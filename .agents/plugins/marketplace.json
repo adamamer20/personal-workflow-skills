@@ -1,0 +1,20 @@
+{
+  "name": "adam-workflows",
+  "interface": {
+    "displayName": "Adam Workflows"
+  },
+  "plugins": [
+    {
+      "name": "personal-workflow-skills",
+      "source": {
+        "source": "local",
+        "path": "./plugins/personal-workflow-skills"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
