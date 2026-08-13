@@ -1,0 +1,4 @@
+interface:
+  display_name: "Strong Typing Audit"
+  short_description: "Strengthen Python typing boundaries"
+  default_prompt: "Use $strong-typing-audit to replace weak Python types with precise models, protocols, and honest boundary types."

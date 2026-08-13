@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fallback Upstream Audit"
+  short_description: "Move downstream repair to canonical owners"
+  default_prompt: "Use $fallback-upstream-audit to classify fallbacks and move unjustified repair logic to the canonical upstream owner."

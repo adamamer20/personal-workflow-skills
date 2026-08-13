@@ -1,0 +1,18 @@
+{
+  "name": "personal-workflow-skills",
+  "version": "0.1.0+codex.20260813092419",
+  "description": "Cross-project planning, orchestration, delegation, and code-audit workflows.",
+  "author": {
+    "name": "Adam Amer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Personal Workflow Skills",
+    "shortDescription": "Reusable planning, routing, and code-audit workflows.",
+    "longDescription": "Personal Workflow Skills packages Adam Amer's cross-project planning, orchestration, delegation, and code-audit workflows for consistent use across repositories.",
+    "developerName": "Adam Amer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Choose the smallest matching workflow from Personal Workflow Skills for this repository task."
+  }
+}

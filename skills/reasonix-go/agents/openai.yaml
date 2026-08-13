@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reasonix Go Worker"
+  short_description: "Run steerable workers through OpenCode Go"
+  default_prompt: "Use $reasonix-go to run a bounded external coding worker with progress, steering, and explicit integration checks."

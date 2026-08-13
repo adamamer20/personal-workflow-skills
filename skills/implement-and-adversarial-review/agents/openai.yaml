@@ -1,0 +1,6 @@
+interface:
+  display_name: "Implement and Adversarial Review"
+  short_description: "Implement features through independent review"
+  default_prompt: "Use $implement-and-adversarial-review to implement this feature and resolve substantive findings through fresh independent reviews."
+policy:
+  allow_implicit_invocation: false

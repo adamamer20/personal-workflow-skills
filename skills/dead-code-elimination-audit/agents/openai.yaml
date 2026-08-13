@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dead Code Elimination Audit"
+  short_description: "Remove unreferenced code with safety checks"
+  default_prompt: "Use $dead-code-elimination-audit to identify and remove unreferenced code with evidence-backed safety checks."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grill Me Light"
+  short_description: "Close material decisions in a compact plan"
+  default_prompt: "Use $grill-me-light to inspect this repository, close only material decisions, and update its single active implementation plan."

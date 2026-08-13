@@ -1,0 +1,4 @@
+interface:
+  display_name: "Over-Abstraction Audit"
+  short_description: "Find harmful layering and indirection"
+  default_prompt: "Use $overabstraction-audit to identify non-rent-paying abstractions and propose evidence-backed simplifications."

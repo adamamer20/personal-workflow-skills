@@ -1,0 +1,4 @@
+interface:
+  display_name: "Abstraction Opportunity Audit"
+  short_description: "Find safe reusable architecture seams"
+  default_prompt: "Use $abstraction-opportunity-audit to find safe abstraction opportunities and propose an incremental refactor plan with file and line evidence."

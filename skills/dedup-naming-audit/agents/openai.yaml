@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dedup Naming Audit"
+  short_description: "Find duplicate logic and unclear naming"
+  default_prompt: "Use $dedup-naming-audit to find duplicate logic and naming ambiguity, then propose safe incremental refactors."

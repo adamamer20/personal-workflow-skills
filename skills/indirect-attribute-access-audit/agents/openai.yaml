@@ -1,0 +1,4 @@
+interface:
+  display_name: "Indirect Attribute Access Audit"
+  short_description: "Find dynamic Python interface drift risks"
+  default_prompt: "Use $indirect-attribute-access-audit to find indirect attribute access that should become a direct typed interface."
