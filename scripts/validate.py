@@ -22,10 +22,8 @@ EXPECTED_SKILLS = {
     "dedup-naming-audit",
     "fallback-upstream-audit",
     "grill-me-light",
-    "implement-and-adversarial-review",
     "indirect-attribute-access-audit",
     "overabstraction-audit",
-    "reasonix-go",
     "sol-luna-route",
     "strong-typing-audit",
 }
@@ -144,6 +142,9 @@ def validate_global_agents_template() -> None:
     required_text = (
         "$grill-me-light",
         "$sol-luna-route",
+        "`docs/reviews/`",
+        "Before substantial execution",
+        "open P0/P1 findings are zero",
         "Repository `AGENTS.md` files own project-specific plan paths",
     )
     for token in required_text:

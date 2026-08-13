@@ -14,8 +14,6 @@ the project-owned active plan.
 
 - `grill-me-light`
 - `sol-luna-route`
-- `reasonix-go`
-- `implement-and-adversarial-review`
 - `abstraction-opportunity-audit`
 - `dead-code-elimination-audit`
 - `dedup-naming-audit`
