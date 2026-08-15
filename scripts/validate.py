@@ -137,6 +137,22 @@ def validate_independence() -> None:
         fail("planning and execution skills must not depend on each other")
 
 
+def validate_sol_luna_git_contract() -> None:
+    route_path = SKILLS_ROOT / "sol-luna-route" / "SKILL.md"
+    route = route_path.read_text(encoding="utf-8")
+    required_text = (
+        "The current branch is the task branch",
+        "Sol is the sole Git integration owner",
+        "not stage, commit, amend, rebase",
+        "stage explicit owned paths",
+        "Once a commit SHA has been handed to a reviewer, keep it stable",
+        "Local checkpoint commits do not authorize a push",
+    )
+    for token in required_text:
+        if token not in route:
+            fail(f"{route_path}: missing Git checkpoint contract: {token}")
+
+
 def validate_global_agents_template() -> None:
     text = GLOBAL_AGENTS_PATH.read_text(encoding="utf-8")
     required_text = (
@@ -144,6 +160,7 @@ def validate_global_agents_template() -> None:
         "$sol-luna-route",
         "`docs/reviews/`",
         "Before substantial execution",
+        "Subagents do not commit in the shared worktree",
         "open P0/P1 findings are zero",
         "Repository `AGENTS.md` files own project-specific plan paths",
     )
@@ -169,6 +186,7 @@ def main() -> int:
     for skill_name in sorted(EXPECTED_SKILLS):
         validate_skill(SKILLS_ROOT / skill_name)
     validate_independence()
+    validate_sol_luna_git_contract()
     validate_global_agents_template()
     print(f"Validated {len(EXPECTED_SKILLS)} cross-project skills.")
     return 0

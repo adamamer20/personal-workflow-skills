@@ -1,6 +1,6 @@
 ---
 name: sol-luna-route
-description: Run substantial repository implementation, audit, debugging, or review work with the main Sol agent as the decision and integration plane while Luna subagents own bounded exploration, implementation, testing, and routine repair. Use when explicitly invoked with `$sol-luna-route` or when repository instructions require it for non-trivial work. Do not use for questions, planning-only requests, small localized edits, or work whose coordination overhead exceeds the operational context it would isolate.
+description: Run substantial repository implementation, audit, debugging, or review work with the main Sol agent as the decision, Git checkpoint, and integration plane while Luna subagents own bounded exploration, implementation, testing, and routine repair. Use when explicitly invoked with `$sol-luna-route` or when repository instructions require it for non-trivial work. Do not use for questions, planning-only requests, small localized edits, or work whose coordination overhead exceeds the operational context it would isolate.
 ---
 
 # Sol-Luna Route
@@ -38,6 +38,49 @@ Before spawning implementation workers, state concisely in the main thread:
 
 Use the repository's existing execution plan or follow-up register when one
 exists. Do not create a parallel roadmap or worker-owned status system.
+
+## Anchor work in Git checkpoints
+
+For implementation and repair work, treat local commits as part of this route.
+Audit-only, review-only, and planning-only invocations remain read-only.
+
+Before the first mutation, have Sol record the current worktree branch, `HEAD`,
+upstream or merge base when available, and the exact pre-existing dirty paths.
+The current branch is the task branch: do not create, switch, rebase, or merge a
+branch unless the user or repository workflow explicitly requests it. Never
+stash, discard, stage, or absorb pre-existing user changes merely to obtain a
+clean baseline. Escalate when they overlap the task's owned files and prevent a
+safe commit.
+
+Sol is the sole Git integration owner in a shared worktree. Luna workers must
+not stage, commit, amend, rebase, cherry-pick, or push. An exception requires an
+explicitly assigned isolated worktree or branch with exclusive commit ownership.
+
+Create a local commit when a coherent behavioral package or integrated package
+group has passed its focused acceptance checks and leaves a valid repository
+state. Use these rules:
+
+- synchronize workers before staging any path they may still mutate;
+- stage explicit owned paths and inspect both `git diff --cached` and
+  `git status --short`; do not use broad staging in a mixed worktree;
+- include the implementation, tests, contract updates, migration, and necessary
+  documentation for one coherent outcome in the same atomic commit;
+- use a concise imperative commit subject that describes the delivered outcome;
+- record the commit SHA, validation performed, remaining scope, and next package
+  in the existing execution plan or status surface;
+- avoid red, speculative, log-only, or arbitrary time-based checkpoint commits;
+  retain a patch or evidence artifact instead when no valid boundary exists.
+
+Once a commit SHA has been handed to a reviewer, keep it stable. Review the
+committed range from the recorded base or prior accepted checkpoint through the
+new SHA, plus any explicitly named residual working-tree changes. Add verified
+repairs as a new atomic commit; amend only an unpushed commit that has not yet
+become a review or handoff boundary.
+
+Before final closure, require a clean task-owned diff or name every intentional
+residual path, and report the base SHA, final commit sequence, and current
+branch. Local checkpoint commits do not authorize a push, pull request, merge,
+tag, release, or remote history rewrite.
 
 ## Keep Sol as the knowledge plane
 
@@ -168,9 +211,10 @@ scope. Fix inexpensive in-scope P2/P3 findings; otherwise record them in the
 existing follow-up register with a concrete closure gate.
 
 Close only when open P0/P1 findings are zero, the implementation matches the
-active execution contract, and required checks pass. Do not stage, commit,
-push, or create project documentation unless the user request independently
-authorizes it.
+active execution contract, required checks pass, and the task-owned work is
+captured in coherent local commits. Do not push, open or merge a pull request,
+tag, release, rewrite remote history, or create unrelated project documentation
+unless the user request independently authorizes it.
 
 ## Keep evidence compact
 

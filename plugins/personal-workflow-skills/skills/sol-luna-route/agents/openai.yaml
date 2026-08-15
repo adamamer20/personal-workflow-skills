@@ -1,4 +1,4 @@
 interface:
   display_name: "Sol-Luna Route"
-  short_description: "Delegate operations while Sol stays strategic"
-  default_prompt: "Use $sol-luna-route to execute a substantial task with Sol coordinating decisions and Luna owning bounded operational work."
+  short_description: "Delegate work while Sol owns Git checkpoints"
+  default_prompt: "Use $sol-luna-route to execute substantial work with Sol coordinating decisions, atomic local commits, and Luna operations."
