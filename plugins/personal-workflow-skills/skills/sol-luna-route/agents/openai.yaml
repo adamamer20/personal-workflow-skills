@@ -1,4 +1,4 @@
 interface:
   display_name: "Sol-Luna Route"
-  short_description: "Delegate work while Sol owns Git checkpoints"
-  default_prompt: "Use $sol-luna-route to execute substantial work with Sol coordinating decisions, atomic local commits, and Luna operations."
+  short_description: "Sol decides while a Luna commits checkpoints"
+  default_prompt: "Use $sol-luna-route to execute substantial work with Sol deciding boundaries, Luna workers operating, and one Luna Git Committer creating atomic checkpoints."

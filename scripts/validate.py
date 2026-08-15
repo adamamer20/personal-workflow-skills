@@ -142,9 +142,11 @@ def validate_sol_luna_git_contract() -> None:
     route = route_path.read_text(encoding="utf-8")
     required_text = (
         "The current branch is the task branch",
-        "Sol is the sole Git integration owner",
-        "not stage, commit, amend, rebase",
-        "stage explicit owned paths",
+        "one persistent Luna Git Committer",
+        "only worker allowed to mutate",
+        "Git Committer a commit capsule",
+        "stages only the exact owned paths",
+        "refuses the commit on unexpected paths",
         "Once a commit SHA has been handed to a reviewer, keep it stable",
         "Local checkpoint commits do not authorize a push",
     )
@@ -160,7 +162,7 @@ def validate_global_agents_template() -> None:
         "$sol-luna-route",
         "`docs/reviews/`",
         "Before substantial execution",
-        "Subagents do not commit in the shared worktree",
+        "one dedicated Luna Git Committer",
         "open P0/P1 findings are zero",
         "Repository `AGENTS.md` files own project-specific plan paths",
     )

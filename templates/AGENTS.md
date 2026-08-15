@@ -20,9 +20,10 @@
   implementation owner. Extend the canonical production route; do not create
   parallel scaffolding or duplicate execution paths.
 - When `$sol-luna-route` executes implementation in a worktree, keep its current
-  branch and let the main agent own explicit, atomic, green checkpoint commits.
-  Subagents do not commit in the shared worktree. Pushes and pull requests still
-  require separate authorization.
+  branch. The main agent decides commit boundaries and delegates exact staging,
+  verification, and atomic green commits to one dedicated Luna Git Committer;
+  other subagents do not commit. Pushes and pull requests still require separate
+  authorization.
 - Close only when required repository gates pass, the result matches the active
   execution contract, and open P0/P1 findings are zero. Treat requirements
   added after the first green gate as a new scoped follow-up.

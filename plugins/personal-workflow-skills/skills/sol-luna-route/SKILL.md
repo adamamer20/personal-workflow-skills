@@ -1,6 +1,6 @@
 ---
 name: sol-luna-route
-description: Run substantial repository implementation, audit, debugging, or review work with the main Sol agent as the decision, Git checkpoint, and integration plane while Luna subagents own bounded exploration, implementation, testing, and routine repair. Use when explicitly invoked with `$sol-luna-route` or when repository instructions require it for non-trivial work. Do not use for questions, planning-only requests, small localized edits, or work whose coordination overhead exceeds the operational context it would isolate.
+description: Run substantial repository implementation, audit, debugging, or review work with the main Sol agent as the decision and integration plane, bounded Luna executors and reviewers, and one dedicated Luna Git Committer for stable local checkpoints. Use when explicitly invoked with `$sol-luna-route` or when repository instructions require it for non-trivial work. Do not use for questions, planning-only requests, small localized edits, or work whose coordination overhead exceeds the operational context it would isolate.
 ---
 
 # Sol-Luna Route
@@ -44,32 +44,54 @@ exists. Do not create a parallel roadmap or worker-owned status system.
 For implementation and repair work, treat local commits as part of this route.
 Audit-only, review-only, and planning-only invocations remain read-only.
 
-Before the first mutation, have Sol record the current worktree branch, `HEAD`,
+Before the first mutation, create or reuse one persistent Luna Git Committer for
+the active worktree. Spawn it as `gpt-5.6-luna` at high reasoning and standard
+velocity with `fork_turns="none"`. It must not delegate or edit production code,
+tests, plans, or documentation. It is the only worker allowed to mutate the Git
+index or create commits in the shared worktree.
+
+Have the Git Committer inspect and report the current worktree branch, `HEAD`,
 upstream or merge base when available, and the exact pre-existing dirty paths.
-The current branch is the task branch: do not create, switch, rebase, or merge a
-branch unless the user or repository workflow explicitly requests it. Never
-stash, discard, stage, or absorb pre-existing user changes merely to obtain a
-clean baseline. Escalate when they overlap the task's owned files and prevent a
-safe commit.
+Sol accepts that report as the execution baseline and owns every decision about
+commit boundaries and content. The current branch is the task branch: do not
+create, switch, rebase, or merge a branch unless the user or repository workflow
+explicitly requests it. Never stash, discard, stage, or absorb pre-existing user
+changes merely to obtain a clean baseline. Escalate when they overlap the task's
+owned files and prevent a safe commit.
 
-Sol is the sole Git integration owner in a shared worktree. Luna workers must
-not stage, commit, amend, rebase, cherry-pick, or push. An exception requires an
-explicitly assigned isolated worktree or branch with exclusive commit ownership.
+Executors, explorers, and reviewers must not stage, commit, amend, rebase,
+cherry-pick, or push. Sol normally delegates the Git mechanics instead of
+running them directly, but remains the semantic Git integration owner.
 
-Create a local commit when a coherent behavioral package or integrated package
-group has passed its focused acceptance checks and leaves a valid repository
-state. Use these rules:
+When a coherent behavioral package or integrated package group has passed its
+focused acceptance checks and leaves a valid repository state, Sol sends the
+Git Committer a commit capsule containing:
 
-- synchronize workers before staging any path they may still mutate;
-- stage explicit owned paths and inspect both `git diff --cached` and
-  `git status --short`; do not use broad staging in a mixed worktree;
-- include the implementation, tests, contract updates, migration, and necessary
-  documentation for one coherent outcome in the same atomic commit;
-- use a concise imperative commit subject that describes the delivered outcome;
-- record the commit SHA, validation performed, remaining scope, and next package
-  in the existing execution plan or status surface;
-- avoid red, speculative, log-only, or arbitrary time-based checkpoint commits;
-  retain a patch or evidence artifact instead when no valid boundary exists.
+1. expected branch and `HEAD`;
+2. exact paths to include and explicit pre-existing or unrelated exclusions;
+3. accepted check results with their freshness and evidence references;
+4. the coherent outcome and imperative commit subject;
+5. expected residual working-tree paths after the commit.
+
+The Git Committer then:
+
+- verifies the branch, `HEAD`, dirty-path baseline, and that Sol has synchronized
+  every worker that could still mutate an included path;
+- stages only the exact owned paths and inspects `git status --short`,
+  `git diff --cached --name-status`, `git diff --cached --check`, and the staged
+  patch; it never uses broad staging in a mixed worktree;
+- confirms the commit includes the implementation, tests, contract updates,
+  migration, and necessary documentation for one coherent outcome;
+- refuses the commit on unexpected paths, changed `HEAD`, stale acceptance
+  evidence, ownership ambiguity, or a staged diff that does not match the
+  capsule, and returns the mismatch to Sol without repairing it;
+- creates the commit and reports its SHA, included paths, validation evidence,
+  and residual status to Sol.
+
+Sol records the accepted commit SHA, validation performed, remaining scope, and
+next package in the existing execution plan or status surface. Avoid red,
+speculative, log-only, or arbitrary time-based checkpoint commits; retain a
+patch or evidence artifact instead when no valid boundary exists.
 
 Once a commit SHA has been handed to a reviewer, keep it stable. Review the
 committed range from the recorded base or prior accepted checkpoint through the
@@ -91,9 +113,9 @@ communication.
 The main agent should normally use tools only for initial state checks, compact
 coordination, decision-critical evidence, integration inspection, and final
 verification. Delegate broad repository reads, routine implementation,
-diagnostics, test logs, and repair iterations. Inspect underlying worker
-evidence only when it is contradictory, incomplete, stale, high risk, or needed
-for a material decision.
+diagnostics, test logs, repair iterations, and Git checkpoint mechanics. Inspect
+underlying worker evidence only when it is contradictory, incomplete, stale,
+high risk, or needed for a material decision.
 
 ## Create isolated Luna workers
 
