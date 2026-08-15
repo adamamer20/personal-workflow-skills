@@ -137,13 +137,22 @@ def validate_independence() -> None:
         fail("planning and execution skills must not depend on each other")
 
 
-def validate_sol_luna_git_contract() -> None:
+def validate_sol_luna_contract() -> None:
     route_path = SKILLS_ROOT / "sol-luna-route" / "SKILL.md"
     route = route_path.read_text(encoding="utf-8")
+    normalized_route = " ".join(route.split())
     required_text = (
+        "### Single-owner / Direct Luna",
+        "### Sol-Luna Lite",
+        "### Sol-Luna Full",
+        "target root waits <12/hour",
+        "Rollover a worker at a green milestone",
+        "Start a verifier only for a named privacy",
         "The current branch is the task branch",
-        "one persistent Luna Git Committer",
-        "only worker allowed to mutate",
+        "persistent Luna Git Committer",
+        "in every mode, including Direct Luna",
+        "Do not create a committer for read-only work",
+        "only agent allowed to mutate",
         "Git Committer a commit capsule",
         "stages only the exact owned paths",
         "refuses the commit on unexpected paths",
@@ -151,23 +160,26 @@ def validate_sol_luna_git_contract() -> None:
         "Local checkpoint commits do not authorize a push",
     )
     for token in required_text:
-        if token not in route:
-            fail(f"{route_path}: missing Git checkpoint contract: {token}")
+        if token not in normalized_route:
+            fail(f"{route_path}: missing routing or Git contract: {token}")
 
 
 def validate_global_agents_template() -> None:
     text = GLOBAL_AGENTS_PATH.read_text(encoding="utf-8")
+    normalized_text = " ".join(text.split())
     required_text = (
         "$grill-me-light",
         "$sol-luna-route",
         "`docs/reviews/`",
         "Before substantial execution",
+        "smallest safe mode (Direct Luna, Lite, or Full)",
+        "sequential task with one mutable owner uses Direct Luna",
         "one dedicated Luna Git Committer",
         "open P0/P1 findings are zero",
         "Repository `AGENTS.md` files own project-specific plan paths",
     )
     for token in required_text:
-        if token not in text:
+        if token not in normalized_text:
             fail(f"{GLOBAL_AGENTS_PATH}: missing routing contract: {token}")
 
     lowered = text.lower()
@@ -188,7 +200,7 @@ def main() -> int:
     for skill_name in sorted(EXPECTED_SKILLS):
         validate_skill(SKILLS_ROOT / skill_name)
     validate_independence()
-    validate_sol_luna_git_contract()
+    validate_sol_luna_contract()
     validate_global_agents_template()
     print(f"Validated {len(EXPECTED_SKILLS)} cross-project skills.")
     return 0

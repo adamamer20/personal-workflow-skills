@@ -19,11 +19,15 @@
 - Give shared runners, registries, schemas, models, and public contracts one
   implementation owner. Extend the canonical production route; do not create
   parallel scaffolding or duplicate execution paths.
-- When `$sol-luna-route` executes implementation in a worktree, keep its current
-  branch. The main agent decides commit boundaries and delegates exact staging,
-  verification, and atomic green commits to one dedicated Luna Git Committer;
-  other subagents do not commit. Pushes and pull requests still require separate
-  authorization.
+- When `$sol-luna-route` executes implementation in a worktree, select the
+  smallest safe mode (Direct Luna, Lite, or Full). A fresh, decision-ready,
+  sequential task with one mutable owner uses Direct Luna; do not force an
+  Explorer, verifier, duplicate final reviewer, or Full mode without a named
+  risk or independent ownership boundary. Keep the current branch. When a local
+  commit or checkpoint is requested, the main agent decides commit boundaries
+  and delegates exact staging, verification, and atomic green commits to one
+  dedicated Luna Git Committer; other agents do not commit. Pushes and pull
+  requests still require separate authorization.
 - Close only when required repository gates pass, the result matches the active
   execution contract, and open P0/P1 findings are zero. Treat requirements
   added after the first green gate as a new scoped follow-up.

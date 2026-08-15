@@ -70,6 +70,32 @@ paths, gates, and exceptions. See the official [Codex AGENTS.md
 documentation](https://developers.openai.com/codex/guides/agents-md/) for the
 instruction precedence rules.
 
+`sol-luna-route` controls spawned roles and checkpoints; it cannot change the
+current main-thread model or reasoning effort mid-task and must not pretend it
+did. Users who want Sol to default to Medium may set that preference in their
+own Codex configuration or profile; the plugin never edits configuration
+automatically. The route selects the smallest safe mode, so a Git Committer,
+Explorer, verifier, and final reviewer are conditional rather than mandatory.
+
+An optional user-level baseline for this workflow is:
+
+```toml
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 20
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "high"
+```
+
+Set `agents.max_concurrent_threads_per_session` only as a capacity ceiling;
+the skill parallelizes genuinely independent packages and does not treat free
+slots as a reason to create roles. See the official [Codex configuration
+reference](https://developers.openai.com/codex/config-reference/) and
+[subagent guide](https://developers.openai.com/codex/subagents/).
+
 ## Validate
 
 Run `python3 scripts/validate.py` before installing or publishing an update.
