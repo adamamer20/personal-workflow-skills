@@ -13,6 +13,7 @@ the project-owned active plan.
 ## Included skills
 
 - `grill-me-light`
+- `codex-notify-thread`
 - `sol-luna-route`
 - `abstraction-opportunity-audit`
 - `dead-code-elimination-audit`
