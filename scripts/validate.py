@@ -18,6 +18,7 @@ PLUGIN_ROOT = ROOT / "plugins" / PLUGIN_NAME
 SKILLS_ROOT = PLUGIN_ROOT / "skills"
 EXPECTED_SKILLS = {
     "abstraction-opportunity-audit",
+    "codex-notify-thread",
     "dead-code-elimination-audit",
     "dedup-naming-audit",
     "fallback-upstream-audit",

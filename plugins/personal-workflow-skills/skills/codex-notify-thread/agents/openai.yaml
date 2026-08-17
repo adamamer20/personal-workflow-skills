@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Notify Thread"
+  short_description: "Message a peer Codex task at closure"
+  default_prompt: "Use $codex-notify-thread to message an existing peer task when this work reaches its requested terminal state."
