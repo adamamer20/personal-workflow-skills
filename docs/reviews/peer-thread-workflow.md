@@ -165,9 +165,106 @@ release work.
 
 ### Successor milestone
 
-After separate push/PR/merge authorization: review and publish the plugin
-change, then update downstream pinned plugin commit/version (including
-SprintAct) and validate a real fresh-task dispatch using the installed build.
+M2 — publish a ready plugin PR.
+
+## Milestone M2 — Publish the routed plugin change for review
+
+### Outcome
+
+The complete green branch is pushed and a ready-for-review PR targets `main`
+with the permission-boundary rationale and validation evidence. No merge occurs
+in this milestone.
+
+### Mutable ownership
+
+- local branch `agent/enforce-peer-model-routing` and its existing commits;
+- validation-only repairs inside the M1 owned surfaces if a gate regresses;
+- remote branch of the same name and its pull request metadata.
+
+### Protected surfaces
+
+- audit skills, marketplace identity/policy, installed plugin cache, downstream
+  repositories and pins, unrelated local branches/worktrees, and `main` history.
+
+### Dependencies
+
+- M1 commits `e580c1f`, `0aaf014`, and `aed7502` are attached to the branch.
+- GitHub CLI is authenticated as `adamamer20`; `origin` is the canonical remote.
+- The user has explicitly authorized push, PR, review, merge, installation, and
+  downstream updates for this program.
+
+### Implementation boundary
+
+1. Inspect branch status, complete diff against `origin/main`, commit history,
+   and remote/default-branch identity.
+2. Re-run decisive local validators if no newer evidence exists; repair only a
+   real regression within M1 ownership.
+3. Push the current branch with tracking.
+4. Open a non-draft PR to `main` explaining the observed Sol-default failure,
+   enforced authorized route, no-authorization behavior, failure semantics,
+   version bump, unchanged audit skills, and validation.
+5. Do not self-approve, merge, install, or update downstream pins in this
+   milestone.
+
+### Acceptance criteria
+
+- Remote branch head equals the final local green head.
+- A ready PR targets `main`, contains the full three-commit change, and accurately
+  documents the authorization boundary and checks.
+- No unrelated file or commit appears in the PR.
+- Local source validation remains green and open P0/P1 self-review findings are
+  zero.
+
+### Validation
+
+- `python3 -B scripts/validate.py`
+- bundled quick validators for all three workflow skills
+- JSON parse for plugin and marketplace manifests
+- `git diff --check origin/main...HEAD`
+- complete diff/name-status review and audit-skill path exclusion
+- GitHub PR metadata confirming ready state, base, head, and head SHA
+
+### Promotion gate
+
+Branch push and ready PR creation are confirmed with local/remote SHA equality.
+Independent review and merge remain M3 gates.
+
+### Review requirement
+
+M3 uses a fresh independent peer. The M2 owner must not approve or merge its own
+change.
+
+### Successor milestone
+
+M3 — independent review and merge.
+
+## Milestone M3 — Independently review and merge the plugin
+
+Outcome: a fresh peer reviews the complete PR, records findings, and merges only
+with zero open P0/P1 and green required checks. Repairs return to a fresh
+implementation context rather than expanding the reviewer into an owner.
+
+Promotion gate: PR is merged to `main`; record the immutable merge commit and
+published plugin version. A self-authored GitHub approval is not claimed when
+GitHub identity rules prohibit it; record an independent review result
+truthfully.
+
+Successor milestone: M4 — install and smoke-test the merged build.
+
+## Milestone M4 — Install and prove fresh-task routing
+
+Outcome: upgrade the marketplace/plugin to the merged commit, start a new Codex
+task, and retain evidence that an authorized route passes the exact native
+`model`/`thinking` pair. Also verify the documented no-authorization and
+unsupported/rejected decisions without creating an unintended fallback task.
+
+Promotion gate: installed version and marketplace ref match the merged source;
+the fresh authorized dispatch is confirmed; no fallback or duplicate task is
+created for negative cases.
+
+Successor milestone: M5 — update SprintAct's pinned commit/version and propagate
+the new workflow pin through its required PR/review/merge and named active
+worktrees.
 
 ## Assumptions
 
@@ -179,8 +276,7 @@ SprintAct) and validate a real fresh-task dispatch using the installed build.
 ## Open findings
 
 - M1 has no open P0/P1 finding. Publication, installed-build verification, and
-  downstream pin updates are executable only after separate remote/release
-  authorization.
+  downstream pin updates are now authorized and ordered as M2–M5.
 
 ## Current review log
 
@@ -201,23 +297,31 @@ SprintAct) and validate a real fresh-task dispatch using the installed build.
 
 ## Next execution
 
-Milestone: M2 — review, publish, install, and propagate the routed build
+Milestone: M2 — publish the routed plugin change for review
 
-Status: awaiting explicit authorization for push, PR, merge, plugin
-installation, and downstream repository updates
+Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`
+
+Routing authorization: the user explicitly said “vai continua” after the exact
+push/PR/merge/install/downstream operations were enumerated.
 
 Planning thread: `01a01405-e5b1-7dd1-b540-5fffc15538b0`
 
 Plan path: `docs/reviews/peer-thread-workflow.md`
 
-Proposed owned surfaces: plugin PR/release state, installed plugin version, a
-fresh-task routing smoke test, and downstream pinned commit/version updates.
+Owned surfaces: `agent/enforce-peer-model-routing`, validation-only repairs in
+M1 surfaces, its remote branch, and a ready PR to plugin `main`.
 
 Protected surfaces: audit skills, marketplace identity/policy, native tool
 implementation, installed cache, downstream repositories/pins, and remotes.
 
-Acceptance: independent review is green; plugin change is merged/published;
-installed build reports `0.1.1+codex.20260818104438`; a fresh authorized task
-proves the requested native pair; downstream pins consume the merged commit.
+Acceptance: decisive validation green; exact local/remote SHA equality; complete
+ready PR to `main`; zero unrelated paths or open P0/P1; no merge/install/pin
+mutation yet.
 
-Do not dispatch M2 until the required external mutations are authorized.
+Escalate only for: authentication/remote ambiguity, a validation regression
+requiring scope outside M1, unexpected branch history, or inability to create a
+truthful ready PR.
+
+Completion callback: send one terminal packet to
+`01a01405-e5b1-7dd1-b540-5fffc15538b0` with final SHA, PR URL/metadata,
+validation, and exact M3 gate. No routine updates.
