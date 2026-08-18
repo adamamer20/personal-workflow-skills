@@ -178,8 +178,9 @@ SprintAct) and validate a real fresh-task dispatch using the installed build.
 
 ## Open findings
 
-- None blocking for local source implementation. Publication and downstream pin
-  updates remain outside M1 until separately authorized.
+- M1 has no open P0/P1 finding. Publication, installed-build verification, and
+  downstream pin updates are executable only after separate remote/release
+  authorization.
 
 ## Current review log
 
@@ -200,29 +201,23 @@ SprintAct) and validate a real fresh-task dispatch using the installed build.
 
 ## Next execution
 
-Milestone: M1
+Milestone: M2 — review, publish, install, and propagate the routed build
 
-Recommended executor: `gpt-5.6-luna` with `thinking=xhigh`
+Status: awaiting explicit authorization for push, PR, merge, plugin
+installation, and downstream repository updates
 
 Planning thread: `01a01405-e5b1-7dd1-b540-5fffc15538b0`
 
 Plan path: `docs/reviews/peer-thread-workflow.md`
 
-Owned surfaces: the three workflow skills, global template, README, validator,
-plugin version metadata, and factual completion update in this plan.
+Proposed owned surfaces: plugin PR/release state, installed plugin version, a
+fresh-task routing smoke test, and downstream pinned commit/version updates.
 
 Protected surfaces: audit skills, marketplace identity/policy, native tool
 implementation, installed cache, downstream repositories/pins, and remotes.
 
-Acceptance: enforce authorized exact model/reasoning at peer creation; fail
-closed on unsupported routing; align validation/docs; preserve audits; create
-one local green commit; no push or publication.
+Acceptance: independent review is green; plugin change is merged/published;
+installed build reports `0.1.1+codex.20260818104438`; a fresh authorized task
+proves the requested native pair; downstream pins consume the merged commit.
 
-Escalate only for: evidence that governing AGENTS instructions cannot count as
-user authorization under the native tool contract, unavailable exact mappings
-in the current schema, or a required change outside owned surfaces.
-
-Completion callback: send one terminal packet to
-`01a01405-e5b1-7dd1-b540-5fffc15538b0` with commit, validation, permission-
-boundary evidence, version, and any publication/downstream gate. No routine
-updates.
+Do not dispatch M2 until the required external mutations are authorized.
