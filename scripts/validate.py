@@ -40,6 +40,18 @@ FORBIDDEN_AUTHORING_PATHS = (
     ".codex/skills/",
 )
 GLOBAL_AGENTS_PATH = ROOT / "templates" / "AGENTS.md"
+BASELINE_PLUGIN_VERSION = "0.1.0+codex.20260818104438"
+WORKFLOW_PATHS = {
+    "plan": SKILLS_ROOT / "plan-work" / "SKILL.md",
+    "handoff": SKILLS_ROOT / "codex-thread-handoff" / "SKILL.md",
+    "execute": SKILLS_ROOT / "execute-milestone" / "SKILL.md",
+}
+STALE_ROUTING_CONTRACTS = (
+    "Pass a model or reasoning override only when the user has explicitly requested it",
+    "otherwise keep the recommendation in the capsule and let the new task use configured defaults",
+    "Model selection is routing metadata, not workflow identity",
+    "The skill records or recommends routing",
+)
 
 
 def fail(message: str) -> None:
@@ -69,6 +81,19 @@ def validate_manifest() -> None:
         fail("plugin name must match its marketplace directory")
     if manifest.get("skills") != "./skills/":
         fail("plugin manifest must expose ./skills/")
+    version = manifest.get("version")
+    if not isinstance(version, str):
+        fail("plugin manifest must contain a string version")
+    baseline_match = re.fullmatch(
+        r"(\d+)\.(\d+)\.(\d+)\+codex\.(\d+)", BASELINE_PLUGIN_VERSION
+    )
+    current_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)\+codex\.(\d+)", version)
+    if baseline_match is None or current_match is None:
+        fail("plugin version must use semver plus a codex build timestamp")
+    baseline = tuple(int(part) for part in baseline_match.groups())
+    current = tuple(int(part) for part in current_match.groups())
+    if current <= baseline:
+        fail(f"plugin version must be newer than {BASELINE_PLUGIN_VERSION}")
 
 
 def validate_marketplace() -> None:
@@ -190,7 +215,7 @@ def validate_thread_handoff_contract() -> None:
         "inspect `isGitRepository`",
         "Call `create_thread` once",
         "initial `prompt`",
-        "only when the user has explicitly requested it",
+        "only when a governing user instruction authorizes the resolved pair",
         "returns `threadId` and `hostId`",
         "return `clientThreadId`",
         "never pass it to tools that require `threadId`",
@@ -205,6 +230,76 @@ def validate_thread_handoff_contract() -> None:
     require_contract(handoff_path, required_text)
 
 
+def validate_native_routing_contract() -> None:
+    workflow_text = {
+        name: " ".join(path.read_text(encoding="utf-8").split())
+        for name, path in WORKFLOW_PATHS.items()
+    }
+    combined = " ".join(workflow_text.values())
+    for stale in STALE_ROUTING_CONTRACTS:
+        if stale in combined:
+            fail(f"workflow still contains stale routing contract: {stale}")
+
+    plan_required = (
+        "Resolve execution routing",
+        "concrete native route",
+        "applicable user-owned `AGENTS.md` routing policy",
+        "installing this skill is not authorization",
+        "`routing_status: not_authorized`",
+        "`gpt-5.6-luna`",
+        "`gpt-5.6-sol`",
+        "schema advertises both fields",
+        "substitute another model",
+        "resolved exact native pair",
+        "passing the same exact pair as native `model` and `thinking` arguments",
+        "confirmed dispatch distinct from confirmed model enforcement",
+        "Never retry a rejected or unsupported route",
+    )
+    require_contract(WORKFLOW_PATHS["plan"], plan_required)
+
+    handoff_required = (
+        "Native routing authorization",
+        "applicable user-owned `AGENTS.md` policy",
+        "skill installation by itself is not authorization",
+        "advertises both `model` and `thinking` plus the authorized values",
+        "pass both exact fields as top-level native arguments",
+        "`routing_status: not_authorized`",
+        "do not create a peer with a default or alternate route",
+        "`routing_status: enforced`",
+        "confirms dispatch",
+        "native response or tool contract confirms the exact pair",
+    )
+    require_contract(WORKFLOW_PATHS["handoff"], handoff_required)
+
+    execute_required = (
+        "concrete native pair",
+        "gpt-5.6-luna",
+        "gpt-5.6-sol",
+        "Skill installation alone does not authorize model overrides",
+        "omits `model` and `thinking`",
+        "dispatch fails closed",
+        "no default-model, alternate-model, or retry fallback",
+        "task-creation contract, not capsule-only recommendation text",
+        "native confirmation of the exact pair",
+    )
+    require_contract(WORKFLOW_PATHS["execute"], execute_required)
+
+    README_PATH = ROOT / "README.md"
+    readme_text = " ".join(README_PATH.read_text(encoding="utf-8").split())
+    readme_required = (
+        "Authorized native routing defaults:",
+        "Native `model`",
+        "Native `thinking`",
+        "explicit user request or applicable user-owned `AGENTS.md` policy",
+        "plugin installation alone is insufficient authorization",
+        "passes both in one call",
+        "fails closed on unsupported or rejected routes",
+        "routing not enforced",
+        "model enforcement is confirmed only",
+    )
+    require_contract(README_PATH, readme_required)
+
+
 def validate_global_agents_template() -> None:
     text = GLOBAL_AGENTS_PATH.read_text(encoding="utf-8")
     normalized_text = " ".join(text.split())
@@ -216,6 +311,13 @@ def validate_global_agents_template() -> None:
         "Sol High planning thread",
         "fresh peer execution thread",
         "Luna XHigh",
+        "model=gpt-5.6-luna, thinking=xhigh",
+        "model=gpt-5.6-luna, thinking=high",
+        "model=gpt-5.6-sol, thinking=high",
+        "user-owned routing authorization",
+        "plugin installation alone is not authorization",
+        "native schema does not advertise an authorized pair",
+        "routing was not enforced",
         "never polls execution",
         "One milestone normally uses one fresh execution context",
         "Before substantial execution",
@@ -247,6 +349,7 @@ def main() -> int:
     validate_plan_work_contract()
     validate_execute_milestone_contract()
     validate_thread_handoff_contract()
+    validate_native_routing_contract()
     validate_global_agents_template()
     print(f"Validated {len(EXPECTED_SKILLS)} cross-project skills.")
     return 0

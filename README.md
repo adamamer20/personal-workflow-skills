@@ -18,7 +18,7 @@ decision-ready canonical plan
 fresh peer execution thread
         ↓
 $execute-milestone
-Luna XHigh
+native `model=gpt-5.6-luna` + `thinking=xhigh`
         ↓
 completion or material escalation
         ↓
@@ -101,23 +101,32 @@ keeps skill installation and routing as separate trust decisions. See the
 official [Codex AGENTS.md documentation](https://developers.openai.com/codex/guides/agents-md/)
 for instruction precedence.
 
-Recommended conceptual routing:
+Authorized native routing defaults:
 
-| Situation | Task context | Model |
+| Situation | Task context | Native `model` | Native `thinking` |
 | --- | --- | --- |
-| Small/local change | direct execution | Luna High |
-| Decision-ready substantial milestone | fresh execution | Luna XHigh |
-| First-time large or uncertain program | planning | Sol High |
-| Material architecture escalation | existing planning thread | Sol High |
-| Mechanical repair after a precise finding | fresh/current execution | Luna High |
-| Difficult unresolved implementation after XHigh | fresh execution | Luna Max |
-| Independent normal code review | fresh peer | Luna XHigh |
-| Critical architecture or security review | fresh peer or planning | Sol High |
+| Small/local change | direct execution | `gpt-5.6-luna` | `high` |
+| Decision-ready substantial milestone | fresh execution | `gpt-5.6-luna` | `xhigh` |
+| First-time large or uncertain program | planning | `gpt-5.6-sol` | `high` |
+| Material architecture escalation | existing planning thread | `gpt-5.6-sol` | `high` |
+| Mechanical repair after a precise finding | fresh/current execution | `gpt-5.6-luna` | `high` |
+| Difficult unresolved implementation after XHigh | fresh execution | `gpt-5.6-luna` | `max` |
+| Independent normal code review | fresh peer | `gpt-5.6-luna` | `xhigh` |
+| Critical architecture or security review | fresh peer or planning | `gpt-5.6-sol` | `high` |
 
-These are task-level routing defaults, not a parent/subagent configuration.
+These pairs are applied to native `create_thread` only when an explicit user
+request or applicable user-owned `AGENTS.md` policy authorizes them. A plugin
+installation alone is insufficient authorization. The handoff checks that
+the current native schema advertises both fields and the exact values, passes
+both in one call, and fails closed on unsupported or rejected routes without
+retrying, substituting another model, or silently using the configured default.
+No authorization means no overrides and an explicit “routing not enforced”
+status. A returned thread id confirms dispatch; model enforcement is confirmed
+only when the native response or tool contract acknowledges the exact pair.
+Luna Max escalation is outside these template defaults and requires a separate
+explicit user authorization plus schema support.
 Subagents remain optional tactical helpers rather than the workflow foundation.
-The skills cannot claim to change a current task's model if the runtime does not
-expose that operation.
+The skills cannot change the model of a task that is already running.
 
 ## Validate
 

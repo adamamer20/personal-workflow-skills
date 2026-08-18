@@ -187,6 +187,16 @@ SprintAct) and validate a real fresh-task dispatch using the installed build.
   routing execute on the configured Sol Medium default. Selected enforced native
   parameters under explicit user/AGENTS policy while preserving the native
   no-authorization boundary.
+- 2026-08-18: M1 source implementation completed locally. The workflow skills,
+  template, README, validator, and plugin metadata now resolve and pass the
+  authorized native `model`/`thinking` pair, omit overrides without governing
+  authorization, and fail closed on unsupported or rejected routes. `python3
+  -B scripts/validate.py`, the three bundled `quick_validate.py` checks, JSON
+  parsing for plugin and marketplace manifests, `git diff --check`, and stale-
+  contract searches passed. All 21 audit-skill file hashes are byte-for-byte
+  unchanged from the pre-edit baseline. Version is
+  `0.1.1+codex.20260818104438`; one local green commit is created, with push,
+  publication, installation, and downstream pin updates intentionally open.
 
 ## Next execution
 

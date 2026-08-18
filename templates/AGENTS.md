@@ -11,6 +11,18 @@
   child/subagent.
 - Substantial milestones normally use Luna XHigh with `$execute-milestone`;
   bounded or mechanical work may use Luna High directly.
+- These defaults are user-owned routing authorization for native peer creation:
+  when a fresh peer is created, the handoff must pass the exact pair
+  `model=gpt-5.6-luna, thinking=xhigh` for a substantial milestone or
+  independent normal code review, `model=gpt-5.6-luna, thinking=high` for
+  bounded/mechanical work, and `model=gpt-5.6-sol, thinking=high` for critical
+  architecture/security review or planning. The most specific applicable user
+  instruction wins.
+- A plugin installation alone is not authorization to override native task
+  settings. If the native schema does not advertise an authorized pair, or
+  native creation rejects it, stop without retrying, substituting a model, or
+  falling back to the configured default. If no user authorization applies,
+  omit the overrides and state that routing was not enforced.
 - Execution threads message the planning thread only for a material escalation
   or terminal milestone outcome. The planning thread never polls execution and
   execution sends no routine progress updates.

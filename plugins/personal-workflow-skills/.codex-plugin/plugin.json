@@ -1,6 +1,6 @@
 {
   "name": "personal-workflow-skills",
-  "version": "0.1.0+codex.20260818104438",
+  "version": "0.1.1+codex.20260818104438",
   "description": "Cross-project planning, milestone execution, peer-thread handoff, and code-audit workflows.",
   "author": {
     "name": "Adam Amer"

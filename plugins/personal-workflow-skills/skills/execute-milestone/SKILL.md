@@ -30,16 +30,24 @@ do not build parallel scaffolding or a duplicate execution route.
 
 ## Model routing
 
-- **Luna High:** bounded implementation, mechanical refactors, ordinary bug
-  fixes, and precise repair packets.
-- **Luna XHigh:** default for substantial milestone ownership, cross-file
-  reasoning, difficult architecture implementation, and artifact or design work
-  requiring judgment.
-- **Luna Max:** escalation only after XHigh cannot resolve a genuinely hard
-  implementation problem; it is not the default for long work.
+The planning and handoff creator resolve the execution role to a concrete
+native pair under the governing user/`AGENTS.md` policy. The default authorized
+pairs are `gpt-5.6-luna` with `thinking=high` for bounded or mechanical work,
+`gpt-5.6-luna` with `thinking=xhigh` for substantial milestones and independent
+normal reviews, and `gpt-5.6-sol` with `thinking=high` for critical
+architecture/security review or planning. The creator applies the resolved
+pair to a fresh peer's native `create_thread` call; this skill cannot change
+the model of the task that is already running.
 
-The skill records or recommends routing; it cannot claim to change the current
-thread's model when the runtime does not expose that operation.
+Skill installation alone does not authorize model overrides. Without an
+applicable user authorization, the creator omits `model` and `thinking` and
+reports that routing was not enforced. If an authorized pair is not advertised
+by the native schema or is rejected by the native call, dispatch fails closed:
+there is no default-model, alternate-model, or retry fallback.
+
+The role guidance is therefore a task-creation contract, not capsule-only
+recommendation text. A returned peer id confirms dispatch; model enforcement
+is a separate fact that requires native confirmation of the exact pair.
 
 ## Execute and validate
 
