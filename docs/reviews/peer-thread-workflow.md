@@ -275,8 +275,8 @@ worktrees.
 
 ## Open findings
 
-- M1 has no open P0/P1 finding. Publication, installed-build verification, and
-  downstream pin updates are now authorized and ordered as M2–M5.
+- M1 and M2 have no open P0/P1 finding. PR #3 is ready and mergeable; its
+  CodeRabbit status was pending at the M2 terminal snapshot and is an M3 gate.
 
 ## Current review log
 
@@ -294,10 +294,14 @@ worktrees.
   unchanged from the pre-edit baseline. Version is
   `0.1.1+codex.20260818104438`; one local green commit is created, with push,
   publication, installation, and downstream pin updates intentionally open.
+- 2026-08-18: M2 validation remained green, remote branch
+  `agent/enforce-peer-model-routing` matched local head `0e4a427`, and ready PR
+  #3 opened against `main` with exactly the eight intended paths. No merge,
+  installation, or downstream change occurred.
 
 ## Next execution
 
-Milestone: M2 — publish the routed plugin change for review
+Milestone: M3 — independently review and merge the plugin
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`
 
@@ -308,20 +312,20 @@ Planning thread: `01a01405-e5b1-7dd1-b540-5fffc15538b0`
 
 Plan path: `docs/reviews/peer-thread-workflow.md`
 
-Owned surfaces: `agent/enforce-peer-model-routing`, validation-only repairs in
-M1 surfaces, its remote branch, and a ready PR to plugin `main`.
+Owned surfaces: complete read-only review of PR #3, truthful GitHub review
+record, required-check state, and merge action only after the promotion gate.
 
 Protected surfaces: audit skills, marketplace identity/policy, native tool
 implementation, installed cache, downstream repositories/pins, and remotes.
 
-Acceptance: decisive validation green; exact local/remote SHA equality; complete
-ready PR to `main`; zero unrelated paths or open P0/P1; no merge/install/pin
-mutation yet.
+Acceptance: independently verify the complete diff and permission/failure
+semantics; zero open P0/P1; required checks green; merge the unchanged reviewed
+head and record immutable merge SHA plus version
+`0.1.1+codex.20260818104438`.
 
-Escalate only for: authentication/remote ambiguity, a validation regression
-requiring scope outside M1, unexpected branch history, or inability to create a
-truthful ready PR.
+Escalate only for: a P0/P1 finding, changed PR head, non-green required check,
+merge conflict, or missing review/merge authority. Do not repair in M3.
 
 Completion callback: send one terminal packet to
-`01a01405-e5b1-7dd1-b540-5fffc15538b0` with final SHA, PR URL/metadata,
-validation, and exact M3 gate. No routine updates.
+`01a01405-e5b1-7dd1-b540-5fffc15538b0` with findings, reviewed head, checks,
+review record, merge SHA/state, and exact M4 gate. No routine updates.
