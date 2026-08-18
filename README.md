@@ -104,7 +104,7 @@ for instruction precedence.
 Authorized native routing defaults:
 
 | Situation | Task context | Native `model` | Native `thinking` |
-| --- | --- | --- |
+| --- | --- | --- | --- |
 | Small/local change | direct execution | `gpt-5.6-luna` | `high` |
 | Decision-ready substantial milestone | fresh execution | `gpt-5.6-luna` | `xhigh` |
 | First-time large or uncertain program | planning | `gpt-5.6-sol` | `high` |
