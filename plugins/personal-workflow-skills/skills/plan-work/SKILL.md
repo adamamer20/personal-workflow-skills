@@ -25,6 +25,33 @@ important contracts, or success criteria. Keep one active plan for the program.
 5. Prefer the simplest design that meets the accepted outcome. Do not add
    speculative extensibility or a parallel production path.
 
+## Resolve execution routing
+
+When a plan selects a peer milestone, resolve a concrete native route from the
+most specific governing user instruction. An explicit user request or an
+applicable user-owned `AGENTS.md` routing policy is authorization to apply the
+pair; installing this skill is not authorization. Record the native model id
+and reasoning value in the execution capsule, rather than only a Luna/Sol
+label or a recommendation.
+
+Use the task class and the authorized policy to select one of these exact
+pairs when the current `create_thread` schema advertises both fields and
+values:
+
+| Task class | Native `model` | Native `thinking` |
+| --- | --- | --- |
+| Substantial decision-ready milestone | `gpt-5.6-luna` | `xhigh` |
+| Bounded or mechanical milestone | `gpt-5.6-luna` | `high` |
+| Independent normal code review | `gpt-5.6-luna` | `xhigh` |
+| Critical architecture/security review or planning | `gpt-5.6-sol` | `high` |
+
+If no applicable user authorization exists, mark the capsule
+`routing_status: not_authorized`, omit native overrides, and do not claim that
+the route was enforced. If an authorized pair is absent from the advertised
+schema, the creator must report the route as unsupported and stop; it must not
+substitute another model, reasoning value, or configured default. A route that
+the native call rejects is likewise a failed dispatch, not a retry opportunity.
+
 Planning is decision-ready when a capable executor can identify the outcome,
 scope and non-goals, architecture and ownership, mutable and protected surfaces,
 contracts and failure behavior, acceptance, validation, and promotion gates
@@ -81,7 +108,8 @@ Successor milestone
 
 ## Next execution
 Milestone: M1
-Recommended executor: Luna XHigh
+Resolved route: model=<native model id>, thinking=<native reasoning value>
+Routing authorization: <governing user instruction or not_authorized>
 Planning thread: <exact thread id when available>
 Plan path: <canonical path>
 Owned surfaces: ...
@@ -108,17 +136,25 @@ has another safe integration boundary.
 If the request is planning-only, stop once the canonical plan is decision-ready.
 If implementation was requested:
 
-1. Select the first executable milestone and finalize its compact execution
-   capsule.
-2. Capability-check for the native `create_thread` task tool. Create a fresh
-   peer Codex task/thread only when that native operation is available. Use the
-   `codex-thread-handoff` START contract when the bundled skill is available.
-3. Recommend Luna XHigh for a substantial milestone and Luna High for bounded
-   or mechanical execution. Model selection is routing metadata, not workflow
-   identity.
-4. Seed the peer with only the capsule, canonical plan path, and this planning
-   thread's exact id for material escalation and terminal completion.
-5. Confirm dispatch, record the created thread id, and end the planning turn.
+1. Select the first executable milestone, resolve its authorized exact native
+   pair, and finalize a compact execution capsule carrying the resolved exact
+   native pair as `model` and `thinking`, plus the authorization status.
+2. Capability-check the native `create_thread` task tool and its advertised
+   `model` and `thinking` fields. Create a fresh peer Codex task/thread when
+   native creation is available; if a route is authorized, require that exact
+   pair before creating, while a `not_authorized` capsule may create without
+   overrides. Use the `codex-thread-handoff` START contract when the bundled
+   skill is available.
+3. Seed the peer with only the capsule, canonical plan path, and this planning
+   thread's exact id for material escalation and terminal completion. This
+   requires passing the same exact pair as native `model` and `thinking`
+   arguments when authorization and schema support are confirmed.
+4. Keep confirmed dispatch distinct from confirmed model enforcement: a
+   returned thread id proves creation, while enforcement is confirmed only by
+   the native response or contract acknowledging the exact pair.
+5. Confirm the single dispatch, record the created thread id and routing
+   status, and end the planning turn. Never retry a rejected or unsupported
+   route and never silently use the configured default.
 
 The execution task is a peer, never a child/subagent. Do not pass inherited chat
 history, poll, wait for progress, or create a persistent orchestrator. If native
