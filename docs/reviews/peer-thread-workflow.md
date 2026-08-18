@@ -47,5 +47,5 @@ subagent fallback are out of scope.
 
 - 2026-08-18 — Implemented the peer-thread workflow and removed the legacy
   Direct/Lite/Full routing architecture.
-- 2026-08-18 — Integrated the previously merged `codex-notify-thread` work by
-  superseding it with the START/MESSAGE `codex-thread-handoff` contract.
+- 2026-08-18 — Integrated the previously merged completion-only transport work
+  by superseding it with the START/MESSAGE peer-handoff contract.
