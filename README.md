@@ -1,20 +1,52 @@
 # Personal Workflow Skills
 
 Versioned, cross-project Codex workflows owned by Adam Amer. This repository is
-both the source of the plugin and an installable Codex marketplace. It keeps
-reusable planning, orchestration, delegation, and code-audit instructions out
-of individual application repositories.
+both the source of the plugin and an installable Codex marketplace. It packages
+planning, milestone execution, event-based peer-thread handoff, and bounded
+code-audit instructions without embedding project-specific decisions.
 
-Project-specific composition remains in each project's `AGENTS.md`. In
-particular, `grill-me-light` and `sol-luna-route` are independent skills:
-repository instructions decide when planning hands off to execution and name
-the project-owned active plan.
+## Lifecycle
+
+```text
+new substantial program
+        ↓
+$plan-work
+Sol High planning thread
+        ↓
+decision-ready canonical plan
+        ↓
+fresh peer execution thread
+        ↓
+$execute-milestone
+Luna XHigh
+        ↓
+completion or material escalation
+        ↓
+$codex-thread-handoff
+        ↓
+planning thread
+```
+
+Peer execution threads are not subagents. The planning thread does not wait for
+or poll them. It owns the canonical plan, architecture decisions, milestone
+ordering, and program completion. Each fresh execution thread owns exactly one
+milestone under normal conditions and sends one material escalation or terminal
+outcome when needed.
+
+Project-specific composition remains in each project's `AGENTS.md`. Repository
+instructions name the canonical plan path, gates, protected surfaces, and any
+exceptions.
 
 ## Included skills
 
-- `grill-me-light`
-- `codex-notify-thread`
-- `sol-luna-route`
+Workflow:
+
+- `plan-work`
+- `execute-milestone`
+- `codex-thread-handoff`
+
+Audits:
+
 - `abstraction-opportunity-audit`
 - `dead-code-elimination-audit`
 - `dedup-naming-audit`
@@ -58,44 +90,34 @@ decisions. Do not hand-edit `~/.codex/config.toml`; use the commands above.
 
 ## Optional global routing instructions
 
-[`templates/AGENTS.md`](templates/AGENTS.md) contains the generic routing rules
-used to compose `grill-me-light` with `sol-luna-route`. Codex reads global
-instructions from `$CODEX_HOME/AGENTS.md`, or `~/.codex/AGENTS.md` when
-`CODEX_HOME` is unset. Review and merge the template with an existing global
-file; do not overwrite personal instructions blindly.
+[`templates/AGENTS.md`](templates/AGENTS.md) contains generic routing rules for
+the three workflow skills. Codex reads global instructions from
+`$CODEX_HOME/AGENTS.md`, or `~/.codex/AGENTS.md` when `CODEX_HOME` is unset.
+Review and merge the template with an existing global file; do not overwrite
+personal instructions blindly.
 
 The plugin installer intentionally does not modify global instructions. This
-keeps skill installation and global routing as separate trust decisions, while
-repository `AGENTS.md` files remain responsible for project-specific plan
-paths, gates, and exceptions. See the official [Codex AGENTS.md
-documentation](https://developers.openai.com/codex/guides/agents-md/) for the
-instruction precedence rules.
+keeps skill installation and routing as separate trust decisions. See the
+official [Codex AGENTS.md documentation](https://developers.openai.com/codex/guides/agents-md/)
+for instruction precedence.
 
-`sol-luna-route` controls spawned roles and checkpoints; it cannot change the
-current main-thread model or reasoning effort mid-task and must not pretend it
-did. Users who want Sol to default to Medium may set that preference in their
-own Codex configuration or profile; the plugin never edits configuration
-automatically. The route selects the smallest safe mode, so a Git Committer,
-Explorer, verifier, and final reviewer are conditional rather than mandatory.
+Recommended conceptual routing:
 
-An optional user-level baseline for this workflow is:
+| Situation | Task context | Model |
+| --- | --- | --- |
+| Small/local change | direct execution | Luna High |
+| Decision-ready substantial milestone | fresh execution | Luna XHigh |
+| First-time large or uncertain program | planning | Sol High |
+| Material architecture escalation | existing planning thread | Sol High |
+| Mechanical repair after a precise finding | fresh/current execution | Luna High |
+| Difficult unresolved implementation after XHigh | fresh execution | Luna Max |
+| Independent normal code review | fresh peer | Luna XHigh |
+| Critical architecture or security review | fresh peer or planning | Sol High |
 
-```toml
-model = "gpt-5.6-sol"
-model_reasoning_effort = "medium"
-
-[agents]
-enabled = true
-max_concurrent_threads_per_session = 20
-default_subagent_model = "gpt-5.6-luna"
-default_subagent_reasoning_effort = "high"
-```
-
-Set `agents.max_concurrent_threads_per_session` only as a capacity ceiling;
-the skill parallelizes genuinely independent packages and does not treat free
-slots as a reason to create roles. See the official [Codex configuration
-reference](https://developers.openai.com/codex/config-reference/) and
-[subagent guide](https://developers.openai.com/codex/subagents/).
+These are task-level routing defaults, not a parent/subagent configuration.
+Subagents remain optional tactical helpers rather than the workflow foundation.
+The skills cannot claim to change a current task's model if the runtime does not
+expose that operation.
 
 ## Validate
 
