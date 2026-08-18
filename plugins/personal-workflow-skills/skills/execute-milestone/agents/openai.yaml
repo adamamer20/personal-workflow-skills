@@ -1,0 +1,4 @@
+interface:
+  display_name: "Execute Milestone"
+  short_description: "Own one planned milestone end-to-end"
+  default_prompt: "Use $execute-milestone to implement one decision-ready milestone end-to-end, escalating only material decisions to the planning thread."

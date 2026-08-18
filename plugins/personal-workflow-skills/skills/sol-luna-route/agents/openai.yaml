@@ -1,4 +1,0 @@
-interface:
-  display_name: "Sol-Luna Route"
-  short_description: "Choose the smallest safe Sol/Luna execution mode"
-  default_prompt: "Use $sol-luna-route to execute substantial work with Sol deciding boundaries when present, Luna workers operating, and conditional reviews or Git checkpoints only when the selected mode requires them."

@@ -1,59 +1,65 @@
 ## Personal Workflow Skills
 
-- Keep planning and execution routing independent. When a substantial request
-  lacks a decision-ready active plan, or the plan is stale, use the globally
-  installed `$grill-me-light` skill and update the single project-owned plan
-  under `docs/reviews/` by default, or at the path defined by that repository's
-  instructions.
-- If the request is planning-only, stop after the plan is decision-ready. When
-  execution is requested from a decision-ready plan, use `$sol-luna-route` for
-  substantial implementation, audit, debugging, or review work.
-- Keep small localized tasks and questions on the direct single-agent path.
+- For a new substantial or architecturally uncertain program, start with a Sol
+  High planning thread and use `$plan-work`. Update the single project-owned
+  canonical plan under `docs/reviews/` by default, or at the path defined by
+  repository instructions.
+- If planning-only was requested, stop when the plan is decision-ready. If
+  execution was requested, the planning thread selects the first executable
+  milestone and uses `$codex-thread-handoff` to create a fresh peer execution
+  thread when native peer creation is available. Never silently substitute a
+  child/subagent.
+- Substantial milestones normally use Luna XHigh with `$execute-milestone`;
+  bounded or mechanical work may use Luna High directly.
+- Execution threads message the planning thread only for a material escalation
+  or terminal milestone outcome. The planning thread never polls execution and
+  execution sends no routine progress updates.
+- One milestone normally uses one fresh execution context. Program ownership
+  may persist across milestones; task context does not. Use parallel peers only
+  for genuinely independent milestones with disjoint mutable surfaces.
+- Keep small localized tasks and questions on the direct single-owner path.
 - Repository `AGENTS.md` files own project-specific plan paths, gates, and
-  exceptions; the skills do not depend on or invoke each other.
+  exceptions.
 
 ## Execution Contract
 
-- Before substantial execution, state the active scope, non-goals, acceptance
-  checks, and ownership of shared files and contracts.
-- Give shared runners, registries, schemas, models, and public contracts one
-  implementation owner. Extend the canonical production route; do not create
-  parallel scaffolding or duplicate execution paths.
-- When `$sol-luna-route` executes implementation in a worktree, select the
-  smallest safe mode (Direct Luna, Lite, or Full). A fresh, decision-ready,
-  sequential task with one mutable owner uses Direct Luna; do not force an
-  Explorer, verifier, duplicate final reviewer, or Full mode without a named
-  risk or independent ownership boundary. Keep the current branch. When a local
-  commit or checkpoint is requested, the main agent decides commit boundaries
-  and delegates exact staging, verification, and atomic green commits to one
-  dedicated Luna Git Committer; other agents do not commit. Pushes and pull
-  requests still require separate authorization.
-- Close only when required repository gates pass, the result matches the active
-  execution contract, and open P0/P1 findings are zero. Treat requirements
-  added after the first green gate as a new scoped follow-up.
+- Before substantial execution, state active scope, non-goals, acceptance and
+  promotion checks, owned and protected surfaces, and ownership of shared files
+  and contracts.
+- Give shared runners, registries, schemas, models, persisted/public contracts,
+  and canonical production entrypoints one implementation owner. Do not create
+  parallel scaffolding or duplicate production paths.
+- Each execution owner implements, tests, repairs, self-reviews, and may create
+  safe local commits for its milestone. Preserve unrelated changes and require
+  separate authorization for pushes, rebases, merges, stashes, discards, or
+  remote-history changes.
+- Close a milestone only when required outcome and safety gates pass, the
+  execution contract matches the result, and open P0/P1 findings are zero.
+  Requirements added after the first green gate are a newly scoped follow-up.
 
 ## Planning and Evidence
 
-- Keep exactly one mutable active plan per program. Keep current decisions,
-  scope and non-goals, owned workstreams, closure gates, implementation order,
-  open findings, and a short current review log. Put historical narrative and
-  raw evidence in retained artifacts or Git history instead of parallel plans.
-- Keep the plan compact enough that an implementer can find the next owned
-  action, its non-goals, and its closure gate quickly.
+- Keep exactly one mutable active plan per program. The planning thread owns
+  decisions, milestone ordering, scope changes, plan updates, and program
+  closure; execution peers return compact evidence and terminal outcomes.
+- Keep the plan compact enough that an executor can find its owned action,
+  protected surfaces, non-goals, escalation conditions, and closure gate.
 - Distinguish outcome or promotion gates, safety or integrity gates, executable
-  prerequisites, and diagnostic evidence. Only outcome and safety gates control
-  delivery; tests, manifests, scores, and status bookkeeping support them.
-- Route every failed gate to one concrete remediation or stop decision. A
-  failed optional branch blocks that branch, not the whole task when another
-  safe in-scope route remains.
+  prerequisites, and diagnostic evidence. Tests, manifests, counts, scores, and
+  status bookkeeping support but do not replace observable outcome proof.
+- Route every failed gate to one remediation or stop decision. A failed optional
+  branch blocks that branch, not the whole program when a safe route remains.
 
-## Implementation Defaults
+## Universal Invariants
 
-- Treat a new abstraction as complete only when the same change connects it to
-  a production entrypoint and real caller, defines its ownership boundary, and
-  exercises the path with an integration or end-to-end test.
-- Default to forward-only changes. Add compatibility shims or dual paths only
-  when explicitly requested, and update repository call sites together.
-- Run subagents at standard velocity unless the user explicitly asks otherwise.
-  Let the invoked skill choose model and reasoning; keep final decisions and
-  synthesis with the main agent.
+- One mutable owner per surface and one canonical active plan per program.
+- One milestone normally equals one fresh execution context; use hard rollover
+  at two major compactions, or at 75M tokens or 500 calls when telemetry exists.
+- Runtime reality outranks catalog presence: an abstraction is complete only
+  when a real caller changes observable behavior through the production
+  entrypoint and the path has integration or end-to-end proof.
+- Prove replacement reachability and required behavioral parity before deleting
+  an old path or its tests.
+- Subjective promotion requires fixed sentinel artifacts, real rendered-output
+  inspection, and an independent qualitative authority—not inventory or
+  self-authored status metadata alone.

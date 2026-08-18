@@ -1,18 +1,18 @@
 {
   "name": "personal-workflow-skills",
-  "version": "0.1.0+codex.20260815175012",
-  "description": "Cross-project planning, orchestration, delegation, and code-audit workflows.",
+  "version": "0.1.0+codex.20260818104438",
+  "description": "Cross-project planning, milestone execution, peer-thread handoff, and code-audit workflows.",
   "author": {
     "name": "Adam Amer"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Personal Workflow Skills",
-    "shortDescription": "Reusable planning, routing, and code-audit workflows.",
-    "longDescription": "Personal Workflow Skills packages Adam Amer's cross-project planning, orchestration, delegation, and code-audit workflows for consistent use across repositories.",
+    "shortDescription": "Planning, milestone execution, handoff, and audits.",
+    "longDescription": "Personal Workflow Skills packages cross-project planning, milestone execution, event-based peer-thread handoff, and code-audit workflows for consistent use across repositories.",
     "developerName": "Adam Amer",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Choose the smallest matching workflow from Personal Workflow Skills for this repository task."
+    "defaultPrompt": "Choose the smallest workflow: plan new substantial work, execute one decision-ready milestone, or hand off to a peer thread."
   }
 }

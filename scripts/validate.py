@@ -18,13 +18,14 @@ PLUGIN_ROOT = ROOT / "plugins" / PLUGIN_NAME
 SKILLS_ROOT = PLUGIN_ROOT / "skills"
 EXPECTED_SKILLS = {
     "abstraction-opportunity-audit",
+    "codex-thread-handoff",
     "dead-code-elimination-audit",
     "dedup-naming-audit",
+    "execute-milestone",
     "fallback-upstream-audit",
-    "grill-me-light",
     "indirect-attribute-access-audit",
     "overabstraction-audit",
-    "sol-luna-route",
+    "plan-work",
     "strong-typing-audit",
 }
 FORBIDDEN_PROJECT_TEXT = (
@@ -131,50 +132,93 @@ def validate_skill(skill_dir: Path) -> None:
 
 
 def validate_independence() -> None:
-    grill = (SKILLS_ROOT / "grill-me-light" / "SKILL.md").read_text(encoding="utf-8")
-    route = (SKILLS_ROOT / "sol-luna-route" / "SKILL.md").read_text(encoding="utf-8")
-    if "$sol-luna-route" in grill or "$grill-me-light" in route:
+    plan = (SKILLS_ROOT / "plan-work" / "SKILL.md").read_text(encoding="utf-8")
+    execute = (SKILLS_ROOT / "execute-milestone" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    if "$execute-milestone" in plan or "$plan-work" in execute:
         fail("planning and execution skills must not depend on each other")
 
 
-def validate_sol_luna_contract() -> None:
-    route_path = SKILLS_ROOT / "sol-luna-route" / "SKILL.md"
-    route = route_path.read_text(encoding="utf-8")
-    normalized_route = " ".join(route.split())
-    required_text = (
-        "### Single-owner / Direct Luna",
-        "### Sol-Luna Lite",
-        "### Sol-Luna Full",
-        "target root waits <12/hour",
-        "Rollover a worker at a green milestone",
-        "Start a verifier only for a named privacy",
-        "The current branch is the task branch",
-        "persistent Luna Git Committer",
-        "in every mode, including Direct Luna",
-        "Do not create a committer for read-only work",
-        "only agent allowed to mutate",
-        "Git Committer a commit capsule",
-        "stages only the exact owned paths",
-        "refuses the commit on unexpected paths",
-        "Once a commit SHA has been handed to a reviewer, keep it stable",
-        "Local checkpoint commits do not authorize a push",
-    )
+def require_contract(path: Path, required_text: tuple[str, ...]) -> None:
+    normalized_text = " ".join(path.read_text(encoding="utf-8").split())
     for token in required_text:
-        if token not in normalized_route:
-            fail(f"{route_path}: missing routing or Git contract: {token}")
+        if token not in normalized_text:
+            fail(f"{path}: missing workflow contract: {token}")
+
+
+def validate_plan_work_contract() -> None:
+    plan_path = SKILLS_ROOT / "plan-work" / "SKILL.md"
+    required_text = (
+        "decision-ready",
+        "exactly one active plan",
+        "independently closable milestones",
+        "one milestone, one fresh peer execution thread",
+        "If implementation was requested",
+        "planning thread's exact id",
+        "Do not pass inherited chat history, poll, wait for progress",
+        "never silently fall back to a subagent",
+    )
+    require_contract(plan_path, required_text)
+
+
+def validate_execute_milestone_contract() -> None:
+    execute_path = SKILLS_ROOT / "execute-milestone" / "SKILL.md"
+    required_text = (
+        "exactly one decision-ready milestone",
+        "planning thread owns the program plan",
+        "Escalate material decisions only",
+        "Do not poll, wait for, or repeatedly list",
+        "Hard context rollover",
+        "self-review",
+        "Subjective-quality promotion",
+        "production reachability",
+        "prove parity before deletion",
+        "stage only exact task-owned paths",
+        "Never push, rebase, merge, stash, discard",
+        "send exactly one bounded completion packet",
+    )
+    require_contract(execute_path, required_text)
+
+
+def validate_thread_handoff_contract() -> None:
+    handoff_path = SKILLS_ROOT / "codex-thread-handoff" / "SKILL.md"
+    required_text = (
+        "one **START** or **MESSAGE** operation",
+        "Peer tasks are durable Codex threads, not child/subagents",
+        "call `list_projects` first",
+        "inspect `isGitRepository`",
+        "Call `create_thread` once",
+        "initial `prompt`",
+        "only when the user has explicitly requested it",
+        "returns `threadId` and `hostId`",
+        "return `clientThreadId`",
+        "never pass it to tools that require `threadId`",
+        "do not use `fork_thread`",
+        "exact thread id",
+        "Do not wait for the peer",
+        "Send exactly one",
+        "Never poll",
+        "Never retry an uncertain create or send",
+        "silently use a fallback transport",
+    )
+    require_contract(handoff_path, required_text)
 
 
 def validate_global_agents_template() -> None:
     text = GLOBAL_AGENTS_PATH.read_text(encoding="utf-8")
     normalized_text = " ".join(text.split())
     required_text = (
-        "$grill-me-light",
-        "$sol-luna-route",
+        "$plan-work",
+        "$execute-milestone",
+        "$codex-thread-handoff",
         "`docs/reviews/`",
+        "Sol High planning thread",
+        "fresh peer execution thread",
+        "Luna XHigh",
+        "never polls execution",
+        "One milestone normally uses one fresh execution context",
         "Before substantial execution",
-        "smallest safe mode (Direct Luna, Lite, or Full)",
-        "sequential task with one mutable owner uses Direct Luna",
-        "one dedicated Luna Git Committer",
         "open P0/P1 findings are zero",
         "Repository `AGENTS.md` files own project-specific plan paths",
     )
@@ -200,7 +244,9 @@ def main() -> int:
     for skill_name in sorted(EXPECTED_SKILLS):
         validate_skill(SKILLS_ROOT / skill_name)
     validate_independence()
-    validate_sol_luna_contract()
+    validate_plan_work_contract()
+    validate_execute_milestone_contract()
+    validate_thread_handoff_contract()
     validate_global_agents_template()
     print(f"Validated {len(EXPECTED_SKILLS)} cross-project skills.")
     return 0
