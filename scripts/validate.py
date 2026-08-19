@@ -180,7 +180,10 @@ def validate_plan_work_contract() -> None:
         "independently closable milestones",
         "one milestone, one fresh peer execution thread",
         "If implementation was requested",
-        "planning thread's exact id",
+        "Completion callback: threadId=<planning thread id>",
+        "exact callback `threadId`",
+        "Never derive a callback host",
+        "Keep the planning thread unarchived and routable",
         "Do not pass inherited chat history, poll, wait for progress",
         "never silently fall back to a subagent",
     )
@@ -201,7 +204,13 @@ def validate_execute_milestone_contract() -> None:
         "prove parity before deletion",
         "stage only exact task-owned paths",
         "Never push, rebase, merge, stash, discard",
-        "send exactly one bounded completion packet",
+        "planning callback `threadId`",
+        "Never derive a host",
+        "Every terminal exit must attempt exactly one bounded callback",
+        "Status: BLOCKED",
+        "Status: FAILED",
+        "callback_status: sent|unsent",
+        "complete unsent packet",
     )
     require_contract(execute_path, required_text)
 
@@ -211,9 +220,16 @@ def validate_thread_handoff_contract() -> None:
     required_text = (
         "one **START** or **MESSAGE** operation",
         "Peer tasks are durable Codex threads, not child/subagents",
-        "call `list_projects` first",
+        "call `list_projects` immediately before creation",
         "inspect `isGitRepository`",
-        "Call `create_thread` once",
+        "Use only a project id returned by that current call",
+        "Construct the call from the currently exposed `create_thread` schema",
+        "`projectId` belongs only inside `target`",
+        "one logical START",
+        "`clientThreadId` is successful queued creation",
+        "do not infer non-creation from the error text",
+        "exactly one non-waiting `list_threads` reconciliation snapshot",
+        "Never retry `create_thread`",
         "initial `prompt`",
         "only when a governing user instruction authorizes the resolved pair",
         "returns `threadId` and `hostId`",
@@ -221,10 +237,13 @@ def validate_thread_handoff_contract() -> None:
         "never pass it to tools that require `threadId`",
         "do not use `fork_thread`",
         "exact thread id",
+        "Use `hostId` only when it came from",
+        "callback_status: unsent",
+        "complete unsent packet",
         "Do not wait for the peer",
         "Send exactly one",
         "Never poll",
-        "Never retry an uncertain create or send",
+        "Never retry a create or an uncertain send",
         "silently use a fallback transport",
     )
     require_contract(handoff_path, required_text)
@@ -254,6 +273,10 @@ def validate_native_routing_contract() -> None:
         "passing the same exact pair as native `model` and `thinking` arguments",
         "confirmed dispatch distinct from confirmed model enforcement",
         "Never retry a rejected or unsupported route",
+        "one non-waiting peer-list reconciliation",
+        "rejected-looking response is not proof that no task exists",
+        "every terminal outcome",
+        "Keep the planning thread unarchived and routable",
     )
     require_contract(WORKFLOW_PATHS["plan"], plan_required)
 
@@ -268,6 +291,11 @@ def validate_native_routing_contract() -> None:
         "`routing_status: enforced`",
         "confirms dispatch",
         "native response or tool contract confirms the exact pair",
+        "unknown project id is not sufficient proof that no task exists",
+        "Never retry `create_thread`",
+        "exact callback host id",
+        "Use `hostId` only when it came from",
+        "callback_status: unsent",
     )
     require_contract(WORKFLOW_PATHS["handoff"], handoff_required)
 
@@ -292,10 +320,18 @@ def validate_native_routing_contract() -> None:
         "Native `thinking`",
         "explicit user request or applicable user-owned `AGENTS.md` policy",
         "plugin installation alone is insufficient authorization",
-        "passes both in one call",
+        "passes both in one logical START",
         "fails closed on unsupported or rejected routes",
+        "Error text alone never proves non-creation",
+        "one non-waiting `list_threads` reconciliation snapshot",
+        "never calls `create_thread` again",
+        "queued `clientThreadId` confirms dispatch",
         "routing not enforced",
         "model enforcement is confirmed only",
+        "Execution capsules carry the exact planning callback `threadId`",
+        "planning task remains unarchived",
+        "accurately labelled `BLOCKED`/`FAILED` escalation",
+        "callback_status: unsent",
     )
     require_contract(README_PATH, readme_required)
 
@@ -318,6 +354,11 @@ def validate_global_agents_template() -> None:
         "plugin installation alone is not authorization",
         "native schema does not advertise an authorized pair",
         "routing was not enforced",
+        "Error text alone does not prove that no task was created",
+        "one non-waiting `list_threads` reconciliation snapshot",
+        "never retries `create_thread`",
+        "Every terminal outcome returns exactly one",
+        "Keep the planning thread unarchived",
         "never polls execution",
         "One milestone normally uses one fresh execution context",
         "Before substantial execution",

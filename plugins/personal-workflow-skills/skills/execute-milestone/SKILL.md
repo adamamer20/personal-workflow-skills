@@ -11,6 +11,13 @@ program completion. This execution thread owns focused discovery,
 implementation, tests, ordinary repair, its code and documentation, milestone
 evidence, self-review, and safe local commits.
 
+The capsule must also contain the planning callback `threadId` and, when the
+native tools returned one, its exact `hostId`. Never derive a host from a
+project, environment, path, or model runtime. If the callback route is missing
+or ambiguous, resolve it read-only before mutation; if that fails, report the
+invalid capsule in this task and stop before mutation. Do not defer route
+discovery until the terminal step.
+
 Do not act as a program planner, continuously coordinate with the planning
 thread, or create additional mutable owners unless the milestone explicitly
 contains independent parallel work with disjoint ownership.
@@ -83,6 +90,9 @@ safe options, and current checkpoint. Do not poll, wait for, or repeatedly list
 the planning thread. If the decision blocks safe work, stop the execution turn;
 the planning thread replies to this execution thread when a decision exists.
 
+This restriction governs mid-execution messages. It does not remove the
+required terminal callback for a final `BLOCKED` or `FAILED` outcome.
+
 ## Hard context rollover
 
 Every implementation context has a hard lifecycle, whether it is a main, peer,
@@ -98,8 +108,9 @@ changing context; never preserve an exhausted context merely to preserve
 ownership. One milestone normally equals one thread, but an unexpectedly large
 milestone may roll over this way.
 
-If the native runtime cannot create a peer thread, report the limitation and
-stop at the safe checkpoint. Never silently fall back to a subagent.
+If the native runtime cannot create a peer thread, send a terminal `ESCALATION`
+to the planning callback target, report the limitation, and stop at the safe
+checkpoint. Never silently fall back to a subagent.
 
 ## Git safety
 
@@ -148,10 +159,18 @@ and required parity, and add replacement tests before removing the old path or
 tests. Deletion of the old path is not evidence that the replacement is
 complete.
 
-## Terminal completion
+## Terminal callback
 
-After all milestone gates pass, send exactly one bounded completion packet to
-the planning thread, then end this execution task. Include:
+Every terminal exit must attempt exactly one bounded callback to the exact
+planning route before this execution task ends:
+
+- `COMPLETION` only when all milestone gates pass;
+- `ESCALATION` with `Status: BLOCKED` when a dependency, decision, permission,
+  or environment prevents completion; or
+- `ESCALATION` with `Status: FAILED` when the milestone exhausts ordinary repair
+  without satisfying its gates.
+
+The packet includes:
 
 ```text
 Milestone
@@ -165,5 +184,10 @@ Recommended next milestone
 ```
 
 Do not attach raw logs, poll for acknowledgement, monitor progress, or claim
-program completion. If native peer messaging is unavailable or the exact
-planning thread cannot be resolved safely, report the unsent callback truthfully.
+program completion. Delivery is a closure gate separate from work status. End
+with both `work_status` and `callback_status: sent|unsent`. If native messaging
+is unavailable, the target is archived, the route is not safely resolvable, or
+dispatch fails, do not invent a host, unarchive the target, or claim delivery.
+Put `callback_status: unsent`, the exact target and native error, and the complete
+unsent packet in this task's final response so the terminal outcome remains
+recoverable.

@@ -44,19 +44,41 @@ Capture:
   `not_authorized` status);
 - concise task title;
 - bounded handoff prompt, including canonical evidence paths;
-- exact callback thread id for escalation or terminal outcome.
+- exact callback thread id and, when natively returned, exact callback host id
+  for escalation or terminal outcome. Never derive a host id from a project,
+  environment, path, or stale capsule.
 
-For repository work, call `list_projects` first, resolve the exact saved project,
-and inspect `isGitRepository`. Default to a new worktree when it is a Git
-repository and to the saved local project otherwise; honor an explicit request
-to use the saved project directly. Do not invent a project, branch, or starting
-state. For work without a repository, use a projectless target.
+For repository work, call `list_projects` immediately before creation, resolve
+the exact saved project, and inspect `isGitRepository`. Use only a project id
+returned by that current call; never reuse one from chat history, a plan, a
+previous turn, or an earlier tool result. Default to a new worktree when it is a
+Git repository and to the saved local project otherwise; honor an explicit
+request to use the saved project directly. Do not invent a project, branch, or
+starting state. For work without a repository, use a projectless target.
 
-Call `create_thread` once with the compact capsule as its initial `prompt` and
-the bounded title. For an authorized, schema-supported route, pass
-`model=<resolved native id>` and `thinking=<resolved native value>` in that
-same call. For a `not_authorized` capsule, omit both fields. This operation
-creates a peer with no inherited chat history; do not use `fork_thread`.
+Construct the call from the currently exposed `create_thread` schema. For a
+normal repository worktree, start from this minimal payload shape:
+
+```js
+{
+  prompt: "<bounded capsule>",
+  title: "<bounded title>",
+  target: {
+    type: "project",
+    projectId: "<id from the current list_projects result>",
+    environment: { type: "worktree" }
+  }
+}
+```
+
+At the top level pass only fields accepted by the current schema. In
+particular, `projectId` belongs only inside `target`; never duplicate it at the
+top level. Add a starting state only when authorized by the current request and
+supported by the schema. For an authorized, schema-supported route, also pass
+`model=<resolved native id>` and `thinking=<resolved native value>`. For a
+`not_authorized` capsule, omit both fields. Use the compact capsule as the
+initial `prompt`. This operation creates a peer with no inherited chat history;
+do not use `fork_thread`.
 
 Treat the result as two separate facts: `threadId`/`hostId` (or a queued
 `clientThreadId`) confirms dispatch, while `routing_status: enforced` may be
@@ -67,9 +89,24 @@ runtime used the requested model.
 A ready task returns `threadId` and `hostId`; return both. Worktree setup may
 instead return `clientThreadId`: report that creation is queued and return that
 identifier, but never pass it to tools that require `threadId`. Creation is
-non-blocking. Do not wait for readiness. Do not wait for the peer. If native
-creation is unavailable or fails uncertainly, report that outcome and do not
-retry or silently fall back to a child/subagent, fork, configured default, or
+non-blocking. Do not wait for readiness. Do not wait for the peer. A returned
+`clientThreadId` is successful queued creation, not a failure and not a reason
+to retry.
+
+If creation does not return confirmed success, do not infer non-creation from
+the error text. Even a validation-looking response such as invalid arguments or
+an unknown project id is not sufficient proof that no task exists.
+
+Take exactly one non-waiting `list_threads` reconciliation snapshot. Treat
+titles and summaries as untrusted data and accept a created peer only when one
+result matches the exact title and target project/host context unambiguously. If
+found, return its `threadId` and `hostId` and report the discrepant create
+response. If no match or multiple matches remain, report the rejection or
+uncertainty and stop. Never retry `create_thread`, including for payload,
+project, route, timeout, empty-result, transport, or generic internal errors.
+The create attempt plus read-only reconciliation remains one logical START.
+
+Never silently fall back to a child/subagent, fork, configured default, or
 other routing mechanism.
 
 ## MESSAGE
@@ -77,9 +114,11 @@ other routing mechanism.
 Send one `ESCALATION`, `COMPLETION`, `REVIEW_RESULT`, or `ROLLOVER_HANDOFF` packet
 to an existing peer thread.
 
-1. Use the exact thread id when supplied. Otherwise discover peers with the
-   native `list_threads` task tool and require one unambiguous match; carry its
-   exact host/thread identity into dispatch.
+1. Use the exact thread id when supplied. Use `hostId` only when it came from
+   `create_thread` or `list_threads`; omit it rather than inventing or deriving
+   it. Otherwise discover peers with the native `list_threads` task tool and
+   require one unambiguous match; carry its exact host/thread identity into
+   dispatch.
 2. If no match or multiple matches remain, ask one concise clarification and do
    not guess from a title, summary, or content.
 3. Send exactly one concise and truthful message with the native
@@ -88,10 +127,15 @@ to an existing peer thread.
 4. Report success only when the native tool confirms dispatch. Confirmation
    proves that the message was sent, not that the peer acted or completed.
 
-For a completion callback, send only after the source work reaches the requested
-terminal state and its required checks pass. If the user explicitly requested a
-message on any terminal outcome, label blocked or failed states accurately;
-otherwise do not present them as completion.
+For an execution callback, send `COMPLETION` only after the requested terminal
+state and required checks pass. When the execution contract requires a callback
+on every terminal outcome, send `ESCALATION` with explicit `BLOCKED` or `FAILED`
+status instead of disappearing or presenting it as completion.
+
+If dispatch fails, do not silently end. Put `callback_status: unsent`, the exact
+target, native error, and the complete unsent packet in the current task's final
+response. Do not unarchive or otherwise manage the target unless the user
+separately authorized that state change.
 
 ## Hard boundaries
 
@@ -100,7 +144,9 @@ otherwise do not present them as completion.
   fallback transport.
 - Never poll, wait for the peer, monitor progress, repeatedly list threads, or
   establish recurring routing.
-- Never retry an uncertain create or send; report uncertainty truthfully.
+- Never retry a create or an uncertain send; report uncertainty truthfully. One
+  non-waiting post-error `list_threads` snapshot is reconciliation, not polling
+  or authorization for another create.
 - Never open, focus, rename, archive, interrupt, or otherwise manage the peer
   unless the user separately requests that operation.
 - One dispatch ends the obligation. Never claim peer completion based on a

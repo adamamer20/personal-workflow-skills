@@ -65,8 +65,10 @@ the creator. A skill cannot change the already-running task's model.
   `thinking`; the capsule mirrors the same pair.
 - Unsupported or rejected routing fails truthfully without retry or silent
   model substitution.
-- Peer creation remains one non-blocking START operation with no polling,
-  inherited chat, child agent, or fallback transport.
+- Peer creation remains one non-blocking logical START operation with no
+  polling, inherited chat, child agent, or fallback transport. After an error,
+  one non-waiting peer-list reconciliation may recover a created task id; no
+  result authorizes another create call.
 - Planning, execution, Git, completion-callback, and ownership boundaries remain
   unchanged.
 
@@ -115,8 +117,9 @@ can no longer describe a capsule-only recommendation as successful routing.
    model/reasoning pair for the milestone.
 2. Change START to apply that pair to native `create_thread` when authorized and
    supported, with explicit unavailable/no-authorization behavior.
-3. Preserve one-call/no-retry semantics and make confirmed dispatch distinct
-   from confirmed model enforcement.
+3. Preserve one logical START and zero create retries, reconcile one
+   failed-looking result read-only, and make confirmed dispatch distinct from
+   confirmed model enforcement.
 4. Align `execute-milestone`, the global template, and README with the enforced
    task-creation behavior and current-task limitation.
 5. Update deterministic validation so the old immediate-request-only/capsule
@@ -298,6 +301,17 @@ worktrees.
   `agent/enforce-peer-model-routing` matched local head `0e4a427`, and ready PR
   #3 opened against `main` with exactly the eight intended paths. No merge,
   installation, or downstream change occurred.
+- 2026-08-19: Reviewed recent native creation failures. Confirmed one malformed
+  top-level `projectId`, one `Unknown projectId` response that nevertheless
+  created a task and led to a duplicate retry, and ambiguous generic failures;
+  successful worktree creation normally returned queued `clientThreadId`.
+  Tightened START preflight and payload shape, prohibited all create retries,
+  and added one read-only post-error reconciliation snapshot.
+- 2026-08-19: Reviewed missing Luna returns. Observed an archived planning
+  target and a non-routable environment-derived `hostId`; the existing executor
+  also required callbacks only for green completion. Added exact callback-route
+  ownership, unarchived-planner availability, one callback for every terminal
+  status, and a recoverable unsent-packet final state.
 
 ## Next execution
 

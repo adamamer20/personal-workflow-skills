@@ -20,11 +20,17 @@
   instruction wins.
 - A plugin installation alone is not authorization to override native task
   settings. If the native schema does not advertise an authorized pair, or
-  native creation rejects it, stop without retrying, substituting a model, or
-  falling back to the configured default. If no user authorization applies,
-  omit the overrides and state that routing was not enforced.
+  native creation rejects that pair, stop without retrying, substituting a
+  model, or falling back to the configured default. Error text alone does not
+  prove that no task was created; the handoff may take one non-waiting
+  `list_threads` reconciliation snapshot after an error, but it never retries
+  `create_thread`. If no user authorization applies, omit the overrides and
+  state that routing was not enforced.
 - Execution threads message the planning thread only for a material escalation
-  or terminal milestone outcome. The planning thread never polls execution and
+  or terminal milestone outcome. Every terminal outcome returns exactly one
+  `COMPLETION` or accurately labelled `BLOCKED`/`FAILED` escalation using the
+  exact callback thread/host route. Keep the planning thread unarchived while a
+  peer owes it a callback. The planning thread never polls execution and
   execution sends no routine progress updates.
 - One milestone normally uses one fresh execution context. Program ownership
   may persist across milestones; task context does not. Use parallel peers only

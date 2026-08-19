@@ -118,15 +118,26 @@ These pairs are applied to native `create_thread` only when an explicit user
 request or applicable user-owned `AGENTS.md` policy authorizes them. A plugin
 installation alone is insufficient authorization. The handoff checks that
 the current native schema advertises both fields and the exact values, passes
-both in one call, and fails closed on unsupported or rejected routes without
-retrying, substituting another model, or silently using the configured default.
-No authorization means no overrides and an explicit “routing not enforced”
-status. A returned thread id confirms dispatch; model enforcement is confirmed
-only when the native response or tool contract acknowledges the exact pair.
+both in one logical START, and fails closed on unsupported or rejected routes
+without retrying, substituting another model, or silently using the configured
+default. Error text alone never proves non-creation: after any failed-looking
+result, the handoff takes one non-waiting `list_threads` reconciliation snapshot
+and never calls `create_thread` again. No authorization means no overrides and
+an explicit “routing not enforced” status. A returned thread id or queued
+`clientThreadId` confirms dispatch; model enforcement is confirmed only when the
+native response or tool contract acknowledges the exact pair.
 Luna Max escalation is outside these template defaults and requires a separate
 explicit user authorization plus schema support.
 Subagents remain optional tactical helpers rather than the workflow foundation.
 The skills cannot change the model of a task that is already running.
+
+Execution capsules carry the exact planning callback `threadId` and a `hostId`
+only when native task tools returned it; environment ids are never substituted
+for host ids. The planning task remains unarchived while peers are active. Every
+terminal execution outcome attempts one callback: `COMPLETION` when green, or
+an accurately labelled `BLOCKED`/`FAILED` escalation otherwise. If delivery is
+impossible, the Luna task ends with `callback_status: unsent` and the complete
+recoverable packet instead of silently disappearing.
 
 ## Validate
 

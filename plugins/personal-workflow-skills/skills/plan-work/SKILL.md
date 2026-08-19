@@ -51,6 +51,9 @@ the route was enforced. If an authorized pair is absent from the advertised
 schema, the creator must report the route as unsupported and stop; it must not
 substitute another model, reasoning value, or configured default. A route that
 the native call rejects is likewise a failed dispatch, not a retry opportunity.
+The START contract never retries creation after any error text; it performs one
+non-waiting peer-list reconciliation because a rejected-looking response is not
+proof that no task exists.
 
 Planning is decision-ready when a capable executor can identify the outcome,
 scope and non-goals, architecture and ownership, mutable and protected surfaces,
@@ -116,7 +119,7 @@ Owned surfaces: ...
 Protected surfaces: ...
 Acceptance: ...
 Escalate only for: ...
-Completion callback: <planning thread id>
+Completion callback: threadId=<planning thread id>, hostId=<exact native host id when available>
 ```
 
 Use concrete paths and real owning components where known. Include small
@@ -146,20 +149,26 @@ If implementation was requested:
    overrides. Use the `codex-thread-handoff` START contract when the bundled
    skill is available.
 3. Seed the peer with only the capsule, canonical plan path, and this planning
-   thread's exact id for material escalation and terminal completion. This
-   requires passing the same exact pair as native `model` and `thinking`
-   arguments when authorization and schema support are confirmed.
+   thread's exact callback `threadId` plus its natively returned `hostId` when
+   available for material escalation and every terminal outcome. Never derive a
+   callback host from a project or execution environment. This requires passing
+   the same exact pair as native `model` and `thinking` arguments when
+   authorization and schema support are confirmed.
 4. Keep confirmed dispatch distinct from confirmed model enforcement: a
    returned thread id proves creation, while enforcement is confirmed only by
    the native response or contract acknowledging the exact pair.
-5. Confirm the single dispatch, record the created thread id and routing
-   status, and end the planning turn. Never retry a rejected or unsupported
-   route and never silently use the configured default.
+5. Confirm the single logical dispatch, record the created thread id and
+   routing status, and end the planning turn. Never retry a rejected or
+   unsupported route and never silently use the configured default. After any
+   creation error, the START contract may take one non-waiting `list_threads`
+   reconciliation snapshot, but it never makes another create call.
 
 The execution task is a peer, never a child/subagent. Do not pass inherited chat
 history, poll, wait for progress, or create a persistent orchestrator. If native
 peer creation is unavailable, report that limitation and leave the handoff
 undispatched; never silently fall back to a subagent or another routing method.
+Keep the planning thread unarchived and routable while any execution peer owes
+it a terminal callback.
 
 ## Continue after an event
 
