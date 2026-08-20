@@ -189,14 +189,17 @@ The plugin bundles synchronous `PreToolUse`, `PostToolUse`, `Stop`, and
   `local` or `worktree`, and top-level-only ids are denied;
 - an atomic `PLUGIN_DATA` ledger stores a bounded title/target/model/thinking
   fingerprint and prompt digest, never the prompt body or raw tool response;
-- same-turn and unresolved duplicate creates are blocked, including changed
-  payloads in the same session; ledger saturation never evicts recovery state;
+- same-turn, unresolved, and terminally unsafe duplicate creates are blocked,
+  including changed payloads in the same session; ledger saturation never
+  evicts recovery-blocking state;
 - `threadId` is confirmed, `clientThreadId` is queued, and every other result is
   uncertain/error and permits at most one exact read-only `list_threads`
   reconciliation;
 - reconciliation is classified as found, not-found, or ambiguous using exact
-  title plus complete target identity; only a valid `threadId` can confirm,
-  while missing/lossy identity, title-prefix collisions, and normalization-only
+  title plus explicit complete target identity; only a supported, bounded list
+  snapshot can reconcile and only its valid empty form can prove not-found;
+  malformed/error-shaped or oversized snapshots, invalid `threadId` values,
+  missing/lossy identity, title-prefix collisions, and normalization-only
   matches remain terminally ambiguous; hooks never call tools, poll, retry,
   unarchive, replace, switch models, or send messages;
 - unresolved recovery is surfaced once at `Stop` and once on same-session

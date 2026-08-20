@@ -146,6 +146,10 @@ def validate_hooks() -> None:
         "title_identity",
         "normalised_digest",
         "reconciled_ambiguous",
+        "MAX_CANDIDATES",
+        "MAX_RETAINED_MATCHES",
+        "invalid_snapshot",
+        "blocks_create",
     )
     normalized = " ".join(hook_text.split())
     for token in required:

@@ -240,6 +240,7 @@ class HandoffHookTests(unittest.TestCase):
                 {
                     "threadId": "thread-found",
                     "title": "M5 hooks",
+                    "type": "project",
                     "projectId": "project-1",
                     "environment": {"type": "worktree"},
                 },
@@ -293,7 +294,6 @@ class HandoffHookTests(unittest.TestCase):
             ),
             {},
         )
-
         self.pre_create(turn="turn-2")
         self.post_create({"error": "unknown project"}, turn="turn-2")
         self.run_hook(
@@ -314,12 +314,14 @@ class HandoffHookTests(unittest.TestCase):
                         {
                             "threadId": "a",
                             "title": "M5 hooks",
+                            "type": "project",
                             "projectId": "project-1",
                             "environment": {"type": "worktree"},
                         },
                         {
                             "threadId": "b",
                             "title": "M5 hooks",
+                            "type": "project",
                             "projectId": "project-1",
                             "environment": {"type": "worktree"},
                         },
@@ -341,6 +343,49 @@ class HandoffHookTests(unittest.TestCase):
             ),
             {},
         )
+        blocked = self.pre_create(turn="turn-3")
+        self.assertEqual(blocked["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_only_valid_empty_snapshot_becomes_not_found(self) -> None:
+        invalid_responses = (
+            {"error": "server failure"},
+            {"threads": [], "error": "partial failure"},
+            {"threads": "not-a-list"},
+            {"unexpected": []},
+            "not-json",
+            '"{\\"threads\\": []}"',
+            None,
+        )
+        for index, response in enumerate(invalid_responses):
+            session = f"invalid-snapshot-{index}"
+            self.pre_create(session=session)
+            self.post_create({"error": "timeout"}, session=session)
+            self.pre_list(session=session)
+            output = self.post_list(response, session=session)
+            attempt = self.state()["attempts"][-1]
+            self.assertEqual(attempt["status"], "ambiguous")
+            self.assertNotEqual(attempt["reconciliation_classification"], "not_found")
+            self.assertIn("do not create", output["hookSpecificOutput"]["additionalContext"])
+            retry = self.pre_create(session=session, turn="later")
+            self.assertEqual(retry["hookSpecificOutput"]["permissionDecision"], "deny")
+
+        session = "valid-direct-empty"
+        self.pre_create(session=session)
+        self.post_create({"error": "timeout"}, session=session)
+        self.pre_list(session=session)
+        self.post_list([], session=session)
+        self.assertEqual(self.state()["attempts"][-1]["status"], "not_found")
+
+    def test_malformed_candidate_items_do_not_become_not_found(self) -> None:
+        for index, candidate in enumerate((None, "not-a-thread", 42, [])):
+            session = f"malformed-item-{index}"
+            self.pre_create(session=session)
+            self.post_create({"error": "timeout"}, session=session)
+            self.pre_list(session=session)
+            self.post_list({"threads": [candidate]}, session=session)
+            attempt = self.state()["attempts"][-1]
+            self.assertEqual(attempt["status"], "ambiguous")
+            self.assertTrue(attempt["blocks_create"])
 
     def test_stop_is_bounded_and_honors_stop_hook_active(self) -> None:
         self.pre_create()
@@ -489,6 +534,8 @@ class HandoffHookTests(unittest.TestCase):
             "directoryName": "handoff-two",
         }
         self.assertEqual(reconcile(projectless, "directory", projectless_candidate), "not_found")
+        projectless_exact = dict(projectless_candidate, threadId="thread-dir-exact", directoryName="handoff-one")
+        self.assertEqual(reconcile(projectless, "directory-exact", projectless_exact | {"title": "directory-exact"}), "confirmed")
 
         cloud = {"type": "chatgptWorkCloud", "projectId": "cloud-one"}
         cloud_candidate = {
@@ -498,6 +545,8 @@ class HandoffHookTests(unittest.TestCase):
             "projectId": "cloud-two",
         }
         self.assertEqual(reconcile(cloud, "cloud", cloud_candidate), "not_found")
+        cloud_exact = dict(cloud_candidate, threadId="thread-cloud-exact", projectId="cloud-one")
+        self.assertEqual(reconcile(cloud, "cloud-exact", cloud_exact | {"title": "cloud-exact"}), "confirmed")
 
     def test_reconciliation_rejects_unaddressable_or_lossy_candidates(self) -> None:
         target = self.create_input()["target"]
@@ -520,6 +569,109 @@ class HandoffHookTests(unittest.TestCase):
         self.post_list(response)
         self.assertEqual(self.state()["attempts"][-1]["status"], "ambiguous")
         self.assertNotIn("peer_id", self.state()["attempts"][-1])
+
+    def test_candidate_target_type_is_required_and_lossy_context_is_ambiguous(self) -> None:
+        target = self.create_input()["target"]
+        malformed_candidates = (
+            {
+                "threadId": "missing-type",
+                "title": "M5 hooks",
+                "projectId": target["projectId"],
+                "environment": target["environment"],
+            },
+            {
+                "threadId": "unsupported-type",
+                "title": "M5 hooks",
+                "type": "unsupported",
+                "projectId": target["projectId"],
+                "environment": target["environment"],
+            },
+            {
+                "threadId": "lossy-project",
+                "title": "M5 hooks",
+                "type": "project",
+                "projectId": target["projectId"],
+            },
+            {
+                "threadId": "conflicting-identity",
+                "title": "M5 hooks",
+                "target": target,
+                "type": "project",
+            },
+        )
+        for index, candidate in enumerate(malformed_candidates):
+            session = f"malformed-candidate-{index}"
+            self.pre_create(session=session)
+            self.post_create({"error": "timeout"}, session=session)
+            self.pre_list(session=session)
+            self.post_list({"threads": [candidate]}, session=session)
+            attempt = self.state()["attempts"][-1]
+            self.assertEqual(attempt["status"], "ambiguous")
+            self.assertNotIn("peer_id", attempt)
+
+    def test_thread_ids_must_be_addressable(self) -> None:
+        invalid_ids = ("", "   ", " leading", "trailing ", "has\ncontrol", "zero\u200bwidth", "x" * 257)
+        for index, thread_id in enumerate(invalid_ids):
+            session = f"invalid-id-{index}"
+            self.pre_create(session=session)
+            create_output = self.post_create({"threadId": thread_id}, session=session)
+            self.assertIn("exactly one", create_output["hookSpecificOutput"]["additionalContext"])
+            self.pre_list(session=session)
+            self.post_list(
+                {
+                    "threads": [
+                        {
+                            "threadId": thread_id,
+                            "title": "M5 hooks",
+                            "type": "project",
+                            "projectId": "project-1",
+                            "environment": {"type": "worktree"},
+                        }
+                    ]
+                },
+                session=session,
+            )
+            self.assertEqual(self.state()["attempts"][-1]["status"], "ambiguous")
+
+    def test_candidate_snapshot_cardinality_is_bounded(self) -> None:
+        session = "oversized-snapshot"
+        self.pre_create(session=session)
+        self.post_create({"error": "timeout"}, session=session)
+        self.pre_list(session=session)
+        candidates = [
+            {
+                "threadId": f"thread-{index}",
+                "title": "unrelated",
+                "type": "project",
+                "projectId": "project-1",
+                "environment": {"type": "worktree"},
+            }
+            for index in range(257)
+        ]
+        self.post_list({"threads": candidates}, session=session)
+        attempt = self.state()["attempts"][-1]
+        self.assertEqual(attempt["status"], "ambiguous")
+        self.assertEqual(attempt["reconciliation_classification"], "oversized_snapshot")
+        state_text = (self.data / "native-thread-handoff.json").read_text()
+        self.assertNotIn("thread-256", state_text)
+
+    def test_terminal_unsafe_history_cannot_be_evicted(self) -> None:
+        attempts = [
+            {"session_id": f"blocked-{index}", "status": "ambiguous", "blocks_create": True}
+            for index in range(32)
+        ]
+        (self.data / "native-thread-handoff.json").write_text(
+            json.dumps({"version": 1, "attempts": attempts}),
+            encoding="utf-8",
+        )
+        saturated = self.pre_create(session="new-session", turn="new-turn")
+        self.assertEqual(saturated["hookSpecificOutput"]["permissionDecision"], "deny")
+        state = self.state()
+        self.assertEqual(len(state["attempts"]), 32)
+        self.assertEqual(
+            {item["session_id"] for item in state["attempts"]},
+            {f"blocked-{index}" for index in range(32)},
+        )
 
     def test_title_identity_avoids_prefix_collision_and_flags_normalisation(self) -> None:
         long_title_a = "L" * 180 + "A"

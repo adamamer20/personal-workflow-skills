@@ -34,6 +34,8 @@ MAX_THINKING = 32
 MAX_PROMPT_FOR_DIGEST = 32 * 1024
 MAX_DIRECTORY = 160
 MAX_JSON_TEXT = 256 * 1024
+MAX_CANDIDATES = 256
+MAX_RETAINED_MATCHES = 16
 UNRESOLVED_STATUSES = frozenset({"pending", "uncertain"})
 MISSING = object()
 
@@ -57,7 +59,12 @@ def _bounded_optional(value: Any, limit: int) -> str | None:
 
 
 def _valid_id(value: Any) -> str | None:
-    return _bounded(value, MAX_ID)
+    candidate = _bounded(value, MAX_ID)
+    if candidate is None or candidate.strip() != candidate:
+        return None
+    if any(unicodedata.category(character).startswith("C") for character in candidate):
+        return None
+    return candidate
 
 
 def _event_session_id(event: dict[str, Any]) -> str | None:
@@ -263,19 +270,25 @@ def _is_unresolved_attempt(attempt: Any) -> bool:
     return isinstance(attempt, dict) and attempt.get("status") in UNRESOLVED_STATUSES
 
 
+def _is_recovery_blocking_attempt(attempt: Any) -> bool:
+    return _is_unresolved_attempt(attempt) or (
+        isinstance(attempt, dict) and attempt.get("blocks_create") is True
+    )
+
+
 def _trim_attempts(attempts: list[Any]) -> list[dict[str, Any]]:
-    """Bound resolved history without ever evicting an unresolved attempt."""
+    """Bound resolved history without evicting recovery-blocking evidence."""
 
     valid = [item for item in attempts if isinstance(item, dict)]
-    unresolved_count = sum(_is_unresolved_attempt(item) for item in valid)
-    if unresolved_count > MAX_ATTEMPTS:
-        raise RuntimeError("handoff state contains too many unresolved attempts")
+    blocking_count = sum(_is_recovery_blocking_attempt(item) for item in valid)
+    if blocking_count > MAX_ATTEMPTS:
+        raise RuntimeError("handoff state contains too many recovery-blocking attempts")
     if len(valid) <= MAX_ATTEMPTS:
         return valid
     retained: list[dict[str, Any]] = []
     to_drop = len(valid) - MAX_ATTEMPTS
     for item in valid:
-        if to_drop and not _is_unresolved_attempt(item):
+        if to_drop and not _is_recovery_blocking_attempt(item):
             to_drop -= 1
             continue
         retained.append(item)
@@ -440,7 +453,10 @@ def _allow_pre_create(event: dict[str, Any]) -> dict[str, Any]:
     turn_id = _bounded_optional(event.get("turn_id"), MAX_ID)
 
     def mutate(state: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        if _unresolved_attempts(state, session_id):
+        if _unresolved_attempts(state, session_id) or any(
+            item.get("session_id") == session_id and item.get("blocks_create") is True
+            for item in state["attempts"]
+        ):
             return "duplicate", None
         for attempt in reversed(state["attempts"]):
             if attempt.get("session_id") != session_id:
@@ -450,7 +466,7 @@ def _allow_pre_create(event: dict[str, Any]) -> dict[str, Any]:
             same_turn = turn_id is not None and attempt.get("turn_id") == turn_id
             if same_turn:
                 return "duplicate", None
-        if sum(_is_unresolved_attempt(item) for item in state["attempts"]) >= MAX_ATTEMPTS:
+        if sum(_is_recovery_blocking_attempt(item) for item in state["attempts"]) >= MAX_ATTEMPTS:
             return "saturated", None
         state["attempts"].append(_new_attempt(repaired, context, fingerprint, event, session_id))
         state["attempts"] = _trim_attempts(state["attempts"])
@@ -565,18 +581,37 @@ def _pre_list(event: dict[str, Any]) -> dict[str, Any]:
     return _pre_allow(None)
 
 
-def _candidate_items(response: Any) -> list[Any]:
+def _candidate_items(response: Any) -> tuple[str, list[Any]]:
+    """Return only a valid, bounded native list snapshot.
+
+    Invalid/error-shaped results are deliberately distinct from a valid empty
+    snapshot: only the latter may prove that a create was not found.
+    """
+
     response = _decode_json_string(response)
     if isinstance(response, list):
-        return response
+        if len(response) > MAX_CANDIDATES:
+            return "oversized", []
+        return "valid", response
     if not isinstance(response, dict):
-        return []
+        return "invalid", []
+    if any(key in response for key in ("error", "errors", "isError", "is_error")):
+        return "invalid", []
     items: list[Any] = []
+    found_collection = False
     for key in ("pinnedThreads", "threads", "items", "results"):
-        value = response.get(key)
-        if isinstance(value, list):
-            items.extend(value)
-    return items
+        if key not in response:
+            continue
+        found_collection = True
+        value = response[key]
+        if not isinstance(value, list):
+            return "invalid", []
+        if len(items) + len(value) > MAX_CANDIDATES:
+            return "oversized", []
+        items.extend(value)
+    if not found_collection:
+        return "invalid", []
+    return "valid", items
 
 
 def _candidate_context(candidate: dict[str, Any]) -> dict[str, Any] | None:
@@ -597,12 +632,10 @@ def _candidate_context(candidate: dict[str, Any]) -> dict[str, Any] | None:
     target_type = candidate.get("type", MISSING)
     project_id = candidate.get("projectId", MISSING)
     project_id_alias = candidate.get("project_id", MISSING)
-    if project_id is not MISSING and project_id_alias is not MISSING and project_id != project_id_alias:
+    if project_id is not MISSING and project_id_alias is not MISSING:
         return None
     if target_type is MISSING:
-        if project_id is MISSING and project_id_alias is MISSING:
-            return None
-        target_type = "project"
+        return None
     if not isinstance(target_type, str):
         return None
     flattened: dict[str, Any] = {"type": target_type}
@@ -663,7 +696,7 @@ def _post_list(event: dict[str, Any]) -> dict[str, Any]:
     session_id = _event_session_id(event)
     if session_id is None:
         return _warning("session_id is absent or malformed; reconciliation state was not inspected")
-    response_items = _candidate_items(event.get("tool_response"))
+    snapshot_classification, response_items = _candidate_items(event.get("tool_response"))
 
     def mutate(state: dict[str, Any]) -> tuple[str, str | None]:
         attempt = next(
@@ -680,36 +713,54 @@ def _post_list(event: dict[str, Any]) -> dict[str, Any]:
         )
         if attempt is None:
             return "ordinary", None
-        matches: list[tuple[dict[str, Any], str]] = []
-        uncertain_matches: list[dict[str, Any]] = []
+        if snapshot_classification != "valid":
+            attempt["status"] = "ambiguous"
+            attempt["blocks_create"] = True
+            attempt["result_classification"] = "reconciled_ambiguous"
+            attempt["reconciliation_classification"] = {
+                "invalid": "invalid_snapshot",
+                "oversized": "oversized_snapshot",
+            }[snapshot_classification]
+            return "ambiguous", None
+        matches: list[str] = []
+        uncertain_match_count = 0
         expected_target = _attempt_target(attempt)
         for item in response_items:
             if not isinstance(item, dict):
-                continue
-            if not _context_matches(expected_target, _candidate_context(item)):
+                uncertain_match_count = min(uncertain_match_count + 1, MAX_RETAINED_MATCHES)
                 continue
             title_match = _candidate_title_match(attempt, item)
+            if title_match == "none":
+                continue
+            candidate_context = _candidate_context(item)
+            if candidate_context is None:
+                uncertain_match_count = min(uncertain_match_count + 1, MAX_RETAINED_MATCHES)
+                continue
+            if not _context_matches(expected_target, candidate_context):
+                continue
             if title_match == "exact":
                 peer_id = _valid_id(item.get("threadId"))
                 if peer_id is None:
-                    uncertain_matches.append(item)
+                    uncertain_match_count = min(uncertain_match_count + 1, MAX_RETAINED_MATCHES)
                 else:
-                    matches.append((item, peer_id))
+                    if len(matches) < MAX_RETAINED_MATCHES:
+                        matches.append(peer_id)
             elif title_match in {"normalised", "unverifiable"}:
-                uncertain_matches.append(item)
-        if len(matches) == 1 and not uncertain_matches:
+                uncertain_match_count = min(uncertain_match_count + 1, MAX_RETAINED_MATCHES)
+        if len(matches) == 1 and not uncertain_match_count:
             attempt["status"] = "confirmed"
             attempt["result_classification"] = "reconciled_found"
             attempt["reconciliation_classification"] = "found"
-            peer_id = matches[0][1]
+            peer_id = matches[0]
             attempt["peer_id"] = peer_id
             return "found", peer_id
-        if len(matches) == 0 and not uncertain_matches:
+        if len(matches) == 0 and not uncertain_match_count:
             attempt["status"] = "not_found"
             attempt["result_classification"] = "reconciled_not_found"
             attempt["reconciliation_classification"] = "not_found"
             return "not_found", None
         attempt["status"] = "ambiguous"
+        attempt["blocks_create"] = True
         attempt["result_classification"] = "reconciled_ambiguous"
         attempt["reconciliation_classification"] = "ambiguous"
         return "ambiguous", None
@@ -728,8 +779,8 @@ def _post_list(event: dict[str, Any]) -> dict[str, Any]:
         )
     if classification == "ambiguous":
         return _post_context(
-            "Reconciliation found multiple exact title and target-project matches. Stop and request "
-            "manual disambiguation; do not create or replace a peer."
+            "Reconciliation was invalid, oversized, or could not prove one exact addressable title "
+            "and target identity. Stop and request manual disambiguation; do not create or replace a peer."
         )
     return {}
 

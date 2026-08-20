@@ -218,6 +218,10 @@ found, not-found, or ambiguous. Candidates must expose a valid addressable
 normalization-only matches remain terminally ambiguous and are never
 confirmed. A second reconciliation is denied, and no result authorizes
 another create.
+Only a successfully decoded, supported, bounded list response is a valid
+snapshot; native errors, malformed or unsupported shapes, oversized candidate
+sets, or candidates without an explicit complete target type and identity are
+terminally ambiguous. Only a valid empty snapshot may establish not-found.
 
 The `Stop` hook surfaces unresolved recovery at most once and honors
 `stop_hook_active`, so it cannot create a continuation loop. A same-session
