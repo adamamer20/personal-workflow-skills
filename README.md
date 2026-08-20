@@ -178,6 +178,42 @@ proven unavailable or terminal. This handles recoverable client/server and
 interruption cases without creating duplicate owners; it cannot guarantee an
 automatic callback when the runtime dies before the task can send one.
 
+## Native handoff lifecycle hooks
+
+The plugin bundles synchronous `PreToolUse`, `PostToolUse`, `Stop`, and
+`SessionStart` hooks in the default `hooks/hooks.json` path. They guard native
+`create_thread` and `list_threads` calls with a small retry-free state machine:
+
+- before create, only an unambiguous top-level `projectId` duplicate may be
+  moved into a complete project `target`; project environments are strictly
+  `local` or `worktree`, and top-level-only ids are denied;
+- an atomic `PLUGIN_DATA` ledger stores a bounded title/target/model/thinking
+  fingerprint and prompt digest, never the prompt body or raw tool response;
+- same-turn, unresolved, and terminally unsafe duplicate creates are blocked,
+  including changed payloads in the same session; ledger saturation never
+  evicts recovery-blocking state;
+- `threadId` is confirmed, `clientThreadId` is queued, and every other result is
+  uncertain/error and permits at most one exact read-only `list_threads`
+  reconciliation; success requires exactly one native identity shape and ids
+  cannot contain Unicode whitespace or control/format/surrogate characters;
+- reconciliation is classified as found, not-found, or ambiguous using exact
+  title plus explicit complete target identity; only a supported, bounded list
+  snapshot can reconcile and only its valid empty form can prove not-found;
+  supported envelopes contain only `threads`, canonical `pinnedThreads` plus
+  `threads`, or one retained legacy `items`/`results` collection; additional
+  status/flag/error/metadata keys, mixed shapes, oversized snapshots, invalid
+  `threadId` values, missing/lossy identity, title-prefix collisions, and
+  normalization-only matches remain terminally ambiguous; hooks never call
+  tools, poll, retry, unarchive, replace, switch models, or send messages;
+- unresolved recovery is surfaced once at `Stop` and once on same-session
+  `resume`, with `stop_hook_active` honored to prevent continuation loops.
+
+These are non-managed command hooks. Codex requires explicit review and trust
+of the exact current hook definitions (for example, through `/hooks`) before
+they run; installing or enabling the plugin alone does not grant that trust.
+Internal hook failures fail open with a warning. Review the hook source and its
+privacy boundary before trusting it, and keep `PLUGIN_DATA` private.
+
 ## Validate
 
 Run `python3 scripts/validate.py` before installing or publishing an update.

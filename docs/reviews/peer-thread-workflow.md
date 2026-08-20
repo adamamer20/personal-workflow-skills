@@ -10,20 +10,17 @@ silently allowing an unrelated configured default to execute the work.
 
 ## Current context
 
-- `plan-work` currently says to recommend Luna XHigh or Luna High.
-- `codex-thread-handoff` currently passes `model` and reasoning only when the
-  user names them in the immediate request; otherwise it puts the recommendation
-  in text and omits the native fields.
-- The global `AGENTS.md` template already defines Luna XHigh for substantial
-  milestones and Luna High for bounded/mechanical work, but does not explicitly
-  state that this policy authorizes native task-creation parameters.
-- The observed result was a capsule recommending Luna XHigh while
-  `create_thread` used the configured Sol Medium default. That violates the
-  workflow's intended execution topology.
-- Native `create_thread` exposes concrete `model` and `thinking` fields but
-  requires model overrides to be authorized by the user. Applicable user-owned
-  `AGENTS.md` routing policy is therefore the durable authorization source; the
-  installed skill alone is not.
+- M1-M4 routing and recovery source history is represented by merged base
+  `a12c206e4c6cd420cdc228b04e36f7e8bf92cda8`.
+- M5 hook source is implemented in the isolated repair worktree. Its current
+  plugin source version is `0.1.4+codex.20260820180447`; the hook-enabled build
+  has not been published, installed, or trusted from this worktree.
+- Review of M5 reopened three parser/identity P1s. The local repair now uses
+  narrow native response allowlists, rejects Unicode whitespace in peer ids,
+  and preserves permanent duplicate blocking for uncertain create results.
+- M5 promotion remains pending an independent green review of the final local
+  repair commit. M6 is the next milestone; publication, installation, and hook
+  trust remain separate actions and are not implied by source validation.
 
 ## Proposed design
 
@@ -317,9 +314,114 @@ Promotion gate: installed version and marketplace ref match the merged source;
 the fresh authorized dispatch is confirmed; no fallback or duplicate task is
 created for negative cases.
 
-Successor milestone: M5 — update SprintAct's pinned commit/version and propagate
-the new workflow pin through its required PR/review/merge and named active
-worktrees.
+Successor milestone: M5 — deterministic lifecycle hooks for retry-free native
+handoff recovery.
+
+## Milestone M5 — deterministic lifecycle hooks for retry-free handoff recovery
+
+### Outcome
+
+Package plugin-bundled lifecycle hooks that validate and safely repair native
+`create_thread` payloads, persist a privacy-bounded attempt fingerprint before
+dispatch, prevent same-turn, unresolved, and terminally unsafe duplicate
+creates, classify native results, reserve at most one read-only `list_threads`
+reconciliation, and
+restore unresolved context on same-session resume. Hooks are advisory recovery
+state, not a second native transport.
+
+### Mutable ownership
+
+- `plugins/personal-workflow-skills/hooks/`
+- `plugins/personal-workflow-skills/.codex-plugin/plugin.json`
+- `plugins/personal-workflow-skills/skills/codex-thread-handoff/SKILL.md`
+- `README.md`
+- `scripts/validate.py`
+- focused tests under `tests/`
+- this canonical plan for M5 evidence
+
+### Protected surfaces and non-goals
+
+- all seven audit skills/resources, marketplace identity and policy, and native
+  Codex task tools/server behavior;
+- routing authorization/model policy, global `~/.codex` state, downstream
+  repositories, and unrelated branches/worktrees;
+- no manifest `hooks` override when default `hooks/hooks.json` discovery works;
+- no hook invocation of native tools, polling, retries, unarchive/replace/model
+  switching, continuation loop, prompt-body/raw-response persistence, push, PR,
+  merge, or plugin installation without separate authorization.
+
+### Implementation boundary
+
+1. Add synchronous `PreToolUse`, `PostToolUse`, `Stop`, and `SessionStart`
+   handlers in `hooks/hooks.json` using the released command-hook schema and
+   `PLUGIN_ROOT`/`PLUGIN_DATA` environment contracts.
+2. Before `create_thread`, validate the object and deny malformed/conflicting
+   project targets. Move/remove only an unambiguous top-level `projectId`; hash
+   bounded title/target/model/thinking plus a bounded prompt digest without
+   storing the prompt body. Persist atomically before dispatch and block
+   same-turn, unresolved, or terminally unsafe duplicates.
+3. After `create_thread`, classify a real `threadId` as confirmed and a queued
+   `clientThreadId` as queued; every other result is uncertain/error and asks
+   for one read-only reconciliation. Before and after `list_threads`, reserve
+   and classify exactly one exact title + target-project-context snapshot as
+   found, not-found, or ambiguous.
+4. Surface unresolved state once at `Stop`, honor `stop_hook_active`, and restore
+   bounded unresolved context once on same-session `resume`. Internal hook
+   errors fail open with a warning.
+5. Document the explicit hook trust-review gate truthfully, bump plugin build
+   metadata monotonically, extend deterministic validation, add focused tests,
+   and prove the audit-skill tree is unchanged.
+
+### Acceptance and promotion gates
+
+- safe payload repair, conflict denial, duplicate prevention,
+  confirmed/queued/error classification, exact reconciliation, bounded Stop,
+  resume, privacy-bounded state, and fail-open behavior have focused tests;
+- `python3 -B scripts/validate.py`, hook/skill validators, JSON parsing,
+  Python compilation, and `git diff --check` pass;
+- hooks are synchronous, use default discovery, never call native tools, and
+  do not persist prompt bodies or raw tool responses;
+- plugin version is newer than `0.1.3+codex.20260820180447`; audit-skill paths
+  remain byte-for-byte unchanged; open P0/P1 findings are zero;
+- create one safe local commit only after complete self-review. Publication,
+  installation, and hook trust remain M6/user-owned gates.
+
+### Successor milestone
+
+M6 — independently review and publish/install the hook-enabled plugin build.
+
+## Milestone M6 — independently review and publish/install the hook build
+
+### Outcome and dependency
+
+Independently review the complete M5 diff through its final local repair commit.
+Only after zero open P0/P1 findings and all M5 gates remain green may an
+explicitly authorized integration owner publish and install the exact
+`0.1.4+codex.20260820180447` source. Hook trust is a separate user decision and
+is never inferred from installation.
+
+### Mutable ownership
+
+- read-only review of the complete M5 source and evidence;
+- focused M5 repair surfaces only if the planning owner dispatches a finding;
+- remote branch/PR/merge and local plugin installation only under explicit
+  authority in the M6 integration task.
+
+### Protected surfaces and non-goals
+
+- all seven audit skills/resources, marketplace identity/policy, native Codex
+  tools, dirty primary checkout state, downstream repositories, and unrelated
+  worktrees/remotes;
+- no publication, installation, or hook trust during M5 repair/review; no
+  self-authored review result substitutes for independent promotion evidence.
+
+### Acceptance and promotion gates
+
+The independent reviewer reports zero P0/P1 on the exact final M5 commit; all
+M5 unit, validator, JSON, compilation, diff, protected-tree, and no-native-call
+gates pass. A later authorized integration records the immutable published and
+installed commit/version. Trust of `hooks/hooks.json` remains explicitly open
+until the user reviews and approves it.
 
 ## Assumptions
 
@@ -330,10 +432,9 @@ worktrees.
 
 ## Open findings
 
-- Source self-review has no open P0/P1 finding. PR #5 is the active draft and
-  was mergeable before the visual-routing update. CodeRabbit passed on its
-  previous head; a green independent check on the final pushed head remains the
-  M3 merge gate.
+- Source self-review has no open P0/P1 finding after the first Sol Medium M5
+  repair cycle. Independent promotion review of the final repair commit remains
+  open; no hook-build publication, installation, or trust is claimed.
 
 ## Current review log
 
@@ -382,28 +483,37 @@ worktrees.
   read-only reconciliation and RECOVER_THREAD for one same-thread resume or
   callback republication. No automatic create/send retry, unarchive, model
   switch, or replacement is introduced.
+- 2026-08-20: M5 hook implementation and the first escalated target/reconciliation
+  repair landed locally through `d9de620`; 22 focused tests and all deterministic
+  gates passed, but independent review reopened contradictory list/create
+  envelope and Unicode-whitespace P1s. The first Sol Medium repair cycle now
+  uses exact native-envelope allowlists and permanent duplicate blocking. M5
+  still requires independent promotion review; no publish/install/trust action
+  has occurred for version `0.1.4+codex.20260820180447`.
 
 ## Next execution
 
-Milestone: M3 — independently review and merge the plugin
+Milestone: M6 — independently review the final M5 hook build, then publish and
+install only if the planning owner supplies the required authority.
 
-Execution mode: direct integration in the current user-authorized task;
-independent review is supplied by the repository review check on the final head.
+Execution mode: fresh independent review context first; a distinct authorized
+integration action owns any later remote or installed-state mutation.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`
 
-Owned surfaces: the nine scoped source/documentation files, remote branch
-`agent/reliable-peer-handoff-callbacks`, PR #5 metadata and checks, merge action,
-and local plugin installation.
+Owned surfaces: read-only review of the M5 diff and evidence. Conditional
+integration ownership is limited to its exact remote branch/PR/merge and the
+exact `0.1.4+codex.20260820180447` plugin installation.
 
 Protected surfaces: audit skills, marketplace identity/policy, native tool
-implementation, downstream repositories/pins, and unrelated remotes/worktrees.
+implementation, dirty primary checkout state, downstream repositories/pins,
+unrelated remotes/worktrees, and hook trust configuration.
 
-Acceptance: independently verify the complete diff and permission/failure
-semantics; zero open P0/P1; required checks green; merge the unchanged reviewed
-head and record immutable merge SHA plus version
-`0.1.3+codex.20260820180447`; install that exact merged build locally and verify
-the installed manifest and changed skill bytes against merged source.
+Acceptance: independently verify the exact final M5 commit and its
+permission/failure semantics; zero open P0/P1; required checks green. Only an
+authorized integration task may then publish and install the unchanged reviewed
+head, recording its immutable commit and version
+`0.1.4+codex.20260820180447`. Installation does not authorize hook trust.
 
-Escalate only for: a P0/P1 finding, changed PR head, non-green required check,
-merge conflict, or missing review/merge/install authority.
+Escalate only for: a P0/P1 finding, changed reviewed head, non-green required
+check, merge conflict, or missing publication/install authority.

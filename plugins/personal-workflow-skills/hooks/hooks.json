@@ -1,0 +1,56 @@
+{
+  "description": "Retry-free native peer-thread handoff recovery.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(create_thread|list_threads|codex_app__create_thread|codex_app__list_threads)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/hooks/lifecycle.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking native thread handoff"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(create_thread|list_threads|codex_app__create_thread|codex_app__list_threads)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/hooks/lifecycle.py\"",
+            "timeout": 10,
+            "statusMessage": "Recording native thread handoff result"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/hooks/lifecycle.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking unresolved handoff recovery"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/hooks/lifecycle.py\"",
+            "timeout": 10,
+            "statusMessage": "Restoring handoff recovery context"
+          }
+        ]
+      }
+    ]
+  }
+}

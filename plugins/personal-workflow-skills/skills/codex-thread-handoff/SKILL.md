@@ -189,6 +189,59 @@ model of the thread, or create a replacement. A replacement requires a separate
 explicit user decision after the existing owner is proven unavailable or
 terminal.
 
+## Lifecycle hook guardrails
+
+When this plugin is enabled, its default `hooks/hooks.json` adds synchronous
+`PreToolUse`, `PostToolUse`, `Stop`, and `SessionStart` guards around native
+`create_thread` and `list_threads`. The guards are a deterministic recovery
+ledger, not another transport: they never call native tools, poll, retry,
+unarchive, replace, switch models, or send messages themselves.
+
+Before a create, the hook validates the JSON payload and only repairs an
+unambiguous top-level `projectId` by moving/removing that duplicate inside a
+complete project `target`. Project targets require `environment.type` `local`
+or `worktree`; a top-level-only id cannot manufacture a target. Conflicting,
+unsupported, or malformed targets are denied. It writes an atomic,
+privacy-bounded fingerprint to `PLUGIN_DATA` before dispatch. The fingerprint
+contains bounded title/target/model/thinking values and a prompt digest; it
+never stores the prompt body or a raw tool response. Same-turn and unresolved
+duplicate creates are denied, including changed-payload creates in a session;
+ledger saturation denies safely without evicting unresolved attempts.
+
+After a create, a real `threadId` is classified as confirmed and a
+`clientThreadId` as queued; both clear recovery. Any other result is classified
+as uncertain/error and asks the model for exactly one read-only
+`list_threads` reconciliation. The hook reserves that snapshot in its ledger,
+requires an exact title and complete target-context match, and reports one of
+found, not-found, or ambiguous. Candidates must expose a valid addressable
+`threadId`; missing or lossy identity, truncated-title collisions, and
+normalization-only matches remain terminally ambiguous and are never
+confirmed. A second reconciliation is denied, and no result authorizes
+another create.
+Only a successfully decoded, supported, bounded list response is a valid
+snapshot; native errors, malformed or unsupported shapes, oversized candidate
+sets, or candidates without an explicit complete target type and identity are
+terminally ambiguous. Only a valid empty snapshot may establish not-found.
+Supported list envelopes contain only `threads`, canonical `pinnedThreads` plus
+`threads`, or one retained legacy collection (`items` or `results`); additional
+status, flag, error, metadata, or mixed-collection keys invalidate the snapshot.
+Create success likewise requires exactly one permitted identity shape:
+`threadId` with optional valid `hostId`, or a lone `clientThreadId`. Peer ids
+containing any Unicode whitespace or control/format/surrogate character are not
+addressable. Contradictory or error-shaped create results remain uncertain and
+permanently block another create in that session.
+
+The `Stop` hook surfaces unresolved recovery at most once and honors
+`stop_hook_active`, so it cannot create a continuation loop. A same-session
+`SessionStart` resume restores the bounded recovery context once. Internal
+hook errors fail open with a warning so native Codex behavior remains available.
+
+Plugin-bundled hooks are non-managed commands and require explicit review and
+trust of the exact current hook definitions (for example, with `/hooks`) before
+they run. Installation or enabling the plugin alone does not silently grant
+that trust. The default discovery path is `hooks/hooks.json`; no unsupported
+manifest hooks field is required.
+
 ## Hard boundaries
 
 - Use native Codex peer-thread tools only. Capability-check START before use.
