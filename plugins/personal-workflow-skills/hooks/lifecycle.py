@@ -16,6 +16,7 @@ import os
 import sys
 import tempfile
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -26,13 +27,14 @@ STATE_FILE = "native-thread-handoff.json"
 MAX_ATTEMPTS = 32
 MAX_SEEN_SESSIONS = 16
 MAX_TITLE = 160
+MAX_TITLE_INPUT = 4096
 MAX_ID = 256
 MAX_MODEL = 128
 MAX_THINKING = 32
 MAX_PROMPT_FOR_DIGEST = 32 * 1024
 MAX_DIRECTORY = 160
 MAX_JSON_TEXT = 256 * 1024
-UNRESOLVED_STATUSES = frozenset({"pending", "uncertain", "ambiguous"})
+UNRESOLVED_STATUSES = frozenset({"pending", "uncertain"})
 MISSING = object()
 
 
@@ -77,57 +79,112 @@ def _decode_json_string(value: Any) -> Any:
         return None
 
 
-def _normalise_environment(value: Any) -> str | None:
-    if value is None:
-        return None
+def _normalise_starting_state(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        raise PayloadError("target.environment.startingState must be an object")
+    state_type = _bounded(value.get("type"), 64)
+    if state_type is None:
+        raise PayloadError("target.environment.startingState.type must be valid")
+    if state_type == "working-tree":
+        if set(value) != {"type"}:
+            raise PayloadError("working-tree startingState contains unsupported fields")
+        return {"type": state_type}
+    if state_type == "branch":
+        if set(value) - {"type", "branchName", "onMissing"}:
+            raise PayloadError("branch startingState contains unsupported fields")
+        branch_name = _bounded(value.get("branchName"), MAX_ID)
+        if branch_name is None:
+            raise PayloadError("branch startingState requires branchName")
+        on_missing = value.get("onMissing", MISSING)
+        if on_missing is not MISSING and (
+            not isinstance(on_missing, str) or on_missing not in {"error", "create-branch"}
+        ):
+            raise PayloadError("branch startingState.onMissing is invalid")
+        state = {"type": state_type, "branch_name": branch_name}
+        if on_missing is not MISSING:
+            state["on_missing"] = on_missing
+        return state
+    raise PayloadError(f"unsupported startingState.type: {state_type}")
+
+
+def _normalise_environment(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PayloadError("target.environment must be an object")
     environment_type = _bounded(value.get("type"), 64)
     if environment_type is None:
         raise PayloadError("target.environment.type must be a non-empty string")
-    return environment_type
+    if environment_type == "local":
+        if set(value) != {"type"}:
+            raise PayloadError("local environment contains unsupported fields")
+        return {"type": environment_type}
+    if environment_type == "worktree":
+        if set(value) - {"type", "startingState"}:
+            raise PayloadError("worktree environment contains unsupported fields")
+        environment = {"type": environment_type}
+        if "startingState" in value:
+            environment["starting_state"] = _normalise_starting_state(value["startingState"])
+        return environment
+    raise PayloadError(f"unsupported target.environment.type: {environment_type}")
 
 
-def _target_context(target: Any) -> dict[str, str | None]:
-    """Return only bounded, non-sensitive target identity fields."""
+def _target_context(target: Any) -> dict[str, Any]:
+    """Return the complete, bounded identity of an advertised target variant."""
 
-    if target is None:
-        return {"type": "projectless", "project_id": None, "environment": None}
     if not isinstance(target, dict):
         raise PayloadError("target must be an object")
 
     target_type = _bounded(target.get("type"), 64)
     if target_type is None:
         raise PayloadError("target.type must be a non-empty string")
-    environment = _normalise_environment(target.get("environment"))
-
     if target_type == "project":
+        if set(target) != {"type", "projectId", "environment"}:
+            raise PayloadError("project target must contain projectId and environment only")
         project_id = _bounded(target.get("projectId"), MAX_ID)
         if project_id is None:
             raise PayloadError("project target requires target.projectId")
         return {
             "type": target_type,
             "project_id": project_id,
-            "environment": environment,
+            "environment": _normalise_environment(target["environment"]),
         }
     if target_type == "projectless":
-        directory = target.get("directoryName")
-        if directory is not None and _bounded(directory, MAX_DIRECTORY) is None:
+        if set(target) - {"type", "directoryName"}:
+            raise PayloadError("projectless target contains unsupported fields")
+        directory = target.get("directoryName", MISSING)
+        if directory is not MISSING and _bounded(directory, MAX_DIRECTORY) is None:
             raise PayloadError("projectless target directoryName is malformed")
-        return {"type": target_type, "project_id": None, "environment": environment}
+        return {
+            "type": target_type,
+            "directory_name": None if directory is MISSING else directory,
+        }
     if target_type == "chatgptWorkCloud":
-        project_id = target.get("projectId")
-        if project_id is not None and _bounded(project_id, MAX_ID) is None:
+        if set(target) - {"type", "projectId"}:
+            raise PayloadError("chatgptWorkCloud target contains unsupported fields")
+        project_id = target.get("projectId", MISSING)
+        if project_id is not MISSING and _bounded(project_id, MAX_ID) is None:
             raise PayloadError("cloud target projectId is malformed")
         return {
             "type": target_type,
-            "project_id": project_id,
-            "environment": environment,
+            "project_id": None if project_id is MISSING else project_id,
         }
     raise PayloadError(f"unsupported target.type: {target_type}")
 
 
-def _repair_payload(tool_input: Any) -> tuple[dict[str, Any], bool, dict[str, str | None]]:
+def _title_identity(value: Any, *, present: bool = True) -> dict[str, Any] | None:
+    if not present:
+        return None
+    if not isinstance(value, str) or len(value) > MAX_TITLE_INPUT:
+        raise PayloadError("title must be a bounded string")
+    raw = value.encode("utf-8", "surrogatepass")
+    normalised = unicodedata.normalize("NFC", value).strip().encode("utf-8", "surrogatepass")
+    return {
+        "length": len(value),
+        "digest": hashlib.sha256(raw).hexdigest(),
+        "normalised_digest": hashlib.sha256(normalised).hexdigest(),
+    }
+
+
+def _repair_payload(tool_input: Any) -> tuple[dict[str, Any], bool, dict[str, Any]]:
     """Validate create_thread and make only the safe top-level projectId repair."""
 
     if not isinstance(tool_input, dict):
@@ -137,6 +194,8 @@ def _repair_payload(tool_input: Any) -> tuple[dict[str, Any], bool, dict[str, st
         raise PayloadError("create_thread.prompt must be a non-empty string")
 
     repaired = copy.deepcopy(tool_input)
+    if "title" in repaired:
+        _title_identity(repaired["title"])
     top_level_project = repaired.get("projectId", MISSING)
     target = repaired.get("target", MISSING)
     changed = False
@@ -146,10 +205,7 @@ def _repair_payload(tool_input: Any) -> tuple[dict[str, Any], bool, dict[str, st
         if project_id is None:
             raise PayloadError("top-level projectId must be a non-empty string")
         if target is MISSING:
-            repaired["target"] = {"type": "project", "projectId": project_id}
-            del repaired["projectId"]
-            target = repaired["target"]
-            changed = True
+            raise PayloadError("top-level projectId cannot manufacture a project target without environment")
         elif not isinstance(target, dict):
             raise PayloadError("top-level projectId conflicts with malformed target")
         else:
@@ -178,11 +234,10 @@ def _prompt_digest(prompt: str) -> str:
     return hashlib.sha256(bounded_prompt).hexdigest()
 
 
-def _fingerprint(tool_input: dict[str, Any], context: dict[str, str | None]) -> str:
+def _fingerprint(tool_input: dict[str, Any], context: dict[str, Any]) -> str:
+    title_identity = _title_identity(tool_input.get("title"), present="title" in tool_input)
     canonical = {
-        "title": tool_input.get("title", "")[:MAX_TITLE]
-        if isinstance(tool_input.get("title"), str)
-        else "",
+        "title": title_identity,
         "target": context,
         "model": tool_input.get("model", "")[:MAX_MODEL]
         if isinstance(tool_input.get("model"), str)
@@ -204,6 +259,31 @@ def _empty_state() -> dict[str, Any]:
     return {"version": STATE_VERSION, "attempts": []}
 
 
+def _is_unresolved_attempt(attempt: Any) -> bool:
+    return isinstance(attempt, dict) and attempt.get("status") in UNRESOLVED_STATUSES
+
+
+def _trim_attempts(attempts: list[Any]) -> list[dict[str, Any]]:
+    """Bound resolved history without ever evicting an unresolved attempt."""
+
+    valid = [item for item in attempts if isinstance(item, dict)]
+    unresolved_count = sum(_is_unresolved_attempt(item) for item in valid)
+    if unresolved_count > MAX_ATTEMPTS:
+        raise RuntimeError("handoff state contains too many unresolved attempts")
+    if len(valid) <= MAX_ATTEMPTS:
+        return valid
+    retained: list[dict[str, Any]] = []
+    to_drop = len(valid) - MAX_ATTEMPTS
+    for item in valid:
+        if to_drop and not _is_unresolved_attempt(item):
+            to_drop -= 1
+            continue
+        retained.append(item)
+    if to_drop:
+        raise RuntimeError("handoff state cannot safely evict attempts")
+    return retained
+
+
 def _validate_state(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("version") != STATE_VERSION:
         raise RuntimeError("handoff state has an unsupported version")
@@ -211,7 +291,7 @@ def _validate_state(value: Any) -> dict[str, Any]:
     if not isinstance(attempts, list):
         raise RuntimeError("handoff state attempts are malformed")
     # State is deliberately bounded and contains only the fields written below.
-    value["attempts"] = [item for item in attempts if isinstance(item, dict)][-MAX_ATTEMPTS:]
+    value["attempts"] = _trim_attempts(attempts)
     return value
 
 
@@ -282,15 +362,11 @@ def _transaction(mutator: Any) -> Any:
         return result
 
 
-def _attempt_target(attempt: dict[str, Any]) -> dict[str, str | None]:
+def _attempt_target(attempt: dict[str, Any]) -> dict[str, Any]:
     target = attempt.get("target")
     if not isinstance(target, dict):
-        return {"type": "unknown", "project_id": None, "environment": None}
-    return {
-        "type": target.get("type"),
-        "project_id": target.get("project_id"),
-        "environment": target.get("environment"),
-    }
+        return {}
+    return copy.deepcopy(target)
 
 
 def _unresolved_attempts(state: dict[str, Any], session_id: str) -> list[dict[str, Any]]:
@@ -303,15 +379,18 @@ def _unresolved_attempts(state: dict[str, Any], session_id: str) -> list[dict[st
 
 def _new_attempt(
     tool_input: dict[str, Any],
-    context: dict[str, str | None],
+    context: dict[str, Any],
     fingerprint: str,
     event: dict[str, Any],
     session_id: str,
 ) -> dict[str, Any]:
     title = tool_input.get("title") if isinstance(tool_input.get("title"), str) else ""
+    title_identity = _title_identity(tool_input.get("title"), present="title" in tool_input)
     return {
         "fingerprint": fingerprint,
         "title": title[:MAX_TITLE],
+        "title_present": "title" in tool_input,
+        "title_identity": title_identity,
         "target": context,
         "model": (tool_input.get("model") or "")[:MAX_MODEL]
         if isinstance(tool_input.get("model"), str)
@@ -361,21 +440,27 @@ def _allow_pre_create(event: dict[str, Any]) -> dict[str, Any]:
     turn_id = _bounded_optional(event.get("turn_id"), MAX_ID)
 
     def mutate(state: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        if _unresolved_attempts(state, session_id):
+            return "duplicate", None
         for attempt in reversed(state["attempts"]):
             if attempt.get("session_id") != session_id:
                 continue
             if attempt.get("fingerprint") != fingerprint:
                 continue
             same_turn = turn_id is not None and attempt.get("turn_id") == turn_id
-            if same_turn or attempt.get("status") in UNRESOLVED_STATUSES:
+            if same_turn:
                 return "duplicate", None
+        if sum(_is_unresolved_attempt(item) for item in state["attempts"]) >= MAX_ATTEMPTS:
+            return "saturated", None
         state["attempts"].append(_new_attempt(repaired, context, fingerprint, event, session_id))
-        state["attempts"] = state["attempts"][-MAX_ATTEMPTS:]
+        state["attempts"] = _trim_attempts(state["attempts"])
         return "allowed", repaired if changed else None
 
     outcome, updated = _transaction(mutate)
     if outcome == "duplicate":
-        return _deny("same-turn or unresolved duplicate create_thread attempt")
+        return _deny("a pending or uncertain create_thread attempt already blocks this session")
+    if outcome == "saturated":
+        return _deny("recovery ledger is saturated with unresolved attempts; no create was dispatched")
     if updated is not None:
         return _pre_allow(updated)
     return _pre_allow(None)
@@ -494,47 +579,84 @@ def _candidate_items(response: Any) -> list[Any]:
     return items
 
 
-def _candidate_context(candidate: dict[str, Any]) -> dict[str, str | None] | None:
-    target = candidate.get("target")
-    if isinstance(target, dict):
+def _candidate_context(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    target = candidate.get("target", MISSING)
+    if target is not MISSING:
+        if not isinstance(target, dict):
+            return None
+        if any(
+            key in candidate
+            for key in ("type", "projectId", "project_id", "environment", "directoryName")
+        ):
+            return None
         try:
             return _target_context(target)
         except PayloadError:
             return None
-    project_id = candidate.get("projectId")
-    if project_id is None:
-        project_id = candidate.get("project_id")
-    if project_id is not None:
-        project_id = _bounded(project_id, MAX_ID)
-        if project_id is None:
+
+    target_type = candidate.get("type", MISSING)
+    project_id = candidate.get("projectId", MISSING)
+    project_id_alias = candidate.get("project_id", MISSING)
+    if project_id is not MISSING and project_id_alias is not MISSING and project_id != project_id_alias:
+        return None
+    if target_type is MISSING:
+        if project_id is MISSING and project_id_alias is MISSING:
             return None
-        environment = candidate.get("environment")
-        if isinstance(environment, dict):
-            try:
-                environment_type = _normalise_environment(environment)
-            except PayloadError:
-                return None
-        else:
-            environment_type = None
-        return {"type": "project", "project_id": project_id, "environment": environment_type}
-    if candidate.get("type") == "projectless":
-        return {"type": "projectless", "project_id": None, "environment": None}
-    return None
+        target_type = "project"
+    if not isinstance(target_type, str):
+        return None
+    flattened: dict[str, Any] = {"type": target_type}
+    if target_type == "project":
+        if project_id is MISSING:
+            project_id = project_id_alias
+        if project_id is MISSING or "environment" not in candidate:
+            return None
+        flattened["projectId"] = project_id
+        flattened["environment"] = candidate["environment"]
+    elif target_type == "projectless":
+        if "directoryName" in candidate:
+            flattened["directoryName"] = candidate["directoryName"]
+        if project_id is not MISSING or project_id_alias is not MISSING or "environment" in candidate:
+            return None
+    elif target_type == "chatgptWorkCloud":
+        if project_id is not MISSING:
+            flattened["projectId"] = project_id
+        elif project_id_alias is not MISSING:
+            flattened["projectId"] = project_id_alias
+        if "environment" in candidate or "directoryName" in candidate:
+            return None
+    else:
+        return None
+    try:
+        return _target_context(flattened)
+    except PayloadError:
+        return None
 
 
-def _context_matches(
-    expected: dict[str, str | None], candidate: dict[str, str | None] | None
-) -> bool:
-    if candidate is None:
-        return False
-    if candidate.get("type") != expected.get("type"):
-        return False
-    if candidate.get("project_id") != expected.get("project_id"):
-        return False
-    # list_threads summaries may omit environment while still exposing the
-    # exact saved project. If it is present, it must agree exactly.
-    candidate_environment = candidate.get("environment")
-    return candidate_environment is None or candidate_environment == expected.get("environment")
+def _candidate_title_match(attempt: dict[str, Any], candidate: dict[str, Any]) -> str:
+    expected = attempt.get("title_identity")
+    if not isinstance(expected, dict):
+        return "unverifiable"
+    if "title" not in candidate:
+        return "unverifiable"
+    try:
+        actual = _title_identity(candidate["title"])
+    except PayloadError:
+        return "unverifiable"
+    if actual is None:
+        return "unverifiable"
+    if (
+        actual.get("length") == expected.get("length")
+        and actual.get("digest") == expected.get("digest")
+    ):
+        return "exact"
+    if actual.get("normalised_digest") == expected.get("normalised_digest"):
+        return "normalised"
+    return "none"
+
+
+def _context_matches(expected: dict[str, Any], candidate: dict[str, Any] | None) -> bool:
+    return candidate is not None and candidate == expected
 
 
 def _post_list(event: dict[str, Any]) -> dict[str, Any]:
@@ -558,27 +680,31 @@ def _post_list(event: dict[str, Any]) -> dict[str, Any]:
         )
         if attempt is None:
             return "ordinary", None
-        matches: list[dict[str, Any]] = []
-        expected_title = attempt.get("title", "")
+        matches: list[tuple[dict[str, Any], str]] = []
+        uncertain_matches: list[dict[str, Any]] = []
         expected_target = _attempt_target(attempt)
         for item in response_items:
             if not isinstance(item, dict):
                 continue
-            candidate_title = item.get("title")
-            if not isinstance(candidate_title, str) or candidate_title[:MAX_TITLE] != expected_title:
-                continue
             if not _context_matches(expected_target, _candidate_context(item)):
                 continue
-            matches.append(item)
-        if len(matches) == 1:
+            title_match = _candidate_title_match(attempt, item)
+            if title_match == "exact":
+                peer_id = _valid_id(item.get("threadId"))
+                if peer_id is None:
+                    uncertain_matches.append(item)
+                else:
+                    matches.append((item, peer_id))
+            elif title_match in {"normalised", "unverifiable"}:
+                uncertain_matches.append(item)
+        if len(matches) == 1 and not uncertain_matches:
             attempt["status"] = "confirmed"
             attempt["result_classification"] = "reconciled_found"
             attempt["reconciliation_classification"] = "found"
-            peer_id = _valid_id(matches[0].get("threadId")) or _valid_id(matches[0].get("id"))
-            if peer_id is not None:
-                attempt["peer_id"] = peer_id
+            peer_id = matches[0][1]
+            attempt["peer_id"] = peer_id
             return "found", peer_id
-        if len(matches) == 0:
+        if len(matches) == 0 and not uncertain_matches:
             attempt["status"] = "not_found"
             attempt["result_classification"] = "reconciled_not_found"
             attempt["reconciliation_classification"] = "not_found"

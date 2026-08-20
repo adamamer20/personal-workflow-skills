@@ -92,6 +92,30 @@ class HandoffHookTests(unittest.TestCase):
             }
         )
 
+    def pre_list(self, *, session: str = "session-1", turn: str = "turn-2") -> dict[str, Any]:
+        return self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "list_threads",
+                "turn_id": turn,
+                "session_id": session,
+                "tool_input": {},
+            }
+        )
+
+    def post_list(
+        self, response: Any, *, session: str = "session-1", turn: str = "turn-2"
+    ) -> dict[str, Any]:
+        return self.run_hook(
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "list_threads",
+                "turn_id": turn,
+                "session_id": session,
+                "tool_response": response,
+            }
+        )
+
     def test_safe_top_level_project_repair(self) -> None:
         original_shape = {
             "prompt": "Implement exactly one bounded milestone.",
@@ -114,6 +138,39 @@ class HandoffHookTests(unittest.TestCase):
 
     def test_conflicting_or_malformed_targets_are_denied(self) -> None:
         conflict = self.pre_create(target={"type": "project", "projectId": "project-2"}, projectId="project-1")
+        missing_environment = self.pre_create(target={"type": "project", "projectId": "project-1"})
+        top_level_only = self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "create_thread",
+                "turn_id": "turn-top-level",
+                "session_id": "session-1",
+                "tool_input": {
+                    "prompt": "Implement exactly one bounded milestone.",
+                    "title": "M5 hooks",
+                    "projectId": "project-1",
+                    "model": "gpt-5.6-luna",
+                    "thinking": "xhigh",
+                },
+            }
+        )
+        unsupported_environment = self.pre_create(
+            target={
+                "type": "project",
+                "projectId": "project-1",
+                "environment": {"type": "remote"},
+            }
+        )
+        malformed_starting_state = self.pre_create(
+            target={
+                "type": "project",
+                "projectId": "project-1",
+                "environment": {
+                    "type": "worktree",
+                    "startingState": {"type": "branch", "branchName": "main", "onMissing": []},
+                },
+            }
+        )
         malformed = self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -123,14 +180,25 @@ class HandoffHookTests(unittest.TestCase):
             }
         )
         self.assertEqual(conflict["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(missing_environment["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(top_level_only["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(unsupported_environment["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(malformed_starting_state["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertEqual(malformed["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_same_turn_and_unresolved_duplicates_are_denied(self) -> None:
         self.assertEqual(self.pre_create()["hookSpecificOutput"]["permissionDecision"], "allow")
         same_turn = self.pre_create()
         next_turn = self.pre_create(turn="turn-2")
+        changed_payload = self.pre_create(
+            turn="turn-3",
+            title="changed title",
+            prompt="changed prompt",
+            model="gpt-5.6-sol",
+        )
         self.assertEqual(same_turn["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertEqual(next_turn["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(changed_payload["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_confirmed_and_queued_results_clear_recovery(self) -> None:
         self.pre_create()
@@ -213,6 +281,18 @@ class HandoffHookTests(unittest.TestCase):
         )
         self.assertEqual(self.state()["attempts"][-1]["status"], "not_found")
         self.assertEqual(self.state()["attempts"][-1]["reconciliation_classification"], "not_found")
+        self.assertEqual(
+            self.run_hook(
+                {"hook_event_name": "Stop", "session_id": "session-1", "stop_hook_active": False}
+            ),
+            {},
+        )
+        self.assertEqual(
+            self.run_hook(
+                {"hook_event_name": "SessionStart", "source": "resume", "session_id": "session-1"}
+            ),
+            {},
+        )
 
         self.pre_create(turn="turn-2")
         self.post_create({"error": "unknown project"}, turn="turn-2")
@@ -249,6 +329,18 @@ class HandoffHookTests(unittest.TestCase):
         )
         self.assertEqual(self.state()["attempts"][-1]["status"], "ambiguous")
         self.assertEqual(self.state()["attempts"][-1]["reconciliation_classification"], "ambiguous")
+        self.assertEqual(
+            self.run_hook(
+                {"hook_event_name": "Stop", "session_id": "session-1", "stop_hook_active": False}
+            ),
+            {},
+        )
+        self.assertEqual(
+            self.run_hook(
+                {"hook_event_name": "SessionStart", "source": "resume", "session_id": "session-1"}
+            ),
+            {},
+        )
 
     def test_stop_is_bounded_and_honors_stop_hook_active(self) -> None:
         self.pre_create()
@@ -335,6 +427,144 @@ class HandoffHookTests(unittest.TestCase):
         )
         self.assertEqual(resume_b, {})
         self.assertIn("M5 hooks", resume_a["hookSpecificOutput"]["additionalContext"])
+
+    def test_unresolved_ledger_saturation_never_evicts_recovery(self) -> None:
+        for index in range(32):
+            output = self.pre_create(
+                session=f"session-{index}",
+                turn=f"turn-{index}",
+                title=f"M5 hooks {index}",
+            )
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+        saturated = self.pre_create(session="session-32", turn="turn-32", title="M5 hooks 32")
+        self.assertEqual(saturated["hookSpecificOutput"]["permissionDecision"], "deny")
+        state = self.state()
+        self.assertEqual(len(state["attempts"]), 32)
+        self.assertEqual({item["session_id"] for item in state["attempts"]}, {f"session-{i}" for i in range(32)})
+        self.assertTrue(all(item["status"] == "pending" for item in state["attempts"]))
+
+    def test_supported_target_variants_require_exact_identity(self) -> None:
+        def reconcile(target: dict[str, Any], title: str, candidate: dict[str, Any]) -> str:
+            self.assertEqual(
+                self.pre_create(target=target, title=title)["hookSpecificOutput"]["permissionDecision"],
+                "allow",
+            )
+            self.post_create({"error": "timeout"}, tool_input=self.create_input(target=target, title=title))
+            self.assertEqual(self.pre_list()["hookSpecificOutput"]["permissionDecision"], "allow")
+            self.post_list({"threads": [candidate]})
+            return self.state()["attempts"][-1]["status"]
+
+        branch_a = {
+            "type": "project",
+            "projectId": "project-1",
+            "environment": {
+                "type": "worktree",
+                "startingState": {"type": "branch", "branchName": "branch-a", "onMissing": "error"},
+            },
+        }
+        candidate_a = {
+            "threadId": "thread-a",
+            "title": "branch-a",
+            "type": "project",
+            "projectId": "project-1",
+            "environment": branch_a["environment"],
+        }
+        self.assertEqual(reconcile(branch_a, "branch-a", candidate_a), "confirmed")
+
+        branch_b = {
+            "type": "project",
+            "projectId": "project-1",
+            "environment": {
+                "type": "worktree",
+                "startingState": {"type": "branch", "branchName": "branch-b", "onMissing": "error"},
+            },
+        }
+        self.assertEqual(reconcile(branch_b, "branch-b", candidate_a), "not_found")
+
+        projectless = {"type": "projectless", "directoryName": "handoff-one"}
+        projectless_candidate = {
+            "threadId": "thread-dir",
+            "title": "directory",
+            "type": "projectless",
+            "directoryName": "handoff-two",
+        }
+        self.assertEqual(reconcile(projectless, "directory", projectless_candidate), "not_found")
+
+        cloud = {"type": "chatgptWorkCloud", "projectId": "cloud-one"}
+        cloud_candidate = {
+            "threadId": "thread-cloud",
+            "title": "cloud",
+            "type": "chatgptWorkCloud",
+            "projectId": "cloud-two",
+        }
+        self.assertEqual(reconcile(cloud, "cloud", cloud_candidate), "not_found")
+
+    def test_reconciliation_rejects_unaddressable_or_lossy_candidates(self) -> None:
+        target = self.create_input()["target"]
+        self.pre_create(title="identity fields")
+        self.post_create({"error": "timeout"}, tool_input=self.create_input(title="identity fields"))
+        self.assertEqual(self.pre_list()["hookSpecificOutput"]["permissionDecision"], "allow")
+        response = {
+            "threads": [
+                None,
+                "not a thread",
+                {"threadId": "missing-target", "title": "identity fields"},
+                {
+                    "title": "identity fields",
+                    "type": "project",
+                    "projectId": target["projectId"],
+                    "environment": target["environment"],
+                },
+            ]
+        }
+        self.post_list(response)
+        self.assertEqual(self.state()["attempts"][-1]["status"], "ambiguous")
+        self.assertNotIn("peer_id", self.state()["attempts"][-1])
+
+    def test_title_identity_avoids_prefix_collision_and_flags_normalisation(self) -> None:
+        long_title_a = "L" * 180 + "A"
+        long_title_b = "L" * 180 + "B"
+        self.pre_create(title=long_title_a)
+        self.post_create({"error": "timeout"}, tool_input=self.create_input(title=long_title_a))
+        self.assertEqual(self.pre_list()["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.post_list(
+            {
+                "threads": [
+                    {
+                        "threadId": "wrong-long-title",
+                        "title": long_title_b,
+                        "type": "project",
+                        "projectId": "project-1",
+                        "environment": {"type": "worktree"},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(self.state()["attempts"][-1]["status"], "not_found")
+
+        normalized_title = "Normalize me"
+        self.pre_create(turn="turn-3", title=normalized_title)
+        self.post_create(
+            {"error": "timeout"},
+            turn="turn-3",
+            tool_input=self.create_input(title=normalized_title),
+        )
+        self.assertEqual(self.pre_list(turn="turn-4")["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.post_list(
+            {
+                "threads": [
+                    {
+                        "threadId": "normalized-title",
+                        "title": f" {normalized_title} ",
+                        "type": "project",
+                        "projectId": "project-1",
+                        "environment": {"type": "worktree"},
+                    }
+                ]
+            },
+            turn="turn-4",
+        )
+        self.assertEqual(self.state()["attempts"][-1]["status"], "ambiguous")
 
     def test_malformed_session_fails_open_without_state_access(self) -> None:
         self.pre_create(session="session-a")

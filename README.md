@@ -185,15 +185,19 @@ The plugin bundles synchronous `PreToolUse`, `PostToolUse`, `Stop`, and
 `create_thread` and `list_threads` calls with a small retry-free state machine:
 
 - before create, only an unambiguous top-level `projectId` duplicate may be
-  moved into `target`; conflicting or malformed project targets are denied;
+  moved into a complete project `target`; project environments are strictly
+  `local` or `worktree`, and top-level-only ids are denied;
 - an atomic `PLUGIN_DATA` ledger stores a bounded title/target/model/thinking
   fingerprint and prompt digest, never the prompt body or raw tool response;
-- same-turn and unresolved duplicate creates are blocked;
+- same-turn and unresolved duplicate creates are blocked, including changed
+  payloads in the same session; ledger saturation never evicts recovery state;
 - `threadId` is confirmed, `clientThreadId` is queued, and every other result is
   uncertain/error and permits at most one exact read-only `list_threads`
   reconciliation;
 - reconciliation is classified as found, not-found, or ambiguous using exact
-  title plus target project context; hooks never call tools, poll, retry,
+  title plus complete target identity; only a valid `threadId` can confirm,
+  while missing/lossy identity, title-prefix collisions, and normalization-only
+  matches remain terminally ambiguous; hooks never call tools, poll, retry,
   unarchive, replace, switch models, or send messages;
 - unresolved recovery is surfaced once at `Stop` and once on same-session
   `resume`, with `stop_hook_active` honored to prevent continuation loops.

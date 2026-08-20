@@ -199,19 +199,25 @@ unarchive, replace, switch models, or send messages themselves.
 
 Before a create, the hook validates the JSON payload and only repairs an
 unambiguous top-level `projectId` by moving/removing that duplicate inside a
-valid project `target`. Conflicting or malformed targets are denied. It writes
-an atomic, privacy-bounded fingerprint to `PLUGIN_DATA` before dispatch. The
-fingerprint contains bounded title/target/model/thinking values and a prompt
-digest; it never stores the prompt body or a raw tool response. Same-turn and
-unresolved duplicate creates are denied.
+complete project `target`. Project targets require `environment.type` `local`
+or `worktree`; a top-level-only id cannot manufacture a target. Conflicting,
+unsupported, or malformed targets are denied. It writes an atomic,
+privacy-bounded fingerprint to `PLUGIN_DATA` before dispatch. The fingerprint
+contains bounded title/target/model/thinking values and a prompt digest; it
+never stores the prompt body or a raw tool response. Same-turn and unresolved
+duplicate creates are denied, including changed-payload creates in a session;
+ledger saturation denies safely without evicting unresolved attempts.
 
 After a create, a real `threadId` is classified as confirmed and a
 `clientThreadId` as queued; both clear recovery. Any other result is classified
 as uncertain/error and asks the model for exactly one read-only
 `list_threads` reconciliation. The hook reserves that snapshot in its ledger,
-requires an exact title and target-project-context match, and reports one of
-found, not-found, or ambiguous. A second reconciliation is denied, and no
-result authorizes another create.
+requires an exact title and complete target-context match, and reports one of
+found, not-found, or ambiguous. Candidates must expose a valid addressable
+`threadId`; missing or lossy identity, truncated-title collisions, and
+normalization-only matches remain terminally ambiguous and are never
+confirmed. A second reconciliation is denied, and no result authorizes
+another create.
 
 The `Stop` hook surfaces unresolved recovery at most once and honors
 `stop_hook_active`, so it cannot create a continuation loop. A same-session

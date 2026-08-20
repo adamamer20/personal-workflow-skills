@@ -140,6 +140,12 @@ def validate_hooks() -> None:
         "SessionStart",
         "never invokes a Codex tool",
         "fail open",
+        "MAX_TITLE_INPUT",
+        "startingState",
+        "recovery ledger is saturated",
+        "title_identity",
+        "normalised_digest",
+        "reconciled_ambiguous",
     )
     normalized = " ".join(hook_text.split())
     for token in required:
