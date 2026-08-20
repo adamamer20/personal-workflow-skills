@@ -150,6 +150,9 @@ def validate_hooks() -> None:
         "MAX_RETAINED_MATCHES",
         "invalid_snapshot",
         "blocks_create",
+        "LIST_RESPONSE_KEYSETS",
+        "character.isspace()",
+        "set(response)",
     )
     normalized = " ".join(hook_text.split())
     for token in required:

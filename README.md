@@ -194,14 +194,17 @@ The plugin bundles synchronous `PreToolUse`, `PostToolUse`, `Stop`, and
   evicts recovery-blocking state;
 - `threadId` is confirmed, `clientThreadId` is queued, and every other result is
   uncertain/error and permits at most one exact read-only `list_threads`
-  reconciliation;
+  reconciliation; success requires exactly one native identity shape and ids
+  cannot contain Unicode whitespace or control/format/surrogate characters;
 - reconciliation is classified as found, not-found, or ambiguous using exact
   title plus explicit complete target identity; only a supported, bounded list
   snapshot can reconcile and only its valid empty form can prove not-found;
-  malformed/error-shaped or oversized snapshots, invalid `threadId` values,
-  missing/lossy identity, title-prefix collisions, and normalization-only
-  matches remain terminally ambiguous; hooks never call tools, poll, retry,
-  unarchive, replace, switch models, or send messages;
+  supported envelopes contain only `threads`, canonical `pinnedThreads` plus
+  `threads`, or one retained legacy `items`/`results` collection; additional
+  status/flag/error/metadata keys, mixed shapes, oversized snapshots, invalid
+  `threadId` values, missing/lossy identity, title-prefix collisions, and
+  normalization-only matches remain terminally ambiguous; hooks never call
+  tools, poll, retry, unarchive, replace, switch models, or send messages;
 - unresolved recovery is surfaced once at `Stop` and once on same-session
   `resume`, with `stop_hook_active` honored to prevent continuation loops.
 

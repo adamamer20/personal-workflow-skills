@@ -222,6 +222,14 @@ Only a successfully decoded, supported, bounded list response is a valid
 snapshot; native errors, malformed or unsupported shapes, oversized candidate
 sets, or candidates without an explicit complete target type and identity are
 terminally ambiguous. Only a valid empty snapshot may establish not-found.
+Supported list envelopes contain only `threads`, canonical `pinnedThreads` plus
+`threads`, or one retained legacy collection (`items` or `results`); additional
+status, flag, error, metadata, or mixed-collection keys invalidate the snapshot.
+Create success likewise requires exactly one permitted identity shape:
+`threadId` with optional valid `hostId`, or a lone `clientThreadId`. Peer ids
+containing any Unicode whitespace or control/format/surrogate character are not
+addressable. Contradictory or error-shaped create results remain uncertain and
+permanently block another create in that session.
 
 The `Stop` hook surfaces unresolved recovery at most once and honors
 `stop_hook_active`, so it cannot create a continuation loop. A same-session

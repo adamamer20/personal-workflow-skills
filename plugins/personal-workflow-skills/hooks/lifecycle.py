@@ -36,6 +36,14 @@ MAX_DIRECTORY = 160
 MAX_JSON_TEXT = 256 * 1024
 MAX_CANDIDATES = 256
 MAX_RETAINED_MATCHES = 16
+LIST_RESPONSE_KEYSETS = frozenset(
+    {
+        frozenset({"threads"}),
+        frozenset({"pinnedThreads", "threads"}),
+        frozenset({"items"}),
+        frozenset({"results"}),
+    }
+)
 UNRESOLVED_STATUSES = frozenset({"pending", "uncertain"})
 MISSING = object()
 
@@ -60,7 +68,7 @@ def _bounded_optional(value: Any, limit: int) -> str | None:
 
 def _valid_id(value: Any) -> str | None:
     candidate = _bounded(value, MAX_ID)
-    if candidate is None or candidate.strip() != candidate:
+    if candidate is None or any(character.isspace() for character in candidate):
         return None
     if any(unicodedata.category(character).startswith("C") for character in candidate):
         return None
@@ -507,10 +515,12 @@ def _deny(reason: str) -> dict[str, Any]:
 
 def _classify_create_response(response: Any) -> tuple[str, str, str | None]:
     response = _decode_json_string(response)
-    if isinstance(response, dict):
+    if isinstance(response, dict) and set(response) in ({"threadId"}, {"threadId", "hostId"}):
         thread_id = _valid_id(response.get("threadId"))
-        if thread_id is not None:
+        host_is_valid = "hostId" not in response or _valid_id(response.get("hostId")) is not None
+        if thread_id is not None and host_is_valid:
             return "confirmed", "confirmed", thread_id
+    if isinstance(response, dict) and set(response) == {"clientThreadId"}:
         client_id = _valid_id(response.get("clientThreadId"))
         if client_id is not None:
             return "queued", "queued", client_id
@@ -537,6 +547,8 @@ def _post_create(event: dict[str, Any]) -> dict[str, Any]:
             return False
         attempt["status"] = status
         attempt["result_classification"] = classification
+        if status == "uncertain":
+            attempt["blocks_create"] = True
         if peer_id is not None:
             attempt["peer_id"] = peer_id
         attempt["reconciliation_used"] = False
@@ -595,22 +607,19 @@ def _candidate_items(response: Any) -> tuple[str, list[Any]]:
         return "valid", response
     if not isinstance(response, dict):
         return "invalid", []
-    if any(key in response for key in ("error", "errors", "isError", "is_error")):
+    keys = frozenset(response)
+    if keys not in LIST_RESPONSE_KEYSETS:
         return "invalid", []
     items: list[Any] = []
-    found_collection = False
     for key in ("pinnedThreads", "threads", "items", "results"):
         if key not in response:
             continue
-        found_collection = True
         value = response[key]
         if not isinstance(value, list):
             return "invalid", []
         if len(items) + len(value) > MAX_CANDIDATES:
             return "oversized", []
         items.extend(value)
-    if not found_collection:
-        return "invalid", []
     return "valid", items
 
 
@@ -754,7 +763,7 @@ def _post_list(event: dict[str, Any]) -> dict[str, Any]:
             peer_id = matches[0]
             attempt["peer_id"] = peer_id
             return "found", peer_id
-        if len(matches) == 0 and not uncertain_match_count:
+        if not response_items and len(matches) == 0 and not uncertain_match_count:
             attempt["status"] = "not_found"
             attempt["result_classification"] = "reconciled_not_found"
             attempt["reconciliation_classification"] = "not_found"
@@ -774,8 +783,8 @@ def _post_list(event: dict[str, Any]) -> dict[str, Any]:
         )
     if classification == "not_found":
         return _post_context(
-            "Reconciliation found no exact title and target-project match. Do not retry create_thread "
-            "in this turn; a new START requires an explicit request."
+            "Reconciliation returned a valid empty snapshot. No peer was found; do not retry "
+            "create_thread or replace the permanently blocked attempt."
         )
     if classification == "ambiguous":
         return _post_context(

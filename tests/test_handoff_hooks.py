@@ -209,6 +209,37 @@ class HandoffHookTests(unittest.TestCase):
         self.assertEqual(self.state()["attempts"][-1]["status"], "queued")
         self.assertEqual(self.state()["attempts"][-1]["result_classification"], "queued")
 
+        self.pre_create(turn="turn-3")
+        self.post_create({"threadId": "thread-only"}, turn="turn-3")
+        self.assertEqual(self.state()["attempts"][-1]["status"], "confirmed")
+
+    def test_create_result_rejects_contradictory_or_error_envelopes(self) -> None:
+        invalid_responses = (
+            {"threadId": "thread", "clientThreadId": "client"},
+            {"threadId": "thread", "error": "failed"},
+            {"threadId": "thread", "isError": True},
+            {"threadId": "thread", "failure": True},
+            {"threadId": "thread", "failed": True},
+            {"threadId": "thread", "status": "error"},
+            {"threadId": "thread", "status": "failure"},
+            {"threadId": "thread", "ok": False},
+            {"threadId": "thread", "success": False},
+            {"threadId": "thread", "isError": False},
+            {"clientThreadId": "client", "status": "failed"},
+            {"threadId": "thread", "hostId": "local", "unexpected": True},
+        )
+        for index, response in enumerate(invalid_responses):
+            session = f"invalid-create-{index}"
+            self.pre_create(session=session)
+            output = self.post_create(response, session=session)
+            attempt = self.state()["attempts"][-1]
+            self.assertEqual(attempt["status"], "uncertain")
+            self.assertEqual(attempt["result_classification"], "error")
+            self.assertTrue(attempt["blocks_create"])
+            self.assertIn("exactly one", output["hookSpecificOutput"]["additionalContext"])
+            retry = self.pre_create(session=session, turn="later")
+            self.assertEqual(retry["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_error_is_uncertain_and_allows_one_exact_reconciliation(self) -> None:
         self.pre_create()
         output = self.post_create({"error": "server failure", "secret": "must not persist"})
@@ -259,6 +290,9 @@ class HandoffHookTests(unittest.TestCase):
         self.assertIn("exactly one", reconciliation["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(self.state()["attempts"][-1]["status"], "confirmed")
         self.assertEqual(self.state()["attempts"][-1]["reconciliation_classification"], "found")
+        self.assertTrue(self.state()["attempts"][-1]["blocks_create"])
+        retry = self.pre_create(turn="turn-3")
+        self.assertEqual(retry["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertNotIn("must not persist", (self.data / "native-thread-handoff.json").read_text())
 
     def test_reconciliation_not_found_and_ambiguous_are_terminal(self) -> None:
@@ -294,13 +328,13 @@ class HandoffHookTests(unittest.TestCase):
             ),
             {},
         )
-        self.pre_create(turn="turn-2")
-        self.post_create({"error": "unknown project"}, turn="turn-2")
+        self.pre_create(turn="turn-2", session="session-2")
+        self.post_create({"error": "unknown project"}, turn="turn-2", session="session-2")
         self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
                 "tool_name": "list_threads",
-                "session_id": "session-1",
+                "session_id": "session-2",
                 "tool_input": {},
             }
         )
@@ -308,7 +342,7 @@ class HandoffHookTests(unittest.TestCase):
             {
                 "hook_event_name": "PostToolUse",
                 "tool_name": "list_threads",
-                "session_id": "session-1",
+                "session_id": "session-2",
                 "tool_response": {
                     "threads": [
                         {
@@ -333,23 +367,37 @@ class HandoffHookTests(unittest.TestCase):
         self.assertEqual(self.state()["attempts"][-1]["reconciliation_classification"], "ambiguous")
         self.assertEqual(
             self.run_hook(
-                {"hook_event_name": "Stop", "session_id": "session-1", "stop_hook_active": False}
+                {"hook_event_name": "Stop", "session_id": "session-2", "stop_hook_active": False}
             ),
             {},
         )
         self.assertEqual(
             self.run_hook(
-                {"hook_event_name": "SessionStart", "source": "resume", "session_id": "session-1"}
+                {"hook_event_name": "SessionStart", "source": "resume", "session_id": "session-2"}
             ),
             {},
         )
-        blocked = self.pre_create(turn="turn-3")
+        blocked = self.pre_create(turn="turn-3", session="session-2")
         self.assertEqual(blocked["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_only_valid_empty_snapshot_becomes_not_found(self) -> None:
         invalid_responses = (
             {"error": "server failure"},
             {"threads": [], "error": "partial failure"},
+            {"threads": [], "status": "error"},
+            {"threads": [], "status": "failed"},
+            {"threads": [], "status": "failure"},
+            {"threads": [], "ok": False},
+            {"threads": [], "success": False},
+            {"threads": [], "failure": True},
+            {"threads": [], "failed": True},
+            {"threads": [], "isError": True},
+            {"threads": [], "error": False},
+            {"threads": [], "status": "ok"},
+            {"threads": [], "ok": True},
+            {"threads": [], "metadata": {}},
+            {"threads": [], "items": []},
+            {"pinnedThreads": []},
             {"threads": "not-a-list"},
             {"unexpected": []},
             "not-json",
@@ -369,12 +417,24 @@ class HandoffHookTests(unittest.TestCase):
             retry = self.pre_create(session=session, turn="later")
             self.assertEqual(retry["hookSpecificOutput"]["permissionDecision"], "deny")
 
-        session = "valid-direct-empty"
-        self.pre_create(session=session)
-        self.post_create({"error": "timeout"}, session=session)
-        self.pre_list(session=session)
-        self.post_list([], session=session)
-        self.assertEqual(self.state()["attempts"][-1]["status"], "not_found")
+        valid_responses = (
+            [],
+            {"threads": []},
+            {"pinnedThreads": [], "threads": []},
+            {"items": []},
+            {"results": []},
+        )
+        for index, response in enumerate(valid_responses):
+            session = f"valid-empty-{index}"
+            self.pre_create(session=session)
+            self.post_create({"error": "timeout"}, session=session)
+            self.pre_list(session=session)
+            self.post_list(response, session=session)
+            attempt = self.state()["attempts"][-1]
+            self.assertEqual(attempt["status"], "not_found")
+            self.assertTrue(attempt["blocks_create"])
+            retry = self.pre_create(session=session, turn="later")
+            self.assertEqual(retry["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_malformed_candidate_items_do_not_become_not_found(self) -> None:
         for index, candidate in enumerate((None, "not-a-thread", 42, [])):
@@ -489,14 +549,27 @@ class HandoffHookTests(unittest.TestCase):
         self.assertTrue(all(item["status"] == "pending" for item in state["attempts"]))
 
     def test_supported_target_variants_require_exact_identity(self) -> None:
+        reconciliation_index = 0
+
         def reconcile(target: dict[str, Any], title: str, candidate: dict[str, Any]) -> str:
+            nonlocal reconciliation_index
+            reconciliation_index += 1
+            session = f"target-variant-{reconciliation_index}"
             self.assertEqual(
-                self.pre_create(target=target, title=title)["hookSpecificOutput"]["permissionDecision"],
+                self.pre_create(target=target, title=title, session=session)["hookSpecificOutput"][
+                    "permissionDecision"
+                ],
                 "allow",
             )
-            self.post_create({"error": "timeout"}, tool_input=self.create_input(target=target, title=title))
-            self.assertEqual(self.pre_list()["hookSpecificOutput"]["permissionDecision"], "allow")
-            self.post_list({"threads": [candidate]})
+            self.post_create(
+                {"error": "timeout"},
+                session=session,
+                tool_input=self.create_input(target=target, title=title),
+            )
+            self.assertEqual(
+                self.pre_list(session=session)["hookSpecificOutput"]["permissionDecision"], "allow"
+            )
+            self.post_list({"threads": [candidate]}, session=session)
             return self.state()["attempts"][-1]["status"]
 
         branch_a = {
@@ -524,7 +597,7 @@ class HandoffHookTests(unittest.TestCase):
                 "startingState": {"type": "branch", "branchName": "branch-b", "onMissing": "error"},
             },
         }
-        self.assertEqual(reconcile(branch_b, "branch-b", candidate_a), "not_found")
+        self.assertEqual(reconcile(branch_b, "branch-b", candidate_a), "ambiguous")
 
         projectless = {"type": "projectless", "directoryName": "handoff-one"}
         projectless_candidate = {
@@ -533,7 +606,7 @@ class HandoffHookTests(unittest.TestCase):
             "type": "projectless",
             "directoryName": "handoff-two",
         }
-        self.assertEqual(reconcile(projectless, "directory", projectless_candidate), "not_found")
+        self.assertEqual(reconcile(projectless, "directory", projectless_candidate), "ambiguous")
         projectless_exact = dict(projectless_candidate, threadId="thread-dir-exact", directoryName="handoff-one")
         self.assertEqual(reconcile(projectless, "directory-exact", projectless_exact | {"title": "directory-exact"}), "confirmed")
 
@@ -544,7 +617,7 @@ class HandoffHookTests(unittest.TestCase):
             "type": "chatgptWorkCloud",
             "projectId": "cloud-two",
         }
-        self.assertEqual(reconcile(cloud, "cloud", cloud_candidate), "not_found")
+        self.assertEqual(reconcile(cloud, "cloud", cloud_candidate), "ambiguous")
         cloud_exact = dict(cloud_candidate, threadId="thread-cloud-exact", projectId="cloud-one")
         self.assertEqual(reconcile(cloud, "cloud-exact", cloud_exact | {"title": "cloud-exact"}), "confirmed")
 
@@ -610,7 +683,19 @@ class HandoffHookTests(unittest.TestCase):
             self.assertNotIn("peer_id", attempt)
 
     def test_thread_ids_must_be_addressable(self) -> None:
-        invalid_ids = ("", "   ", " leading", "trailing ", "has\ncontrol", "zero\u200bwidth", "x" * 257)
+        invalid_ids = (
+            "",
+            "   ",
+            " leading",
+            "trailing ",
+            "internal space",
+            "no\u00a0break",
+            "em\u2003space",
+            "line\u2028separator",
+            "has\ncontrol",
+            "zero\u200bwidth",
+            "x" * 257,
+        )
         for index, thread_id in enumerate(invalid_ids):
             session = f"invalid-id-{index}"
             self.pre_create(session=session)
@@ -632,6 +717,13 @@ class HandoffHookTests(unittest.TestCase):
                 session=session,
             )
             self.assertEqual(self.state()["attempts"][-1]["status"], "ambiguous")
+
+            client_session = f"invalid-client-id-{index}"
+            self.pre_create(session=client_session)
+            self.post_create({"clientThreadId": thread_id}, session=client_session)
+            client_attempt = self.state()["attempts"][-1]
+            self.assertEqual(client_attempt["status"], "uncertain")
+            self.assertTrue(client_attempt["blocks_create"])
 
     def test_candidate_snapshot_cardinality_is_bounded(self) -> None:
         session = "oversized-snapshot"
@@ -692,16 +784,22 @@ class HandoffHookTests(unittest.TestCase):
                 ]
             }
         )
-        self.assertEqual(self.state()["attempts"][-1]["status"], "not_found")
+        self.assertEqual(self.state()["attempts"][-1]["status"], "ambiguous")
 
         normalized_title = "Normalize me"
-        self.pre_create(turn="turn-3", title=normalized_title)
+        self.pre_create(turn="turn-3", session="title-normalized", title=normalized_title)
         self.post_create(
             {"error": "timeout"},
             turn="turn-3",
+            session="title-normalized",
             tool_input=self.create_input(title=normalized_title),
         )
-        self.assertEqual(self.pre_list(turn="turn-4")["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.assertEqual(
+            self.pre_list(turn="turn-4", session="title-normalized")["hookSpecificOutput"][
+                "permissionDecision"
+            ],
+            "allow",
+        )
         self.post_list(
             {
                 "threads": [
@@ -715,6 +813,7 @@ class HandoffHookTests(unittest.TestCase):
                 ]
             },
             turn="turn-4",
+            session="title-normalized",
         )
         self.assertEqual(self.state()["attempts"][-1]["status"], "ambiguous")
 
