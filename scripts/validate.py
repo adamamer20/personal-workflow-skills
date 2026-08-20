@@ -16,6 +16,8 @@ PLUGIN_NAME = "personal-workflow-skills"
 MARKETPLACE_NAME = "adam-workflows"
 PLUGIN_ROOT = ROOT / "plugins" / PLUGIN_NAME
 SKILLS_ROOT = PLUGIN_ROOT / "skills"
+HOOKS_ROOT = PLUGIN_ROOT / "hooks"
+HOOKS_FILE = HOOKS_ROOT / "hooks.json"
 EXPECTED_SKILLS = {
     "abstraction-opportunity-audit",
     "codex-thread-handoff",
@@ -40,7 +42,7 @@ FORBIDDEN_AUTHORING_PATHS = (
     ".codex/skills/",
 )
 GLOBAL_AGENTS_PATH = ROOT / "templates" / "AGENTS.md"
-BASELINE_PLUGIN_VERSION = "0.1.0+codex.20260818104438"
+BASELINE_PLUGIN_VERSION = "0.1.3+codex.20260820180447"
 WORKFLOW_PATHS = {
     "plan": SKILLS_ROOT / "plan-work" / "SKILL.md",
     "handoff": SKILLS_ROOT / "codex-thread-handoff" / "SKILL.md",
@@ -81,6 +83,8 @@ def validate_manifest() -> None:
         fail("plugin name must match its marketplace directory")
     if manifest.get("skills") != "./skills/":
         fail("plugin manifest must expose ./skills/")
+    if "hooks" in manifest:
+        fail("plugin manifest must use default hooks/hooks.json discovery")
     version = manifest.get("version")
     if not isinstance(version, str):
         fail("plugin manifest must contain a string version")
@@ -94,6 +98,55 @@ def validate_manifest() -> None:
     current = tuple(int(part) for part in current_match.groups())
     if current <= baseline:
         fail(f"plugin version must be newer than {BASELINE_PLUGIN_VERSION}")
+
+
+def validate_hooks() -> None:
+    if not HOOKS_FILE.is_file():
+        fail("plugin must include default hooks/hooks.json")
+    hooks_manifest = json.loads(HOOKS_FILE.read_text(encoding="utf-8"))
+    if not isinstance(hooks_manifest, dict) or not isinstance(hooks_manifest.get("hooks"), dict):
+        fail("hooks.json must contain a hooks object")
+    configured = hooks_manifest["hooks"]
+    expected_events = {"PreToolUse", "PostToolUse", "Stop", "SessionStart"}
+    if set(configured) != expected_events:
+        fail(f"hooks.json must configure exactly {sorted(expected_events)}")
+    for event_name, groups in configured.items():
+        if not isinstance(groups, list) or not groups:
+            fail(f"hooks.json {event_name} must contain matcher groups")
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                fail(f"hooks.json {event_name} matcher group is malformed")
+            for handler in group["hooks"]:
+                if not isinstance(handler, dict) or handler.get("type") != "command":
+                    fail("plugin lifecycle hooks must use command handlers")
+                command = handler.get("command")
+                if not isinstance(command, str) or "$PLUGIN_ROOT/hooks/lifecycle.py" not in command:
+                    fail("plugin lifecycle hook must resolve lifecycle.py through PLUGIN_ROOT")
+                if handler.get("async") is True:
+                    fail("plugin lifecycle hooks must be synchronous")
+    script = HOOKS_ROOT / "lifecycle.py"
+    if not script.is_file():
+        fail("hooks/lifecycle.py is missing")
+    hook_text = script.read_text(encoding="utf-8")
+    required = (
+        "PLUGIN_DATA",
+        "os.replace",
+        "permissionDecision",
+        "updatedInput",
+        "threadId",
+        "clientThreadId",
+        "list_threads",
+        "stop_hook_active",
+        "SessionStart",
+        "never invokes a Codex tool",
+        "fail open",
+    )
+    normalized = " ".join(hook_text.split())
+    for token in required:
+        if token not in normalized:
+            fail(f"hooks/lifecycle.py missing lifecycle contract: {token}")
+    with tempfile.TemporaryDirectory(prefix="personal-workflow-hooks-validation-") as temp_dir:
+        py_compile.compile(str(script), cfile=str(Path(temp_dir) / "lifecycle.pyc"), doraise=True)
 
 
 def validate_marketplace() -> None:
@@ -442,6 +495,7 @@ def validate_global_agents_template() -> None:
 def main() -> int:
     validate_marketplace()
     validate_manifest()
+    validate_hooks()
     actual_skills = {path.name for path in SKILLS_ROOT.iterdir() if path.is_dir()}
     if actual_skills != EXPECTED_SKILLS:
         fail(f"unexpected skill inventory: {sorted(actual_skills ^ EXPECTED_SKILLS)}")

@@ -178,6 +178,32 @@ proven unavailable or terminal. This handles recoverable client/server and
 interruption cases without creating duplicate owners; it cannot guarantee an
 automatic callback when the runtime dies before the task can send one.
 
+## Native handoff lifecycle hooks
+
+The plugin bundles synchronous `PreToolUse`, `PostToolUse`, `Stop`, and
+`SessionStart` hooks in the default `hooks/hooks.json` path. They guard native
+`create_thread` and `list_threads` calls with a small retry-free state machine:
+
+- before create, only an unambiguous top-level `projectId` duplicate may be
+  moved into `target`; conflicting or malformed project targets are denied;
+- an atomic `PLUGIN_DATA` ledger stores a bounded title/target/model/thinking
+  fingerprint and prompt digest, never the prompt body or raw tool response;
+- same-turn and unresolved duplicate creates are blocked;
+- `threadId` is confirmed, `clientThreadId` is queued, and every other result is
+  uncertain/error and permits at most one exact read-only `list_threads`
+  reconciliation;
+- reconciliation is classified as found, not-found, or ambiguous using exact
+  title plus target project context; hooks never call tools, poll, retry,
+  unarchive, replace, switch models, or send messages;
+- unresolved recovery is surfaced once at `Stop` and once on same-session
+  `resume`, with `stop_hook_active` honored to prevent continuation loops.
+
+These are non-managed command hooks. Codex requires explicit review and trust
+of the exact current hook definitions (for example, through `/hooks`) before
+they run; installing or enabling the plugin alone does not grant that trust.
+Internal hook failures fail open with a warning. Review the hook source and its
+privacy boundary before trusting it, and keep `PLUGIN_DATA` private.
+
 ## Validate
 
 Run `python3 scripts/validate.py` before installing or publishing an update.

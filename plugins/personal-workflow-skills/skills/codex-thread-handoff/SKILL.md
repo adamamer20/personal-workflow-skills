@@ -189,6 +189,41 @@ model of the thread, or create a replacement. A replacement requires a separate
 explicit user decision after the existing owner is proven unavailable or
 terminal.
 
+## Lifecycle hook guardrails
+
+When this plugin is enabled, its default `hooks/hooks.json` adds synchronous
+`PreToolUse`, `PostToolUse`, `Stop`, and `SessionStart` guards around native
+`create_thread` and `list_threads`. The guards are a deterministic recovery
+ledger, not another transport: they never call native tools, poll, retry,
+unarchive, replace, switch models, or send messages themselves.
+
+Before a create, the hook validates the JSON payload and only repairs an
+unambiguous top-level `projectId` by moving/removing that duplicate inside a
+valid project `target`. Conflicting or malformed targets are denied. It writes
+an atomic, privacy-bounded fingerprint to `PLUGIN_DATA` before dispatch. The
+fingerprint contains bounded title/target/model/thinking values and a prompt
+digest; it never stores the prompt body or a raw tool response. Same-turn and
+unresolved duplicate creates are denied.
+
+After a create, a real `threadId` is classified as confirmed and a
+`clientThreadId` as queued; both clear recovery. Any other result is classified
+as uncertain/error and asks the model for exactly one read-only
+`list_threads` reconciliation. The hook reserves that snapshot in its ledger,
+requires an exact title and target-project-context match, and reports one of
+found, not-found, or ambiguous. A second reconciliation is denied, and no
+result authorizes another create.
+
+The `Stop` hook surfaces unresolved recovery at most once and honors
+`stop_hook_active`, so it cannot create a continuation loop. A same-session
+`SessionStart` resume restores the bounded recovery context once. Internal
+hook errors fail open with a warning so native Codex behavior remains available.
+
+Plugin-bundled hooks are non-managed commands and require explicit review and
+trust of the exact current hook definitions (for example, with `/hooks`) before
+they run. Installation or enabling the plugin alone does not silently grant
+that trust. The default discovery path is `hooks/hooks.json`; no unsupported
+manifest hooks field is required.
+
 ## Hard boundaries
 
 - Use native Codex peer-thread tools only. Capability-check START before use.

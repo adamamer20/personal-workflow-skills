@@ -317,9 +317,81 @@ Promotion gate: installed version and marketplace ref match the merged source;
 the fresh authorized dispatch is confirmed; no fallback or duplicate task is
 created for negative cases.
 
-Successor milestone: M5 — update SprintAct's pinned commit/version and propagate
-the new workflow pin through its required PR/review/merge and named active
-worktrees.
+Successor milestone: M5 — deterministic lifecycle hooks for retry-free native
+handoff recovery.
+
+## Milestone M5 — deterministic lifecycle hooks for retry-free handoff recovery
+
+### Outcome
+
+Package plugin-bundled lifecycle hooks that validate and safely repair native
+`create_thread` payloads, persist a privacy-bounded attempt fingerprint before
+dispatch, prevent same-turn and unresolved duplicate creates, classify native
+results, reserve at most one read-only `list_threads` reconciliation, and
+restore unresolved context on same-session resume. Hooks are advisory recovery
+state, not a second native transport.
+
+### Mutable ownership
+
+- `plugins/personal-workflow-skills/hooks/`
+- `plugins/personal-workflow-skills/.codex-plugin/plugin.json`
+- `plugins/personal-workflow-skills/skills/codex-thread-handoff/SKILL.md`
+- `README.md`
+- `scripts/validate.py`
+- focused tests under `tests/`
+- this canonical plan for M5 evidence
+
+### Protected surfaces and non-goals
+
+- all seven audit skills/resources, marketplace identity and policy, and native
+  Codex task tools/server behavior;
+- routing authorization/model policy, global `~/.codex` state, downstream
+  repositories, and unrelated branches/worktrees;
+- no manifest `hooks` override when default `hooks/hooks.json` discovery works;
+- no hook invocation of native tools, polling, retries, unarchive/replace/model
+  switching, continuation loop, prompt-body/raw-response persistence, push, PR,
+  merge, or plugin installation without separate authorization.
+
+### Implementation boundary
+
+1. Add synchronous `PreToolUse`, `PostToolUse`, `Stop`, and `SessionStart`
+   handlers in `hooks/hooks.json` using the released command-hook schema and
+   `PLUGIN_ROOT`/`PLUGIN_DATA` environment contracts.
+2. Before `create_thread`, validate the object and deny malformed/conflicting
+   project targets. Move/remove only an unambiguous top-level `projectId`; hash
+   bounded title/target/model/thinking plus a bounded prompt digest without
+   storing the prompt body. Persist atomically before dispatch and block
+   same-turn or unresolved duplicates.
+3. After `create_thread`, classify a real `threadId` as confirmed and a queued
+   `clientThreadId` as queued; every other result is uncertain/error and asks
+   for one read-only reconciliation. Before and after `list_threads`, reserve
+   and classify exactly one exact title + target-project-context snapshot as
+   found, not-found, or ambiguous.
+4. Surface unresolved state once at `Stop`, honor `stop_hook_active`, and restore
+   bounded unresolved context once on same-session `resume`. Internal hook
+   errors fail open with a warning.
+5. Document the explicit hook trust-review gate truthfully, bump plugin build
+   metadata monotonically, extend deterministic validation, add focused tests,
+   and prove the audit-skill tree is unchanged.
+
+### Acceptance and promotion gates
+
+- safe payload repair, conflict denial, duplicate prevention,
+  confirmed/queued/error classification, exact reconciliation, bounded Stop,
+  resume, privacy-bounded state, and fail-open behavior have focused tests;
+- `python3 -B scripts/validate.py`, hook/skill validators, JSON parsing,
+  Python compilation, and `git diff --check` pass;
+- hooks are synchronous, use default discovery, never call native tools, and
+  do not persist prompt bodies or raw tool responses;
+- plugin version is newer than `0.1.3+codex.20260820180447`; audit-skill paths
+  remain byte-for-byte unchanged; open P0/P1 findings are zero;
+- create one safe local commit only after complete self-review. Reinstallation
+  is optional and only allowed when the worktree safely supports it; otherwise
+  return exact installation commands to the planning owner.
+
+### Successor milestone
+
+M6 — independently review and publish/install the hook-enabled plugin build.
 
 ## Assumptions
 
