@@ -38,8 +38,30 @@ The default authorized mappings in the shipped global template are:
 
 - substantial decision-ready milestone: `gpt-5.6-luna`, `xhigh`;
 - bounded/mechanical milestone: `gpt-5.6-luna`, `high`;
+- visual-judgment implementation: `gpt-5.6-sol`, `medium`;
+- critical visual direction, repeated visual failure remediation, or final
+  qualitative promotion review: `gpt-5.6-sol`, `high`;
+- Luna implementation/review loop after two unsuccessful repair cycles:
+  `gpt-5.6-sol`, `medium` in a fresh context;
+- Sol Medium implementation/review loop after two further unsuccessful repair
+  cycles: `gpt-5.6-sol`, `high` in a fresh context;
 - independent normal code review: `gpt-5.6-luna`, `xhigh`;
 - critical architecture/security review or planning: `gpt-5.6-sol`, `high`.
+
+Classify by the judgment required for acceptance before applying the generic
+milestone-size mapping. Slides, landing pages, frontend/UI work, visual systems,
+and rendered-document quality use Sol Medium when acceptance depends on visual
+judgment. Sol High owns novel or critical visual direction, weak or conflicting
+references, repeated visual failure, and final qualitative promotion review.
+Luna remains available only for visually adjacent work whose target and
+acceptance are frozen and whose remaining execution is mechanical and
+objectively verifiable.
+
+Implementation/review loops have a two-stage circuit breaker. Two unsuccessful
+cycles in Luna escalate the bounded continuation to fresh Sol Medium; two
+further unsuccessful cycles in Sol Medium escalate once to fresh Sol High. If
+Sol High exhausts ordinary repair, return a truthful terminal `BLOCKED` or
+`FAILED` outcome to the planning owner rather than forming an indefinite loop.
 
 Resolve against models and reasoning levels actually advertised by the current
 `create_thread` schema. If the authorized pair is unavailable or rejected,
@@ -65,6 +87,23 @@ the creator. A skill cannot change the already-running task's model.
   `thinking`; the capsule mirrors the same pair.
 - Unsupported or rejected routing fails truthfully without retry or silent
   model substitution.
+- Visual judgment takes precedence over generic milestone size: Sol Medium is
+  the default implementation route and Sol High is the critical-direction or
+  final-promotion route.
+- Review-loop escalation preserves the diff, evidence, findings, scope, and
+  acceptance gate; it changes model/context and never weakens the gate.
+- Luna escalates to Sol Medium after two unsuccessful implementation/review
+  cycles; Sol Medium escalates once to Sol High after two further cycles; Sol
+  High failure terminates truthfully rather than looping.
+- A failed or uncertain START is reconciled read-only and never retried
+  automatically. Delayed recovery may discover the original task but never
+  creates one.
+- An interrupted known peer is resumed in the same thread/worktree after one
+  non-waiting status snapshot. Active work is left alone; completed work may
+  only republish its established callback packet.
+- Replacement requires an explicit user decision after the previous owner is
+  proven unavailable or terminal; server/client errors and missing callbacks do
+  not implicitly authorize a duplicate owner.
 - Peer creation remains one non-blocking logical START operation with no
   polling, inherited chat, child agent, or fallback transport. After an error,
   one non-waiting peer-list reconciliation may recover a created task id; no
@@ -127,6 +166,13 @@ can no longer describe a capsule-only recommendation as successful routing.
    fallback contracts are required.
 6. Bump plugin build metadata monotonically so a published marketplace upgrade
    can distinguish this source from `0.1.0+codex.20260818104438`.
+7. Route subjective visual implementation to Sol Medium, critical visual work
+   and qualitative promotion to Sol High, and reserve Luna for frozen,
+   mechanical visually adjacent work.
+8. Add a two-stage review-loop circuit breaker: Luna to fresh Sol Medium, then
+   Sol Medium to fresh Sol High, with terminal failure after Sol High.
+9. Add retry-free delayed START reconciliation and same-thread recovery for
+   interrupted peers or missing terminal callbacks.
 
 ### Acceptance criteria
 
@@ -139,6 +185,11 @@ can no longer describe a capsule-only recommendation as successful routing.
 - Unsupported/rejected routes stop without default-model or alternate-model
   substitution.
 - Template defaults unambiguously authorize the exact Luna/Sol mappings above.
+- Visual-judgment routing and the two-stage review-loop circuit breaker are
+  consistent across the plan, execution skill, template, README, and validator.
+- Handoff recovery leaves active work alone, resumes an interrupted task in
+  place, republishes a completed task's callback without mutation, and never
+  creates a replacement without separate explicit authorization.
 - Validator rejects the previous immediate-prompt-only contract and requires
   the new behavior.
 - Audit skill tree is byte-for-byte unchanged.
@@ -243,9 +294,10 @@ M3 — independent review and merge.
 
 ## Milestone M3 — Independently review and merge the plugin
 
-Outcome: a fresh peer reviews the complete PR, records findings, and merges only
-with zero open P0/P1 and green required checks. Repairs return to a fresh
-implementation context rather than expanding the reviewer into an owner.
+Outcome: an independent reviewer or repository review check reviews the complete
+final PR head, records findings, and the integration owner merges only with zero
+open P0/P1 and green required checks. Repairs return to a fresh implementation
+context rather than expanding the reviewer into an owner.
 
 Promotion gate: PR is merged to `main`; record the immutable merge commit and
 published plugin version. A self-authored GitHub approval is not claimed when
@@ -278,8 +330,10 @@ worktrees.
 
 ## Open findings
 
-- M1 and M2 have no open P0/P1 finding. PR #3 is ready and mergeable; its
-  CodeRabbit status was pending at the M2 terminal snapshot and is an M3 gate.
+- Source self-review has no open P0/P1 finding. PR #5 is the active draft and
+  was mergeable before the visual-routing update. CodeRabbit passed on its
+  previous head; a green independent check on the final pushed head remains the
+  M3 merge gate.
 
 ## Current review log
 
@@ -312,34 +366,44 @@ worktrees.
   also required callbacks only for green completion. Added exact callback-route
   ownership, unarchived-planner availability, one callback for every terminal
   status, and a recoverable unsent-packet final state.
+- 2026-08-20: Added judgment-first visual routing after repeated weak visual
+  outcomes: Sol Medium for normal visual implementation, Sol High for critical
+  direction, repeated visual failure, or final qualitative promotion, and Luna
+  only for frozen mechanical execution. Added the authorized review-loop
+  circuit breaker Luna -> fresh Sol Medium -> fresh Sol High, with terminal
+  `BLOCKED`/`FAILED` after Sol High instead of indefinite repair/review cycles.
+  Target plugin build is `0.1.3+codex.20260820180447`.
+- 2026-08-20: Audited recent native failures. Malformed client payloads produced
+  `invalid arguments`; current or stale project identifiers produced unknown-
+  project failures; one schema-valid START returned a generic server/tool error
+  while the target host was unavailable for reconciliation. Recent execution
+  turns also recorded `interrupted`, while the durable task thread remained
+  resumable and later accepted follow-up turns. Added RECOVER_START for delayed
+  read-only reconciliation and RECOVER_THREAD for one same-thread resume or
+  callback republication. No automatic create/send retry, unarchive, model
+  switch, or replacement is introduced.
 
 ## Next execution
 
 Milestone: M3 — independently review and merge the plugin
 
-Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`
-
-Routing authorization: the user explicitly said “vai continua” after the exact
-push/PR/merge/install/downstream operations were enumerated.
-
-Planning thread: `01a01405-e5b1-7dd1-b540-5fffc15538b0`
+Execution mode: direct integration in the current user-authorized task;
+independent review is supplied by the repository review check on the final head.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`
 
-Owned surfaces: complete read-only review of PR #3, truthful GitHub review
-record, required-check state, and merge action only after the promotion gate.
+Owned surfaces: the nine scoped source/documentation files, remote branch
+`agent/reliable-peer-handoff-callbacks`, PR #5 metadata and checks, merge action,
+and local plugin installation.
 
 Protected surfaces: audit skills, marketplace identity/policy, native tool
-implementation, installed cache, downstream repositories/pins, and remotes.
+implementation, downstream repositories/pins, and unrelated remotes/worktrees.
 
 Acceptance: independently verify the complete diff and permission/failure
 semantics; zero open P0/P1; required checks green; merge the unchanged reviewed
 head and record immutable merge SHA plus version
-`0.1.1+codex.20260818104438`.
+`0.1.3+codex.20260820180447`; install that exact merged build locally and verify
+the installed manifest and changed skill bytes against merged source.
 
 Escalate only for: a P0/P1 finding, changed PR head, non-green required check,
-merge conflict, or missing review/merge authority. Do not repair in M3.
-
-Completion callback: send one terminal packet to
-`01a01405-e5b1-7dd1-b540-5fffc15538b0` with findings, reviewed head, checks,
-review record, merge SHA/state, and exact M4 gate. No routine updates.
+merge conflict, or missing review/merge/install authority.

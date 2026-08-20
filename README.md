@@ -18,7 +18,7 @@ decision-ready canonical plan
 fresh peer execution thread
         ↓
 $execute-milestone
-native `model=gpt-5.6-luna` + `thinking=xhigh`
+authorized native route selected by task class
         ↓
 completion or material escalation
         ↓
@@ -107,12 +107,40 @@ Authorized native routing defaults:
 | --- | --- | --- | --- |
 | Small/local change | direct execution | `gpt-5.6-luna` | `high` |
 | Decision-ready substantial milestone | fresh execution | `gpt-5.6-luna` | `xhigh` |
+| Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents) | fresh execution | `gpt-5.6-sol` | `medium` |
+| New visual direction, ambiguous references, repeated visual failure, or final qualitative promotion review | fresh peer or planning | `gpt-5.6-sol` | `high` |
+| Luna implementation/review loop after two unsuccessful repair cycles | fresh execution | `gpt-5.6-sol` | `medium` |
+| Sol Medium implementation/review loop after two further unsuccessful repair cycles | fresh execution | `gpt-5.6-sol` | `high` |
 | First-time large or uncertain program | planning | `gpt-5.6-sol` | `high` |
 | Material architecture escalation | existing planning thread | `gpt-5.6-sol` | `high` |
 | Mechanical repair after a precise finding | fresh/current execution | `gpt-5.6-luna` | `high` |
 | Difficult unresolved implementation after XHigh | fresh execution | `gpt-5.6-luna` | `max` |
 | Independent normal code review | fresh peer | `gpt-5.6-luna` | `xhigh` |
 | Critical architecture or security review | fresh peer or planning | `gpt-5.6-sol` | `high` |
+
+Classify by the judgment needed for acceptance, not by file type alone. When
+success depends on composition, hierarchy, responsive behavior, rendered
+inspection, or other subjective visual judgment, Sol Medium is the default.
+Use Sol High for novel or system-wide visual direction, weak or conflicting
+references, remediation after repeated visual misses, and the independent final
+qualitative promotion review. Luna remains appropriate only when the visual
+target and acceptance criteria are already frozen and the remaining work is
+mechanical and objectively verifiable, such as bounded wiring, copy replacement,
+asset processing, export, or a precisely identified CSS repair.
+
+Luna also has a bounded implementation/review circuit breaker. If two complete
+repair and re-review cycles fail to close the same material blocker, or the same
+class of finding is reopened, stop iterating in that Luna context. Hand the
+current diff, validation evidence, review findings, and remaining acceptance gap
+to a fresh Sol Medium execution context. If that Sol Medium continuation also
+completes two repair and re-review cycles without closing the blocker, hand the
+same bounded evidence forward once to fresh Sol High. If Sol High cannot close
+the gate through ordinary repair, return an accurately labelled terminal
+`BLOCKED` or `FAILED` outcome to the planning owner; do not create an indefinite
+review loop. Each step is a model escalation, not permission to weaken the gate,
+silently expand scope, or continue using the exhausted task. A more specific
+Sol High route still wins immediately for critical visual, architecture, or
+security work.
 
 These pairs are applied to native `create_thread` only when an explicit user
 request or applicable user-owned `AGENTS.md` policy authorizes them. A plugin
@@ -136,8 +164,19 @@ only when native task tools returned it; environment ids are never substituted
 for host ids. The planning task remains unarchived while peers are active. Every
 terminal execution outcome attempts one callback: `COMPLETION` when green, or
 an accurately labelled `BLOCKED`/`FAILED` escalation otherwise. If delivery is
-impossible, the Luna task ends with `callback_status: unsent` and the complete
+impossible, the execution task ends with `callback_status: unsent` and the complete
 recoverable packet instead of silently disappearing.
+
+Runtime recovery is deliberately retry-free. A failed or uncertain START can be
+reconciled later with one read-only snapshot; it is never silently recreated. If
+an existing task's last turn is `interrupted`, one explicit recovery operation
+resumes that same thread and worktree after inspecting durable state. If work is
+complete but its callback is missing, the same thread republishes the existing
+terminal packet without rerunning or changing it. Active work is left alone, and
+a replacement task requires separate user authorization after the old owner is
+proven unavailable or terminal. This handles recoverable client/server and
+interruption cases without creating duplicate owners; it cannot guarantee an
+automatic callback when the runtime dies before the task can send one.
 
 ## Validate
 

@@ -186,6 +186,11 @@ def validate_plan_work_contract() -> None:
         "Keep the planning thread unarchived and routable",
         "Do not pass inherited chat history, poll, wait for progress",
         "never silently fall back to a subagent",
+        "Before replacing any outstanding milestone",
+        "Reconcile an uncertain START without creating anything",
+        "resume the same thread after an `interrupted` turn",
+        "Never create a replacement merely because a server/client error",
+        "RECOVER_START or RECOVER_THREAD",
     )
     require_contract(plan_path, required_text)
 
@@ -211,6 +216,10 @@ def validate_execute_milestone_contract() -> None:
         "Status: FAILED",
         "callback_status: sent|unsent",
         "complete unsent packet",
+        "Recovery after interruption",
+        "do not restart the milestone blindly",
+        "inspect the existing worktree/diff, durable artifacts",
+        "A `REPUBLISH_CALLBACK` message is narrower",
     )
     require_contract(execute_path, required_text)
 
@@ -218,7 +227,7 @@ def validate_execute_milestone_contract() -> None:
 def validate_thread_handoff_contract() -> None:
     handoff_path = SKILLS_ROOT / "codex-thread-handoff" / "SKILL.md"
     required_text = (
-        "one **START** or **MESSAGE** operation",
+        "one **START**, **RECOVER_START**, **MESSAGE**, or **RECOVER_THREAD** operation",
         "Peer tasks are durable Codex threads, not child/subagents",
         "call `list_projects` immediately before creation",
         "inspect `isGitRepository`",
@@ -245,6 +254,14 @@ def validate_thread_handoff_contract() -> None:
         "Never poll",
         "Never retry a create or an uncertain send",
         "silently use a fallback transport",
+        "RECOVER_START never calls `create_thread`",
+        "`creation_status: uncertain`",
+        "`creation_status: not_found_after_reconciliation`",
+        "Take exactly one non-waiting status snapshot",
+        "If the latest turn is `interrupted`",
+        "`REPUBLISH_CALLBACK` message",
+        "`recovery_status: unsent`",
+        "A replacement requires a separate explicit user decision",
     )
     require_contract(handoff_path, required_text)
 
@@ -267,6 +284,16 @@ def validate_native_routing_contract() -> None:
         "`routing_status: not_authorized`",
         "`gpt-5.6-luna`",
         "`gpt-5.6-sol`",
+        "Visual-judgment implementation",
+        "`medium`",
+        "Classify the acceptance judgment before applying the generic milestone-size route",
+        "The presence of frontend, CSS, slide, or document files alone does not determine the route",
+        "Luna implementation/review loop after two unsuccessful repair cycles",
+        "Sol Medium implementation/review loop after two further unsuccessful repair cycles",
+        "two complete implementation/review repair cycles fail to close the same material blocker",
+        "route a fresh execution task to Sol Medium",
+        "escalate once to a fresh Sol High execution task",
+        "terminal `BLOCKED` or `FAILED` outcome",
         "schema advertises both fields",
         "substitute another model",
         "resolved exact native pair",
@@ -303,6 +330,15 @@ def validate_native_routing_contract() -> None:
         "concrete native pair",
         "gpt-5.6-luna",
         "gpt-5.6-sol",
+        "thinking=medium",
+        "Sol Medium is the default for that implementation",
+        "Sol High owns new or system-wide visual direction",
+        "Classify by the judgment needed for acceptance, not by file type",
+        "bounded implementation/review circuit breaker",
+        "two complete repair and re-review cycles fail to close the same material blocker",
+        "fresh `gpt-5.6-sol` task with `thinking=medium`",
+        "fresh `gpt-5.6-sol` task with `thinking=high`",
+        "If Sol High exhausts ordinary repair",
         "Skill installation alone does not authorize model overrides",
         "omits `model` and `thinking`",
         "dispatch fails closed",
@@ -316,6 +352,16 @@ def validate_native_routing_contract() -> None:
     readme_text = " ".join(README_PATH.read_text(encoding="utf-8").split())
     readme_required = (
         "Authorized native routing defaults:",
+        "Visual-judgment implementation",
+        "Sol Medium is the default",
+        "Use Sol High for novel or system-wide visual direction",
+        "Luna remains appropriate only when the visual target and acceptance criteria are already frozen",
+        "Luna implementation/review loop after two unsuccessful repair cycles",
+        "Sol Medium implementation/review loop after two further unsuccessful repair cycles",
+        "two complete repair and re-review cycles fail to close the same material blocker",
+        "fresh Sol Medium execution context",
+        "fresh Sol High",
+        "do not create an indefinite review loop",
         "Native `model`",
         "Native `thinking`",
         "explicit user request or applicable user-owned `AGENTS.md` policy",
@@ -332,6 +378,10 @@ def validate_native_routing_contract() -> None:
         "planning task remains unarchived",
         "accurately labelled `BLOCKED`/`FAILED` escalation",
         "callback_status: unsent",
+        "Runtime recovery is deliberately retry-free",
+        "last turn is `interrupted`",
+        "same thread republishes the existing terminal packet",
+        "cannot guarantee an automatic callback",
     )
     require_contract(README_PATH, readme_required)
 
@@ -349,7 +399,15 @@ def validate_global_agents_template() -> None:
         "Luna XHigh",
         "model=gpt-5.6-luna, thinking=xhigh",
         "model=gpt-5.6-luna, thinking=high",
+        "model=gpt-5.6-sol, thinking=medium",
         "model=gpt-5.6-sol, thinking=high",
+        "subjective visual judgment uses Sol Medium by default",
+        "Use Sol High for new or system-wide visual direction",
+        "remaining execution is mechanical and objectively verifiable",
+        "two implementation/review repair cycles without closing the same material blocker",
+        "route the bounded continuation to a fresh Sol Medium task",
+        "route it once to fresh Sol High",
+        "return a terminal `BLOCKED` or `FAILED` outcome",
         "user-owned routing authorization",
         "plugin installation alone is not authorization",
         "native schema does not advertise an authorized pair",
@@ -360,6 +418,9 @@ def validate_global_agents_template() -> None:
         "Every terminal outcome returns exactly one",
         "Keep the planning thread unarchived",
         "never polls execution",
+        "failed-looking START is never automatic retry authorization",
+        "resume the same thread after an `interrupted` turn",
+        "user explicitly authorizes replacement",
         "One milestone normally uses one fresh execution context",
         "Before substantial execution",
         "open P0/P1 findings are zero",

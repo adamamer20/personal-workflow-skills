@@ -42,8 +42,39 @@ values:
 | --- | --- | --- |
 | Substantial decision-ready milestone | `gpt-5.6-luna` | `xhigh` |
 | Bounded or mechanical milestone | `gpt-5.6-luna` | `high` |
+| Visual-judgment implementation | `gpt-5.6-sol` | `medium` |
+| Critical visual direction, repeated-failure remediation, or final qualitative promotion review | `gpt-5.6-sol` | `high` |
+| Luna implementation/review loop after two unsuccessful repair cycles | `gpt-5.6-sol` | `medium` |
+| Sol Medium implementation/review loop after two further unsuccessful repair cycles | `gpt-5.6-sol` | `high` |
 | Independent normal code review | `gpt-5.6-luna` | `xhigh` |
 | Critical architecture/security review or planning | `gpt-5.6-sol` | `high` |
+
+Classify the acceptance judgment before applying the generic milestone-size
+route. Slide composition, landing pages, frontend or UI design, visual systems,
+and rendered-document quality are visual-judgment work when success depends on
+composition, hierarchy, responsive behavior, or inspection of the rendered
+result. Route that implementation to Sol Medium even when the implementation
+steps are otherwise decision-ready. Route new or system-wide visual direction,
+weak or conflicting references, remediation after repeated visual misses, and
+the independent final qualitative promotion review to Sol High. Use Luna for
+visually adjacent work only when the design target and acceptance criteria are
+already frozen and the remaining work is mechanical and objectively verifiable.
+The presence of frontend, CSS, slide, or document files alone does not determine
+the route.
+
+Apply a bounded circuit breaker to Luna execution. If two complete
+implementation/review repair cycles fail to close the same material blocker, or
+the same class of finding is reopened, stop assigning further iterations to
+that Luna context. Preserve the current diff, validation evidence, open review
+findings, and remaining acceptance gap in a continuation capsule, then route a
+fresh execution task to Sol Medium. Do not interpret escalation as permission to
+weaken acceptance, expand scope, or reuse the exhausted task. If the fresh Sol
+Medium continuation also completes two repair and re-review cycles without
+closing the blocker, preserve the same bounded evidence and escalate once to a
+fresh Sol High execution task. If Sol High exhausts ordinary repair, return a
+terminal `BLOCKED` or `FAILED` outcome to the planning owner rather than forming
+an indefinite loop. A more specific Sol High route still wins immediately for
+critical visual, architecture, or security work.
 
 If no applicable user authorization exists, mark the capsule
 `routing_status: not_authorized`, omit native overrides, and do not claim that
@@ -170,9 +201,19 @@ undispatched; never silently fall back to a subagent or another routing method.
 Keep the planning thread unarchived and routable while any execution peer owes
 it a terminal callback.
 
+Before replacing any outstanding milestone whose START was uncertain or whose
+terminal callback is missing, use the handoff recovery contract once. Reconcile
+an uncertain START without creating anything. For a known peer, take one
+non-waiting status snapshot: leave an active turn alone, resume the same thread
+after an `interrupted` turn, or request callback republication when the task is
+already complete. Never create a replacement merely because a server/client
+error, interruption, or missing callback occurred. A replacement requires a
+separate explicit user decision after the prior owner is proven unavailable or
+terminal and the duplicate-work risk is reported.
+
 ## Continue after an event
 
-Do not monitor execution. When a peer later messages this planning thread with
+Do not monitor execution routinely. When a peer later messages this planning thread with
 a material escalation, decide that question once from the plan and evidence,
 then send one reply to the exact execution thread. When a terminal milestone
 packet arrives, verify its claimed gates in proportion to risk, update the
@@ -180,6 +221,10 @@ canonical plan and current review log, select the next now-executable milestone,
 and dispatch it to a new peer context. Do not reuse the completed execution
 thread as the next milestone owner. Mark the program complete only after every
 required milestone and program-level promotion gate passes.
+
+If the user explicitly asks to recover a missing handoff or interrupted task,
+perform the single RECOVER_START or RECOVER_THREAD snapshot described above and
+return; do not turn recovery into polling.
 
 ## Final self-review
 
