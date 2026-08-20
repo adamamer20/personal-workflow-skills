@@ -11,6 +11,13 @@ program completion. This execution thread owns focused discovery,
 implementation, tests, ordinary repair, its code and documentation, milestone
 evidence, self-review, and safe local commits.
 
+The capsule must also contain the planning callback `threadId` and, when the
+native tools returned one, its exact `hostId`. Never derive a host from a
+project, environment, path, or model runtime. If the callback route is missing
+or ambiguous, resolve it read-only before mutation; if that fails, report the
+invalid capsule in this task and stop before mutation. Do not defer route
+discovery until the terminal step.
+
 Do not act as a program planner, continuously coordinate with the planning
 thread, or create additional mutable owners unless the milestone explicitly
 contains independent parallel work with disjoint ownership.
@@ -34,10 +41,36 @@ The planning and handoff creator resolve the execution role to a concrete
 native pair under the governing user/`AGENTS.md` policy. The default authorized
 pairs are `gpt-5.6-luna` with `thinking=high` for bounded or mechanical work,
 `gpt-5.6-luna` with `thinking=xhigh` for substantial milestones and independent
-normal reviews, and `gpt-5.6-sol` with `thinking=high` for critical
-architecture/security review or planning. The creator applies the resolved
-pair to a fresh peer's native `create_thread` call; this skill cannot change
-the model of the task that is already running.
+normal reviews, `gpt-5.6-sol` with `thinking=medium` for visual-judgment
+implementation, and `gpt-5.6-sol` with `thinking=high` for critical visual
+direction or promotion review, architecture/security review, or planning. The
+creator applies the resolved pair to a fresh peer's native `create_thread` call;
+this skill cannot change the model of the task that is already running.
+
+Visual-judgment work includes slide composition, landing pages, frontend or UI
+design, visual systems, and rendered-document quality when acceptance depends
+on composition, hierarchy, responsive behavior, or inspection of the rendered
+result. Sol Medium is the default for that implementation. Sol High owns new or
+system-wide visual direction, weak or conflicting references, remediation after
+repeated visual misses, and the independent final qualitative promotion review.
+Use Luna for visually adjacent execution only when the target and acceptance
+criteria are frozen and the remaining work is mechanical and objectively
+verifiable. Classify by the judgment needed for acceptance, not by file type.
+
+Luna execution has a bounded implementation/review circuit breaker. If two
+complete repair and re-review cycles fail to close the same material blocker,
+or the same class of finding is reopened, stop iterating in that Luna context.
+Reach the nearest safe checkpoint, preserve the current diff, validation
+evidence, review findings, and remaining acceptance gap, and send a bounded
+continuation through the planning route for a fresh `gpt-5.6-sol` task with
+`thinking=medium`. If that Sol Medium continuation also completes two repair
+and re-review cycles without closing the blocker, preserve the same bounded
+evidence and escalate once through the planning route to a fresh
+`gpt-5.6-sol` task with `thinking=high`. If Sol High exhausts ordinary repair,
+return a terminal `BLOCKED` or `FAILED` outcome instead of continuing the loop.
+Do not weaken the gate, silently expand scope, or reuse the exhausted task. A
+more specific Sol High route still wins immediately for critical visual,
+architecture, or security work.
 
 Skill installation alone does not authorize model overrides. Without an
 applicable user authorization, the creator omits `model` and `thinking` and
@@ -83,6 +116,9 @@ safe options, and current checkpoint. Do not poll, wait for, or repeatedly list
 the planning thread. If the decision blocks safe work, stop the execution turn;
 the planning thread replies to this execution thread when a decision exists.
 
+This restriction governs mid-execution messages. It does not remove the
+required terminal callback for a final `BLOCKED` or `FAILED` outcome.
+
 ## Hard context rollover
 
 Every implementation context has a hard lifecycle, whether it is a main, peer,
@@ -98,8 +134,26 @@ changing context; never preserve an exhausted context merely to preserve
 ownership. One milestone normally equals one thread, but an unexpectedly large
 milestone may roll over this way.
 
-If the native runtime cannot create a peer thread, report the limitation and
-stop at the safe checkpoint. Never silently fall back to a subagent.
+If the native runtime cannot create a peer thread, send a terminal `ESCALATION`
+to the planning callback target, report the limitation, and stop at the safe
+checkpoint. Never silently fall back to a subagent.
+
+## Recovery after interruption
+
+An interrupted runtime turn cannot guarantee that this skill executed its
+terminal callback. When this same task receives an explicit `RECOVERY` message,
+do not restart the milestone blindly. Re-read the canonical plan and capsule,
+inspect the existing worktree/diff, durable artifacts, recent validation
+evidence, and relevant background-process state, then resume from the nearest
+safe checkpoint. Preserve already verified work and rerun only checks made stale
+by later mutations or whose completion cannot be established.
+
+Retain the original ownership, scope, model, acceptance gates, and callback
+route. Do not create another task, duplicate the production path, weaken a gate,
+or claim that pre-interruption commands completed without durable evidence. The
+resumed turn still owes exactly one terminal callback. A `REPUBLISH_CALLBACK`
+message is narrower: do not edit or rerun work; reproduce the already-established
+terminal packet in both the peer final response and the exact planning callback.
 
 ## Git safety
 
@@ -148,10 +202,18 @@ and required parity, and add replacement tests before removing the old path or
 tests. Deletion of the old path is not evidence that the replacement is
 complete.
 
-## Terminal completion
+## Terminal callback
 
-After all milestone gates pass, send exactly one bounded completion packet to
-the planning thread, then end this execution task. Include:
+Every terminal exit must attempt exactly one bounded callback to the exact
+planning route before this execution task ends:
+
+- `COMPLETION` only when all milestone gates pass;
+- `ESCALATION` with `Status: BLOCKED` when a dependency, decision, permission,
+  or environment prevents completion; or
+- `ESCALATION` with `Status: FAILED` when the milestone exhausts ordinary repair
+  without satisfying its gates.
+
+The packet includes:
 
 ```text
 Milestone
@@ -165,5 +227,10 @@ Recommended next milestone
 ```
 
 Do not attach raw logs, poll for acknowledgement, monitor progress, or claim
-program completion. If native peer messaging is unavailable or the exact
-planning thread cannot be resolved safely, report the unsent callback truthfully.
+program completion. Delivery is a closure gate separate from work status. End
+with both `work_status` and `callback_status: sent|unsent`. If native messaging
+is unavailable, the target is archived, the route is not safely resolvable, or
+dispatch fails, do not invent a host, unarchive the target, or claim delivery.
+Put `callback_status: unsent`, the exact target and native error, and the complete
+unsent packet in this task's final response so the terminal outcome remains
+recoverable.

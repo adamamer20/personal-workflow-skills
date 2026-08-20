@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Thread Handoff"
-  short_description: "Start or message peer tasks without polling"
-  default_prompt: "Use $codex-thread-handoff to hand work or a result to a peer Codex thread without creating a child agent or polling it."
+  short_description: "Start, recover, or message peer tasks safely"
+  default_prompt: "Use $codex-thread-handoff to start, reconcile, recover, or message one peer Codex thread without retries, child agents, or routine polling."
