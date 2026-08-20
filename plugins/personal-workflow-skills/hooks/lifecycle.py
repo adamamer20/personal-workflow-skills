@@ -31,6 +31,7 @@ MAX_MODEL = 128
 MAX_THINKING = 32
 MAX_PROMPT_FOR_DIGEST = 32 * 1024
 MAX_DIRECTORY = 160
+MAX_JSON_TEXT = 256 * 1024
 UNRESOLVED_STATUSES = frozenset({"pending", "uncertain", "ambiguous"})
 MISSING = object()
 
@@ -55,6 +56,25 @@ def _bounded_optional(value: Any, limit: int) -> str | None:
 
 def _valid_id(value: Any) -> str | None:
     return _bounded(value, MAX_ID)
+
+
+def _event_session_id(event: dict[str, Any]) -> str | None:
+    """Return the exact bounded session identity required for state access."""
+
+    return _bounded(event.get("session_id"), MAX_ID)
+
+
+def _decode_json_string(value: Any) -> Any:
+    """Decode one bounded JSON string layer without recursive parsing."""
+
+    if not isinstance(value, str):
+        return value
+    if not value or len(value) > MAX_JSON_TEXT:
+        return None
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, RecursionError, UnicodeDecodeError):
+        return None
 
 
 def _normalise_environment(value: Any) -> str | None:
@@ -273,8 +293,12 @@ def _attempt_target(attempt: dict[str, Any]) -> dict[str, str | None]:
     }
 
 
-def _unresolved_attempts(state: dict[str, Any]) -> list[dict[str, Any]]:
-    return [item for item in state["attempts"] if item.get("status") in UNRESOLVED_STATUSES]
+def _unresolved_attempts(state: dict[str, Any], session_id: str) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in state["attempts"]
+        if item.get("session_id") == session_id and item.get("status") in UNRESOLVED_STATUSES
+    ]
 
 
 def _new_attempt(
@@ -282,6 +306,7 @@ def _new_attempt(
     context: dict[str, str | None],
     fingerprint: str,
     event: dict[str, Any],
+    session_id: str,
 ) -> dict[str, Any]:
     title = tool_input.get("title") if isinstance(tool_input.get("title"), str) else ""
     return {
@@ -295,7 +320,7 @@ def _new_attempt(
         if isinstance(tool_input.get("thinking"), str)
         else "",
         "turn_id": _bounded_optional(event.get("turn_id"), MAX_ID),
-        "session_id": _bounded_optional(event.get("session_id"), MAX_ID),
+        "session_id": session_id,
         "created_at": _now(),
         "status": "pending",
         "result_classification": "pending",
@@ -307,9 +332,15 @@ def _new_attempt(
 
 
 def _find_attempt(
-    state: dict[str, Any], fingerprint: str, *, statuses: set[str] | frozenset[str] | None = None
+    state: dict[str, Any],
+    fingerprint: str,
+    *,
+    session_id: str,
+    statuses: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any] | None:
     for attempt in reversed(state["attempts"]):
+        if attempt.get("session_id") != session_id:
+            continue
         if attempt.get("fingerprint") != fingerprint:
             continue
         if statuses is not None and attempt.get("status") not in statuses:
@@ -320,17 +351,25 @@ def _find_attempt(
 
 def _allow_pre_create(event: dict[str, Any]) -> dict[str, Any]:
     repaired, changed, context = _repair_payload(event.get("tool_input"))
+    session_id = _event_session_id(event)
+    if session_id is None:
+        return _pre_allow(
+            repaired if changed else None,
+            warning="session_id is absent or malformed; recovery state was not recorded",
+        )
     fingerprint = _fingerprint(repaired, context)
     turn_id = _bounded_optional(event.get("turn_id"), MAX_ID)
 
     def mutate(state: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         for attempt in reversed(state["attempts"]):
+            if attempt.get("session_id") != session_id:
+                continue
             if attempt.get("fingerprint") != fingerprint:
                 continue
             same_turn = turn_id is not None and attempt.get("turn_id") == turn_id
             if same_turn or attempt.get("status") in UNRESOLVED_STATUSES:
                 return "duplicate", None
-        state["attempts"].append(_new_attempt(repaired, context, fingerprint, event))
+        state["attempts"].append(_new_attempt(repaired, context, fingerprint, event, session_id))
         state["attempts"] = state["attempts"][-MAX_ATTEMPTS:]
         return "allowed", repaired if changed else None
 
@@ -342,14 +381,17 @@ def _allow_pre_create(event: dict[str, Any]) -> dict[str, Any]:
     return _pre_allow(None)
 
 
-def _pre_allow(updated_input: dict[str, Any] | None) -> dict[str, Any]:
+def _pre_allow(updated_input: dict[str, Any] | None, *, warning: str | None = None) -> dict[str, Any]:
     specific: dict[str, Any] = {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
     }
     if updated_input is not None:
         specific["updatedInput"] = updated_input
-    return {"hookSpecificOutput": specific}
+    output: dict[str, Any] = {"hookSpecificOutput": specific}
+    if warning is not None:
+        output["systemMessage"] = f"personal-workflow-skills hook warning: {warning}. Allowing operation."
+    return output
 
 
 def _deny(reason: str) -> dict[str, Any]:
@@ -363,6 +405,7 @@ def _deny(reason: str) -> dict[str, Any]:
 
 
 def _classify_create_response(response: Any) -> tuple[str, str, str | None]:
+    response = _decode_json_string(response)
     if isinstance(response, dict):
         thread_id = _valid_id(response.get("threadId"))
         if thread_id is not None:
@@ -374,18 +417,21 @@ def _classify_create_response(response: Any) -> tuple[str, str, str | None]:
 
 
 def _post_create(event: dict[str, Any]) -> dict[str, Any]:
+    session_id = _event_session_id(event)
+    if session_id is None:
+        return _warning("session_id is absent or malformed; recovery state was not inspected")
     tool_input = event.get("tool_input")
     if not isinstance(tool_input, dict):
         return _warning("could not identify create_thread arguments; recovery remains fail-open")
     try:
-        _, _, context = _repair_payload(tool_input)
-        fingerprint = _fingerprint(tool_input, context)
+        repaired, _, context = _repair_payload(tool_input)
+        fingerprint = _fingerprint(repaired, context)
     except PayloadError:
         return _warning("could not fingerprint create_thread result; recovery remains fail-open")
     status, classification, peer_id = _classify_create_response(event.get("tool_response"))
 
     def mutate(state: dict[str, Any]) -> bool:
-        attempt = _find_attempt(state, fingerprint, statuses={"pending"})
+        attempt = _find_attempt(state, fingerprint, session_id=session_id, statuses={"pending"})
         if attempt is None:
             return False
         attempt["status"] = status
@@ -410,8 +456,15 @@ def _post_create(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pre_list(event: dict[str, Any]) -> dict[str, Any]:
+    session_id = _event_session_id(event)
+    if session_id is None:
+        return _pre_allow(
+            None,
+            warning="session_id is absent or malformed; reconciliation state was not inspected",
+        )
+
     def mutate(state: dict[str, Any]) -> str:
-        unresolved = _unresolved_attempts(state)
+        unresolved = _unresolved_attempts(state, session_id)
         if not unresolved:
             return "ordinary"
         attempt = unresolved[-1]
@@ -428,6 +481,7 @@ def _pre_list(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _candidate_items(response: Any) -> list[Any]:
+    response = _decode_json_string(response)
     if isinstance(response, list):
         return response
     if not isinstance(response, dict):
@@ -484,6 +538,9 @@ def _context_matches(
 
 
 def _post_list(event: dict[str, Any]) -> dict[str, Any]:
+    session_id = _event_session_id(event)
+    if session_id is None:
+        return _warning("session_id is absent or malformed; reconciliation state was not inspected")
     response_items = _candidate_items(event.get("tool_response"))
 
     def mutate(state: dict[str, Any]) -> tuple[str, str | None]:
@@ -491,7 +548,11 @@ def _post_list(event: dict[str, Any]) -> dict[str, Any]:
             (
                 item
                 for item in reversed(state["attempts"])
-                if item.get("status") == "uncertain" and item.get("reconciliation_used")
+                if (
+                    item.get("session_id") == session_id
+                    and item.get("status") == "uncertain"
+                    and item.get("reconciliation_used")
+                )
             ),
             None,
         )
@@ -559,9 +620,12 @@ def _post_context(context: str) -> dict[str, Any]:
 def _stop(event: dict[str, Any]) -> dict[str, Any]:
     if event.get("stop_hook_active") is True:
         return {}
+    session_id = _event_session_id(event)
+    if session_id is None:
+        return _warning("session_id is absent or malformed; unresolved recovery was not inspected")
 
     def mutate(state: dict[str, Any]) -> bool:
-        unresolved = _unresolved_attempts(state)
+        unresolved = _unresolved_attempts(state, session_id)
         if not unresolved:
             return False
         attempt = unresolved[-1]
@@ -585,10 +649,12 @@ def _stop(event: dict[str, Any]) -> dict[str, Any]:
 def _session_start(event: dict[str, Any]) -> dict[str, Any]:
     if event.get("source") != "resume":
         return {}
-    session_id = _bounded_optional(event.get("session_id"), MAX_ID) or "unknown-session"
+    session_id = _event_session_id(event)
+    if session_id is None:
+        return _warning("session_id is absent or malformed; unresolved recovery was not inspected")
 
     def mutate(state: dict[str, Any]) -> str | None:
-        unresolved = _unresolved_attempts(state)
+        unresolved = _unresolved_attempts(state, session_id)
         if not unresolved:
             return None
         attempt = unresolved[-1]

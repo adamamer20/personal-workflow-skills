@@ -55,39 +55,62 @@ class HandoffHookTests(unittest.TestCase):
         return value
 
     def pre_create(
-        self, *, turn: str = "turn-1", use_data: bool = True, **overrides: Any
+        self,
+        *,
+        turn: str = "turn-1",
+        session: str = "session-1",
+        use_data: bool = True,
+        **overrides: Any,
     ) -> dict[str, Any]:
         return self.run_hook(
             {
                 "hook_event_name": "PreToolUse",
                 "tool_name": "create_thread",
                 "turn_id": turn,
-                "session_id": "session-1",
+                "session_id": session,
                 "tool_input": self.create_input(**overrides),
             },
             use_data=use_data,
         )
 
     def post_create(
-        self, response: Any, *, turn: str = "turn-1", tool_input: dict[str, Any] | None = None
+        self,
+        response: Any,
+        *,
+        turn: str = "turn-1",
+        session: str = "session-1",
+        tool_input: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.run_hook(
             {
                 "hook_event_name": "PostToolUse",
                 "tool_name": "create_thread",
                 "turn_id": turn,
-                "session_id": "session-1",
+                "session_id": session,
                 "tool_input": tool_input or self.create_input(),
                 "tool_response": response,
             }
         )
 
     def test_safe_top_level_project_repair(self) -> None:
-        output = self.pre_create(target={"type": "project", "environment": {"type": "worktree"}}, projectId="project-1")
+        original_shape = {
+            "prompt": "Implement exactly one bounded milestone.",
+            "title": "M5 hooks",
+            "projectId": "project-1",
+            "target": {"type": "project", "environment": {"type": "worktree"}},
+            "model": "gpt-5.6-luna",
+            "thinking": "xhigh",
+        }
+        output = self.pre_create(
+            target=original_shape["target"],
+            projectId=original_shape["projectId"],
+        )
         specific = output["hookSpecificOutput"]
         self.assertEqual(specific["permissionDecision"], "allow")
         self.assertNotIn("projectId", specific["updatedInput"])
         self.assertEqual(specific["updatedInput"]["target"]["projectId"], "project-1")
+        self.post_create('{"error":"timeout"}', tool_input=original_shape)
+        self.assertEqual(self.state()["attempts"][-1]["status"], "uncertain")
 
     def test_conflicting_or_malformed_targets_are_denied(self) -> None:
         conflict = self.pre_create(target={"type": "project", "projectId": "project-2"}, projectId="project-1")
@@ -111,10 +134,10 @@ class HandoffHookTests(unittest.TestCase):
 
     def test_confirmed_and_queued_results_clear_recovery(self) -> None:
         self.pre_create()
-        self.post_create({"threadId": "thread-1", "hostId": "local"})
+        self.post_create('{"threadId":"thread-1","hostId":"local"}')
         self.assertEqual(self.state()["attempts"][-1]["status"], "confirmed")
         self.pre_create(turn="turn-2")
-        self.post_create({"clientThreadId": "client-1"}, turn="turn-2")
+        self.post_create('{"clientThreadId":"client-1"}', turn="turn-2")
         self.assertEqual(self.state()["attempts"][-1]["status"], "queued")
         self.assertEqual(self.state()["attempts"][-1]["result_classification"], "queued")
 
@@ -129,6 +152,7 @@ class HandoffHookTests(unittest.TestCase):
                 "hook_event_name": "PreToolUse",
                 "tool_name": "list_threads",
                 "turn_id": "turn-2",
+                "session_id": "session-1",
                 "tool_input": {"limit": 10},
             }
         )
@@ -138,6 +162,7 @@ class HandoffHookTests(unittest.TestCase):
                 "hook_event_name": "PreToolUse",
                 "tool_name": "list_threads",
                 "turn_id": "turn-2",
+                "session_id": "session-1",
                 "tool_input": {"limit": 10},
             }
         )
@@ -158,7 +183,8 @@ class HandoffHookTests(unittest.TestCase):
                 "hook_event_name": "PostToolUse",
                 "tool_name": "list_threads",
                 "turn_id": "turn-2",
-                "tool_response": response,
+                "session_id": "session-1",
+                "tool_response": json.dumps(response),
             }
         )
         self.assertIn("exactly one", reconciliation["hookSpecificOutput"]["additionalContext"])
@@ -169,18 +195,40 @@ class HandoffHookTests(unittest.TestCase):
     def test_reconciliation_not_found_and_ambiguous_are_terminal(self) -> None:
         self.pre_create()
         self.post_create({"error": "unknown project"})
-        self.run_hook({"hook_event_name": "PreToolUse", "tool_name": "list_threads", "tool_input": {}})
-        self.run_hook({"hook_event_name": "PostToolUse", "tool_name": "list_threads", "tool_response": {"threads": []}})
+        self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "list_threads",
+                "session_id": "session-1",
+                "tool_input": {},
+            }
+        )
+        self.run_hook(
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "list_threads",
+                "session_id": "session-1",
+                "tool_response": json.dumps({"threads": []}),
+            }
+        )
         self.assertEqual(self.state()["attempts"][-1]["status"], "not_found")
         self.assertEqual(self.state()["attempts"][-1]["reconciliation_classification"], "not_found")
 
         self.pre_create(turn="turn-2")
         self.post_create({"error": "unknown project"}, turn="turn-2")
-        self.run_hook({"hook_event_name": "PreToolUse", "tool_name": "list_threads", "tool_input": {}})
+        self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "list_threads",
+                "session_id": "session-1",
+                "tool_input": {},
+            }
+        )
         self.run_hook(
             {
                 "hook_event_name": "PostToolUse",
                 "tool_name": "list_threads",
+                "session_id": "session-1",
                 "tool_response": {
                     "threads": [
                         {
@@ -222,6 +270,85 @@ class HandoffHookTests(unittest.TestCase):
     def test_internal_state_error_fails_open_with_warning(self) -> None:
         output = self.pre_create(use_data=False)
         self.assertIn("warning", output["systemMessage"])
+
+    def test_sessions_isolate_create_duplicates_and_reconciliation_reservations(self) -> None:
+        self.pre_create(session="session-a")
+        self.post_create('{"error":"timeout"}', session="session-a")
+        allowed = self.pre_create(session="session-b", turn="turn-b")
+        self.assertEqual(allowed["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.post_create('{"error":"timeout"}', session="session-b", turn="turn-b")
+
+        first_a = self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "list_threads",
+                "session_id": "session-a",
+                "tool_input": {},
+            }
+        )
+        first_b = self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "list_threads",
+                "session_id": "session-b",
+                "tool_input": {},
+            }
+        )
+        self.assertEqual(first_a["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.assertEqual(first_b["hookSpecificOutput"]["permissionDecision"], "allow")
+        second_a = self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "list_threads",
+                "session_id": "session-a",
+                "tool_input": {},
+            }
+        )
+        second_b = self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "list_threads",
+                "session_id": "session-b",
+                "tool_input": {},
+            }
+        )
+        self.assertEqual(second_a["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(second_b["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_sessions_isolate_stop_and_resume_context(self) -> None:
+        self.pre_create(session="session-a")
+        self.post_create('{"error":"timeout"}', session="session-a")
+        stop_b = self.run_hook(
+            {"hook_event_name": "Stop", "session_id": "session-b", "stop_hook_active": False}
+        )
+        stop_a = self.run_hook(
+            {"hook_event_name": "Stop", "session_id": "session-a", "stop_hook_active": False}
+        )
+        self.assertNotIn("decision", stop_b)
+        self.assertEqual(stop_a["decision"], "block")
+
+        resume_b = self.run_hook(
+            {"hook_event_name": "SessionStart", "source": "resume", "session_id": "session-b"}
+        )
+        resume_a = self.run_hook(
+            {"hook_event_name": "SessionStart", "source": "resume", "session_id": "session-a"}
+        )
+        self.assertEqual(resume_b, {})
+        self.assertIn("M5 hooks", resume_a["hookSpecificOutput"]["additionalContext"])
+
+    def test_malformed_session_fails_open_without_state_access(self) -> None:
+        self.pre_create(session="session-a")
+        output = self.run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "create_thread",
+                "turn_id": "turn-b",
+                "tool_input": self.create_input(),
+            }
+        )
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+        self.assertIn("session_id", output["systemMessage"])
+        self.assertEqual(len(self.state()["attempts"]), 1)
 
 
 if __name__ == "__main__":
