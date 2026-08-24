@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
+import stat
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,53 +110,59 @@ def _canonical_jsonl(values: tuple[dict[str, Any], ...]) -> str:
     )
 
 
-def _reject_symlink(path: Path) -> None:
-    if path.is_symlink():
-        raise UnsafeArtifactPath(f"refusing symlink in artifact path: {path}")
-
-
 def _repository_root(path: str | Path) -> Path:
-    root = Path(path)
-    if not root.exists() or not root.is_dir():
-        raise UnsafeArtifactPath(f"repository root is not an existing directory: {root}")
-    _reject_symlink(root)
-    resolved = root.resolve(strict=True)
-    if not resolved.is_dir():
-        raise UnsafeArtifactPath(f"repository root is not a directory: {root}")
-    return resolved
-
-
-def _ensure_child_directory(root: Path, relative: tuple[str, ...]) -> Path:
-    current = root
-    for component in relative:
-        current = current / component
-        if current.exists() or current.is_symlink():
-            _reject_symlink(current)
-            if not current.is_dir():
-                raise UnsafeArtifactPath(f"artifact path component is not a directory: {current}")
-        else:
-            current.mkdir()
-        resolved = current.resolve(strict=True)
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise UnsafeArtifactPath(f"artifact path escapes repository: {current}") from exc
-    return current
-
-
-def _safe_file_path(root: Path, relative: tuple[str, ...]) -> Path:
-    parent = _ensure_child_directory(root, relative[:-1])
-    target = parent / relative[-1]
-    if target.exists() or target.is_symlink():
-        _reject_symlink(target)
-        if not target.is_file():
-            raise UnsafeArtifactPath(f"artifact target is not a regular file: {target}")
-    resolved = target.resolve(strict=False)
+    root = Path(os.path.abspath(os.fspath(path)))
     try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise UnsafeArtifactPath(f"artifact target escapes repository: {target}") from exc
-    return target
+        metadata = os.lstat(root)
+    except FileNotFoundError as exc:
+        raise UnsafeArtifactPath(f"repository root is not an existing directory: {root}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise UnsafeArtifactPath(f"repository root is not a real directory: {root}")
+    return root
+
+
+def _open_directory_chain(path: Path) -> int:
+    """Open every ancestor with O_NOFOLLOW and retain the final directory fd."""
+
+    current_fd = os.open(path.anchor, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        try:
+            os.close(current_fd)
+        except OSError:
+            pass
+        raise UnsafeArtifactPath(f"artifact ancestor is not a stable real directory: {path}") from exc
+
+
+def _open_child_directory(parent_fd: int, name: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        try:
+            return os.open(name, flags, dir_fd=parent_fd)
+        except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+            raise UnsafeArtifactPath(f"artifact directory is not stable: {name}") from exc
+    except (NotADirectoryError, OSError) as exc:
+        raise UnsafeArtifactPath(f"artifact directory is not a real directory: {name}") from exc
+
+
+def _assert_regular_or_missing(parent_fd: int, name: str) -> None:
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise UnsafeArtifactPath(f"artifact target is not a real regular file: {name}")
 
 
 class ArtifactProjector:
@@ -174,65 +181,98 @@ class ArtifactProjector:
         run = RunId(run_id if isinstance(run_id, str) else str(run_id))
         root = self.repository_root
         try:
-            ledger_path = ledger.path.resolve(strict=True)
-            ledger_path.relative_to(root)
-        except (FileNotFoundError, ValueError) as exc:
+            ledger.path.relative_to(root)
+        except ValueError as exc:
             raise UnsafeArtifactPath("ledger must be stored inside the repository root") from exc
-        snapshot = ledger.snapshot(run)
-        run_dir = _ensure_child_directory(root, (".codex-flow", "runs", str(run)))
-
-        run_path = _safe_file_path(root, (".codex-flow", "runs", str(run), "run.json"))
-        milestones_path = _safe_file_path(root, (".codex-flow", "runs", str(run), "milestones.json"))
-        events_path = _safe_file_path(root, (".codex-flow", "runs", str(run), "events.jsonl"))
-        milestones = tuple(
-            {
-                **_milestone_json(record),
-                "dispatches": [
-                    _dispatch_json(dispatch)
-                    for dispatch in snapshot.dispatches
-                    if dispatch.milestone_id == record.milestone_id
-                ],
-            }
-            for record in snapshot.milestones
-        )
-        events = tuple(_event_json(event) for event in snapshot.events)
-        files = (
-            (run_path, _canonical_json(_run_json(snapshot))),
-            (milestones_path, _canonical_json(list(milestones))),
-            (events_path, _canonical_jsonl(events)),
-        )
-        for index, (path, content) in enumerate(files):
-            self._atomic_write(path, content, f"projection_{index}")
-        return ProjectionPaths(run_dir, run_path, milestones_path, events_path)
-
-    def _atomic_write(self, target: Path, content: str, stage: str) -> None:
-        _reject_symlink(target)
-        parent = target.parent
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=parent)
-        temporary = Path(temporary_name)
+        root_fd = _open_directory_chain(root)
         try:
+            codex_fd = _open_child_directory(root_fd, ".codex-flow")
+            try:
+                runs_fd = _open_child_directory(codex_fd, "runs")
+                try:
+                    run_fd = _open_child_directory(runs_fd, str(run))
+                    try:
+                        snapshot = ledger.snapshot(run)
+                        run_dir = root / ".codex-flow" / "runs" / str(run)
+                        files = (
+                            ("run.json", _canonical_json(_run_json(snapshot))),
+                            (
+                                "milestones.json",
+                                _canonical_json(
+                                    [
+                                        {
+                                            **_milestone_json(record),
+                                            "dispatches": [
+                                                _dispatch_json(dispatch)
+                                                for dispatch in snapshot.dispatches
+                                                if dispatch.run_id == record.run_id
+                                                and dispatch.milestone_id == record.milestone_id
+                                            ],
+                                        }
+                                        for record in snapshot.milestones
+                                    ]
+                                ),
+                            ),
+                            ("events.jsonl", _canonical_jsonl(tuple(_event_json(event) for event in snapshot.events))),
+                        )
+                        for index, (name, content) in enumerate(files):
+                            self._atomic_write(run_fd, name, content, f"projection_{index}", run_dir / name)
+                        return ProjectionPaths(
+                            run_dir, run_dir / "run.json", run_dir / "milestones.json", run_dir / "events.jsonl"
+                        )
+                    finally:
+                        os.close(run_fd)
+                finally:
+                    os.close(runs_fd)
+            finally:
+                os.close(codex_fd)
+        finally:
+            os.close(root_fd)
+
+    def _atomic_write(self, run_fd: int, name: str, content: str, stage: str, target: Path) -> None:
+        _assert_regular_or_missing(run_fd, name)
+        temporary_name: str | None = None
+        descriptor: int | None = None
+        try:
+            for _ in range(16):
+                candidate = f".{name}.{uuid.uuid4().hex}.tmp"
+                try:
+                    descriptor = os.open(
+                        candidate,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=run_fd,
+                    )
+                    temporary_name = candidate
+                    break
+                except FileExistsError:
+                    continue
+            if descriptor is None or temporary_name is None:
+                raise ArtifactError(f"unable to allocate temporary projection for {target}")
             if self._fault_injector is not None:
                 self._fault_injector(stage, target)
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(content)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = None
+                handle.write(content.encode("utf-8"))
                 handle.flush()
                 os.fsync(handle.fileno())
-            _reject_symlink(temporary)
-            os.replace(temporary, target)
-            directory_fd = os.open(parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            _assert_regular_or_missing(run_fd, name)
+            os.replace(temporary_name, name, src_dir_fd=run_fd, dst_dir_fd=run_fd)
+            temporary_name = None
+            os.fsync(run_fd)
         except BaseException as exc:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=run_fd)
+                except OSError:
+                    pass
+            if isinstance(exc, ArtifactError):
+                raise
             raise ArtifactError(f"failed to atomically write projection {target}") from exc
 
 
@@ -246,24 +286,3 @@ def rebuild_projections(
     """Convenience function for the canonical projection path."""
 
     return ArtifactProjector(repository_root, fault_injector=fault_injector).rebuild(ledger, run_id)
-
-
-write_artifacts = rebuild_projections
-rebuild_artifacts = rebuild_projections
-ArtifactWriter = ArtifactProjector
-ProjectionWriter = ArtifactProjector
-
-
-def write_run_artifacts(
-    ledger: Ledger,
-    run_id: RunId | str,
-    repository_root: str | Path,
-    *,
-    fault_injector: ProjectionFaultInjector | None = None,
-) -> ProjectionPaths:
-    return rebuild_projections(
-        ledger,
-        repository_root,
-        run_id,
-        fault_injector=fault_injector,
-    )

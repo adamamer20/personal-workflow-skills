@@ -290,12 +290,6 @@ class WorkflowState(str, Enum):
     CANCELLED = "CANCELLED"
 
 
-# Friendly aliases make the contract discoverable without introducing a second
-# state vocabulary in callers.
-State = WorkflowState
-MilestoneState = WorkflowState
-
-
 TERMINAL_STATES: frozenset[WorkflowState] = frozenset(
     {WorkflowState.ACCEPTED, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED}
 )
@@ -351,14 +345,6 @@ def coerce_state(value: WorkflowState | str) -> WorkflowState:
         raise ValueError(f"unknown workflow state: {value!r}") from exc
 
 
-def is_allowed_transition(from_state: WorkflowState | str, to_state: WorkflowState | str) -> bool:
-    """Return whether one edge exists in the closed H2 state machine."""
-
-    source = coerce_state(from_state)
-    target = coerce_state(to_state)
-    return target in ALLOWED_TRANSITIONS[source]
-
-
 class StateMachine:
     """Pure view of the deterministic state/transition contract."""
 
@@ -367,8 +353,11 @@ class StateMachine:
     transitions = ALLOWED_TRANSITIONS
 
     @classmethod
-    def allows(cls, from_state: WorkflowState | str, to_state: WorkflowState | str) -> bool:
-        return is_allowed_transition(from_state, to_state)
+    def validate(cls, from_state: WorkflowState | str, to_state: WorkflowState | str) -> None:
+        source = coerce_state(from_state)
+        target = coerce_state(to_state)
+        if target not in cls.transitions[source]:
+            raise ValueError(f"{source.value} -> {target.value} is not allowed")
 
 
 class ReasonCode(str, Enum):
@@ -389,43 +378,31 @@ class ReasonCode(str, Enum):
 @dataclass(frozen=True, slots=True)
 class WorkflowReason:
     code: ReasonCode
-    detail: str | None = None
+    detail: None = None
 
     def __post_init__(self) -> None:
-        if self.detail is not None and (
-            not isinstance(self.detail, str) or len(self.detail) > 2048 or "\x00" in self.detail
-        ):
-            raise ValueError("reason detail must be bounded and text-safe")
+        if self.detail is not None:
+            raise ValueError("durable workflow reasons do not carry free-form detail")
 
 
 class PreIdentityTransportFailure(WorkflowReason):
-    def __init__(self, detail: str | None = None) -> None:
-        super().__init__(ReasonCode.TRANSPORT_FAILURE, detail)
+    def __init__(self) -> None:
+        super().__init__(ReasonCode.TRANSPORT_FAILURE)
 
 
 class PostIdentityExecutionFailure(WorkflowReason):
-    def __init__(self, detail: str | None = None) -> None:
-        super().__init__(ReasonCode.EXECUTION_FAILURE, detail)
+    def __init__(self) -> None:
+        super().__init__(ReasonCode.EXECUTION_FAILURE)
 
 
 class ReviewRejected(WorkflowReason):
-    def __init__(self, detail: str | None = None) -> None:
-        super().__init__(ReasonCode.REVIEW_REJECTED, detail)
+    def __init__(self) -> None:
+        super().__init__(ReasonCode.REVIEW_REJECTED)
 
 
 class TerminalOutcome(WorkflowReason):
-    def __init__(self, detail: str | None = None) -> None:
-        super().__init__(ReasonCode.TERMINAL_OUTCOME, detail)
-
-
-# Existing H1 exception names remain the transport boundary; H2 callers can use
-# the explicit typed reason names above without conflating failure categories.
-TransportFailureReason = PreIdentityTransportFailure
-ExecutionFailureReason = PostIdentityExecutionFailure
-ReviewRejectionReason = ReviewRejected
-Reason = WorkflowReason
-PreIdentityTransportReason = PreIdentityTransportFailure
-PostIdentityExecutionReason = PostIdentityExecutionFailure
+    def __init__(self) -> None:
+        super().__init__(ReasonCode.TERMINAL_OUTCOME)
 
 
 @dataclass(frozen=True, slots=True)

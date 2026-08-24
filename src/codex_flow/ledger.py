@@ -8,14 +8,14 @@ SDK, subprocess, network, or worktree code belongs here.
 
 from __future__ import annotations
 
-import json
-import re
+import os
 import sqlite3
+import stat
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 from .domain import (
     ALLOWED_TRANSITIONS,
@@ -39,7 +39,6 @@ from .domain import (
     RunId,
     RunRecord,
     SchemaVersion,
-    State,
     TerminalFailureAfterIdentity,
     TerminalOutcome,
     TransportFailureBeforeIdentity,
@@ -48,19 +47,15 @@ from .domain import (
     coerce_state,
 )
 
-JSONScalar: TypeAlias = str | int | float | bool | None
-JSONValue: TypeAlias = JSONScalar | dict[str, "JSONValue"] | list["JSONValue"]
-
 CURRENT_SCHEMA_VERSION = SchemaVersion(2)
-SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 SUPPORTED_SCHEMA_VERSIONS = frozenset({SchemaVersion(1), CURRENT_SCHEMA_VERSION})
+_SCHEMA_IDENTITIES = {SchemaVersion(1): "codex_flow_h2_v1", CURRENT_SCHEMA_VERSION: "codex_flow_h2_v2"}
+_SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
 _STATES_SQL = ", ".join(f"'{state.value}'" for state in WorkflowState)
-_EVENT_TYPE_PATTERN = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
-_FORBIDDEN_FIELD_PATTERN = re.compile(
-    r"(?:secret|password|credential|token|prompt|payload|request|response|raw[_ -]?sdk|raw[_ -]?response|authorization)",
-    re.IGNORECASE,
-)
+_REASON_CODES_SQL = ", ".join(f"'{reason.value}'" for reason in ReasonCode)
+_EVENT_TYPES = frozenset({"dispatch_claimed", "state_transition"})
+_EVENT_TYPES_SQL = ", ".join(f"'{event_type}'" for event_type in sorted(_EVENT_TYPES))
 
 
 class LedgerError(RuntimeError):
@@ -91,21 +86,12 @@ class InvalidTransition(LedgerError):
     """A state transition is not in the explicit H2 transition table."""
 
 
-InvalidTransitionError = InvalidTransition
-
-
 class StaleWriter(LedgerError):
     """The caller's expected predecessor is no longer current."""
 
 
-StaleStateError = StaleWriter
-
-
 class DispatchConflict(LedgerError):
     """A milestone/role is already owned by another logical dispatch."""
-
-
-DispatchOwnershipConflict = DispatchConflict
 
 
 FaultInjector = Callable[[str], None]
@@ -143,66 +129,33 @@ def _generation(value: Generation | int | str) -> Generation:
         raise ValueError(f"invalid generation: {value!r}") from exc
 
 
-def _safe_json_value(value: object, *, field_name: str = "metadata", depth: int = 0) -> JSONValue:
-    """Validate the intentionally non-sensitive projection metadata contract.
+def _empty_object(value: Mapping[str, object] | None, *, field_name: str) -> tuple[JsonObject, str]:
+    """Reject generic durable content; H2 persists identifiers and facts only."""
 
-    Ledger metadata is for small identifiers and diagnostics, never model
-    inputs or SDK payloads.  Rejecting suspicious field names before SQL keeps
-    secrets from being accidentally made durable and makes the boundary easy
-    to audit.
-    """
-
-    if depth > 12:
-        raise ValueError(f"{field_name} is nested too deeply")
-    if isinstance(value, dict):
-        output: dict[str, JSONValue] = {}
-        for key, child in value.items():
-            if not isinstance(key, str) or not key or len(key) > 96:
-                raise ValueError(f"{field_name} keys must be bounded strings")
-            if _FORBIDDEN_FIELD_PATTERN.search(key):
-                raise ValueError(f"{field_name} cannot persist sensitive field {key!r}")
-            output[key] = _safe_json_value(child, field_name=f"{field_name}.{key}", depth=depth + 1)
-        return output
-    if isinstance(value, list):
-        return [_safe_json_value(child, field_name=field_name, depth=depth + 1) for child in value]
-    if value is None or isinstance(value, str | int | float | bool):
-        if isinstance(value, str) and ("\x00" in value or len(value) > 4096):
-            raise ValueError(f"{field_name} contains an unsafe or oversized string")
-        return value
-    raise TypeError(f"{field_name} must be JSON-serializable")
-
-
-def _json_object(value: Mapping[str, object] | None, *, field_name: str) -> tuple[JsonObject, str]:
-    checked = _safe_json_value(dict(value or {}), field_name=field_name)
-    assert isinstance(checked, dict)
-    return checked, json.dumps(checked, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if value is not None and not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    if value is not None and dict(value):
+        raise ValueError(f"{field_name} does not accept arbitrary durable fields")
+    return {}, "{}"
 
 
 def _decode_object(raw: str | None, *, field_name: str) -> JsonObject:
-    if raw is None:
+    if raw in (None, "{}"):
         return {}
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise SchemaError(f"invalid JSON in {field_name}") from exc
-    if not isinstance(value, dict):
-        raise SchemaError(f"{field_name} must contain a JSON object")
-    checked = _safe_json_value(value, field_name=field_name)
-    assert isinstance(checked, dict)
-    return checked
+    raise SchemaError(f"{field_name} contains unsupported durable content")
 
 
 def _reason(value: WorkflowReason | ReasonCode | str | BaseException | None) -> WorkflowReason | None:
     if value is None:
         return None
     if isinstance(value, WorkflowReason):
-        if value.detail is not None and _FORBIDDEN_FIELD_PATTERN.search(value.detail):
-            raise ValueError("reason detail cannot persist sensitive content")
+        if value.detail is not None:
+            raise ValueError("durable workflow reasons do not carry free-form detail")
         return value
     if isinstance(value, TransportFailureBeforeIdentity):
-        return PreIdentityTransportFailure(str(value) or None)
+        return PreIdentityTransportFailure()
     if isinstance(value, TerminalFailureAfterIdentity):
-        return PostIdentityExecutionFailure(str(value) or None)
+        return PostIdentityExecutionFailure()
     if isinstance(value, ReasonCode):
         return WorkflowReason(value)
     try:
@@ -219,9 +172,55 @@ def _row_state(value: str) -> WorkflowState:
 
 
 def _event_type(value: str) -> str:
-    if not isinstance(value, str) or _EVENT_TYPE_PATTERN.fullmatch(value) is None:
-        raise ValueError("event type must be lowercase ASCII and at most 64 characters")
+    if value not in _EVENT_TYPES:
+        raise ValueError(f"unsupported event type: {value!r}")
     return value
+
+
+def _absolute_path(path: str | Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _path_components(path: Path) -> tuple[Path, ...]:
+    absolute = _absolute_path(path)
+    current = Path(absolute.anchor)
+    components = [current]
+    for part in absolute.parts[1:]:
+        current = current / part
+        components.append(current)
+    return tuple(components)
+
+
+def _validate_ledger_location(path: Path, *, create_parent: bool) -> tuple[tuple[int, int], ...]:
+    """Validate every lexical ancestor and the database entry without following symlinks."""
+
+    components = _path_components(path)
+    parent_components = components[:-1]
+    if create_parent:
+        for component in parent_components:
+            try:
+                metadata = os.lstat(component)
+            except FileNotFoundError:
+                component.mkdir()
+                metadata = os.lstat(component)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise SchemaError(f"ledger ancestor is not a real directory: {component}")
+    fingerprints: list[tuple[int, int]] = []
+    for component in parent_components:
+        try:
+            metadata = os.lstat(component)
+        except FileNotFoundError as exc:
+            raise SchemaError(f"ledger ancestor disappeared: {component}") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise SchemaError(f"ledger ancestor is not a real directory: {component}")
+        fingerprints.append((metadata.st_dev, metadata.st_ino))
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return tuple(fingerprints)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SchemaError(f"ledger database is not a real file: {path}")
+    return tuple(fingerprints)
 
 
 class Ledger:
@@ -236,9 +235,7 @@ class Ledger:
     ) -> None:
         if timeout <= 0:
             raise ValueError("SQLite busy timeout must be positive")
-        self.path = Path(path)
-        if self.path.is_symlink():
-            raise SchemaError(f"refusing symlink workflow ledger path: {self.path}")
+        self.path = _absolute_path(path)
         self._timeout = timeout
         self._fault_injector = fault_injector
         self._connection: sqlite3.Connection | None = None
@@ -248,7 +245,8 @@ class Ledger:
         if self._connection is not None:
             return
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            before = _validate_ledger_location(self.path, create_parent=True)
+            _validate_ledger_location(self.path, create_parent=False)
             connection = sqlite3.connect(
                 str(self.path),
                 timeout=self._timeout,
@@ -258,13 +256,27 @@ class Ledger:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute(f"PRAGMA busy_timeout = {int(self._timeout * 1000)}")
+            after = _validate_ledger_location(self.path, create_parent=False)
+            if before != after:
+                connection.close()
+                raise SchemaError("ledger ancestors changed while opening")
             self._connection = connection
             self._ensure_schema()
+        except LedgerError:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+            raise
         except sqlite3.DatabaseError as exc:
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
             raise SchemaError(f"unable to open workflow ledger {self.path}") from exc
+        except BaseException:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+            raise
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -300,14 +312,24 @@ class Ledger:
             raise UnsupportedSchemaVersion(f"ledger schema {version} is newer than supported {CURRENT_SCHEMA_VERSION}")
         if version not in SUPPORTED_SCHEMA_VERSIONS:
             raise UnsupportedSchemaVersion(f"ledger schema {version} is unsupported")
+        metadata_keys = {
+            str(row[0]) for row in connection.execute("SELECT key FROM schema_meta ORDER BY key").fetchall()
+        }
+        if metadata_keys != {"schema_version", "migration_marker", "schema_identity"}:
+            raise CorruptSchemaError("schema metadata keys are not the owned v2 contract")
+        identity = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()
+        if identity is None or identity[0] != _SCHEMA_IDENTITIES[version]:
+            raise CorruptSchemaError("schema identity does not match its version")
         marker = connection.execute("SELECT value FROM schema_meta WHERE key = 'migration_marker'").fetchone()
         if marker is None and version == CURRENT_SCHEMA_VERSION:
             raise CorruptSchemaError("migration marker is missing")
-        if marker is not None and marker[0] not in {"complete", f"v{int(version)}"}:
+        expected_markers = {"complete"} if version == CURRENT_SCHEMA_VERSION else {"complete", f"v{int(version)}"}
+        if marker is not None and marker[0] not in expected_markers:
             raise CorruptSchemaError("invalid migration marker")
         if version < CURRENT_SCHEMA_VERSION:
             self._migrate(version)
-        self._validate_shape()
+        self._validate_shape(CURRENT_SCHEMA_VERSION)
+        self._validate_rows()
 
     def _create_schema(self) -> None:
         sql = f"""
@@ -323,7 +345,7 @@ class Ledger:
                 created_at TEXT NOT NULL,
                 closed_at TEXT,
                 metadata_json TEXT NOT NULL DEFAULT '{{}}'
-                    CHECK(json_valid(metadata_json) AND json_type(metadata_json) = 'object')
+                    CHECK(metadata_json = '{{}}')
             );
 
             CREATE TABLE milestones (
@@ -333,7 +355,7 @@ class Ledger:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{{}}'
-                    CHECK(json_valid(metadata_json) AND json_type(metadata_json) = 'object'),
+                    CHECK(metadata_json = '{{}}'),
                 PRIMARY KEY(run_id, milestone_id),
                 FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
             );
@@ -345,6 +367,7 @@ class Ledger:
                 role TEXT NOT NULL CHECK(length(role) BETWEEN 1 AND 128),
                 generation INTEGER NOT NULL CHECK(generation > 0),
                 claimed_at TEXT NOT NULL,
+                CHECK(dispatch_id = run_id || '/' || milestone_id || '/' || role || '/' || generation),
                 UNIQUE(run_id, milestone_id, role),
                 FOREIGN KEY(run_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE
             );
@@ -356,12 +379,13 @@ class Ledger:
                 sequence INTEGER NOT NULL CHECK(sequence > 0),
                 from_state TEXT CHECK(from_state IS NULL OR from_state IN ({_STATES_SQL})),
                 to_state TEXT NOT NULL CHECK(to_state IN ({_STATES_SQL})),
-                event_type TEXT NOT NULL CHECK(length(event_type) BETWEEN 1 AND 64),
-                reason_code TEXT,
-                reason_detail TEXT,
+                event_type TEXT NOT NULL CHECK(event_type IN ({_EVENT_TYPES_SQL})),
+                reason_code TEXT CHECK(reason_code IS NULL OR reason_code IN ({_REASON_CODES_SQL})),
+                reason_detail TEXT CHECK(reason_detail IS NULL),
                 dispatch_id TEXT,
-                data_json TEXT CHECK(data_json IS NULL OR (json_valid(data_json) AND json_type(data_json) = 'object')),
+                data_json TEXT CHECK(data_json IS NULL),
                 occurred_at TEXT NOT NULL,
+                CHECK(event_id = run_id || '/' || milestone_id || '/' || sequence),
                 UNIQUE(run_id, milestone_id, sequence),
                 FOREIGN KEY(run_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE,
                 FOREIGN KEY(dispatch_id) REFERENCES dispatches(dispatch_id) ON DELETE RESTRICT
@@ -381,6 +405,9 @@ class Ledger:
                     (str(int(CURRENT_SCHEMA_VERSION)),),
                 )
                 self.connection.execute("INSERT INTO schema_meta(key, value) VALUES ('migration_marker', 'complete')")
+                self.connection.execute(
+                    "INSERT INTO schema_meta(key, value) VALUES ('schema_identity', ?)", (_SCHEMA_IDENTITY,)
+                )
                 statements = [statement.strip() for statement in sql.split(";") if statement.strip()]
                 # The first three statements above are intentionally skipped
                 # from the generated block, leaving the four owned data tables.
@@ -394,38 +421,205 @@ class Ledger:
                 raise
             self._ensure_schema()
 
-    def _validate_shape(self) -> None:
-        required: dict[str, set[str]] = {
-            "schema_meta": {"key", "value"},
-            "runs": {"run_id", "created_at", "metadata_json"},
-            "milestones": {"run_id", "milestone_id", "current_state", "created_at", "updated_at", "metadata_json"},
-            "dispatches": {"dispatch_id", "run_id", "milestone_id", "role", "generation", "claimed_at"},
+    def _validate_shape(self, version: SchemaVersion) -> None:
+        required_tables = {"schema_meta", "runs", "milestones", "dispatches", "events"}
+        tables = {
+            str(row[0])
+            for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if tables - required_tables:
+            raise CorruptSchemaError(f"unexpected tables in workflow ledger: {sorted(tables - required_tables)!r}")
+        expected: dict[str, dict[str, tuple[str, int, int]]] = {
+            "schema_meta": {
+                "key": ("TEXT", 1, 1),
+                "value": ("TEXT", 1, 0),
+            },
+            "runs": {
+                "run_id": ("TEXT", 1, 1),
+                "created_at": ("TEXT", 1, 0),
+                "closed_at": ("TEXT", 0, 0),
+                "metadata_json": ("TEXT", 1, 0),
+            },
+            "milestones": {
+                "run_id": ("TEXT", 1, 1),
+                "milestone_id": ("TEXT", 1, 2),
+                "current_state": ("TEXT", 1, 0),
+                "created_at": ("TEXT", 1, 0),
+                "updated_at": ("TEXT", 1, 0),
+                "metadata_json": ("TEXT", 1, 0),
+            },
+            "dispatches": {
+                "dispatch_id": ("TEXT", 1, 1),
+                "run_id": ("TEXT", 1, 0),
+                "milestone_id": ("TEXT", 1, 0),
+                "role": ("TEXT", 1, 0),
+                "generation": ("INTEGER", 1, 0),
+                "claimed_at": ("TEXT", 1, 0),
+            },
             "events": {
-                "event_id",
-                "run_id",
-                "milestone_id",
-                "sequence",
-                "from_state",
-                "to_state",
-                "event_type",
-                "reason_code",
-                "reason_detail",
-                "dispatch_id",
-                "data_json",
-                "occurred_at",
+                "event_id": ("TEXT", 1, 1),
+                "run_id": ("TEXT", 1, 0),
+                "milestone_id": ("TEXT", 1, 0),
+                "sequence": ("INTEGER", 1, 0),
+                "from_state": ("TEXT", 0, 0),
+                "to_state": ("TEXT", 1, 0),
+                "event_type": ("TEXT", 1, 0),
+                "reason_code": ("TEXT", 0, 0),
+                "reason_detail": ("TEXT", 0, 0),
+                "dispatch_id": ("TEXT", 0, 0),
+                "data_json": ("TEXT", 0, 0),
+                "occurred_at": ("TEXT", 1, 0),
             },
         }
-        for table, expected_columns in required.items():
-            columns = {str(row[1]) for row in self.connection.execute(f"PRAGMA table_info({table})").fetchall()}
-            if not expected_columns.issubset(columns):
-                raise CorruptSchemaError(f"ledger table {table!r} is missing required columns")
+        if version == SchemaVersion(1):
+            expected["runs"].pop("closed_at")
+        for table, expected_columns in expected.items():
+            rows = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+            actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
+            if actual != expected_columns:
+                raise CorruptSchemaError(f"ledger table {table!r} has an unexpected column contract")
+
+        signatures = {
+            "schema_meta": ("CHECK(LENGTH(KEY)>0)", "CHECK(LENGTH(VALUE)>0)"),
+            "runs": ("CHECK(LENGTH(RUN_ID)BETWEEN1AND128)", "CHECK(METADATA_JSON='{}')"),
+            "milestones": ("CHECK(CURRENT_STATEIN(", "CHECK(METADATA_JSON='{}')"),
+            "dispatches": (
+                "CHECK(LENGTH(ROLE)BETWEEN1AND128)",
+                "CHECK(GENERATION>0)",
+                "CHECK(DISPATCH_ID=RUN_ID||'/'||MILESTONE_ID||'/'||ROLE||'/'||GENERATION)",
+            ),
+            "events": (
+                "CHECK(SEQUENCE>0)",
+                "CHECK(TO_STATEIN(",
+                "CHECK(EVENT_TYPEIN(",
+                "CHECK(REASON_CODEISNULLORREASON_CODEIN(",
+                "CHECK(REASON_DETAILISNULL)",
+                "CHECK(DATA_JSONISNULL)",
+                "CHECK(EVENT_ID=RUN_ID||'/'||MILESTONE_ID||'/'||SEQUENCE)",
+            ),
+        }
+        for table, fragments in signatures.items():
+            row = self.connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+            ).fetchone()
+            if row is None or row[0] is None:
+                raise CorruptSchemaError(f"ledger table {table!r} has no owned SQL definition")
+            compact = "".join(str(row[0]).upper().split())
+            if any(fragment not in compact for fragment in fragments):
+                raise CorruptSchemaError(f"ledger table {table!r} is missing an integrity constraint")
+            if table in {"milestones", "events"} and any(state.value not in str(row[0]) for state in WorkflowState):
+                raise CorruptSchemaError(f"ledger table {table!r} does not constrain all workflow states")
+
+        self._require_unique_index("dispatches", ("run_id", "milestone_id", "role"))
+        self._require_unique_index("events", ("run_id", "milestone_id", "sequence"))
+        self._require_foreign_keys(
+            "milestones",
+            (("runs", "run_id", "run_id", "CASCADE"),),
+        )
+        self._require_foreign_keys(
+            "dispatches",
+            (("milestones", "run_id", "run_id", "CASCADE"), ("milestones", "milestone_id", "milestone_id", "CASCADE")),
+        )
+        self._require_foreign_keys(
+            "events",
+            (
+                ("milestones", "run_id", "run_id", "CASCADE"),
+                ("milestones", "milestone_id", "milestone_id", "CASCADE"),
+                ("dispatches", "dispatch_id", "dispatch_id", "RESTRICT"),
+            ),
+        )
         foreign_keys = self.connection.execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
 
+    def _require_unique_index(self, table: str, columns: tuple[str, ...]) -> None:
+        for row in self.connection.execute(f"PRAGMA index_list({table})").fetchall():
+            if int(row[2]) != 1:
+                continue
+            index_columns = tuple(
+                str(info[2]) for info in self.connection.execute(f"PRAGMA index_info({row[1]})").fetchall()
+            )
+            if index_columns == columns:
+                return
+        raise CorruptSchemaError(f"ledger table {table!r} is missing unique index {columns!r}")
+
+    def _require_foreign_keys(self, table: str, expected: tuple[tuple[str, str, str, str], ...]) -> None:
+        actual = tuple(
+            (str(row[2]), str(row[3]), str(row[4]), str(row[6]).upper())
+            for row in sorted(
+                self.connection.execute(f"PRAGMA foreign_key_list({table})").fetchall(),
+                key=lambda row: (int(row[0]), int(row[1])),
+            )
+        )
+        if sorted(actual) != sorted(expected):
+            raise CorruptSchemaError(f"ledger table {table!r} has unexpected foreign keys")
+
+    def _validate_rows(self) -> None:
+        orphan_queries = (
+            "SELECT COUNT(*) FROM milestones m LEFT JOIN runs r ON r.run_id = m.run_id WHERE r.run_id IS NULL",
+            "SELECT COUNT(*) FROM dispatches d LEFT JOIN milestones m ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id WHERE m.run_id IS NULL",
+            "SELECT COUNT(*) FROM events e LEFT JOIN milestones m ON m.run_id = e.run_id AND m.milestone_id = e.milestone_id WHERE m.run_id IS NULL",
+            "SELECT COUNT(*) FROM events e LEFT JOIN dispatches d ON d.dispatch_id = e.dispatch_id WHERE e.dispatch_id IS NOT NULL AND d.dispatch_id IS NULL",
+        )
+        if any(int(self.connection.execute(query).fetchone()[0]) for query in orphan_queries):
+            raise CorruptSchemaError("workflow ledger contains orphan rows")
+        duplicate_queries = (
+            "SELECT COUNT(*) FROM (SELECT run_id, milestone_id FROM milestones GROUP BY run_id, milestone_id HAVING COUNT(*) > 1)",
+            "SELECT COUNT(*) FROM (SELECT run_id, milestone_id, role FROM dispatches GROUP BY run_id, milestone_id, role HAVING COUNT(*) > 1)",
+            "SELECT COUNT(*) FROM (SELECT run_id, milestone_id, sequence FROM events GROUP BY run_id, milestone_id, sequence HAVING COUNT(*) > 1)",
+        )
+        if any(int(self.connection.execute(query).fetchone()[0]) for query in duplicate_queries):
+            raise CorruptSchemaError("workflow ledger contains duplicate logical rows")
+        run_rows = self.connection.execute("SELECT * FROM runs ORDER BY run_id").fetchall()
+        for row in run_rows:
+            RunId(row["run_id"])
+            _decode_object(row["metadata_json"], field_name="run metadata")
+        milestone_rows = self.connection.execute("SELECT * FROM milestones ORDER BY run_id, milestone_id").fetchall()
+        milestone_keys = {(str(row["run_id"]), str(row["milestone_id"])) for row in milestone_rows}
+        dispatch_rows = self.connection.execute(
+            "SELECT * FROM dispatches ORDER BY run_id, milestone_id, role"
+        ).fetchall()
+        dispatch_keys = set()
+        for row in dispatch_rows:
+            key = (str(row["run_id"]), str(row["milestone_id"]), str(row["role"]))
+            if key in dispatch_keys:
+                raise CorruptSchemaError("duplicate dispatch ownership")
+            dispatch_keys.add(key)
+            dispatch = self._dispatch_from_row(row)
+            if dispatch.dispatch_id != DispatchId.from_parts(
+                dispatch.run_id, dispatch.milestone_id, dispatch.role, dispatch.generation
+            ):
+                raise CorruptSchemaError("dispatch identity does not match its columns")
+            if (str(dispatch.run_id), str(dispatch.milestone_id)) not in milestone_keys:
+                raise CorruptSchemaError("dispatch points outside its milestone")
+        event_rows = self.connection.execute("SELECT * FROM events ORDER BY run_id, milestone_id, sequence").fetchall()
+        events_by_milestone: dict[tuple[str, str], list[EventRecord]] = {}
+        for row in event_rows:
+            event = self._event_from_row(row)
+            if event.event_id != EventId(f"{event.run_id}/{event.milestone_id}/{int(event.sequence)}"):
+                raise CorruptSchemaError("event identity does not match its columns")
+            events_by_milestone.setdefault((str(event.run_id), str(event.milestone_id)), []).append(event)
+            if event.from_state is None or event.to_state not in ALLOWED_TRANSITIONS[event.from_state]:
+                raise CorruptSchemaError("event contains a forbidden state transition")
+            if event.dispatch_id is not None and event.event_type != "dispatch_claimed":
+                raise CorruptSchemaError("only dispatch claims may reference a dispatch")
+        for row in milestone_rows:
+            key = (str(row["run_id"]), str(row["milestone_id"]))
+            milestone = self._milestone_from_row(row)
+            history = events_by_milestone.get(key, [])
+            sequences = tuple(int(event.sequence) for event in history)
+            if sequences != tuple(range(1, len(history) + 1)):
+                raise CorruptSchemaError("milestone event sequence is not contiguous")
+            if history and history[-1].to_state is not milestone.state:
+                raise CorruptSchemaError("milestone state does not match its last event")
+            if not history and milestone.state is not WorkflowState.PLANNED:
+                raise CorruptSchemaError("non-planned milestone has no causal history")
+
     def _migrate(self, version: SchemaVersion) -> None:
         if version != SchemaVersion(1):
             raise UnsupportedSchemaVersion(f"ledger schema {version} has no owned migration")
+        self._validate_shape(version)
+        self._validate_rows()
         with self._transaction():
             columns = {str(row[1]) for row in self.connection.execute("PRAGMA table_info(runs)").fetchall()}
             if "closed_at" not in columns:
@@ -438,6 +632,10 @@ class Ledger:
             self.connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(int(CURRENT_SCHEMA_VERSION)),),
+            )
+            self.connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION],),
             )
             self._fault("after_migration")
             self.connection.execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
@@ -488,7 +686,7 @@ class Ledger:
 
     def create_run(self, run_id: RunId | str, *, metadata: Mapping[str, object] | None = None) -> RunRecord:
         run = _run_id(run_id)
-        checked, encoded = _json_object(metadata, field_name="run metadata")
+        checked, encoded = _empty_object(metadata, field_name="run metadata")
         created = utc_now()
         with self._transaction():
             existing = self.connection.execute("SELECT * FROM runs WHERE run_id = ?", (str(run),)).fetchone()
@@ -528,7 +726,7 @@ class Ledger:
     ) -> MilestoneRecord:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
-        checked, encoded = _json_object(metadata, field_name="milestone metadata")
+        checked, encoded = _empty_object(metadata, field_name="milestone metadata")
         now = utc_now()
         with self._transaction():
             self.get_run(run)
@@ -546,23 +744,18 @@ class Ledger:
             )
             return MilestoneRecord(run, milestone, WorkflowState.PLANNED, now, now, checked)
 
-    def get_milestone(self, milestone_id: MilestoneId | str, *, run_id: RunId | str | None = None) -> MilestoneRecord:
+    def get_milestone(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> MilestoneRecord:
+        run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
-        if run_id is None:
-            row = self.connection.execute(
-                "SELECT * FROM milestones WHERE milestone_id = ? ORDER BY run_id LIMIT 1", (str(milestone),)
-            ).fetchone()
-        else:
-            run = _run_id(run_id)
-            row = self.connection.execute(
-                "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?", (str(run), str(milestone))
-            ).fetchone()
+        row = self.connection.execute(
+            "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?", (str(run), str(milestone))
+        ).fetchone()
         if row is None:
             raise RecordNotFound(f"milestone {milestone} does not exist")
         return self._milestone_from_row(row)
 
-    def current_state(self, milestone_id: MilestoneId | str, *, run_id: RunId | str | None = None) -> WorkflowState:
-        return self.get_milestone(milestone_id, run_id=run_id).state
+    def current_state(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> WorkflowState:
+        return self.get_milestone(run_id, milestone_id).state
 
     # ------------------------------------------------------------------
     # Dispatch claims and state transitions
@@ -594,7 +787,7 @@ class Ledger:
             ).fetchone()
             if owner is not None:
                 raise DispatchConflict(f"milestone {milestone} role {role_value} is owned by {owner['dispatch_id']}")
-            current = self.get_milestone(milestone, run_id=run)
+            current = self.get_milestone(run, milestone)
             if current.state is not WorkflowState.PLANNED:
                 raise InvalidTransition(f"dispatch claim requires PLANNED, found {current.state.value}")
             self.connection.execute(
@@ -627,23 +820,13 @@ class Ledger:
             raise RecordNotFound(f"dispatch {dispatch} does not exist")
         return self._dispatch_from_row(row)
 
-    def claim(self, dispatch_id: DispatchId | str) -> DispatchClaim:
-        """Claim from a prevalidated logical identity string."""
-
-        dispatch = DispatchId(dispatch_id if isinstance(dispatch_id, str) else str(dispatch_id))
-        run, milestone, role, generation = dispatch.parts
-        return self.claim_dispatch(run, milestone, role, generation)
-
-    claim_identity = claim
-
     def transition(
         self,
-        run_or_milestone: RunId | MilestoneId | str,
-        milestone_or_state: MilestoneId | WorkflowState | State | str,
-        to_state: WorkflowState | State | str | None = None,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        to_state: WorkflowState | str,
         *,
-        expected_state: WorkflowState | State | str | None = None,
-        expected: WorkflowState | State | str | None = None,
+        expected_state: WorkflowState | str | None = None,
         reason: WorkflowReason | ReasonCode | str | BaseException | None = None,
         event_type: str | None = None,
         data: Mapping[str, object] | None = None,
@@ -651,34 +834,23 @@ class Ledger:
     ) -> EventRecord:
         """Advance a milestone and append its causal event atomically.
 
-        Both ``transition(milestone_id, target, ...)`` and the explicit
-        ``transition(run_id, milestone_id, target, ...)`` form are accepted.
-        The latter is preferred when milestone ids are reused across runs.
+        The run and milestone are always explicit; milestone ids may be reused
+        safely across independent runs.
         """
 
-        explicit_run: RunId | None
-        if to_state is None:
-            explicit_run = None
-            milestone = _milestone_id(run_or_milestone)
-            target = coerce_state(milestone_or_state)
-        else:
-            explicit_run = _run_id(run_or_milestone)
-            milestone = _milestone_id(milestone_or_state)
-            target = coerce_state(to_state)
-        if expected_state is not None and expected is not None:
-            raise ValueError("pass only one of expected_state or expected")
-        expected_predecessor = expected_state if expected_state is not None else expected
-        expected_value = coerce_state(expected_predecessor) if expected_predecessor is not None else None
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        target = coerce_state(to_state)
+        expected_value = coerce_state(expected_state) if expected_state is not None else None
         normalized_reason = _reason(reason)
-        encoded_data: JsonObject | None = None
         if data is not None:
-            encoded_data, _ = _json_object(data, field_name="event data")
+            _empty_object(data, field_name="event data")
         dispatch = None
         if dispatch_id is not None:
             dispatch = DispatchId(dispatch_id if isinstance(dispatch_id, str) else str(dispatch_id))
         normalized_event_type = _event_type(event_type or "state_transition")
         with self._transaction():
-            current = self.get_milestone(milestone, run_id=explicit_run)
+            current = self.get_milestone(run, milestone)
             if expected_value is not None and current.state is not expected_value:
                 raise StaleWriter(
                     f"stale milestone writer: expected {expected_value.value}, current is {current.state.value}"
@@ -711,16 +883,10 @@ class Ledger:
                 event_type=normalized_event_type,
                 reason=normalized_reason,
                 dispatch_id=dispatch,
-                data=encoded_data,
+                data=None,
             )
             self._fault("after_event_insert")
             return event
-
-    def transition_state(self, *args: Any, **kwargs: Any) -> EventRecord:
-        return self.transition(*args, **kwargs)
-
-    advance = transition
-    append_event = transition
 
     def _append_event_in_transaction(
         self,
@@ -742,7 +908,7 @@ class Ledger:
         event_id = EventId(f"{run_id}/{milestone_id}/{int(sequence)}")
         encoded_data = None
         if data is not None:
-            _, encoded_data = _json_object(data, field_name="event data")
+            _empty_object(data, field_name="event data")
         self.connection.execute(
             "INSERT INTO events(event_id, run_id, milestone_id, sequence, from_state, to_state, event_type, "
             "reason_code, reason_detail, dispatch_id, data_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -769,38 +935,22 @@ class Ledger:
     # Read-only snapshots and recovery facts
     # ------------------------------------------------------------------
 
-    def events(
-        self,
-        milestone_id: MilestoneId | str,
-        *,
-        run_id: RunId | str | None = None,
-    ) -> tuple[EventRecord, ...]:
+    def events(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> tuple[EventRecord, ...]:
+        run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
-        if run_id is None:
-            rows = self.connection.execute(
-                "SELECT * FROM events WHERE milestone_id = ? ORDER BY sequence", (str(milestone),)
-            ).fetchall()
-        else:
-            run = _run_id(run_id)
-            rows = self.connection.execute(
-                "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? ORDER BY sequence",
-                (str(run), str(milestone)),
-            ).fetchall()
+        rows = self.connection.execute(
+            "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? ORDER BY sequence",
+            (str(run), str(milestone)),
+        ).fetchall()
         return tuple(self._event_from_row(row) for row in rows)
 
-    def list_events(
-        self, milestone_id: MilestoneId | str, *, run_id: RunId | str | None = None
-    ) -> tuple[EventRecord, ...]:
-        return self.events(milestone_id, run_id=run_id)
-
-    def recovery_facts(self, run_id: RunId | str | None = None) -> tuple[RecoveryFact, ...]:
-        params: tuple[object, ...] = () if run_id is None else (str(_run_id(run_id)),)
-        where = "" if run_id is None else "WHERE d.run_id = ?"
+    def recovery_facts(self, run_id: RunId | str) -> tuple[RecoveryFact, ...]:
+        run = _run_id(run_id)
         rows = self.connection.execute(
-            f"SELECT d.*, m.current_state FROM dispatches d JOIN milestones m "
-            f"ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id {where} "
-            "ORDER BY d.run_id, d.milestone_id, d.role, d.generation",
-            params,
+            "SELECT d.*, m.current_state FROM dispatches d JOIN milestones m "
+            "ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id "
+            "WHERE d.run_id = ? ORDER BY d.milestone_id, d.role, d.generation",
+            (str(run),),
         ).fetchall()
         facts: list[RecoveryFact] = []
         for row in rows:
@@ -808,17 +958,18 @@ class Ledger:
             if state in TERMINAL_STATES:
                 continue
             dispatch = self._dispatch_from_row(row)
-            last = self.connection.execute(
-                "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? ORDER BY sequence DESC LIMIT 1",
+            last_sequence = self.connection.execute(
+                "SELECT MAX(sequence) FROM events WHERE run_id = ? AND milestone_id = ?",
                 (str(dispatch.run_id), str(dispatch.milestone_id)),
+            ).fetchone()[0]
+            last = self.connection.execute(
+                "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? AND sequence = ?",
+                (str(dispatch.run_id), str(dispatch.milestone_id), int(last_sequence)),
             ).fetchone()
             if last is None:
                 raise SchemaError(f"dispatch {dispatch.dispatch_id} has no causal event")
             facts.append(RecoveryFact(dispatch, state, self._event_from_row(last)))
         return tuple(facts)
-
-    non_terminal_dispatches = recovery_facts
-    recovery = recovery_facts
 
     def snapshot(self, run_id: RunId | str) -> LedgerSnapshot:
         run = _run_id(run_id)
@@ -894,6 +1045,8 @@ class Ledger:
         reason = None
         if reason_code is not None:
             try:
+                if row["reason_detail"] is not None:
+                    raise SchemaError("persisted reason detail is not allowed")
                 code = ReasonCode(reason_code)
                 reason_type: type[WorkflowReason] = {
                     ReasonCode.TRANSPORT_FAILURE: PreIdentityTransportFailure,
@@ -902,9 +1055,9 @@ class Ledger:
                     ReasonCode.TERMINAL_OUTCOME: TerminalOutcome,
                 }.get(code, WorkflowReason)
                 if reason_type is WorkflowReason:
-                    reason = WorkflowReason(code, row["reason_detail"])
+                    reason = WorkflowReason(code)
                 else:
-                    reason = reason_type(row["reason_detail"])
+                    reason = reason_type()
             except ValueError as exc:
                 raise SchemaError(f"unknown persisted reason code: {reason_code!r}") from exc
         data = _decode_object(row["data_json"], field_name="event data") if row["data_json"] is not None else None
@@ -921,11 +1074,3 @@ class Ledger:
             DispatchId(row["dispatch_id"]) if row["dispatch_id"] is not None else None,
             data,
         )
-
-
-# Public spelling aliases used by callers and focused tests.
-SQLiteLedger = Ledger
-WorkflowLedger = Ledger
-LedgerSchemaError = SchemaError
-NewerSchemaError = UnsupportedSchemaVersion
-TransportFailureBeforeIdentityReason = PreIdentityTransportFailure
