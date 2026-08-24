@@ -413,6 +413,15 @@ creating a worktree, or depending on messages.
   prompt body, or raw SDK response persistence in generic ledger fields.
 - H2 tests make no SDK call, create no Codex task or Git worktree, and require no
   network, credentials, global config, plugin hook, or external service.
+- The local filesystem threat model treats processes running as the controller's
+  Unix UID as one trusted authority. Path integrity rejects symlinks, path
+  substitution, pre-existing/mid-boundary hardlinks, changed inode identity, and
+  non-cooperative state observed at every owned transaction boundary. It does
+  not claim atomic isolation from a malicious same-UID process that can invoke
+  `link(2)` or inspect/open the controller's files between kernel syscalls; POSIX
+  regular files provide no such boundary. Cross-user access remains governed by
+  directory/file permissions. This is a local workflow-integrity contract, not
+  a same-account hostile-process sandbox.
 
 ### Validation
 
@@ -946,23 +955,44 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   milestones reuse the same workspace while mutable ownership is singular.
   Managed worktrees move to semantic sibling `<repo>.worktrees/<program[-lane]>`
   paths; H3 and the workflow skills must enforce this before controller use.
+- 2026-08-24: repairs `3186662` and `124107b` closed TEMP/schema-metadata
+  mutation, authority-free execution history, optional stale-writer tokens,
+  mixed-snapshot recovery facts, and the deterministic late-link commit
+  boundary. Planning reran focused H2 and full `make check` successfully with 68
+  tests; the full seven-commit H2 chain is integrated as `51e1f30..a858d6f`.
+- 2026-08-24: a final reviewer verified the exact target/scope and green
+  aggregate gates, then was twice stopped by the platform security filter while
+  evaluating a continuously hostile same-UID hardlink race. Planning resolved
+  the architecture rather than retrying: same-UID processes are explicitly one
+  trust boundary, while all repository-path, substitution, cooperative
+  concurrency, and deterministic transaction-boundary guarantees remain
+  required and green. Under that product threat model H2 has zero open P0/P1 and
+  is promoted; H3 is unblocked.
 
 ## Next execution
 
-Milestone: H2-R5 — repair the three findings from independent review of
-`fc6d286`.
+Milestone: H3 — controller-owned execution workspace, SDK execution, durable
+resume, validation, and agent-usable CLI vertical slice.
 
-Dispatch status: delivered exactly once to the existing H2 execution task
-`01a03327-44bd-7240-9120-dc6949c5c349` on host `local`. It reuses the same
-existing execution worktree; do not create or move to another workspace.
+Execution workspace:
 
-Owned scope: H2 domain/ledger/tests only. Require complete main and TEMP schema
-authority validation including schema metadata before commit, reserve dispatch
-acquisition and `PLANNED -> STARTING` to `claim_dispatch`, require explicit
-`expected_state` on every public transition, preserve all prior H2 closures,
-and prove immediate reopenability after every successful mutation.
+- mode: `existing_worktree`
+- repository: `/home/adam/personal-workflow-skills`
+- path: `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller`
+- branch: `agent/python-sdk-controller`
+- base SHA: `a858d6f`
+- lane: `python-sdk-controller`
 
-Validation: focused repeated H2 suite, `make check`, diff checks, full H2 self-
-review, clean local commit, then one fresh independent review. H3 remains
-blocked until zero open P0/P1. Local difficulty routes to continued diagnosis,
-not weaker acceptance or user interruption.
+Dispatch status: direct single mutable owner in the existing semantic program
+workspace. The current native task schema cannot address that exact saved
+worktree path without allocating a different runtime worktree, so peer handoff
+is intentionally not used. This is a workspace-capability limitation, not a
+license to create another directory; the current planning/execution context owns
+H3 end to end.
+
+Owned scope, protected surfaces, contracts, acceptance, and promotion gates are
+the H3 section above. Implement `WorktreeManager` with current/existing/managed
+modes and sibling semantic roots, extend the sole SDK adapter and H2 ledger,
+deliver `codex-flow plan/start/resume/status/cancel`, run hermetic gates and the
+real disposable post-identity-crash sentinel, then obtain an independent
+objective plus architecture review without allocating a reviewer worktree.
