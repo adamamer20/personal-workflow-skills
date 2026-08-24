@@ -1134,6 +1134,26 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   repair changes only hermetic ledger acknowledgement semantics, not the proven
   provider/profile/permission route. H4 remains blocked pending fresh objective
   and architecture promotion reviews.
+- 2026-08-24: architecture review of `f61c12de` returned P0=0/P1=3/P2=1.
+  Repair `02160dc` restricts the `.codex-flow` mutation exemption to the actual
+  repository-bound state tree, requires a persistent causal turn-start fact and
+  exact durable-fact matching for turn idempotency, and adds schema-v7
+  per-milestone workspace baselines while preserving stable program/lane lease
+  identity and its original base SHA. Managed and existing worktree regressions
+  reject non-authoritative `.codex-flow` writes; close/reopen tests reject
+  skipped turn order and retain matching idempotency; two disjoint sequential
+  milestones reuse one managed workspace and recover from both a rejected
+  preflight mutation and an injected post-baseline/pre-external stop without
+  remaining in `STARTING`. Evidence wording now attributes result-before-
+  projection ordering to the deterministic boundary fault injection; the
+  retained real sentinel proves only its observable production-route facts.
+  Focused H2/H3/SDK validation passed 108 tests, `make check` passed all 131
+  tests plus formatting, lint, validators, compileall, and pre-commit, and both
+  repair and full-range diff checks are clean. Full H3 self-review found zero
+  open P0/P1. The real sentinel was not rerun because the SDK/provider/model,
+  native permission, and resume transport route did not change. H4 remains
+  blocked pending fresh independent objective and architecture promotion review
+  of the exact repaired candidate.
 
 ## Next execution
 
@@ -1149,10 +1169,9 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: the terminal-acknowledgement repair, deterministic gates, and
-the retained authorized real sentinel are green in the existing semantic
-workspace. The repaired H3 candidate is ready for fresh independent promotion
-review.
+Dispatch status: architecture repair `02160dc`, deterministic gates, and the
+retained authorized real sentinel are green in the existing semantic workspace.
+The repaired H3 candidate is ready for fresh independent promotion review.
 
 Next action: independently review the exact H3 candidate for objective and
 architecture promotion with zero open P0/P1. The retained real evidence proves
