@@ -522,7 +522,9 @@ installed-plugin and downstream-pin migration.
 
 Milestone: H2 — implement the durable ledger and state machine.
 
-Dispatch status: not yet dispatched.
+Dispatch status: queued once as
+`client-new-thread:8a2c70f3-78ef-4eaa-b7f5-5377a594e5b9` on native host
+`local`; no retry or readiness polling is authorized.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
