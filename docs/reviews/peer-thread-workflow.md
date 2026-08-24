@@ -398,16 +398,49 @@ The implementation candidate passes every acceptance check with zero self-review
 P0/P1, then receives one fresh independent Luna XHigh read-only review of the
 exact commit. H2 promotes only with zero open P0/P1 on ledger correctness,
 concurrency, transactions, migration safety, path safety, and scope adherence.
-Any repair returns to a fresh bounded implementation context under the existing
-H2 contract and is re-reviewed.
+Ordinary repair returns to the same H2 executor and is re-reviewed. A fresh
+implementation context is reserved for explicit context rollover or the
+configured repeated-failure circuit breaker.
 
 ### Current candidate
 
-Implementation candidate: `6db6146` (parent `fab4cb6`, the executor's
+Rejected implementation candidate: `6db6146` (parent `fab4cb6`, the executor's
 cherry-picked equivalent of planning commit `256233a`). The candidate changes
 only `domain.py`, new `ledger.py`, new `artifacts.py`, package exports, and
 focused H2 tests. Executor and planning-owner reruns of `make check` are green
-with 39 tests; independent promotion review remains open.
+with 39 tests. Independent review verdict is `REPAIR_REQUIRED`, P0=0, P1=5,
+P2=1; this commit is evidence only and must not be integrated or promoted.
+
+Required repair decisions:
+
+- `H2-INT-001`: remove every runless milestone shorthand. Ledger operations
+  require explicit `run_id` plus `milestone_id`; no lexicographic first-match or
+  cross-run event aggregation is permitted.
+- `H2-SEC-001`: do not attempt semantic secret detection in arbitrary strings.
+  Remove arbitrary metadata/event-data and free-text reason persistence from H2,
+  or replace it with explicit allowlisted typed fields and identifier-like
+  diagnostic codes that cannot carry prompts, raw SDK responses, credentials,
+  or general text. H1 exception messages never become durable automatically.
+- `H2-SCHEMA-001`: validate the owned schema, not only table/column names. Check
+  primary keys, uniqueness, checks, foreign keys, indexes, migration marker and
+  version-specific schema identity; reject counterfeit or weakened v2 schemas
+  and orphan/duplicate rows before use.
+- `H2-SEC-002`: validate the ledger file and every relevant ancestor on every
+  open/reopen, rejecting symlink or repository escape before connecting. Tests
+  replace the database path after close and must prove reopen fails closed.
+- `H2-SEC-003`: artifact creation and replacement use anchored directory file
+  descriptors with no-follow semantics so an ancestor swap after validation
+  cannot redirect any write outside the repository.
+- `H2-API-001`: remove speculative aliases, compatibility names, duplicate
+  wrappers, and broad exports. Retain one canonical name per H2 concept and only
+  the public surface required by H1 plus the H2 plan.
+
+Required regression expansion: exercise all 121 state pairs through the real
+Ledger API; use a genuine constrained v1 fixture and migration rollback test;
+cover fault injection after event insertion; cover same-identity and
+conflicting-generation process races; cover alternate sensitive keys/values and
+H1 exception details; cover counterfeit constraintless schemas, reopen symlink
+swaps, and ancestor-swap projection attacks.
 
 ### Successor milestone
 
@@ -531,14 +564,23 @@ installed-plugin and downstream-pin migration.
   promotion is withheld pending the required independent review of transition
   completeness, concurrency/idempotency, transactional rollback and migration,
   metadata/path safety, and projection authority.
+- 2026-08-24: H2R independently rejected `6db6146` with P0=0/P1=5/P2=1.
+  Reproduced defects are ambiguous cross-run milestone mutation, alternate-key
+  sensitive-text persistence, counterfeit constraintless v2 acceptance,
+  symlink bypass on ledger reopen, and ancestor-swap artifact escape; speculative
+  aliases are P2. The reviewer independently confirmed the pure 121-pair table,
+  single-owner races, stale-writer exclusion, rollback behavior, genuine-v1
+  migration feasibility, and absence of external side effects. Repair cycle 1
+  returns to the same executor under the decisions above.
 
 ## Next execution
 
-Milestone: H2R — independently review H2 candidate `6db6146` for promotion.
+Milestone: H2-R1 — repair the six stable H2 review findings and expand the
+missing regression coverage.
 
-Dispatch status: queued once as
-`client-new-thread:d72f1de4-8de0-41ff-b5ba-8ba5c921dac0` on native host
-`local`; no retry or readiness polling is authorized.
+Dispatch status: existing H2 executor
+`threadId=01a032dc-bb34-7fa3-81e5-5102a2020bab`, `hostId=local`; repair message
+not yet sent.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
@@ -551,24 +593,25 @@ by the native creator when available.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`.
 
-Owned surfaces: read-only inspection and validation of exact candidate
-`6db6146` against H2; no source, test, plan, artifact, Git-history, or external
-state mutation.
+Owned surfaces: the exact H2 five-path surface from `6db6146`, focused tests,
+and one repair commit; no plan or AGENTS edit.
 
-Protected surfaces: every repository path and candidate commit; H1
-adapter/sentinel/evidence, root tooling/instructions, plugin and skill code,
-dirty primary checkout, global Codex state, remotes, downstream repositories,
-and H3+ execution/controller logic.
+Protected surfaces: H1 adapter/sentinel/evidence, root tooling/instructions,
+plugin and skill code, dirty primary checkout, global Codex state, remotes,
+downstream repositories, unrelated worktrees, and H3+ execution/controller
+logic. Rejected commit `6db6146` remains immutable evidence.
 
-Acceptance: independently reproduce or refute the exact typed state-machine,
-schema/migration, transactional event, concurrent idempotency, reopen recovery,
-projection, metadata and path-safety claims; identify plan/test coverage gaps;
-rerun decisive gates; report `ACCEPTED` only with zero P0/P1 and no material
-scope deviation.
+Acceptance: all six stable finding IDs are closed with focused regressions; all
+121 state pairs execute through Ledger; real v1 migration and rollback,
+after-event rollback, same/conflicting process races, explicit durable-field
+safety, counterfeit-schema rejection, reopen symlink rejection, and anchored
+ancestor-swap-safe projections pass; `make check` is green; zero self-review
+P0/P1; fresh re-review remains required.
 
-Escalate only for: any reproducible P0/P1 or material H2 plan deviation, changed
-review target, inability to inspect the exact commit, or a required external
-side effect. Return findings; do not repair them in the review task.
+Escalate only for: a required H2 state/schema/public-contract change beyond the
+decisions above, inability to make SQLite or filesystem operations fail closed,
+a security/data-integrity risk that survives ordinary repair, changed protected
+surfaces, or a required external side effect.
 
 Completion callback: return exactly one terminal `COMPLETION`, `BLOCKED`, or
 `FAILED` packet to the planning task using the exact native callback route.
