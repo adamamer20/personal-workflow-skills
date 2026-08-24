@@ -642,13 +642,17 @@ installed-plugin and downstream-pin migration.
 Milestone: H2-R2S — repair the rejected H2 ledger candidate under the repeated-
 failure circuit breaker.
 
-Dispatch status: pending one fresh native peer creation; do not reuse or message
-the exhausted Luna executor and do not retry an uncertain creation.
+Dispatch status: queued once as
+`client-new-thread:b22403db-eab8-4fec-95d8-7fe2ac98a4cc` on native host
+`local`; do not reuse or message the exhausted Luna executor, poll readiness, or
+retry creation.
 
 Resolved route: `model=gpt-5.6-sol`, `thinking=medium`.
 
 Routing authorization: applicable user-owned root `AGENTS.md` circuit breaker
-for a Luna implementation/review loop after two unsuccessful repair cycles.
+for a Luna implementation/review loop after two unsuccessful repair cycles. The
+native schema advertised the exact pair and accepted both fields in the queued
+creation request.
 
 Planning thread: `01a032b0-8da1-7f20-bd7c-437be7538082`; callback host is
 `local`.
