@@ -43,6 +43,10 @@ than the workflow source of truth.
 Add a typed Python package and `codex-flow` CLI to this repository:
 
 ```text
+AGENTS.md                  # controller-specific engineering instructions
+Makefile                   # canonical setup/check/test/format/lint entrypoints
+.python-version
+.pre-commit-config.yaml
 pyproject.toml
 src/codex_flow/
   cli.py                 # thin human-facing commands
@@ -147,6 +151,17 @@ explicit context rollover.
 - The controller never rewrites user Git history, pushes, merges, installs a
   plugin, trusts hooks, or deletes a legacy path without separate authorization
   and the named promotion gate.
+- Reuse SprintAct's general Python standards in repository-owned form: `uv`
+  dependency/lock management, Ruff formatting and linting, strict root-level
+  pytest, Typer for the persistent CLI, `pathlib`, precise PEP 484/695 types,
+  typed boundary models, small explicit public interfaces, parameterized
+  logging, no indirect access to expected interfaces, and one canonical
+  execution document.
+- Adapt rather than copy SprintAct policy. Legal-data, frontend, Compose,
+  service, PostgreSQL-only, `httpx2`, benchmark, and product-agent rules do not
+  apply here. SQLite remains the intentional controller ledger, and the Python
+  baseline is selected for this repository and the stable SDK rather than
+  inherited mechanically from SprintAct.
 
 ## Program scope and non-goals
 
@@ -173,7 +188,8 @@ built.
 
 ### Mutable ownership
 
-- `pyproject.toml`, `uv.lock`, and `.gitignore` additions for the controller;
+- root `AGENTS.md`, `Makefile`, `.python-version`, `.pre-commit-config.yaml`,
+  `pyproject.toml`, `uv.lock`, and `.gitignore` additions for the controller;
 - `src/codex_flow/backends/codex_sdk.py` and minimal supporting domain/CLI files;
 - focused SDK adapter unit tests and one opt-in real sentinel;
 - controller installation and compatibility documentation;
@@ -192,21 +208,32 @@ built.
 ### Implementation boundary
 
 1. Add the smallest distributable Python 3.10+ package using `uv` and pin the
-   stable `openai-codex` dependency resolved for this environment.
-2. Inspect the installed SDK, then expose only verified operations behind a
+   stable `openai-codex` dependency resolved for this environment. Adapt the
+   reusable SprintAct tooling into root-owned `setup`, `check`, `test`,
+   `test-fast`, `format`, and `lint` Make targets; Ruff/pre-commit/pytest
+   configuration; and a repository Python-version file. Do not copy monorepo,
+   frontend, Compose, database, service, or legal-data tooling.
+2. Add a concise root `AGENTS.md` that makes the canonical plan and controller
+   ownership explicit and carries the reusable SprintAct Python rules: clarity,
+   stable precise types, `pathlib`, Typer, typed boundary models, no global or
+   implicit side effects, no `getattr`/`setattr`/`hasattr` for expected SDK
+   interfaces, parameterized logging, parameterized SQL, secrets via
+   environment only, root tooling, strict tests, and no weakened gates. State
+   explicitly that SQLite is the designed local workflow ledger.
+3. Inspect the installed SDK, then expose only verified operations behind a
    typed adapter: start, run/turn, thread identity, resume, event consumption,
    sandbox, model, reasoning effort, structured output, review, and structured
    skill input. Unsupported optional capabilities must be explicit typed
    capability results, not guessed methods or CLI fallbacks.
-3. Add hermetic adapter tests with captured SDK-facing fakes. Keep raw SDK
+4. Add hermetic adapter tests with captured SDK-facing fakes. Keep raw SDK
    objects inside the adapter.
-4. Add an opt-in sentinel that starts one read-only local thread in a disposable
+5. Add an opt-in sentinel that starts one read-only local thread in a disposable
    Git repository, records its real id and runtime versions, completes a
    schema-bounded response, resumes the same thread, and captures lifecycle
    events without editing this repository.
-5. Exercise a second read-only review or detached-review path only if the stable
+6. Exercise a second read-only review or detached-review path only if the stable
    SDK advertises it. Record unsupported status truthfully.
-6. Add a manual acceptance capsule for `codex agents`, `codex resume <id>`,
+7. Add a manual acceptance capsule for `codex agents`, `codex resume <id>`,
    Desktop `/app`, idle wake/queue behavior, and permission-profile survival.
    These checks are compatibility evidence, not controller transport.
 
@@ -214,6 +241,12 @@ built.
 
 - `uv sync` installs the stable SDK and its pinned runtime reproducibly on
   Python 3.12 without modifying the user's base Python installation.
+- `make check` is the canonical aggregate gate and covers Ruff format/lint,
+  strict pytest, the existing plugin validator, Python compilation, and
+  pre-commit without weakening the pre-existing repository tests.
+- Root `AGENTS.md` contains only applicable controller/repository rules and
+  explicitly rejects SprintAct-specific PostgreSQL, service, frontend, Compose,
+  legal-data, and HTTP-client policy.
 - Adapter unit tests cover success, SDK exception before identity, terminal
   failure after identity, unsupported capability, resume, and event ordering.
 - The real sentinel records package/runtime versions, an addressable thread id,
@@ -230,7 +263,8 @@ built.
 
 ### Validation and promotion gate
 
-- `uv run python -m unittest discover -s tests -v`
+- `make check`
+- `uv run pytest`
 - `uv run python scripts/validate.py`
 - opt-in real SDK sentinel with retained JSON evidence
 - `git diff --check` and complete diff self-review
@@ -364,6 +398,11 @@ installed-plugin and downstream-pin migration.
   protected. Chosen design is one SDK production backend, SQLite authority,
   controller-owned worktrees, structured results before notifications, and
   capability-gated legacy migration.
+- 2026-08-24: user requested bringing SprintAct's Python tooling and
+  `AGENTS.md` standards into this repository. Selected an adapted import of the
+  reusable root toolchain and Python engineering rules, with explicit exclusion
+  of SprintAct product/service/database policy and preservation of SQLite as the
+  controller ledger.
 
 ## Next execution
 
@@ -391,7 +430,8 @@ global Codex state, remotes, downstream repositories, and H2+ controller logic.
 
 Acceptance: reproducible stable SDK install; typed verified adapter; real
 read-only start, schema-bounded turn, explicit model/reasoning, event capture,
-and same-thread resume; capability matrix truthful; decisive validators green;
+and same-thread resume; adapted root `AGENTS.md` plus `uv`/Ruff/pytest/
+pre-commit/Make tooling; capability matrix truthful; decisive validators green;
 zero open P0/P1.
 
 Escalate only for: a required stable-SDK capability gap; SDK/runtime
