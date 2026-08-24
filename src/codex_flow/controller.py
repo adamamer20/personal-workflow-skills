@@ -68,6 +68,13 @@ class UnsafeResumePermissionChange(ControllerError):
     """Native permission authorities cannot be restricted monotonically."""
 
 
+_MAX_WORKSPACE_SCAN_ENTRIES = 100_000
+_MAX_WORKSPACE_SCAN_DEPTH = 64
+_MAX_WORKSPACE_PATH_BYTES = 4_096
+_MAX_WORKSPACE_FILE_BYTES = 536_870_912
+_MAX_WORKSPACE_TOTAL_BYTES = 2_147_483_648
+
+
 class Adapter(Protocol):
     def start_thread(self) -> ThreadIdentity: ...
 
@@ -459,8 +466,10 @@ class Controller:
         worktrees: WorktreeManager | None = None,
         fault_injector: ControllerFaultInjector | None = None,
     ) -> None:
-        if not state_root.is_absolute():
-            raise ValueError("controller state root must be absolute")
+        try:
+            state_root = state_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("controller state root must have a canonical physical identity") from exc
         # Bind the controller to a real Git toplevel before Ledger can create
         # any `.codex-flow` state.  A failed/outside-root plan therefore leaves
         # no controller database residue behind.
@@ -715,6 +724,88 @@ class Controller:
             if path
         )
 
+    def _revision_directories(self, capsule: ExecutionCapsule, revision: str) -> frozenset[str]:
+        raw = self._git_output_bytes(capsule.workspace_path, "ls-tree", "-r", "--name-only", "-z", revision)
+        directories: set[str] = set()
+        entry_count = 0
+        for item in raw.split(b"\0"):
+            if not item:
+                continue
+            entry_count += 1
+            if entry_count > _MAX_WORKSPACE_SCAN_ENTRIES:
+                raise ControllerError("workspace revision topology exceeds the entry limit")
+            if len(item) > _MAX_WORKSPACE_PATH_BYTES:
+                raise ControllerError("workspace revision topology contains an overlong path")
+            path = Path(os.fsdecode(item))
+            if len(path.parts) > _MAX_WORKSPACE_SCAN_DEPTH:
+                raise ControllerError("workspace revision topology exceeds the depth limit")
+            for parent in path.parents:
+                relative = parent.as_posix()
+                if relative == ".":
+                    break
+                directories.add(relative)
+                if len(directories) > _MAX_WORKSPACE_SCAN_ENTRIES:
+                    raise ControllerError("workspace directory topology exceeds the entry limit")
+        return frozenset(directories)
+
+    def _workspace_directories(self, capsule: ExecutionCapsule) -> frozenset[str]:
+        """Capture bounded repository directory topology without following links."""
+
+        workspace = capsule.workspace_path
+        directories: set[str] = set()
+        entries_seen = 0
+        pending: list[tuple[Path, int]] = [(workspace, 0)]
+        while pending:
+            current, depth = pending.pop()
+            try:
+                with os.scandir(current) as iterator:
+                    entries = sorted(iterator, key=lambda entry: os.fsencode(entry.name), reverse=True)
+            except OSError as exc:
+                raise ControllerError("unable to inspect workspace directory topology") from exc
+            for entry in entries:
+                entries_seen += 1
+                if entries_seen > _MAX_WORKSPACE_SCAN_ENTRIES:
+                    raise ControllerError("workspace directory topology exceeds the entry limit")
+                path = Path(entry.path)
+                relative = path.relative_to(workspace).as_posix()
+                if len(os.fsencode(relative)) > _MAX_WORKSPACE_PATH_BYTES:
+                    raise ControllerError("workspace directory topology contains an overlong path")
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise ControllerError("workspace directory topology changed during capture") from exc
+                if not stat.S_ISDIR(metadata.st_mode):
+                    continue
+                if relative == ".git" or Path(".git") in Path(relative).parents:
+                    continue
+                if self._is_controller_path(workspace, relative):
+                    continue
+                child_depth = depth + 1
+                if child_depth > _MAX_WORKSPACE_SCAN_DEPTH:
+                    raise ControllerError("workspace directory topology exceeds the depth limit")
+                directories.add(relative)
+                pending.append((path, child_depth))
+        return frozenset(directories)
+
+    def _directory_topology_changes(self, capsule: ExecutionCapsule, revision: str) -> tuple[tuple[str, str], ...]:
+        current = self._workspace_directories(capsule)
+        expected = self._revision_directories(capsule, revision)
+        return tuple(
+            (relative, self._directory_topology_signature(capsule.workspace_path / relative))
+            for relative in sorted(current ^ expected)
+        )
+
+    @staticmethod
+    def _directory_topology_signature(path: Path) -> str:
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            return "missing"
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ControllerError(f"workspace directory topology changed type during capture: {path}")
+        payload = f"topology:{stat.S_IMODE(metadata.st_mode):04o}".encode()
+        return f"directory:{_digest_bytes(payload)}"
+
     def _is_controller_path(self, workspace: Path, path: str) -> bool:
         if workspace.resolve() != self.state_root:
             return False
@@ -731,24 +822,43 @@ class Controller:
         if stat.S_ISREG(metadata.st_mode):
             if metadata.st_nlink != 1:
                 raise ControllerError(f"workspace baseline contains a multiply-linked file: {path}")
-            return f"file:{_digest_bytes(path.read_bytes())}"
+            if metadata.st_size > _MAX_WORKSPACE_FILE_BYTES:
+                raise ControllerError(f"workspace baseline contains an oversized file: {path}")
+            payload = f"{stat.S_IMODE(metadata.st_mode):04o}\0".encode() + path.read_bytes()
+            return f"file:{_digest_bytes(payload)}"
         if stat.S_ISDIR(metadata.st_mode):
-            entries: list[str] = []
+            entries: list[str] = [f"root:{stat.S_IMODE(metadata.st_mode):04o}"]
+            entry_count = 0
+            total_bytes = 0
             for current, directories, files in os.walk(path, followlinks=False):
                 directories.sort()
                 files.sort()
                 for name in (*directories, *files):
+                    entry_count += 1
+                    if entry_count > _MAX_WORKSPACE_SCAN_ENTRIES:
+                        raise ControllerError(f"workspace baseline tree exceeds the entry limit: {path}")
                     child = Path(current) / name
                     item = os.lstat(child)
                     if stat.S_ISLNK(item.st_mode):
                         raise ControllerError(f"workspace baseline contains a symlink: {child}")
                     relative = child.relative_to(path).as_posix()
+                    if len(os.fsencode(relative)) > _MAX_WORKSPACE_PATH_BYTES:
+                        raise ControllerError(f"workspace baseline tree contains an overlong path: {path}")
+                    if len(Path(relative).parts) > _MAX_WORKSPACE_SCAN_DEPTH:
+                        raise ControllerError(f"workspace baseline tree exceeds the depth limit: {path}")
                     if stat.S_ISDIR(item.st_mode):
-                        entries.append(f"d:{relative}")
+                        entries.append(f"d:{stat.S_IMODE(item.st_mode):04o}:{relative}")
                     elif stat.S_ISREG(item.st_mode):
                         if item.st_nlink != 1:
                             raise ControllerError(f"workspace baseline contains a multiply-linked file: {child}")
-                        entries.append(f"f:{relative}:{_digest_bytes(child.read_bytes())}")
+                        if item.st_size > _MAX_WORKSPACE_FILE_BYTES:
+                            raise ControllerError(f"workspace baseline contains an oversized file: {child}")
+                        total_bytes += item.st_size
+                        if total_bytes > _MAX_WORKSPACE_TOTAL_BYTES:
+                            raise ControllerError(f"workspace baseline tree exceeds the file-byte limit: {path}")
+                        entries.append(
+                            f"f:{stat.S_IMODE(item.st_mode):04o}:{relative}:{_digest_bytes(child.read_bytes())}"
+                        )
                     else:
                         raise ControllerError(f"workspace baseline contains an unsupported object: {child}")
             return f"directory:{_digest_bytes(chr(10).join(entries).encode())}"
@@ -765,33 +875,88 @@ class Controller:
                 continue
             self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
             facts.append((relative, self._path_signature(capsule.workspace_path / relative)))
+        by_path = dict(facts)
+        for relative, signature in self._directory_topology_changes(capsule, baseline_head):
+            by_path.setdefault(relative, signature)
+        return tuple(sorted(by_path.items()))
+
+    def _owned_workspace_snapshot(self, capsule: ExecutionCapsule) -> tuple[tuple[str, str], ...]:
+        workspace_device = os.stat(capsule.workspace_path).st_dev
+        facts: list[tuple[str, str]] = []
+        for relative in sorted(capsule.mutable_paths):
+            self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
+            self._assert_safe_tree(capsule.workspace_path / relative, workspace_device)
+            facts.append((relative, self._path_signature(capsule.workspace_path / relative)))
         return tuple(facts)
+
+    def _assert_predecessor_terminal_authority(
+        self,
+        capsule: ExecutionCapsule,
+        predecessors: tuple[ExecutionRecord, ...],
+    ) -> None:
+        if not predecessors:
+            return
+        current_head = self._git_output(capsule.workspace_path, "rev-parse", "HEAD")
+        current_git = git_authority_snapshot(capsule.workspace_path).sha256
+        for predecessor in predecessors:
+            predecessor_capsule = self._load_durable_capsule(predecessor)
+            integrity = self.ledger.get_execution_integrity(predecessor.run_id, predecessor.milestone_id)
+            if (
+                integrity.workspace_terminal_head_sha is None
+                or integrity.workspace_terminal is None
+                or integrity.git_authority_after_sha256 is None
+            ):
+                raise ControllerError(
+                    "predecessor terminal workspace authority is unavailable; explicit reconciliation is required"
+                )
+            if current_head != integrity.workspace_terminal_head_sha:
+                raise ControllerError("predecessor terminal Git HEAD changed before successor start")
+            if current_git != integrity.git_authority_after_sha256:
+                raise ControllerError("predecessor terminal Git authority changed before successor start")
+            if self._owned_workspace_snapshot(predecessor_capsule) != integrity.workspace_terminal:
+                raise ControllerError("predecessor-owned terminal workspace content changed before successor start")
 
     @staticmethod
     def _assert_safe_tree(root: Path, workspace_device: int) -> None:
         """Reject symlink traversal and multiply-linked files in mutable roots."""
 
-        try:
-            metadata = os.lstat(root)
-        except FileNotFoundError:
-            return
-        if stat.S_ISLNK(metadata.st_mode):
-            raise ControllerError(f"mutable path is a symlink: {root}")
-        if metadata.st_dev != workspace_device:
-            raise ControllerError(f"mutable path is outside the workspace device: {root}")
-        if stat.S_ISREG(metadata.st_mode):
-            if metadata.st_nlink != 1:
-                raise ControllerError(f"mutable file has external hardlinks: {root}")
-            return
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise ControllerError(f"mutable path is not a regular file or directory: {root}")
-        try:
-            with os.scandir(root) as iterator:
-                entries = sorted(iterator, key=lambda entry: entry.name)
-        except OSError as exc:
-            raise ControllerError(f"unable to inspect mutable path: {root}") from exc
-        for entry in entries:
-            Controller._assert_safe_tree(Path(entry.path), workspace_device)
+        pending: list[tuple[Path, int]] = [(root, 0)]
+        entries_seen = 0
+        while pending:
+            current, depth = pending.pop()
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError:
+                if current == root:
+                    return
+                raise ControllerError(f"mutable path changed during inspection: {root}") from None
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ControllerError(f"mutable path is a symlink: {current}")
+            if metadata.st_dev != workspace_device:
+                raise ControllerError(f"mutable path is outside the workspace device: {current}")
+            if stat.S_ISREG(metadata.st_mode):
+                if metadata.st_nlink != 1:
+                    raise ControllerError(f"mutable file has external hardlinks: {current}")
+                continue
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ControllerError(f"mutable path is not a regular file or directory: {current}")
+            try:
+                with os.scandir(current) as iterator:
+                    entries = sorted(iterator, key=lambda entry: os.fsencode(entry.name), reverse=True)
+            except OSError as exc:
+                raise ControllerError(f"unable to inspect mutable path: {root}") from exc
+            for entry in entries:
+                entries_seen += 1
+                if entries_seen > _MAX_WORKSPACE_SCAN_ENTRIES:
+                    raise ControllerError(f"mutable path exceeds the entry limit: {root}")
+                child = Path(entry.path)
+                relative = child.relative_to(root)
+                if len(os.fsencode(relative.as_posix())) > _MAX_WORKSPACE_PATH_BYTES:
+                    raise ControllerError(f"mutable path contains an overlong entry: {root}")
+                child_depth = depth + 1
+                if child_depth > _MAX_WORKSPACE_SCAN_DEPTH:
+                    raise ControllerError(f"mutable path exceeds the depth limit: {root}")
+                pending.append((child, child_depth))
 
     @staticmethod
     def _assert_safe_changed_path(workspace: Path, relative: str, workspace_device: int) -> None:
@@ -898,11 +1063,13 @@ class Controller:
             baseline_head = integrity.workspace_baseline_head_sha
             baseline = integrity.workspace_baseline
         else:
+            predecessors = self.ledger.completed_workspace_predecessors(
+                capsule.run_id, capsule.milestone_id, capsule.workspace_path
+            )
+            self._assert_predecessor_terminal_authority(capsule, predecessors)
             prior_roots = {
                 mutable
-                for predecessor in self.ledger.completed_workspace_predecessors(
-                    capsule.run_id, capsule.milestone_id, capsule.workspace_path
-                )
+                for predecessor in predecessors
                 for mutable in self._load_durable_capsule(predecessor).mutable_paths
             }
             trusted_roots = tuple(sorted((*prior_roots, *capsule.mutable_paths)))
@@ -1174,6 +1341,35 @@ class Controller:
             else:
                 integrity_reason = "git_authority_changed"
             result = {"status": "failed", "reason": integrity_reason}
+        outcome_status = result.get("status") if isinstance(result, Mapping) else None
+        outcome_failed = isinstance(outcome_status, str) and outcome_status.strip().lower() in {
+            "failed",
+            "failure",
+            "blocked",
+            "cancelled",
+            "error",
+        }
+        terminal_head: str | None = None
+        terminal_workspace: tuple[tuple[str, str], ...] | None = None
+        if validation.exit_code == 0 and not validation.timed_out and not outcome_failed:
+            try:
+                terminal_head = self._git_output(capsule.workspace_path, "rev-parse", "HEAD")
+                terminal_workspace = self._owned_workspace_snapshot(capsule)
+                if git_authority_snapshot(capsule.workspace_path).sha256 != git_after_sha256:
+                    raise ControllerError("Git authority changed during terminal workspace capture")
+            except Exception:
+                validation = ValidationObservation(
+                    validation.argv,
+                    125,
+                    validation.stdout_sha256,
+                    validation.stderr_sha256,
+                    validation.timed_out,
+                    validation.duration_seconds,
+                    ValidationFailureCode.INTEGRITY_FAILURE,
+                )
+                result = {"status": "failed", "reason": "workspace_integrity_failure"}
+                terminal_head = None
+                terminal_workspace = None
         terminal = self.ledger.record_terminal_execution(
             capsule.run_id,
             capsule.milestone_id,
@@ -1181,6 +1377,8 @@ class Controller:
             validation=validation,
             protected_after_sha256=protected_after,
             git_authority_after_sha256=git_after_sha256,
+            workspace_terminal_head_sha=terminal_head,
+            workspace_terminal=terminal_workspace,
         )
         self._fault("before_projection")
         self._project_execution(terminal)
@@ -1230,6 +1428,7 @@ class Controller:
             "effective_permission_sha256": integrity.effective_permission_sha256 if integrity else None,
             "git_authority_before_sha256": integrity.git_authority_before_sha256 if integrity else None,
             "git_authority_after_sha256": integrity.git_authority_after_sha256 if integrity else None,
+            "workspace_terminal_sha256": integrity.workspace_terminal_sha256 if integrity else None,
             "validation": (
                 {
                     "argv": list(record.validation.argv),

@@ -64,7 +64,7 @@ from .domain import (
     is_transition_allowed,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(7)
+CURRENT_SCHEMA_VERSION = SchemaVersion(8)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -73,6 +73,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(4),
         SchemaVersion(5),
         SchemaVersion(6),
+        SchemaVersion(7),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -265,7 +266,7 @@ _EXECUTION_INTEGRITY_V6_DDL = """CREATE TABLE execution_integrity (
     FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
 )"""
 _V6_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_V6_DDL}
-_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+_EXECUTION_INTEGRITY_V7_DDL = """CREATE TABLE execution_integrity (
     run_id TEXT NOT NULL,
     milestone_id TEXT NOT NULL,
     provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'legacy_sandbox_v4', 'legacy_profile_v5', 'legacy_permission_v6', 'controller_v4')),
@@ -301,7 +302,50 @@ _EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
     CHECK(turn_started_at IS NULL OR length(turn_started_at) > 0),
     FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
 )"""
-_V7_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
+_V7_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_V7_DDL}
+
+_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'legacy_sandbox_v4', 'legacy_profile_v5', 'legacy_permission_v6', 'controller_v4', 'controller_v5')),
+    native_profile_sha256 TEXT CHECK(native_profile_sha256 IS NULL OR length(native_profile_sha256) = 64),
+    native_compatibility_sha256 TEXT CHECK(native_compatibility_sha256 IS NULL OR length(native_compatibility_sha256) = 64),
+    effective_permission_json TEXT CHECK(effective_permission_json IS NULL OR length(effective_permission_json) BETWEEN 1 AND 512),
+    effective_permission_sha256 TEXT CHECK(effective_permission_sha256 IS NULL OR length(effective_permission_sha256) = 64),
+    workspace_baseline_head_sha TEXT CHECK(workspace_baseline_head_sha IS NULL OR length(workspace_baseline_head_sha) = 40),
+    workspace_baseline_json TEXT,
+    workspace_baseline_sha256 TEXT CHECK(workspace_baseline_sha256 IS NULL OR length(workspace_baseline_sha256) = 64),
+    workspace_terminal_head_sha TEXT CHECK(workspace_terminal_head_sha IS NULL OR length(workspace_terminal_head_sha) = 40),
+    workspace_terminal_json TEXT,
+    workspace_terminal_sha256 TEXT CHECK(workspace_terminal_sha256 IS NULL OR length(workspace_terminal_sha256) = 64),
+    turn_started_at TEXT,
+    git_authority_before_sha256 TEXT CHECK(git_authority_before_sha256 IS NULL OR length(git_authority_before_sha256) = 64),
+    git_authority_after_sha256 TEXT CHECK(git_authority_after_sha256 IS NULL OR length(git_authority_after_sha256) = 64),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, milestone_id),
+    CHECK((provenance IN ('legacy_v3', 'legacy_sandbox_v4') AND native_profile_sha256 IS NULL
+           AND native_compatibility_sha256 IS NULL AND effective_permission_json IS NULL
+           AND effective_permission_sha256 IS NULL AND workspace_baseline_head_sha IS NULL
+           AND workspace_baseline_json IS NULL AND workspace_baseline_sha256 IS NULL)
+       OR (provenance = 'legacy_profile_v5' AND native_profile_sha256 IS NOT NULL
+           AND native_compatibility_sha256 IS NULL AND effective_permission_json IS NULL
+           AND effective_permission_sha256 IS NULL AND workspace_baseline_head_sha IS NULL
+           AND workspace_baseline_json IS NULL AND workspace_baseline_sha256 IS NULL)
+       OR (provenance = 'legacy_permission_v6' AND native_profile_sha256 IS NOT NULL
+           AND native_compatibility_sha256 IS NOT NULL AND effective_permission_json IS NOT NULL
+           AND effective_permission_sha256 IS NOT NULL AND workspace_baseline_head_sha IS NULL
+           AND workspace_baseline_json IS NULL AND workspace_baseline_sha256 IS NULL)
+       OR (provenance IN ('controller_v4', 'controller_v5') AND native_profile_sha256 IS NOT NULL
+           AND native_compatibility_sha256 IS NOT NULL AND effective_permission_json IS NOT NULL
+           AND effective_permission_sha256 IS NOT NULL AND workspace_baseline_head_sha IS NOT NULL
+           AND workspace_baseline_json IS NOT NULL AND workspace_baseline_sha256 IS NOT NULL)),
+    CHECK((workspace_terminal_head_sha IS NULL AND workspace_terminal_json IS NULL AND workspace_terminal_sha256 IS NULL)
+       OR (workspace_terminal_head_sha IS NOT NULL AND workspace_terminal_json IS NOT NULL AND workspace_terminal_sha256 IS NOT NULL)),
+    CHECK(turn_started_at IS NULL OR length(turn_started_at) > 0),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_V8_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
 
 
 def _canonical_ddl(sql: str) -> str:
@@ -378,7 +422,8 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(4): "codex_flow_h3_integrity_v4",
     SchemaVersion(5): "codex_flow_h3_native_profile_v5",
     SchemaVersion(6): "codex_flow_h3_permission_authority_v6",
-    CURRENT_SCHEMA_VERSION: "codex_flow_h3_causal_workspace_v7",
+    SchemaVersion(7): "codex_flow_h3_causal_workspace_v7",
+    CURRENT_SCHEMA_VERSION: "codex_flow_h3_terminal_workspace_v8",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -588,6 +633,17 @@ def _event_type(value: str) -> str:
 
 def _absolute_path(path: str | Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
+
+
+def _canonical_workspace_path(path: str | Path) -> Path:
+    return Path(path).resolve(strict=False)
+
+
+def _persisted_canonical_path(value: object, *, label: str) -> Path:
+    path = Path(str(value))
+    if not path.is_absolute() or path != path.resolve(strict=False):
+        raise CorruptSchemaError(f"persisted {label} is not a canonical physical path")
+    return path
 
 
 def _file_identity(metadata: os.stat_result) -> FileIdentity:
@@ -876,7 +932,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V7_TABLE_DDL.values():
+                for statement in _V8_TABLE_DDL.values():
                     self._db().execute(statement)
                 self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -905,6 +961,7 @@ class Ledger:
             SchemaVersion(5): _V5_TABLE_DDL,
             SchemaVersion(6): _V6_TABLE_DDL,
             SchemaVersion(7): _V7_TABLE_DDL,
+            SchemaVersion(8): _V8_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -1009,6 +1066,9 @@ class Ledger:
                 "workspace_baseline_head_sha": ("TEXT", 0, 0),
                 "workspace_baseline_json": ("TEXT", 0, 0),
                 "workspace_baseline_sha256": ("TEXT", 0, 0),
+                "workspace_terminal_head_sha": ("TEXT", 0, 0),
+                "workspace_terminal_json": ("TEXT", 0, 0),
+                "workspace_terminal_sha256": ("TEXT", 0, 0),
                 "turn_started_at": ("TEXT", 0, 0),
                 "git_authority_before_sha256": ("TEXT", 0, 0),
                 "git_authority_after_sha256": ("TEXT", 0, 0),
@@ -1040,6 +1100,10 @@ class Ledger:
             expected["execution_integrity"].pop("workspace_baseline_json")
             expected["execution_integrity"].pop("workspace_baseline_sha256")
             expected["execution_integrity"].pop("turn_started_at")
+        if version < SchemaVersion(8) and "execution_integrity" in expected:
+            expected["execution_integrity"].pop("workspace_terminal_head_sha")
+            expected["execution_integrity"].pop("workspace_terminal_json")
+            expected["execution_integrity"].pop("workspace_terminal_sha256")
         for table, expected_columns in expected.items():
             rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
@@ -1324,10 +1388,20 @@ class Ledger:
                         raise CorruptSchemaError("SDK lifecycle sequence is not contiguous")
                 if has_causal_workspace and (str(execution.run_id), str(execution.milestone_id)) in integrity_keys:
                     integrity = self.get_execution_integrity(execution.run_id, execution.milestone_id)
-                    if integrity.provenance == "controller_v4" and (
+                    if integrity.provenance in {"controller_v4", "controller_v5"} and (
                         integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None
                     ):
                         raise CorruptSchemaError("controller execution lacks its workspace baseline authority")
+                    if (
+                        execution.status is ExecutionStatus.COMPLETED
+                        and integrity.provenance == "controller_v5"
+                        and (
+                            integrity.workspace_terminal_head_sha is None
+                            or integrity.workspace_terminal is None
+                            or integrity.workspace_terminal_sha256 is None
+                        )
+                    ):
+                        raise CorruptSchemaError("completed controller execution lacks terminal workspace authority")
                     if execution.turn_id is not None and integrity.turn_started_at is None:
                         raise CorruptSchemaError("durable SDK turn lacks causal turn-start authority")
                     if (
@@ -1350,6 +1424,9 @@ class Ledger:
                         raise CorruptSchemaError("Git authority after-state lacks its pre-turn authority")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(7):
+            self._migrate_v7_to_v8()
+            return
         if version == SchemaVersion(6):
             self._migrate_v6_to_v7()
             return
@@ -1507,7 +1584,7 @@ class Ledger:
         self._validate_rows()
         with self._transaction(validate_authority=False):
             self._db().execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v6")
-            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(_EXECUTION_INTEGRITY_V7_DDL)
             self._db().execute(
                 "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
                 "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
@@ -1523,6 +1600,37 @@ class Ledger:
                 "ON x.run_id = i.run_id AND x.milestone_id = i.milestone_id"
             )
             self._db().execute("DROP TABLE execution_integrity_v6")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(int(SchemaVersion(7))),),
+            )
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(7)],),
+            )
+            self._fault("after_migration")
+        self._migrate_v7_to_v8()
+
+    def _migrate_v7_to_v8(self) -> None:
+        self._validate_schema_metadata(SchemaVersion(7))
+        self._validate_shape(SchemaVersion(7))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._db().execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v7")
+            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(
+                "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
+                "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
+                "workspace_baseline_head_sha, workspace_baseline_json, workspace_baseline_sha256, "
+                "workspace_terminal_head_sha, workspace_terminal_json, workspace_terminal_sha256, "
+                "turn_started_at, git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
+                "SELECT run_id, milestone_id, provenance, native_profile_sha256, native_compatibility_sha256, "
+                "effective_permission_json, effective_permission_sha256, workspace_baseline_head_sha, "
+                "workspace_baseline_json, workspace_baseline_sha256, NULL, NULL, NULL, turn_started_at, "
+                "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at "
+                "FROM execution_integrity_v7"
+            )
+            self._db().execute("DROP TABLE execution_integrity_v7")
             self._db().execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(int(CURRENT_SCHEMA_VERSION)),),
@@ -2046,8 +2154,9 @@ class Ledger:
                 "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
                 "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
                 "workspace_baseline_head_sha, workspace_baseline_json, workspace_baseline_sha256, "
+                "workspace_terminal_head_sha, workspace_terminal_json, workspace_terminal_sha256, "
                 "turn_started_at, git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
-                "VALUES (?, ?, 'controller_v4', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)",
+                "VALUES (?, ?, 'controller_v5', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)",
                 (
                     str(run),
                     str(milestone),
@@ -2094,7 +2203,7 @@ class Ledger:
             if execution.status is not ExecutionStatus.THREAD_STARTED or execution.thread_id is None:
                 raise StaleWriter("native profile resume rebind requires a durable active SDK thread")
             current = self.get_execution_integrity(run, milestone)
-            if current.provenance != "controller_v4" or current.effective_permission is None:
+            if current.provenance not in {"controller_v4", "controller_v5"} or current.effective_permission is None:
                 raise NativeCompatibilityConflict("execution lacks resumable native compatibility authority")
             if current.native_compatibility_sha256 != compatibility:
                 raise NativeCompatibilityConflict("native provider/routing/discovery compatibility changed")
@@ -2535,11 +2644,24 @@ class Ledger:
         validation: ValidationObservation,
         protected_after_sha256: str,
         git_authority_after_sha256: str,
+        workspace_terminal_head_sha: str | None,
+        workspace_terminal: tuple[tuple[str, str], ...] | None,
     ) -> ExecutionRecord:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
         after_digest = _sha256(protected_after_sha256, field_name="protected-path digest")
         git_after = _sha256(git_authority_after_sha256, field_name="Git authority digest")
+        if (workspace_terminal_head_sha is None) != (workspace_terminal is None):
+            raise ValueError("terminal workspace authority must be complete or absent")
+        terminal_head = (
+            _git_sha(workspace_terminal_head_sha, field_name="workspace terminal HEAD")
+            if workspace_terminal_head_sha is not None
+            else None
+        )
+        terminal_json: str | None = None
+        terminal_sha256: str | None = None
+        if workspace_terminal is not None:
+            terminal_json, terminal_sha256 = _encode_workspace_baseline(workspace_terminal)
         now = utc_now()
         outcome_status = result.get("status") if isinstance(result, Mapping) else None
         outcome_failed = isinstance(outcome_status, str) and outcome_status.strip().lower() in {
@@ -2554,6 +2676,10 @@ class Ledger:
             if validation.exit_code == 0 and not validation.timed_out and not outcome_failed
             else ExecutionStatus.FAILED
         )
+        if terminal is ExecutionStatus.COMPLETED and (
+            terminal_head is None or terminal_json is None or terminal_sha256 is None
+        ):
+            raise StaleWriter("completed execution requires accepted terminal workspace authority")
         with self._transaction():
             current = self.get_execution(run, milestone)
             self._reject_terminal_execution(current)
@@ -2594,9 +2720,19 @@ class Ledger:
                 ),
             )
             self._db().execute(
-                "UPDATE execution_integrity SET git_authority_after_sha256 = ?, updated_at = ? "
+                "UPDATE execution_integrity SET git_authority_after_sha256 = ?, "
+                "workspace_terminal_head_sha = ?, workspace_terminal_json = ?, workspace_terminal_sha256 = ?, "
+                "updated_at = ? "
                 "WHERE run_id = ? AND milestone_id = ?",
-                (git_after, now, str(run), str(milestone)),
+                (
+                    git_after,
+                    terminal_head if terminal is ExecutionStatus.COMPLETED else None,
+                    terminal_json if terminal is ExecutionStatus.COMPLETED else None,
+                    terminal_sha256 if terminal is ExecutionStatus.COMPLETED else None,
+                    now,
+                    str(run),
+                    str(milestone),
+                ),
             )
             target = WorkflowState.COMPLETED if terminal is ExecutionStatus.COMPLETED else WorkflowState.FAILED
             self._db().execute(
@@ -2675,13 +2811,14 @@ class Ledger:
         return self._execution_from_row(row)
 
     def get_workspace_lease(self, workspace_path: Path) -> WorkspaceLeaseRecord:
+        canonical_workspace = _canonical_workspace_path(workspace_path)
         row = (
             self._db()
-            .execute("SELECT * FROM workspace_leases WHERE workspace_path = ?", (str(workspace_path),))
+            .execute("SELECT * FROM workspace_leases WHERE workspace_path = ?", (str(canonical_workspace),))
             .fetchone()
         )
         if row is None:
-            raise RecordNotFound(f"workspace lease {workspace_path} does not exist")
+            raise RecordNotFound(f"workspace lease {canonical_workspace} does not exist")
         return self._workspace_lease_from_row(row)
 
     def completed_workspace_predecessors(
@@ -2692,12 +2829,13 @@ class Ledger:
     ) -> tuple[ExecutionRecord, ...]:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
+        canonical_workspace = _canonical_workspace_path(workspace_path)
         rows = (
             self._db()
             .execute(
                 "SELECT * FROM executions WHERE run_id = ? AND workspace_path = ? AND milestone_id != ? "
                 "AND status = ? ORDER BY created_at, milestone_id",
-                (str(run), str(workspace_path), str(milestone), ExecutionStatus.COMPLETED.value),
+                (str(run), str(canonical_workspace), str(milestone), ExecutionStatus.COMPLETED.value),
             )
             .fetchall()
         )
@@ -2889,8 +3027,8 @@ class Ledger:
     @staticmethod
     def _workspace_lease_from_row(row: sqlite3.Row) -> WorkspaceLeaseRecord:
         return WorkspaceLeaseRecord(
-            Path(str(row["workspace_path"])),
-            Path(str(row["repository_root"])),
+            _persisted_canonical_path(row["workspace_path"], label="workspace lease path"),
+            _persisted_canonical_path(row["repository_root"], label="repository root"),
             WorkspaceMode(str(row["mode"])),
             str(row["branch"]),
             str(row["base_sha"]),
@@ -2943,8 +3081,8 @@ class Ledger:
         return ExecutionRecord(
             RunId(row["run_id"]),
             MilestoneId(row["milestone_id"]),
-            Path(str(row["workspace_path"])),
-            Path(str(row["capsule_path"])),
+            _persisted_canonical_path(row["workspace_path"], label="execution workspace path"),
+            _persisted_canonical_path(row["capsule_path"], label="capsule path"),
             _sha256(str(row["capsule_sha256"]), field_name="capsule digest"),
             str(row["model"]),
             ReasoningEffort(str(row["reasoning_effort"])),
@@ -2990,6 +3128,14 @@ class Ledger:
             if any(value is None for value in (baseline_head, baseline_raw, baseline_digest)):
                 raise CorruptSchemaError("workspace baseline fact is incomplete")
             baseline = _decode_workspace_baseline(str(baseline_raw), str(baseline_digest))
+        terminal_head = row["workspace_terminal_head_sha"] if "workspace_terminal_head_sha" in row.keys() else None
+        terminal_raw = row["workspace_terminal_json"] if "workspace_terminal_json" in row.keys() else None
+        terminal_digest = row["workspace_terminal_sha256"] if "workspace_terminal_sha256" in row.keys() else None
+        terminal_workspace = None
+        if any(value is not None for value in (terminal_head, terminal_raw, terminal_digest)):
+            if any(value is None for value in (terminal_head, terminal_raw, terminal_digest)):
+                raise CorruptSchemaError("workspace terminal fact is incomplete")
+            terminal_workspace = _decode_workspace_baseline(str(terminal_raw), str(terminal_digest))
         turn_started_at = row["turn_started_at"] if "turn_started_at" in row.keys() else None
         return ExecutionIntegrityRecord(
             RunId(row["run_id"]),
@@ -3012,6 +3158,13 @@ class Ledger:
             (
                 _sha256(str(baseline_digest), field_name="workspace baseline digest")
                 if baseline_digest is not None
+                else None
+            ),
+            (_git_sha(str(terminal_head), field_name="workspace terminal HEAD") if terminal_head is not None else None),
+            terminal_workspace,
+            (
+                _sha256(str(terminal_digest), field_name="workspace terminal digest")
+                if terminal_digest is not None
                 else None
             ),
             str(turn_started_at) if turn_started_at is not None else None,

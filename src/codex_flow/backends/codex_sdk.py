@@ -128,7 +128,10 @@ class NativeRuntimeConfig:
 
     @property
     def environment(self) -> dict[str, str]:
-        return {"CODEX_HOME": os.fspath(self.runtime_home)}
+        return {
+            "CODEX_HOME": os.fspath(self.runtime_home),
+            **dict(self.native_profile.ephemeral_environment),
+        }
 
 
 def _load_sdk() -> _SdkSurface:

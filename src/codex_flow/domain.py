@@ -670,8 +670,13 @@ class ExecutionCapsule:
             raise ValueError("execution capsule version must be an integer")
         if self.capsule_version != 2:
             raise ValueError("unsupported execution capsule version")
-        if not self.repository_root.is_absolute() or not self.workspace_path.is_absolute():
-            raise ValueError("repository and workspace paths must be absolute")
+        try:
+            repository_root = self.repository_root.resolve(strict=False)
+            workspace_path = self.workspace_path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("repository and workspace paths must have a canonical physical identity") from exc
+        object.__setattr__(self, "repository_root", repository_root)
+        object.__setattr__(self, "workspace_path", workspace_path)
         if _LANE_PATTERN.fullmatch(self.lane) is None:
             raise ValueError("workspace lane must be a lowercase semantic slug")
         if not self.branch or any(character.isspace() for character in self.branch):
@@ -758,6 +763,9 @@ class ExecutionIntegrityRecord:
     workspace_baseline_head_sha: str | None
     workspace_baseline: tuple[tuple[str, str], ...] | None
     workspace_baseline_sha256: str | None
+    workspace_terminal_head_sha: str | None
+    workspace_terminal: tuple[tuple[str, str], ...] | None
+    workspace_terminal_sha256: str | None
     turn_started_at: str | None
     git_authority_before_sha256: str | None
     git_authority_after_sha256: str | None

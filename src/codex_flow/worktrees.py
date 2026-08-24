@@ -58,9 +58,10 @@ def _run(argv: Sequence[str], cwd: Path) -> CommandResult:
 
 
 def _absolute_lexical(path: Path) -> Path:
-    if not path.is_absolute():
-        raise WorktreeError(f"workspace path must be absolute: {path}")
-    return Path(os.path.normpath(os.fspath(path)))
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise WorktreeError(f"workspace path has no canonical physical identity: {path}") from exc
 
 
 def _validate_existing_chain(path: Path, *, allow_missing_leaf: bool = False) -> None:

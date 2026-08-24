@@ -17,7 +17,7 @@ import re
 import stat
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, TypeAlias, cast
 from urllib.parse import urlsplit
@@ -34,8 +34,10 @@ _MAX_DISCOVERY_TOTAL_BYTES = 2_147_483_648
 _MAX_DISCOVERY_SYMLINK_BYTES = 4_096
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_RUNTIME_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SENSITIVE_KEY = re.compile(
-    r"(?:password|secret|credential|bearer|api[_-]?key|access[_-]?token|(?:^|[_-])token(?:$|[_-]))",
+    r"(?:authorization|proxy[_-]?authorization|cookie|password|secret|credential|bearer|"
+    r"client[_-]?secret|api[_-]?key|access[_-]?token|auth[_-]?token|(?:^|[_-])token(?:$|[_-]))",
     re.I,
 )
 
@@ -143,6 +145,7 @@ class NativeProfileProjection:
     projected_config_sha256: str
     compatibility_sha256: str
     profile_sha256: str
+    ephemeral_environment: tuple[tuple[str, str], ...] = field(repr=False)
 
     @classmethod
     def load(
@@ -167,7 +170,8 @@ class NativeProfileProjection:
             raise NativeProfileError("native Codex config must be a TOML table")
         data = cast(dict[str, object], decoded)
         _validate_top_level(data)
-        _reject_secret_fields(data)
+        projected_data, ephemeral_environment = _project_native_config(data)
+        _reject_secret_fields(projected_data)
 
         provider_id = _required_string(data, "model_provider")
         providers = _required_table(data, "model_providers")
@@ -227,7 +231,7 @@ class NativeProfileProjection:
             for name in _DISCOVERY_DIRECTORIES
         )
 
-        preserved = {key: _toml_value(data[key], path=key) for key in sorted(_PRESERVED_TOP_LEVEL)}
+        preserved = {key: _toml_value(projected_data[key], path=key) for key in sorted(_PRESERVED_TOP_LEVEL)}
         projected_toml = _render_toml(preserved)
         projected_digest = hashlib.sha256(projected_toml.encode("utf-8")).hexdigest()
         facts: JsonObject = {
@@ -303,6 +307,7 @@ class NativeProfileProjection:
             projected_digest,
             compatibility_digest,
             profile_digest,
+            ephemeral_environment,
         )
         result.verify_sources()
         return result
@@ -412,6 +417,132 @@ class NativeProfileProjection:
             self.verify_sources()
         finally:
             os.close(descriptor)
+
+
+def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object], tuple[tuple[str, str], ...]]:
+    """Project secret-bearing native values onto process-bound environment references.
+
+    The private ``config.toml`` is durable runtime state, so it may contain
+    only references. Literal MCP HTTP headers and secret-bearing stdio
+    environment values stay in memory long enough to launch the SDK child.
+    """
+
+    projected = {key: _clone_native_value(value) for key, value in data.items()}
+    mcp_servers = projected.get("mcp_servers")
+    if not isinstance(mcp_servers, dict):
+        raise NativeProfileError("native profile field 'mcp_servers' must be a table")
+    ephemeral: dict[str, str] = {}
+    protected_environment = {"CODEX_HOME"}
+    selected_provider = data.get("model_provider")
+    provider_tables = data.get("model_providers")
+    if isinstance(selected_provider, str) and isinstance(provider_tables, dict):
+        selected_table = provider_tables.get(selected_provider)
+        if isinstance(selected_table, dict) and isinstance(selected_table.get("env_key"), str):
+            protected_environment.add(cast(str, selected_table["env_key"]))
+    for server_name, raw_server in sorted(mcp_servers.items()):
+        if not isinstance(server_name, str) or not isinstance(raw_server, dict):
+            raise NativeProfileError("native MCP server definitions must be named tables")
+        for key in raw_server:
+            if _semantic_key(key) in {"http_headers", "env_http_headers"} and key not in {
+                "http_headers",
+                "env_http_headers",
+            }:
+                raise NativeProfileError("native MCP header tables must use their canonical key spelling")
+
+        literal_headers = raw_server.pop("http_headers", None)
+        reference_headers = raw_server.get("env_http_headers", {})
+        if literal_headers is not None and not isinstance(literal_headers, dict):
+            raise NativeProfileError("native MCP http_headers must be a table")
+        if not isinstance(reference_headers, dict):
+            raise NativeProfileError("native MCP env_http_headers must be a table")
+        projected_headers: dict[str, object] = dict(reference_headers)
+        for header_name, raw_value in sorted((literal_headers or {}).items()):
+            if (
+                not isinstance(header_name, str)
+                or not header_name
+                or len(header_name) > 16_384
+                or "\x00" in header_name
+                or not isinstance(raw_value, str)
+                or not raw_value
+                or len(raw_value) > 16_384
+                or "\x00" in raw_value
+            ):
+                raise NativeProfileError("native MCP HTTP headers must be bounded non-empty strings")
+            reference = _ephemeral_reference("HTTP", server_name, header_name)
+            prior = projected_headers.get(header_name)
+            if prior is not None and prior != reference:
+                raise NativeProfileError("native MCP header has conflicting literal and environment sources")
+            projected_headers[header_name] = reference
+            _record_ephemeral(ephemeral, reference, raw_value, protected=protected_environment)
+        if projected_headers:
+            raw_server["env_http_headers"] = projected_headers
+        elif "env_http_headers" in raw_server:
+            raw_server["env_http_headers"] = {}
+
+        literal_environment = raw_server.get("env")
+        if literal_environment is not None:
+            if not isinstance(literal_environment, dict):
+                raise NativeProfileError("native MCP env must be a table")
+            retained_environment: dict[str, object] = {}
+            environment_references = raw_server.get("env_vars", [])
+            if not isinstance(environment_references, list) or any(
+                not isinstance(item, str) or _RUNTIME_ENV_KEY.fullmatch(item) is None for item in environment_references
+            ):
+                raise NativeProfileError("native MCP env_vars must contain environment key references")
+            references = set(environment_references)
+            for key, raw_value in sorted(literal_environment.items()):
+                if (
+                    not isinstance(key, str)
+                    or _RUNTIME_ENV_KEY.fullmatch(key) is None
+                    or not isinstance(raw_value, str)
+                    or len(raw_value) > 16_384
+                    or "\x00" in raw_value
+                ):
+                    raise NativeProfileError("native MCP environment values must be bounded string entries")
+                if _SENSITIVE_KEY.search(key):
+                    references.add(key)
+                    _record_ephemeral(ephemeral, key, raw_value, protected=protected_environment)
+                else:
+                    retained_environment[key] = raw_value
+            if retained_environment:
+                raw_server["env"] = retained_environment
+            else:
+                raw_server.pop("env", None)
+            if references:
+                raw_server["env_vars"] = sorted(references)
+    return projected, tuple(sorted(ephemeral.items()))
+
+
+def _clone_native_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: _clone_native_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_clone_native_value(child) for child in value]
+    return value
+
+
+def _semantic_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+
+
+def _ephemeral_reference(kind: str, server_name: str, field_name: str) -> str:
+    identity = f"{kind}\0{server_name}\0{field_name}".encode()
+    return f"CODEX_FLOW_MCP_{kind}_{hashlib.sha256(identity).hexdigest()[:24].upper()}"
+
+
+def _record_ephemeral(
+    environment: dict[str, str],
+    key: str,
+    value: str,
+    *,
+    protected: set[str],
+) -> None:
+    if key in protected:
+        raise NativeProfileError("native MCP secret conflicts with a controller or provider environment key")
+    prior = environment.get(key)
+    if prior is not None and prior != value:
+        raise NativeProfileError("native MCP secrets require conflicting values for one environment key")
+    environment[key] = value
 
 
 def _open_private_runtime_home(path: Path) -> int:
@@ -562,7 +693,19 @@ def _reject_secret_fields(value: object, *, path: str = "") -> None:
             if not isinstance(key, str):
                 raise NativeProfileError("native profile table keys must be strings")
             child_path = f"{path}.{key}" if path else key
-            allowed_reference = key == "env_key" or key == "requires_openai_auth"
+            if path.endswith(".env_http_headers"):
+                if not isinstance(child, str) or _RUNTIME_ENV_KEY.fullmatch(child) is None:
+                    raise NativeProfileError("native MCP header environment references must name environment keys")
+                continue
+            allowed_reference = key in {
+                "bearer_token_env_var",
+                "env_key",
+                "requires_openai_auth",
+            }
+            if _semantic_key(key) in {"http_headers", "env_http_headers"} and not (
+                key == "env_http_headers" and path.startswith("mcp_servers.") and path.count(".") == 1
+            ):
+                raise NativeProfileError(f"native profile contains an unsupported header field: {child_path}")
             if _SENSITIVE_KEY.search(key) and not allowed_reference:
                 raise NativeProfileError(f"native profile contains a secret-bearing field: {child_path}")
             _reject_secret_fields(child, path=child_path)
@@ -906,8 +1049,19 @@ def _validate_discovery_symlinks(
             continue
         pending = _symlink_target_parts(root_bytes, relative, target, label=label)
         resolved: list[bytes] = []
+        active_ancestors = {
+            b"/".join(posixpath.dirname(relative).split(b"/")[:depth])
+            for depth in range(len(posixpath.dirname(relative).split(b"/")) + 1)
+        }
+        active_ancestors.add(b"")
+        visited_links = {relative}
         hops = 0
-        while pending:
+        while True:
+            if not pending:
+                resolved_target = b"/".join(resolved)
+                if resolved_target in active_ancestors:
+                    raise NativeProfileError(f"{label} contains a cyclic symlink to an active ancestor")
+                break
             part = pending.pop(0)
             candidate = b"/".join((*resolved, part))
             entry = entries.get(candidate)
@@ -916,8 +1070,9 @@ def _validate_discovery_symlinks(
             entry_kind, entry_target = entry
             if entry_kind == b"symlink":
                 hops += 1
-                if hops > _MAX_DISCOVERY_DEPTH or entry_target is None:
+                if hops > _MAX_DISCOVERY_DEPTH or entry_target is None or candidate in visited_links:
                     raise NativeProfileError(f"{label} contains a cyclic or over-deep symlink")
+                visited_links.add(candidate)
                 pending = _symlink_target_parts(root_bytes, candidate, entry_target, label=label) + pending
                 resolved = []
             else:

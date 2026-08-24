@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+import codex_flow.controller as controller_module
 import codex_flow.native_profile as native_profile_module
 from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
 from codex_flow.cli import app
@@ -50,6 +51,7 @@ from codex_flow.domain import (
     WorkspaceMode,
 )
 from codex_flow.ledger import (
+    _EXECUTION_INTEGRITY_V7_DDL,
     _V2_TABLE_DDL,
     _V4_TABLE_DDL,
     _V5_TABLE_DDL,
@@ -789,6 +791,115 @@ def test_managed_worktree_is_semantic_and_reused_across_milestones() -> None:
         controller.close()
 
 
+@pytest.mark.parametrize("alias_kind", ("dot_parent", "symlink", "relative", "trailing_dot"))
+def test_physical_workspace_alias_cannot_acquire_a_second_nonterminal_owner(alias_kind: str) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        if alias_kind == "dot_parent":
+            alias = Path(f"{repository}/../repo")
+        elif alias_kind == "symlink":
+            alias = root / "repo-alias"
+            alias.symlink_to(repository, target_is_directory=True)
+        elif alias_kind == "relative":
+            alias = Path(os.path.relpath(repository, Path.cwd()))
+        else:
+            alias = Path(f"{repository}/.")
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("hold nonterminal owner")
+
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(service),
+            fault_injector=crash,
+        )
+        first.plan(_capsule(repository, repository, base, branch, run="owner-one", milestone="one"))
+        with pytest.raises(RuntimeError, match="hold nonterminal owner"):
+            first.start("owner-one", "one")
+        first.close()
+
+        second_adapter_creations = 0
+
+        def second_factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal second_adapter_creations
+            second_adapter_creations += 1
+            return FakeAdapter(config, service)
+
+        second = Controller(alias, _trusted_test_adapter_factory=second_factory)
+        alias_capsule = _capsule(alias, alias, base, branch, run="owner-two", milestone="two")
+        second.plan(alias_capsule)
+        with pytest.raises(WorkspaceLeaseConflict, match=r"nonterminal execution owner|different facts"):
+            second.start("owner-two", "two")
+        assert second_adapter_creations == 0
+        assert service["starts"] == 1
+        assert second.status("owner-two", "two").workspace_path == repository.resolve()
+        assert second.ledger.get_workspace_lease(alias).owner_run_id == RunId("owner-one")
+        second.close()
+
+
+def test_canonical_execution_reopens_through_symlink_alias_without_second_thread_start() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        alias = root / "repo-alias"
+        alias.symlink_to(repository, target_is_directory=True)
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("close and reopen")
+
+        first = Controller(alias, _trusted_test_adapter_factory=_factory(service), fault_injector=crash)
+        first.plan(_capsule(alias, alias, base, branch))
+        with pytest.raises(RuntimeError, match="close and reopen"):
+            first.start("run", "m1")
+        assert first.status("run", "m1").workspace_path == repository.resolve()
+        first.close()
+
+        reopened = Controller(repository, _trusted_test_adapter_factory=_factory(service))
+        assert reopened.resume("run", "m1").status is ExecutionStatus.COMPLETED
+        assert service["starts"] == 1
+        assert service["resumes"] == 1
+        assert len(reopened.ledger.snapshot("run").dispatches) == 1
+        reopened.close()
+
+
+def test_noncanonical_legacy_workspace_key_fails_closed_on_reopen() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("persist lease")
+
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(service),
+            fault_injector=crash,
+        )
+        controller.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="persist lease"):
+            controller.start("run", "m1")
+        controller.close()
+
+        legacy_alias = f"{repository}/../repo"
+        connection = sqlite3.connect(repository / ".codex-flow" / "workflow.db")
+        connection.execute("UPDATE workspace_leases SET workspace_path = ?", (legacy_alias,))
+        connection.execute("UPDATE executions SET workspace_path = ?", (legacy_alias,))
+        connection.commit()
+        connection.close()
+
+        with pytest.raises(CorruptSchemaError, match="canonical physical path"):
+            Controller(repository, _trusted_test_adapter_factory=_factory(service))
+
+
 def test_disjoint_sequential_milestones_reuse_baseline_and_recover_before_external_start() -> None:
     class NamedOutputAdapter(FakeAdapter):
         def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
@@ -877,6 +988,160 @@ def test_disjoint_sequential_milestones_reuse_baseline_and_recover_before_extern
         recovered.close()
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    ("content", "delete", "type", "symlink", "hardlink", "git_state"),
+)
+def test_fresh_successor_rejects_predecessor_terminal_file_or_git_tampering(tamper: str) -> None:
+    service: dict[str, Any] = {**_service(), "target": "first.txt"}
+
+    class NamedOutputAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            self.service["turns"] += 1
+            assert self.config.cwd is not None
+            target = str(self.service["target"])
+            (self.config.cwd / target).write_text("trusted\n")
+            return TurnObservation(thread, f"turn-{target}", "completed", None, {"status": "done"}, ())
+
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, _branch = _repository(repository)
+        lane = f"predecessor-{tamper.replace('_', '-')}"
+        workspace = repository.parent / "repo.worktrees" / lane
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: NamedOutputAdapter(config, service),
+        )
+        capsule_one = replace(
+            _capsule(
+                repository,
+                workspace,
+                base,
+                f"agent/{lane}",
+                run="predecessor-run",
+                milestone="one",
+                mode=WorkspaceMode.MANAGED_WORKTREE,
+                lane=lane,
+            ),
+            mutable_paths=("first.txt",),
+        )
+        first.plan(capsule_one)
+        assert first.start("predecessor-run", "one").status is ExecutionStatus.COMPLETED
+        accepted = first.ledger.get_execution_integrity("predecessor-run", "one")
+        assert accepted.workspace_terminal is not None
+        first.close()
+
+        output = workspace / "first.txt"
+        if tamper == "content":
+            output.write_text("tampered\n")
+        elif tamper == "delete":
+            output.unlink()
+        elif tamper == "type":
+            output.unlink()
+            output.mkdir()
+        elif tamper == "symlink":
+            output.unlink()
+            output.symlink_to(root / "outside.txt")
+        elif tamper == "hardlink":
+            os.link(output, workspace / "linked-first.txt")
+        else:
+            _git(workspace, "config", "codex-flow.tampered", "yes")
+
+        adapter_creations = 0
+
+        def successor_factory(config: CodexSdkConfig) -> NamedOutputAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return NamedOutputAdapter(config, service)
+
+        successor = Controller(repository, _trusted_test_adapter_factory=successor_factory)
+        capsule_two = replace(
+            capsule_one,
+            milestone_id=MilestoneId("two"),
+            mutable_paths=("second.txt",),
+        )
+        successor.plan(capsule_two)
+        service["target"] = "second.txt"
+        with pytest.raises(ControllerError):
+            successor.start("predecessor-run", "two")
+        assert adapter_creations == 0
+        assert service["starts"] == 1
+        assert successor.status("predecessor-run", "two").status is ExecutionStatus.PLANNED
+        successor.close()
+
+
+@pytest.mark.parametrize("tamper", ("add_empty", "delete_empty"))
+def test_fresh_successor_rejects_predecessor_terminal_empty_directory_tampering(tamper: str) -> None:
+    service = _service()
+
+    class EmptyOutputAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            self.service["turns"] += 1
+            assert self.config.cwd is not None
+            if "first" in input:
+                (self.config.cwd / "owned-directory").mkdir()
+                turn_id = "turn-first"
+            else:
+                (self.config.cwd / "second.txt").write_text("second\n")
+                turn_id = "turn-second"
+            return TurnObservation(thread, turn_id, "completed", None, {"status": "done"}, ())
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, _branch = _repository(repository)
+        lane = f"empty-terminal-{tamper.replace('_', '-')}"
+        workspace = repository.parent / "repo.worktrees" / lane
+        first_capsule = replace(
+            _capsule(
+                repository,
+                workspace,
+                base,
+                f"agent/{lane}",
+                run="empty-terminal-run",
+                milestone="one",
+                mode=WorkspaceMode.MANAGED_WORKTREE,
+                lane=lane,
+            ),
+            mutable_paths=("owned-directory",),
+            prompt="first milestone",
+        )
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: EmptyOutputAdapter(config, service),
+        )
+        first.plan(first_capsule)
+        assert first.start("empty-terminal-run", "one").status is ExecutionStatus.COMPLETED
+        first.close()
+
+        owned = workspace / "owned-directory"
+        if tamper == "add_empty":
+            (owned / "nested-empty").mkdir()
+        else:
+            owned.rmdir()
+
+        adapter_creations = 0
+
+        def successor_factory(config: CodexSdkConfig) -> EmptyOutputAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return EmptyOutputAdapter(config, service)
+
+        successor = Controller(repository, _trusted_test_adapter_factory=successor_factory)
+        successor.plan(
+            replace(
+                first_capsule,
+                milestone_id=MilestoneId("two"),
+                mutable_paths=("second.txt",),
+                prompt="second milestone",
+            )
+        )
+        with pytest.raises(ControllerError, match="predecessor"):
+            successor.start("empty-terminal-run", "two")
+        assert adapter_creations == 0
+        successor.close()
+
+
 @pytest.mark.parametrize("mode", (WorkspaceMode.MANAGED_WORKTREE, WorkspaceMode.EXISTING_WORKTREE))
 def test_distinct_worktree_codex_flow_write_is_not_exempt_from_mutation_scope(mode: WorkspaceMode) -> None:
     class WorkspaceStateAdapter(FakeAdapter):
@@ -884,7 +1149,6 @@ def test_distinct_worktree_codex_flow_write_is_not_exempt_from_mutation_scope(mo
             observation = super().run_turn(thread, input, output_schema=output_schema)
             assert self.config.cwd is not None
             (self.config.cwd / ".codex-flow").mkdir()
-            (self.config.cwd / ".codex-flow" / "executor.txt").write_text("not authoritative\n")
             return observation
 
     with TemporaryDirectory() as directory:
@@ -910,6 +1174,141 @@ def test_distinct_worktree_codex_flow_write_is_not_exempt_from_mutation_scope(mo
             )
         )
         terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        controller.close()
+
+
+@pytest.mark.parametrize("mode", (WorkspaceMode.MANAGED_WORKTREE, WorkspaceMode.EXISTING_WORKTREE))
+def test_distinct_worktree_out_of_scope_empty_directory_fails_closed(mode: WorkspaceMode) -> None:
+    class EmptyDirectoryAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            (self.config.cwd / "outside-empty").mkdir()
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, _branch = _repository(repository)
+        lane = f"empty-{mode.value.replace('_', '-')}"
+        workspace = repository.parent / "repo.worktrees" / lane
+        if mode is WorkspaceMode.EXISTING_WORKTREE:
+            workspace.parent.mkdir()
+            _git(repository, "worktree", "add", "-b", f"agent/{lane}", str(workspace), base)
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: EmptyDirectoryAdapter(config, _service()),
+        )
+        controller.plan(_capsule(repository, workspace, base, f"agent/{lane}", mode=mode, lane=lane))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        controller.close()
+
+
+def test_empty_directory_topology_remains_usable_inside_mutable_root() -> None:
+    class OwnedTopologyAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            self.service["turns"] += 1
+            assert self.config.cwd is not None
+            nested = self.config.cwd / "owned" / "nested"
+            nested.mkdir(parents=True)
+            nested.rename(nested.with_name("renamed"))
+            return TurnObservation(thread, "turn-owned", "completed", None, {"status": "done"}, ())
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: OwnedTopologyAdapter(config, _service()),
+        )
+        capsule = replace(_capsule(repository, repository, base, branch), mutable_paths=("owned",))
+        controller.plan(capsule)
+        assert controller.start("run", "m1").status is ExecutionStatus.COMPLETED
+        assert (repository / "owned" / "renamed").is_dir()
+        controller.close()
+
+
+def test_workspace_directory_topology_bound_fails_before_adapter_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, _service())
+
+        controller = Controller(repository, _trusted_test_adapter_factory=factory)
+        controller.plan(_capsule(repository, repository, base, branch))
+        monkeypatch.setattr(controller_module, "_MAX_WORKSPACE_SCAN_ENTRIES", 1)
+        with pytest.raises(ControllerError, match="topology exceeds the entry limit"):
+            controller.start("run", "m1")
+        assert adapter_creations == 0
+        controller.close()
+
+
+@pytest.mark.parametrize("mode", (WorkspaceMode.MANAGED_WORKTREE, WorkspaceMode.EXISTING_WORKTREE))
+@pytest.mark.parametrize("operation", ("remove", "rename"))
+def test_successor_turn_rejects_predecessor_empty_directory_removal_or_rename(
+    mode: WorkspaceMode,
+    operation: str,
+) -> None:
+    service: dict[str, Any] = {**_service(), "operation": "create"}
+
+    class SequentialTopologyAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            self.service["turns"] += 1
+            assert self.config.cwd is not None
+            owned = self.config.cwd / "owned-empty"
+            if self.service["operation"] == "create":
+                owned.mkdir()
+                turn_id = "turn-create"
+            else:
+                if self.service["operation"] == "remove":
+                    owned.rmdir()
+                else:
+                    owned.rename(self.config.cwd / "renamed-empty")
+                (self.config.cwd / "result.txt").write_text("second\n")
+                turn_id = "turn-second"
+            return TurnObservation(thread, turn_id, "completed", None, {"status": "done"}, ())
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, _branch = _repository(repository)
+        lane = f"topology-{mode.value.replace('_', '-')}-{operation}"
+        workspace = repository.parent / "repo.worktrees" / lane
+        if mode is WorkspaceMode.EXISTING_WORKTREE:
+            workspace.parent.mkdir()
+            _git(repository, "worktree", "add", "-b", f"agent/{lane}", str(workspace), base)
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: SequentialTopologyAdapter(config, service),
+        )
+        first = replace(
+            _capsule(
+                repository,
+                workspace,
+                base,
+                f"agent/{lane}",
+                run="topology-run",
+                milestone="one",
+                mode=mode,
+                lane=lane,
+            ),
+            mutable_paths=("owned-empty",),
+        )
+        controller.plan(first)
+        assert controller.start("topology-run", "one").status is ExecutionStatus.COMPLETED
+        second = replace(first, milestone_id=MilestoneId("two"), mutable_paths=("result.txt",))
+        controller.plan(second)
+        service["operation"] = operation
+        terminal = controller.start("topology-run", "two")
         assert terminal.status is ExecutionStatus.FAILED
         assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
         controller.close()
@@ -1216,6 +1615,10 @@ def test_terminal_execution_rejects_every_public_controller_fact_mutator_after_r
                     validation=validation,
                     protected_after_sha256=protected_after_sha256,
                     git_authority_after_sha256=git_after_sha256,
+                    workspace_terminal_head_sha=(
+                        integrity.workspace_terminal_head_sha if integrity is not None else None
+                    ),
+                    workspace_terminal=(integrity.workspace_terminal if integrity is not None else None),
                 )
             elif mutator_name == "cancel_execution":
                 current.ledger.cancel_execution("run", "m1")
@@ -1635,6 +2038,61 @@ def test_discovery_symlinks_are_internal_fingerprinted_and_never_followed_outsid
             NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
 
 
+@pytest.mark.parametrize("surface", ["skills", "plugins", "memories"])
+@pytest.mark.parametrize("cycle", ["root", "parent", "multi_node", "dangling", "nested_cycle"])
+def test_discovery_rejects_root_ancestor_and_link_graph_cycles(surface: str, cycle: str) -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        discovery = home / surface
+        if cycle == "root":
+            (discovery / "loop").symlink_to(".")
+        elif cycle == "parent":
+            nested = discovery / "nested"
+            nested.mkdir()
+            (nested / "loop").symlink_to("..")
+        elif cycle == "multi_node":
+            (discovery / "first").symlink_to("second")
+            (discovery / "second").symlink_to("first")
+        elif cycle == "dangling":
+            (discovery / "loop").symlink_to("missing")
+        else:
+            nested = discovery / "nested" / "deeper"
+            nested.mkdir(parents=True)
+            (nested / "loop").symlink_to("..")
+
+        with pytest.raises(NativeProfileError, match=r"cyclic|dangling"):
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+
+@pytest.mark.parametrize("surface", ["skills", "plugins", "memories"])
+def test_discovery_root_cycle_blocks_controller_before_adapter_creation(surface: str) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        home = root / "native-home"
+        profile = _test_native_profile(home)
+        (home / surface / "loop").symlink_to(".")
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, _service())
+
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            _trusted_test_native_profile=profile,
+        )
+        controller.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(NativeProfileError, match="cyclic symlink"):
+            controller.start("run", "m1")
+        assert adapter_creations == 0
+        controller.close()
+
+
 def test_discovery_rejects_hardlinks_and_special_files() -> None:
     with TemporaryDirectory() as directory:
         home = Path(directory) / "native-home"
@@ -1684,8 +2142,9 @@ def test_native_profile_rejects_secret_fields_symlinks_and_launch_time_mutation(
 
         config.write_text(original + '\n[mcp_servers.leaky.env]\nAPI_TOKEN = "must-not-project"\n')
         config.chmod(0o600)
-        with pytest.raises(NativeProfileError, match="secret-bearing"):
-            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        projected = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert "must-not-project" not in projected.projected_toml
+        assert dict(projected.ephemeral_environment)["API_TOKEN"] == "must-not-project"
 
         config.write_text(original.replace('personality = "pragmatic"', 'personality = "changed"'))
         config.chmod(0o600)
@@ -1699,6 +2158,180 @@ def test_native_profile_rejects_secret_fields_symlinks_and_launch_time_mutation(
         config.symlink_to(real_config)
         with pytest.raises(NativeProfileError, match="opened safely"):
             NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+
+def test_native_profile_projects_header_and_mcp_secrets_only_through_ephemeral_environment() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        home = root / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        secrets = {
+            "Authorization": "Bearer header-auth-unique",
+            "Proxy-Authorization": "proxy-auth-unique",
+            "Cookie": "cookie-value-unique",
+            "X-Custom": "arbitrary-header-unique",
+            "API_KEY": "api-key-value-unique",
+            "ACCESS_TOKEN": "access-token-value-unique",
+            "PASSWORD": "password-value-unique",
+            "CLIENT_SECRET": "client-secret-value-unique",
+        }
+        config.write_text(
+            config.read_text()
+            + f'''
+[mcp_servers.remote]
+url = "http://127.0.0.1:9"
+http_headers = {{ Authorization = "{secrets["Authorization"]}", "Proxy-Authorization" = "{secrets["Proxy-Authorization"]}", Cookie = "{secrets["Cookie"]}", "X-Custom" = "{secrets["X-Custom"]}" }}
+
+[mcp_servers.stdio]
+command = "sh"
+args = ["-c", "exit 0"]
+
+[mcp_servers.stdio.env]
+API_KEY = "{secrets["API_KEY"]}"
+ACCESS_TOKEN = "{secrets["ACCESS_TOKEN"]}"
+PASSWORD = "{secrets["PASSWORD"]}"
+CLIENT_SECRET = "{secrets["CLIENT_SECRET"]}"
+VISIBLE_SETTING = "retained"
+'''
+        )
+        config.chmod(0o600)
+
+        profile = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        projected_bytes = profile.projected_toml.encode()
+        for secret in secrets.values():
+            assert secret.encode() not in projected_bytes
+        projected = tomllib.loads(profile.projected_toml)
+        remote = projected["mcp_servers"]["remote"]
+        assert "http_headers" not in remote
+        assert set(remote["env_http_headers"]) == {
+            "Authorization",
+            "Proxy-Authorization",
+            "Cookie",
+            "X-Custom",
+        }
+        stdio = projected["mcp_servers"]["stdio"]
+        assert stdio["env"] == {"VISIBLE_SETTING": "retained"}
+        assert set(stdio["env_vars"]) == {"API_KEY", "ACCESS_TOKEN", "PASSWORD", "CLIENT_SECRET"}
+        ephemeral = dict(profile.ephemeral_environment)
+        assert set(secrets.values()).issubset(ephemeral.values())
+
+        runtime = NativeRuntimeConfig(root / "runtime-home", profile)
+        runtime.prepare()
+        assert set(secrets.values()).issubset(runtime.environment.values())
+        for path in runtime.runtime_home.rglob("*"):
+            if path.is_file():
+                payload = path.read_bytes()
+                for secret in secrets.values():
+                    assert secret.encode() not in payload
+
+
+@pytest.mark.parametrize(
+    "header_key",
+    ("HTTP_HEADERS", "Http_Headers", "http-Headers"),
+)
+def test_native_profile_rejects_noncanonical_header_shapes_without_echoing_values(header_key: str) -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        secret = "case-variant-header-secret"
+        config.write_text(config.read_text() + f'\n[mcp_servers.bad]\n{header_key} = {{ "X-Custom" = "{secret}" }}\n')
+        config.chmod(0o600)
+        with pytest.raises(NativeProfileError) as captured:
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert secret not in str(captured.value)
+
+
+def test_native_profile_rejects_nested_header_shape_without_echoing_values() -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        secret = "nested-header-secret"
+        config.write_text(
+            config.read_text() + f'\n[mcp_servers.bad.options.http_headers]\nAuthorization = "{secret}"\n'
+        )
+        config.chmod(0o600)
+        with pytest.raises(NativeProfileError, match="unsupported header field") as captured:
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert secret not in str(captured.value)
+
+
+def test_native_profile_rejects_secret_environment_collision_without_echoing_value() -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        secret = "provider-collision-secret"
+        config.write_text(
+            config.read_text()
+            + f'''
+[mcp_servers.bad]
+command = "sh"
+
+[mcp_servers.bad.env]
+CODEX_LB_API_KEY = "{secret}"
+'''
+        )
+        config.chmod(0o600)
+        with pytest.raises(NativeProfileError, match="conflicts with a controller or provider") as captured:
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert secret not in str(captured.value)
+
+
+def test_controller_route_keeps_native_secret_values_out_of_every_repository_owned_byte() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        home = root / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        secrets = ("controller-header-secret", "controller-token-secret")
+        config.write_text(
+            config.read_text()
+            + f'''
+[mcp_servers.remote]
+url = "http://127.0.0.1:9"
+http_headers = {{ Authorization = "{secrets[0]}" }}
+
+[mcp_servers.stdio]
+command = "sh"
+args = ["-c", "exit 0"]
+
+[mcp_servers.stdio.env]
+API_TOKEN = "{secrets[1]}"
+'''
+        )
+        config.chmod(0o600)
+        profile = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        service = _service()
+        adapter_creations = 0
+
+        def factory(sdk_config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            assert sdk_config.native_runtime is not None
+            sdk_config.native_runtime.prepare()
+            assert set(secrets).issubset(sdk_config.native_runtime.environment.values())
+            return FakeAdapter(sdk_config, service)
+
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            _trusted_test_native_profile=profile,
+        )
+        controller.plan(_capsule(repository, repository, base, branch))
+        assert controller.start("run", "m1").status is ExecutionStatus.COMPLETED
+        controller.close()
+        assert adapter_creations == 1
+
+        for path in repository.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                payload = path.read_bytes()
+                for secret in secrets:
+                    assert secret.encode() not in payload
 
 
 def test_runtime_home_rejects_symlinks_without_mutating_their_targets() -> None:
@@ -1824,7 +2457,7 @@ def test_v2_ledger_migrates_forward_to_canonical_h3_schema() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_causal_workspace_v7"
+        assert ledger.schema_identity == "codex_flow_h3_terminal_workspace_v8"
         assert "checkpoint" in ledger.schema_columns("executions")
         ledger.close()
 
@@ -1847,7 +2480,7 @@ def test_v4_sandbox_authority_schema_migrates_to_truthful_native_profile_authori
         connection.close()
 
         ledger = Ledger(path)
-        assert ledger.schema_identity == "codex_flow_h3_causal_workspace_v7"
+        assert ledger.schema_identity == "codex_flow_h3_terminal_workspace_v8"
         assert "native_profile_sha256" in ledger.schema_columns("execution_integrity")
         assert "sandbox_policy_sha256" not in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -1872,7 +2505,7 @@ def test_v5_native_profile_schema_migrates_to_permission_authority_v6() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_causal_workspace_v7"
+        assert ledger.schema_identity == "codex_flow_h3_terminal_workspace_v8"
         assert "native_compatibility_sha256" in ledger.schema_columns("execution_integrity")
         assert "effective_permission_json" in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -1999,7 +2632,7 @@ def test_v6_permission_schema_migrates_to_causal_workspace_v7() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_causal_workspace_v7"
+        assert ledger.schema_identity == "codex_flow_h3_terminal_workspace_v8"
         columns = ledger.schema_columns("execution_integrity")
         assert "workspace_baseline_sha256" in columns
         assert "turn_started_at" in columns
@@ -2007,6 +2640,70 @@ def test_v6_permission_schema_migrates_to_causal_workspace_v7() -> None:
         assert integrity.provenance == "legacy_permission_v6"
         assert integrity.turn_started_at == timestamp
         ledger.close()
+
+
+def test_migrated_v7_predecessor_without_terminal_snapshot_requires_explicit_reconciliation() -> None:
+    service = _service()
+
+    class FirstOutputAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            self.service["turns"] += 1
+            assert self.config.cwd is not None
+            (self.config.cwd / "first.txt").write_text("accepted\n")
+            return TurnObservation(thread, "turn-first", "completed", None, {"status": "done"}, ())
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        first_capsule = replace(
+            _capsule(repository, repository, base, branch, run="legacy-run", milestone="one"),
+            mutable_paths=("first.txt",),
+        )
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: FirstOutputAdapter(config, service),
+        )
+        first.plan(first_capsule)
+        assert first.start("legacy-run", "one").status is ExecutionStatus.COMPLETED
+        first.close()
+
+        database = repository / ".codex-flow" / "workflow.db"
+        connection = sqlite3.connect(database)
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v8")
+        connection.execute(_EXECUTION_INTEGRITY_V7_DDL)
+        connection.execute(
+            "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
+            "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
+            "workspace_baseline_head_sha, workspace_baseline_json, workspace_baseline_sha256, turn_started_at, "
+            "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
+            "SELECT run_id, milestone_id, 'controller_v4', native_profile_sha256, native_compatibility_sha256, "
+            "effective_permission_json, effective_permission_sha256, workspace_baseline_head_sha, "
+            "workspace_baseline_json, workspace_baseline_sha256, turn_started_at, git_authority_before_sha256, "
+            "git_authority_after_sha256, created_at, updated_at FROM execution_integrity_v8"
+        )
+        connection.execute("DROP TABLE execution_integrity_v8")
+        connection.execute("UPDATE schema_meta SET value = '7' WHERE key = 'schema_version'")
+        connection.execute(
+            "UPDATE schema_meta SET value = 'codex_flow_h3_causal_workspace_v7' WHERE key = 'schema_identity'"
+        )
+        connection.commit()
+        connection.close()
+
+        adapter_creations = 0
+
+        def successor_factory(config: CodexSdkConfig) -> FirstOutputAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FirstOutputAdapter(config, service)
+
+        successor = Controller(repository, _trusted_test_adapter_factory=successor_factory)
+        assert successor.ledger.schema_version == CURRENT_SCHEMA_VERSION
+        successor.plan(replace(first_capsule, milestone_id=MilestoneId("two"), mutable_paths=("second.txt",)))
+        with pytest.raises(ControllerError, match="explicit reconciliation"):
+            successor.start("legacy-run", "two")
+        assert adapter_creations == 0
+        successor.close()
 
 
 def test_ignored_out_of_scope_file_is_rejected() -> None:
