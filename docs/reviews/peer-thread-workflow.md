@@ -1154,6 +1154,30 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   native permission, and resume transport route did not change. H4 remains
   blocked pending fresh independent objective and architecture promotion review
   of the exact repaired candidate.
+- 2026-08-24: architecture promotion review of `02160dc` returned the sole
+  P1 H3-ARCH-004: native discovery compatibility used only shallow root
+  metadata. Repair `84b3065` replaces it with deterministic descriptor-anchored
+  recursive identities for `skills`, `plugins`, and `memories`. Sorted relative
+  paths, types, ownership/identity metadata, file-content digests, internal
+  symlink targets, roots, and absolute ancestors are covered; external,
+  dangling, or cyclic links, hardlinks, special files, substitutions, unsafe
+  scan races, and explicit entry/depth/path/per-file/total-byte limit overflow
+  fail closed without truncation. `verify_sources()` now compares the original
+  captured snapshots before adapter construction and again during private-home
+  preparation. Same-length nested drift on all three surfaces and structural,
+  symlink, hardlink, special-file, limit, ancestor, and post-turn fresh-resume
+  attacks are regression-covered; compatibility failure remains typed and
+  distinct from monotonic permission rebinding with zero adapter/resume calls.
+  Native-profile sanitized facts advance to v2, but SQLite remains schema v7:
+  its existing opaque digest field safely represents the stronger identity,
+  and a prior-algorithm in-flight reopen fails typed and closed. Focused
+  H2/H3/SDK validation passed 129 tests and `make check` passed all 152 tests
+  plus formatting, lint, validators, compileall, and pre-commit. Repair and
+  full-H3 diff checks are clean; full-H3 self-review found zero open P0/P1.
+  The retained real sentinel was not rerun because the SDK/provider/model,
+  permission, and resume transport path did not change. H4 remains blocked
+  pending fresh independent objective and architecture promotion review of
+  this exact repair.
 
 ## Next execution
 
@@ -1169,12 +1193,12 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: architecture repair `02160dc`, deterministic gates, and the
+Dispatch status: H3-ARCH-004 repair `84b3065`, deterministic gates, and the
 retained authorized real sentinel are green in the existing semantic workspace.
 The repaired H3 candidate is ready for fresh independent promotion review.
 
-Next action: independently review the exact H3 candidate for objective and
-architecture promotion with zero open P0/P1. The retained real evidence proves
+Next action: independently review the exact `84b3065` H3 candidate for objective
+and architecture promotion with zero open P0/P1. The retained real evidence proves
 the actual Python SDK route through `codex-lb`, sanitized native
 permission/profile parity, the allowed workspace edit and durable resume,
 unchanged Git authority, and unchanged global Codex config bytes. External-
