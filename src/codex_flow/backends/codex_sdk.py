@@ -33,6 +33,7 @@ from ..domain import (
     TransportFailureBeforeIdentity,
     TurnObservation,
     UnsupportedCapability,
+    validate_output_schema,
 )
 
 
@@ -228,9 +229,44 @@ def _type_matches(value: Any, expected: str) -> bool:
     }.get(expected, True)
 
 
+def _validate_decoded_schema(value: Any, schema: Mapping[str, Any], *, path: str = "output") -> None:
+    expected = schema["type"]
+    if not isinstance(expected, str) or not _type_matches(value, expected):
+        raise TerminalFailureAfterIdentity(f"schema-bounded turn field {path!r} has the wrong JSON type")
+    if expected == "object":
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if not isinstance(properties, Mapping) or not isinstance(required, list):
+            raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed object schema")
+        missing = [name for name in required if name not in value]
+        if missing:
+            raise TerminalFailureAfterIdentity(f"schema-bounded turn omitted required fields: {', '.join(missing)}")
+        for key, property_schema in properties.items():
+            if key in value:
+                if not isinstance(property_schema, Mapping):
+                    raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed property schema")
+                _validate_decoded_schema(value[key], property_schema, path=f"{path}.{key}")
+        if schema.get("additionalProperties", True) is False:
+            unexpected = sorted(set(value) - set(properties))
+            if unexpected:
+                raise TerminalFailureAfterIdentity(
+                    f"schema-bounded turn emitted unexpected fields: {', '.join(unexpected)}"
+                )
+    elif expected == "array" and "items" in schema:
+        items = schema["items"]
+        if not isinstance(items, Mapping):
+            raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed array schema")
+        for index, item in enumerate(value):
+            _validate_decoded_schema(item, items, path=f"{path}[{index}]")
+
+
 def _decode_schema_output(response: str | None, schema: Schema | None) -> JsonObject | None:
     if schema is None:
         return None
+    try:
+        validate_output_schema(schema)
+    except ValueError as exc:
+        raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed output schema") from exc
     if not isinstance(response, str):
         raise TerminalFailureAfterIdentity("schema-bounded turn did not return a text response")
     try:
@@ -239,28 +275,7 @@ def _decode_schema_output(response: str | None, schema: Schema | None) -> JsonOb
         raise TerminalFailureAfterIdentity("schema-bounded turn returned invalid JSON") from exc
     if not isinstance(decoded, dict):
         raise TerminalFailureAfterIdentity("schema-bounded turn returned a non-object JSON value")
-    schema_type = schema.get("type")
-    if isinstance(schema_type, str) and not _type_matches(decoded, schema_type):
-        raise TerminalFailureAfterIdentity("schema-bounded turn violated the root JSON type")
-    required = schema.get("required", [])
-    if isinstance(required, list):
-        missing = [key for key in required if isinstance(key, str) and key not in decoded]
-        if missing:
-            raise TerminalFailureAfterIdentity(f"schema-bounded turn omitted required fields: {', '.join(missing)}")
-    properties = schema.get("properties", {})
-    if isinstance(properties, Mapping):
-        for key, property_schema in properties.items():
-            if key not in decoded or not isinstance(property_schema, Mapping):
-                continue
-            expected = property_schema.get("type")
-            if isinstance(expected, str) and not _type_matches(decoded[key], expected):
-                raise TerminalFailureAfterIdentity(f"schema-bounded turn field {key!r} has the wrong JSON type")
-    if schema.get("additionalProperties") is False and isinstance(properties, Mapping):
-        unexpected = sorted(set(decoded) - set(properties))
-        if unexpected:
-            raise TerminalFailureAfterIdentity(
-                f"schema-bounded turn emitted unexpected fields: {', '.join(unexpected)}"
-            )
+    _validate_decoded_schema(decoded, schema)
     return cast(JsonObject, decoded)
 
 

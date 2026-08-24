@@ -501,7 +501,9 @@ class ValidationFailureCode(str, Enum):
     """Controller-owned, non-sensitive validation failure categories."""
 
     EXECUTABLE_UNAVAILABLE = "executable_unavailable"
+    NONZERO_EXIT = "nonzero_exit"
     TIMEOUT = "timeout"
+    INTEGRITY_FAILURE = "integrity_failure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,10 +512,58 @@ class ValidationSpec:
     timeout_seconds: float
 
     def __post_init__(self) -> None:
-        if not self.argv or any(not isinstance(item, str) or not item for item in self.argv):
+        if not self.argv or any(not isinstance(item, str) or not item or "\x00" in item for item in self.argv):
             raise ValueError("validation argv must contain non-empty strings")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("validation timeout must be positive")
+
+
+_SCHEMA_TYPES = frozenset({"object", "array", "string", "boolean", "number", "integer", "null"})
+_SCHEMA_KEYS = frozenset({"type", "properties", "required", "additionalProperties", "items"})
+
+
+def validate_output_schema(schema: Mapping[str, object], *, root: bool = True) -> None:
+    """Validate the deliberately small recursive schema subset we send to the SDK."""
+
+    if not isinstance(schema, Mapping):
+        raise ValueError("output schema nodes must be objects")
+    unknown = set(schema) - _SCHEMA_KEYS
+    if unknown:
+        raise ValueError(f"output schema contains unsupported keys: {sorted(map(str, unknown))!r}")
+    schema_type = schema.get("type")
+    if not isinstance(schema_type, str) or schema_type not in _SCHEMA_TYPES:
+        raise ValueError("output schema type must be one of the supported JSON types")
+    if root and schema_type != "object":
+        raise ValueError("execution output schema must require an object")
+
+    if schema_type == "object":
+        properties = schema.get("properties", {})
+        if not isinstance(properties, Mapping):
+            raise ValueError("object schema properties must be an object")
+        for name, child in properties.items():
+            if not isinstance(name, str):
+                raise ValueError("object schema property names must be strings")
+            validate_output_schema(child, root=False)
+        required = schema.get("required", [])
+        if not isinstance(required, list):
+            raise ValueError("object schema required must be an array")
+        if any(not isinstance(name, str) for name in required) or len(set(required)) != len(required):
+            raise ValueError("object schema required must contain unique strings")
+        if any(name not in properties for name in required):
+            raise ValueError("object schema required fields must be declared in properties")
+        additional = schema.get("additionalProperties", True)
+        if not isinstance(additional, bool):
+            raise ValueError("object schema additionalProperties must be a boolean")
+    elif schema_type == "array":
+        if "items" in schema:
+            validate_output_schema(schema["items"], root=False)
+        for key in ("properties", "required", "additionalProperties"):
+            if key in schema:
+                raise ValueError(f"array schema cannot contain {key}")
+    else:
+        for key in ("properties", "required", "additionalProperties", "items"):
+            if key in schema:
+                raise ValueError(f"{schema_type} schema cannot contain {key}")
 
 
 def _relative_paths(values: tuple[str, ...], *, label: str) -> None:
@@ -574,8 +624,7 @@ class ExecutionCapsule:
                     raise ValueError("mutable and protected paths must not overlap")
         if not self.model.strip() or not self.prompt.strip():
             raise ValueError("model and prompt must be explicit")
-        if self.output_schema.get("type") != "object":
-            raise ValueError("execution output schema must require an object")
+        validate_output_schema(self.output_schema)
 
 
 @dataclass(frozen=True, slots=True)
@@ -603,7 +652,11 @@ class ValidationObservation:
     def __post_init__(self) -> None:
         if self.exit_code == 0 and self.error_code is not None:
             raise ValueError("successful validation cannot carry a failure code")
-        if self.timed_out and self.error_code not in {None, ValidationFailureCode.TIMEOUT}:
+        if self.timed_out and self.error_code not in {
+            None,
+            ValidationFailureCode.TIMEOUT,
+            ValidationFailureCode.INTEGRITY_FAILURE,
+        }:
             raise ValueError("timed-out validation has an incompatible failure code")
 
 

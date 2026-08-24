@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig
+from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, _decode_schema_output
 from codex_flow.domain import (
     Capability,
     CapabilityStatus,
@@ -209,6 +209,32 @@ class CodexSdkAdapterTests(unittest.TestCase):
 
         with self.assertRaises(TerminalFailureAfterIdentity):
             adapter.run_turn(identity, "hello", output_schema=SCHEMA)
+
+    def test_recursive_schema_rejects_nested_unexpected_fields(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["payload"],
+            "additionalProperties": False,
+        }
+        with self.assertRaises(TerminalFailureAfterIdentity):
+            _decode_schema_output(json.dumps({"payload": {"ok": True, "evil": 1}}), schema)
+
+    def test_malformed_recursive_schema_is_rejected(self) -> None:
+        malformed = {
+            "type": "object",
+            "properties": {"payload": {"type": "object", "required": "payload"}},
+            "required": ["payload"],
+        }
+        with self.assertRaises(TerminalFailureAfterIdentity):
+            _decode_schema_output(json.dumps({"payload": {}}), malformed)
 
 
 if __name__ == "__main__":

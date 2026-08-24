@@ -690,13 +690,14 @@ workspace ownership, durable uncertain-turn recovery, atomic identity/terminal/
 cancellation transitions, base-SHA protected baselines, strict capsule JSON,
 typed validation launch failures, and structured terminal outcomes.
 
-`make check` passed with 94 tests, Ruff, the cross-project validator,
+`make check` passed with 104 tests, Ruff, the cross-project validator,
 compilation, and pre-commit; `git diff --check` is clean. The final opt-in real
 sentinel is retained at `docs/reviews/evidence/h3-controller-sentinel.json` and
 records a fresh-process crash worker, fresh-process resume worker, one dispatch,
-one reused SDK identity/workspace, durable result before projection, unchanged
-HEAD/branch, zero created commits, changed path `result.txt`, and protected-path
-digest parity. No external provider or release gate remains open for H3.
+one reused SDK identity/workspace, 43 ordered SDK lifecycle events, durable
+result before projection, explicit before/after HEAD and branch, commit counts
+and created-commit fact, changed path `result.txt`, diff facts, and protected-
+path digest parity. No external provider or release gate remains open for H3.
 
 ## Milestone H4 — Add decisions, review, repair, and limits
 
@@ -991,7 +992,7 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   durable external-call and identity checkpoints, fresh-client resume,
   explicit validation, result-before-projection ordering, and
   `plan/start/resume/status/cancel`. The real disposable sentinel passed with
-  one dispatch, one semantic managed worktree, one thread id, 56 ordered SDK
+  one dispatch, one semantic managed worktree, one thread id, 43 ordered SDK
   events, an injected post-turn process boundary, successful fresh-client
   `thread_resume`, unchanged protected paths, and a durable terminal result.
   Hermetic tests and repository gates are green; H3 promotion remains pending

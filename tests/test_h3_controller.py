@@ -18,9 +18,11 @@ from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig
 from codex_flow.cli import app
 from codex_flow.controller import (
     Controller,
+    ControllerError,
     ResumeRequired,
     UncertainPreIdentity,
     UncertainTurn,
+    _run_validation,
     capsule_from_json,
     capsule_json,
 )
@@ -750,3 +752,164 @@ def test_capsule_json_rejects_stringified_numeric_fields() -> None:
         value["validation"]["timeout_seconds"] = "5"
         with pytest.raises(ValueError, match="timeout_seconds"):
             capsule_from_json(value)
+
+
+def test_commit_then_revert_out_of_scope_history_fails_closed() -> None:
+    class RevertingAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            outside = self.config.cwd / "outside.txt"
+            outside.write_text("transient\n")
+            _git(self.config.cwd, "add", "outside.txt")
+            _git(self.config.cwd, "commit", "-qm", "out of scope")
+            _git(self.config.cwd, "rm", "-q", "outside.txt")
+            _git(self.config.cwd, "commit", "-qm", "revert out of scope")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=lambda config: RevertingAdapter(config, _service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        controller.close()
+
+
+def test_mutable_symlink_external_write_is_rejected() -> None:
+    class SymlinkAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            outside = self.config.cwd.parent / "external.txt"
+            outside.write_text("outside\n")
+            result = self.config.cwd / "result.txt"
+            result.unlink()
+            result.symlink_to(outside)
+            outside.write_text("executor escaped\n")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        external = repository.parent / "external.txt"
+        controller = Controller(repository, adapter_factory=lambda config: SymlinkAdapter(config, _service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        assert external.read_text() == "executor escaped\n"
+        controller.close()
+
+
+def test_mutable_hardlink_external_write_is_rejected() -> None:
+    class HardlinkAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            external = self.config.cwd.parent / "external-hardlink.txt"
+            external.write_text("outside\n")
+            result = self.config.cwd / "result.txt"
+            result.unlink()
+            result.hardlink_to(external)
+            external.write_text("executor escaped through hardlink\n")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=lambda config: HardlinkAdapter(config, _service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        controller.close()
+
+
+def test_executor_mutation_of_controller_state_is_terminal_failure() -> None:
+    class InternalAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            (self.config.cwd / ".codex-flow" / "executor.txt").write_text("forbidden\n")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=lambda config: InternalAdapter(config, _service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "controller_state_mutated"}
+        controller.close()
+
+
+def test_protected_digest_failure_is_durable_terminal_integrity_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    import codex_flow.controller as controller_module
+
+    calls = 0
+    original_digest = controller_module.protected_paths_digest
+
+    def fail_digest(*_args: Any, **_kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError("secret digest failure")
+        return original_digest(*_args, **_kwargs)
+
+    monkeypatch.setattr(controller_module, "protected_paths_digest", fail_digest)
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=_factory(_service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "protected_paths_integrity_failure"}
+        assert terminal.validation is not None
+        assert terminal.validation.error_code is ValidationFailureCode.INTEGRITY_FAILURE
+        assert controller.ledger.current_state("run", "m1").value == "FAILED"
+        assert controller.ledger.events("run", "m1")[-1].to_state.value == "FAILED"
+        controller.close()
+
+
+def test_nonzero_validation_exit_is_truthful_and_typed() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=_factory(_service()))
+        capsule = replace(_capsule(repository, repository, base, branch), validation=ValidationSpec(("false",), 1))
+        controller.plan(capsule)
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "validation_failed"}
+        assert terminal.validation is not None
+        assert terminal.validation.error_code is ValidationFailureCode.NONZERO_EXIT
+        controller.close()
+
+
+def test_validation_argv_nul_is_rejected_and_launch_value_error_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="argv"):
+        ValidationSpec(("python3", "bad\x00arg"), 1)
+
+    import codex_flow.controller as controller_module
+
+    def fail_launch(*_args: Any, **_kwargs: Any) -> object:
+        raise ValueError("embedded null")
+
+    monkeypatch.setattr(controller_module.subprocess, "run", fail_launch)
+    observation = _run_validation(ValidationSpec(("true",), 1), Path("/tmp"))
+    assert observation.error_code is ValidationFailureCode.EXECUTABLE_UNAVAILABLE
+    assert observation.exit_code == -127
+
+
+def test_controller_binding_failure_leaves_no_outside_root_state() -> None:
+    with TemporaryDirectory() as directory:
+        outside = Path(directory) / "outside"
+        outside.mkdir()
+        with pytest.raises(ControllerError):
+            Controller(outside)
+        assert not (outside / ".codex-flow" / "workflow.db").exists()

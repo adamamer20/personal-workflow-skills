@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import threading
 import time
@@ -276,7 +277,7 @@ def _run_validation(spec: ValidationSpec, workspace: Path) -> ValidationObservat
         stdout = exc.stdout or b""
         stderr = exc.stderr or b""
         error_code = ValidationFailureCode.TIMEOUT
-    except OSError:
+    except (OSError, ValueError):
         # Do not persist platform exception text.  A stable controller-owned
         # code is sufficient to recover and diagnose an unlaunchable command.
         exit_code = -127
@@ -284,7 +285,7 @@ def _run_validation(spec: ValidationSpec, workspace: Path) -> ValidationObservat
         stderr = b""
         error_code = ValidationFailureCode.EXECUTABLE_UNAVAILABLE
     else:
-        error_code = None
+        error_code = ValidationFailureCode.NONZERO_EXIT if exit_code != 0 else None
     return ValidationObservation(
         spec.argv,
         exit_code,
@@ -309,8 +310,14 @@ class Controller:
     ) -> None:
         if not state_root.is_absolute():
             raise ValueError("controller state root must be absolute")
-        self.state_root = state_root
-        self.state_dir = state_root / ".codex-flow"
+        # Bind the controller to a real Git toplevel before Ledger can create
+        # any `.codex-flow` state.  A failed/outside-root plan therefore leaves
+        # no controller database residue behind.
+        bound_root = self._git_toplevel(state_root)
+        if bound_root != state_root.resolve():
+            raise ControllerError("controller state root must equal the physical Git toplevel")
+        self.state_root = bound_root
+        self.state_dir = self.state_root / ".codex-flow"
         self.ledger = Ledger(self.state_dir / "workflow.db")
         self._adapter_factory = adapter_factory
         self._worktrees = worktrees or WorktreeManager()
@@ -419,6 +426,41 @@ class Controller:
             raise ControllerError(f"unable to inspect Git workspace: {' '.join(arguments)}")
         return result.stdout.strip()
 
+    @staticmethod
+    def _git_output_bytes(workspace: Path, *arguments: str) -> bytes:
+        result = subprocess.run(("git", *arguments), cwd=workspace, capture_output=True, check=False)
+        if result.returncode != 0:
+            raise ControllerError(f"unable to inspect Git workspace: {' '.join(arguments)}")
+        return result.stdout
+
+    def _committed_workspace_paths(self, capsule: ExecutionCapsule) -> frozenset[str]:
+        """Return every path touched by every commit after the capsule base.
+
+        Comparing only the final tree to ``base_sha`` misses an out-of-scope
+        commit that is subsequently reverted.  The commit walk is therefore a
+        separate integrity fact from the final-tree diff.
+        """
+
+        commits = self._git_output_bytes(
+            capsule.workspace_path,
+            "rev-list",
+            "--reverse",
+            "--ancestry-path",
+            f"{capsule.base_sha}..HEAD",
+        )
+        paths: set[str] = set()
+        for raw_commit in commits.splitlines():
+            commit = os.fsdecode(raw_commit)
+            parents = self._git_output(capsule.workspace_path, "rev-list", "--parents", "-n", "1", commit).split()
+            options = ("--no-commit-id", "--name-only", "-r", "-z")
+            if len(parents) > 2:
+                options = (*options[:-1], "-m", options[-1])
+            changed = self._git_output_bytes(capsule.workspace_path, "diff-tree", *options, commit)
+            paths.update(os.fsdecode(item) for item in changed.split(b"\0") if item)
+        final_tree = self._git_output_bytes(capsule.workspace_path, "diff", "--name-only", "-z", capsule.base_sha, "--")
+        paths.update(os.fsdecode(item) for item in final_tree.split(b"\0") if item)
+        return frozenset(paths)
+
     def _assert_workspace_history(self, capsule: ExecutionCapsule) -> None:
         branch = self._git_output(capsule.workspace_path, "symbolic-ref", "--quiet", "--short", "HEAD")
         if branch != capsule.branch:
@@ -431,15 +473,7 @@ class Controller:
         )
         if ancestor.returncode != 0:
             raise ControllerError("workspace history no longer descends from the capsule base")
-        committed = subprocess.run(
-            ("git", "diff", "--name-only", "-z", capsule.base_sha, "--"),
-            cwd=capsule.workspace_path,
-            capture_output=True,
-            check=False,
-        )
-        if committed.returncode != 0:
-            raise ControllerError("unable to inspect committed workspace mutations")
-        paths = frozenset(os.fsdecode(item) for item in committed.stdout.split(b"\0") if item)
+        paths = self._committed_workspace_paths(capsule)
         outside = sorted(path for path in paths if not self._path_is_owned(path, capsule.mutable_paths))
         if outside:
             raise ControllerError("committed workspace changes outside mutable paths: " + ", ".join(outside))
@@ -472,8 +506,87 @@ class Controller:
                 *(os.fsdecode(item) for item in untracked.stdout.split(b"\0") if item),
                 *(os.fsdecode(item) for item in ignored.stdout.split(b"\0") if item),
             )
-            if path and path != ".codex-flow" and not path.startswith(".codex-flow/")
+            if path
         )
+
+    @staticmethod
+    def _is_controller_path(path: str) -> bool:
+        candidate = Path(path)
+        internal = Path(".codex-flow")
+        return candidate == internal or internal in candidate.parents
+
+    @staticmethod
+    def _assert_safe_tree(root: Path, workspace_device: int) -> None:
+        """Reject symlink traversal and multiply-linked files in mutable roots."""
+
+        try:
+            metadata = os.lstat(root)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ControllerError(f"mutable path is a symlink: {root}")
+        if metadata.st_dev != workspace_device:
+            raise ControllerError(f"mutable path is outside the workspace device: {root}")
+        if stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise ControllerError(f"mutable file has external hardlinks: {root}")
+            return
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ControllerError(f"mutable path is not a regular file or directory: {root}")
+        try:
+            with os.scandir(root) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError as exc:
+            raise ControllerError(f"unable to inspect mutable path: {root}") from exc
+        for entry in entries:
+            Controller._assert_safe_tree(Path(entry.path), workspace_device)
+
+    @staticmethod
+    def _assert_safe_changed_path(workspace: Path, relative: str, workspace_device: int) -> None:
+        candidate = Path(relative)
+        current = workspace
+        parts = candidate.parts
+        for index, part in enumerate(parts):
+            current /= part
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError:
+                return
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ControllerError(f"workspace mutation traverses a symlink: {relative}")
+            if metadata.st_dev != workspace_device:
+                raise ControllerError(f"workspace mutation leaves the repository device: {relative}")
+            if index < len(parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
+                raise ControllerError(f"workspace mutation traverses a non-directory: {relative}")
+            if index == len(parts) - 1 and stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+                raise ControllerError(f"workspace mutation uses an external hardlink: {relative}")
+
+    @staticmethod
+    def _controller_tree_snapshot(root: Path) -> dict[str, str]:
+        internal = root / ".codex-flow"
+        try:
+            metadata = os.lstat(internal)
+        except FileNotFoundError:
+            return {}
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ControllerError("controller state root is not a real directory")
+        snapshot: dict[str, str] = {}
+        for current, directories, files in os.walk(internal, followlinks=False):
+            for name in sorted((*directories, *files)):
+                path = Path(current) / name
+                relative = str(path.relative_to(root))
+                item = os.lstat(path)
+                if stat.S_ISLNK(item.st_mode):
+                    raise ControllerError("controller state contains a symlink")
+                if stat.S_ISDIR(item.st_mode):
+                    snapshot[relative] = "directory"
+                elif stat.S_ISREG(item.st_mode):
+                    if item.st_nlink != 1:
+                        raise ControllerError("controller state contains a multiply-linked file")
+                    snapshot[relative] = _digest_bytes(path.read_bytes())
+                else:
+                    raise ControllerError("controller state contains an unsupported filesystem object")
+        return snapshot
 
     @staticmethod
     def _path_is_owned(path: str, roots: tuple[str, ...]) -> bool:
@@ -481,10 +594,18 @@ class Controller:
         return any(candidate == Path(root) or Path(root) in candidate.parents for root in roots)
 
     def _assert_mutation_scope(self, capsule: ExecutionCapsule) -> None:
+        changes = self._workspace_changes(capsule.workspace_path)
+        workspace_device = os.stat(capsule.workspace_path).st_dev
+        for relative in capsule.mutable_paths:
+            self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
+            self._assert_safe_tree(capsule.workspace_path / relative, workspace_device)
+        for relative in changes:
+            if not self._is_controller_path(relative):
+                self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
         outside = sorted(
             path
-            for path in self._workspace_changes(capsule.workspace_path)
-            if not self._path_is_owned(path, capsule.mutable_paths)
+            for path in changes
+            if not self._is_controller_path(path) and not self._path_is_owned(path, capsule.mutable_paths)
         )
         if outside:
             raise ControllerError(f"workspace contains changes outside mutable paths: {', '.join(outside)}")
@@ -583,18 +704,36 @@ class Controller:
             raise ControllerError("cannot execute without a durable SDK identity")
         if record.turn_id is None and record.turn_output == {"__controller_checkpoint": "turn_starting"}:
             raise UncertainTurn("SDK turn crossed the external-call boundary without a durable response")
+        controller_state_error = ""
         if record.turn_id is None:
             self.ledger.record_turn_starting(capsule.run_id, capsule.milestone_id)
+            controller_state_before = self._controller_tree_snapshot(self.state_root)
             self._fault("before_sdk_turn")
             observation = adapter.run_turn(record.thread_id, capsule.prompt, output_schema=capsule.output_schema)
+            try:
+                if controller_state_before != self._controller_tree_snapshot(self.state_root):
+                    controller_state_error = "controller_state_mutated"
+            except ControllerError:
+                controller_state_error = "controller_state_integrity_failure"
             record = self.ledger.record_turn(capsule.run_id, capsule.milestone_id, observation)
             self._fault("after_turn")
         turn_output = record.turn_output or {}
         validation = _run_validation(capsule.validation, capsule.workspace_path)
-        protected_after = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+        protected_digest_error = False
+        try:
+            protected_after = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+        except Exception:
+            # The result still has to be committed atomically even when a
+            # protected-path read itself is no longer trustworthy.  Retain the
+            # last known digest as a typed integrity-failure terminal fact;
+            # never persist the platform exception text.
+            protected_after = record.protected_before_sha256
+            protected_digest_error = True
         result: JsonObject = turn_output
         if validation.error_code is ValidationFailureCode.EXECUTABLE_UNAVAILABLE:
             result = {"status": "failed", "reason": "validation_executable_unavailable"}
+        elif validation.error_code is ValidationFailureCode.NONZERO_EXIT:
+            result = {"status": "failed", "reason": "validation_failed"}
         elif validation.error_code is ValidationFailureCode.TIMEOUT:
             result = {"status": "failed", "reason": "validation_timeout"}
         else:
@@ -614,9 +753,12 @@ class Controller:
         except ControllerError as exc:
             mutation_scope_valid = False
             scope_error = str(exc)
+        except Exception:
+            mutation_scope_valid = False
+            scope_error = "workspace_integrity_failure"
         else:
             scope_error = ""
-        if protected_after != record.protected_before_sha256 or not mutation_scope_valid:
+        if protected_digest_error:
             validation = ValidationObservation(
                 validation.argv,
                 validation.exit_code if validation.exit_code != 0 else 125,
@@ -624,16 +766,45 @@ class Controller:
                 validation.stderr_sha256,
                 validation.timed_out,
                 validation.duration_seconds,
+                ValidationFailureCode.INTEGRITY_FAILURE,
+            )
+            result = {"status": "failed", "reason": "protected_paths_integrity_failure"}
+        elif protected_after != record.protected_before_sha256 or not mutation_scope_valid or controller_state_error:
+            failure_code = (
+                ValidationFailureCode.INTEGRITY_FAILURE
+                if controller_state_error or protected_after != record.protected_before_sha256
+                else validation.error_code
+            )
+            validation = ValidationObservation(
+                validation.argv,
+                validation.exit_code if validation.exit_code != 0 else 125,
+                validation.stdout_sha256,
+                validation.stderr_sha256,
+                validation.timed_out,
+                validation.duration_seconds,
+                failure_code,
             )
             result = {
                 "status": "failed",
                 "reason": (
                     "protected_paths_changed"
                     if protected_after != record.protected_before_sha256
+                    else "controller_state_mutated"
+                    if controller_state_error
                     else (
-                        "branch_or_history_changed"
-                        if scope_error.startswith(("workspace branch", "workspace history"))
-                        else "mutation_outside_owned_paths"
+                        "workspace_integrity_failure"
+                        if scope_error == "workspace_integrity_failure"
+                        else (
+                            "branch_or_history_changed"
+                            if scope_error.startswith(
+                                (
+                                    "workspace branch",
+                                    "workspace history",
+                                    "unable to inspect Git workspace: symbolic-ref",
+                                )
+                            )
+                            else "mutation_outside_owned_paths"
+                        )
                     )
                 ),
             }
