@@ -497,6 +497,13 @@ class ControllerCheckpoint(str, Enum):
     RESULT_DURABLE = "result_durable"
 
 
+class ValidationFailureCode(str, Enum):
+    """Controller-owned, non-sensitive validation failure categories."""
+
+    EXECUTABLE_UNAVAILABLE = "executable_unavailable"
+    TIMEOUT = "timeout"
+
+
 @dataclass(frozen=True, slots=True)
 class ValidationSpec:
     argv: tuple[str, ...]
@@ -545,6 +552,8 @@ class ExecutionCapsule:
     output_schema: JsonObject
 
     def __post_init__(self) -> None:
+        if isinstance(self.capsule_version, bool) or not isinstance(self.capsule_version, int):
+            raise ValueError("execution capsule version must be an integer")
         if self.capsule_version != 1:
             raise ValueError("unsupported execution capsule version")
         if not self.repository_root.is_absolute() or not self.workspace_path.is_absolute():
@@ -589,6 +598,13 @@ class ValidationObservation:
     stderr_sha256: str
     timed_out: bool
     duration_seconds: float
+    error_code: ValidationFailureCode | None = None
+
+    def __post_init__(self) -> None:
+        if self.exit_code == 0 and self.error_code is not None:
+            raise ValueError("successful validation cannot carry a failure code")
+        if self.timed_out and self.error_code not in {None, ValidationFailureCode.TIMEOUT}:
+            raise ValueError("timed-out validation has an incompatible failure code")
 
 
 @dataclass(frozen=True, slots=True)

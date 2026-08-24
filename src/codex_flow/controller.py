@@ -30,12 +30,13 @@ from .domain import (
     Schema,
     ThreadIdentity,
     TurnObservation,
+    ValidationFailureCode,
     ValidationObservation,
     ValidationSpec,
     WorkflowState,
     WorkspaceMode,
 )
-from .ledger import Ledger, RecordNotFound
+from .ledger import Ledger
 from .worktrees import WorktreeManager
 
 
@@ -49,6 +50,10 @@ class ResumeRequired(ControllerError):
 
 class UncertainPreIdentity(ControllerError):
     """SDK start failed before identity could be durably bound."""
+
+
+class UncertainTurn(ControllerError):
+    """An external SDK turn may have happened without a durable response."""
 
 
 class Adapter(Protocol):
@@ -124,6 +129,16 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
     }
     if set(value) != expected:
         raise ValueError(f"capsule keys must be exactly {sorted(expected)!r}")
+
+    def require_string(field: str) -> str:
+        raw = value[field]
+        if not isinstance(raw, str):
+            raise ValueError(f"capsule {field} must be a string")
+        return raw
+
+    version = value["capsule_version"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError("capsule capsule_version must be an integer")
     validation = value["validation"]
     if not isinstance(validation, Mapping) or set(validation) != {"argv", "timeout_seconds"}:
         raise ValueError("capsule validation must contain argv and timeout_seconds")
@@ -131,26 +146,47 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
     mutable = value["mutable_paths"]
     protected = value["protected_paths"]
     schema = value["output_schema"]
-    if not isinstance(argv, list) or not isinstance(mutable, list) or not isinstance(protected, list):
+    if (
+        not isinstance(argv, list)
+        or any(not isinstance(item, str) for item in argv)
+        or not isinstance(mutable, list)
+        or any(not isinstance(item, str) for item in mutable)
+        or not isinstance(protected, list)
+        or any(not isinstance(item, str) for item in protected)
+    ):
         raise ValueError("capsule path and argv fields must be arrays")
     if not isinstance(schema, dict):
         raise ValueError("capsule output_schema must be an object")
+    timeout = validation["timeout_seconds"]
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+        raise ValueError("capsule validation timeout_seconds must be a number")
+    repository_root = require_string("repository_root")
+    workspace_path = require_string("workspace_path")
+    branch = require_string("branch")
+    base_sha = require_string("base_sha")
+    lane = require_string("lane")
+    model = require_string("model")
+    prompt = require_string("prompt")
+    workspace_mode = require_string("workspace_mode")
+    effort = require_string("reasoning_effort")
+    run_id = require_string("run_id")
+    milestone_id = require_string("milestone_id")
     return ExecutionCapsule(
-        int(cast(int, value["capsule_version"])),
-        RunId(cast(str, value["run_id"])),
-        MilestoneId(cast(str, value["milestone_id"])),
-        Path(cast(str, value["repository_root"])),
-        WorkspaceMode(cast(str, value["workspace_mode"])),
-        Path(cast(str, value["workspace_path"])),
-        cast(str, value["branch"]),
-        cast(str, value["base_sha"]),
-        cast(str, value["lane"]),
-        tuple(cast(list[str], mutable)),
-        tuple(cast(list[str], protected)),
-        ValidationSpec(tuple(cast(list[str], argv)), float(cast(float, validation["timeout_seconds"]))),
-        cast(str, value["model"]),
-        ReasoningEffort(cast(str, value["reasoning_effort"])),
-        cast(str, value["prompt"]),
+        version,
+        RunId(run_id),
+        MilestoneId(milestone_id),
+        Path(repository_root),
+        WorkspaceMode(workspace_mode),
+        Path(workspace_path),
+        branch,
+        base_sha,
+        lane,
+        tuple(mutable),
+        tuple(protected),
+        ValidationSpec(tuple(argv), float(timeout)),
+        model,
+        ReasoningEffort(effort),
+        prompt,
         cast(JsonObject, schema),
     )
 
@@ -187,6 +223,38 @@ def protected_paths_digest(root: Path, paths: tuple[str, ...]) -> str:
     return digest.hexdigest()
 
 
+def protected_paths_digest_at_revision(repository: Path, revision: str, paths: tuple[str, ...]) -> str:
+    """Hash protected content from the capsule base, before a worktree exists."""
+
+    digest = hashlib.sha256()
+    for relative in sorted(paths):
+        digest.update(relative.encode())
+        listing = subprocess.run(
+            ("git", "ls-tree", "-r", "--name-only", "-z", revision, "--", relative),
+            cwd=repository,
+            capture_output=True,
+            check=False,
+        )
+        if listing.returncode != 0:
+            raise ControllerError("unable to inspect protected base revision")
+        names = [os.fsdecode(item) for item in listing.stdout.split(b"\0") if item]
+        if not names:
+            digest.update(b"\0missing\0")
+            continue
+        for name in sorted(names):
+            content = subprocess.run(
+                ("git", "show", f"{revision}:{name}"),
+                cwd=repository,
+                capture_output=True,
+                check=False,
+            )
+            if content.returncode != 0:
+                raise ControllerError("unable to read protected base revision")
+            digest.update(name.encode())
+            digest.update(content.stdout)
+    return digest.hexdigest()
+
+
 def _run_validation(spec: ValidationSpec, workspace: Path) -> ValidationObservation:
     started = time.monotonic()
     timed_out = False
@@ -207,6 +275,16 @@ def _run_validation(spec: ValidationSpec, workspace: Path) -> ValidationObservat
         exit_code = -1
         stdout = exc.stdout or b""
         stderr = exc.stderr or b""
+        error_code = ValidationFailureCode.TIMEOUT
+    except OSError:
+        # Do not persist platform exception text.  A stable controller-owned
+        # code is sufficient to recover and diagnose an unlaunchable command.
+        exit_code = -127
+        stdout = b""
+        stderr = b""
+        error_code = ValidationFailureCode.EXECUTABLE_UNAVAILABLE
+    else:
+        error_code = None
     return ValidationObservation(
         spec.argv,
         exit_code,
@@ -214,6 +292,7 @@ def _run_validation(spec: ValidationSpec, workspace: Path) -> ValidationObservat
         _digest_bytes(stderr),
         timed_out,
         time.monotonic() - started,
+        error_code,
     )
 
 
@@ -268,8 +347,17 @@ class Controller:
 
     def _plan(self, capsule: ExecutionCapsule) -> ExecutionRecord:
         self._worktrees.validate_plan(capsule)
-        source = capsule.workspace_path if capsule.workspace_path.exists() else capsule.repository_root
-        protected_before = protected_paths_digest(source, capsule.protected_paths)
+        # The ledger and capsule are repository-owned.  A controller rooted at
+        # another checkout/state directory must not be able to claim the same
+        # logical dispatch or workspace.
+        repository_toplevel = self._git_toplevel(capsule.repository_root)
+        if repository_toplevel != capsule.repository_root:
+            raise ControllerError("execution repository_root must be the physical Git toplevel")
+        if self.state_root != repository_toplevel:
+            raise ControllerError("controller state root must equal the execution repository toplevel")
+        protected_before = protected_paths_digest_at_revision(
+            capsule.repository_root, capsule.base_sha, capsule.protected_paths
+        )
         content = _canonical_json(capsule_json(capsule))
         capsule_path = self._capsule_path(capsule)
         self.ledger.create_run(capsule.run_id)
@@ -311,6 +399,51 @@ class Controller:
         if result.stdout.strip():
             raise ControllerError("protected paths are dirty before execution")
 
+    @staticmethod
+    def _git_toplevel(path: Path) -> Path:
+        result = subprocess.run(
+            ("git", "rev-parse", "--show-toplevel"),
+            cwd=path,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ControllerError("execution repository is not a Git checkout")
+        return Path(result.stdout.strip()).resolve()
+
+    @staticmethod
+    def _git_output(workspace: Path, *arguments: str) -> str:
+        result = subprocess.run(("git", *arguments), cwd=workspace, text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            raise ControllerError(f"unable to inspect Git workspace: {' '.join(arguments)}")
+        return result.stdout.strip()
+
+    def _assert_workspace_history(self, capsule: ExecutionCapsule) -> None:
+        branch = self._git_output(capsule.workspace_path, "symbolic-ref", "--quiet", "--short", "HEAD")
+        if branch != capsule.branch:
+            raise ControllerError("workspace branch changed during execution")
+        ancestor = subprocess.run(
+            ("git", "merge-base", "--is-ancestor", capsule.base_sha, "HEAD"),
+            cwd=capsule.workspace_path,
+            capture_output=True,
+            check=False,
+        )
+        if ancestor.returncode != 0:
+            raise ControllerError("workspace history no longer descends from the capsule base")
+        committed = subprocess.run(
+            ("git", "diff", "--name-only", "-z", capsule.base_sha, "--"),
+            cwd=capsule.workspace_path,
+            capture_output=True,
+            check=False,
+        )
+        if committed.returncode != 0:
+            raise ControllerError("unable to inspect committed workspace mutations")
+        paths = frozenset(os.fsdecode(item) for item in committed.stdout.split(b"\0") if item)
+        outside = sorted(path for path in paths if not self._path_is_owned(path, capsule.mutable_paths))
+        if outside:
+            raise ControllerError("committed workspace changes outside mutable paths: " + ", ".join(outside))
+
     def _workspace_changes(self, workspace: Path) -> frozenset[str]:
         tracked = subprocess.run(
             ("git", "diff", "--name-only", "-z", "HEAD"),
@@ -324,13 +457,20 @@ class Controller:
             capture_output=True,
             check=False,
         )
-        if tracked.returncode != 0 or untracked.returncode != 0:
+        ignored = subprocess.run(
+            ("git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+            cwd=workspace,
+            capture_output=True,
+            check=False,
+        )
+        if tracked.returncode != 0 or untracked.returncode != 0 or ignored.returncode != 0:
             raise ControllerError("unable to inspect workspace mutation scope")
         return frozenset(
             path
             for path in (
                 *(os.fsdecode(item) for item in tracked.stdout.split(b"\0") if item),
                 *(os.fsdecode(item) for item in untracked.stdout.split(b"\0") if item),
+                *(os.fsdecode(item) for item in ignored.stdout.split(b"\0") if item),
             )
             if path and path != ".codex-flow" and not path.startswith(".codex-flow/")
         )
@@ -367,12 +507,13 @@ class Controller:
             raise UncertainPreIdentity("prior SDK start crossed the durable external-call boundary")
         self.ledger.claim_dispatch(capsule.run_id, capsule.milestone_id, "executor", 1)
         self._worktrees.select(capsule)
-        self.ledger.acquire_workspace_lease(capsule)
         self._assert_protected_clean(capsule)
+        self._assert_workspace_history(capsule)
         self._assert_mutation_scope(capsule)
         current_digest = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
         if current_digest != record.protected_before_sha256:
             raise ControllerError("protected paths changed between plan and start")
+        self.ledger.acquire_workspace_lease(capsule)
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
@@ -392,12 +533,6 @@ class Controller:
                     "SDK start failed before durable identity; automatic retry is forbidden"
                 ) from exc
             record = self.ledger.record_thread_identity(capsule.run_id, capsule.milestone_id, identity)
-            self.ledger.transition(
-                capsule.run_id,
-                capsule.milestone_id,
-                WorkflowState.RUNNING,
-                expected_state=WorkflowState.STARTING,
-            )
             self._fault("after_thread_identity")
             return self._execute_turn_and_finish(capsule, record, adapter)
         finally:
@@ -422,6 +557,8 @@ class Controller:
             raise ControllerError("execution has no durable SDK identity; use start")
         capsule = self._load_durable_capsule(record)
         self._worktrees.select(capsule)
+        self._assert_protected_clean(capsule)
+        self._assert_workspace_history(capsule)
         self.ledger.acquire_workspace_lease(capsule)
         adapter = self._adapter_factory(
             CodexSdkConfig(
@@ -444,7 +581,11 @@ class Controller:
     ) -> ExecutionRecord:
         if record.thread_id is None:
             raise ControllerError("cannot execute without a durable SDK identity")
+        if record.turn_id is None and record.turn_output == {"__controller_checkpoint": "turn_starting"}:
+            raise UncertainTurn("SDK turn crossed the external-call boundary without a durable response")
         if record.turn_id is None:
+            self.ledger.record_turn_starting(capsule.run_id, capsule.milestone_id)
+            self._fault("before_sdk_turn")
             observation = adapter.run_turn(record.thread_id, capsule.prompt, output_schema=capsule.output_schema)
             record = self.ledger.record_turn(capsule.run_id, capsule.milestone_id, observation)
             self._fault("after_turn")
@@ -452,11 +593,29 @@ class Controller:
         validation = _run_validation(capsule.validation, capsule.workspace_path)
         protected_after = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
         result: JsonObject = turn_output
+        if validation.error_code is ValidationFailureCode.EXECUTABLE_UNAVAILABLE:
+            result = {"status": "failed", "reason": "validation_executable_unavailable"}
+        elif validation.error_code is ValidationFailureCode.TIMEOUT:
+            result = {"status": "failed", "reason": "validation_timeout"}
+        else:
+            structured_status = turn_output.get("status")
+            if isinstance(structured_status, str) and structured_status.strip().lower() in {
+                "failed",
+                "failure",
+                "blocked",
+                "cancelled",
+                "error",
+            }:
+                result = {"status": "failed", "reason": "sdk_terminal_outcome_failed"}
         mutation_scope_valid = True
         try:
+            self._assert_workspace_history(capsule)
             self._assert_mutation_scope(capsule)
-        except ControllerError:
+        except ControllerError as exc:
             mutation_scope_valid = False
+            scope_error = str(exc)
+        else:
+            scope_error = ""
         if protected_after != record.protected_before_sha256 or not mutation_scope_valid:
             validation = ValidationObservation(
                 validation.argv,
@@ -471,7 +630,11 @@ class Controller:
                 "reason": (
                     "protected_paths_changed"
                     if protected_after != record.protected_before_sha256
-                    else "mutation_outside_owned_paths"
+                    else (
+                        "branch_or_history_changed"
+                        if scope_error.startswith(("workspace branch", "workspace history"))
+                        else "mutation_outside_owned_paths"
+                    )
                 ),
             }
         terminal = self.ledger.record_terminal_execution(
@@ -480,14 +643,6 @@ class Controller:
             result=result,
             validation=validation,
             protected_after_sha256=protected_after,
-        )
-        target = WorkflowState.COMPLETED if terminal.status is ExecutionStatus.COMPLETED else WorkflowState.FAILED
-        self.ledger.transition(
-            capsule.run_id,
-            capsule.milestone_id,
-            target,
-            expected_state=WorkflowState.RUNNING,
-            reason=ReasonCode.TERMINAL_OUTCOME if target is WorkflowState.COMPLETED else ReasonCode.EXECUTION_FAILURE,
         )
         self._fault("before_projection")
         self._project_execution(terminal)
@@ -532,6 +687,7 @@ class Controller:
                     "stderr_sha256": record.validation.stderr_sha256,
                     "timed_out": record.validation.timed_out,
                     "duration_seconds": record.validation.duration_seconds,
+                    "error_code": record.validation.error_code.value if record.validation.error_code else None,
                 }
                 if record.validation
                 else None
@@ -553,24 +709,7 @@ class Controller:
             return self._cancel(run_id, milestone_id)
 
     def _cancel(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
-        record = self.ledger.cancel_execution(run_id, milestone_id)
-        try:
-            state = self.ledger.current_state(run_id, milestone_id)
-        except RecordNotFound:
-            return record
-        if state not in {
-            WorkflowState.ACCEPTED,
-            WorkflowState.BLOCKED,
-            WorkflowState.FAILED,
-            WorkflowState.CANCELLED,
-        }:
-            self.ledger.transition(
-                run_id,
-                milestone_id,
-                WorkflowState.CANCELLED,
-                expected_state=state,
-            )
-        return self.ledger.get_execution(run_id, milestone_id)
+        return self.ledger.cancel_execution(run_id, milestone_id)
 
 
 def execution_json(record: ExecutionRecord) -> JsonObject:
@@ -595,6 +734,7 @@ def execution_json(record: ExecutionRecord) -> JsonObject:
                 "stderr_sha256": record.validation.stderr_sha256,
                 "timed_out": record.validation.timed_out,
                 "duration_seconds": record.validation.duration_seconds,
+                "error_code": record.validation.error_code.value if record.validation.error_code else None,
             }
             if record.validation
             else None

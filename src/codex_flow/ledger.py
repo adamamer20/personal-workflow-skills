@@ -52,6 +52,7 @@ from .domain import (
     ThreadIdentity,
     TransportFailureBeforeIdentity,
     TurnObservation,
+    ValidationFailureCode,
     ValidationObservation,
     WorkflowReason,
     WorkflowState,
@@ -67,6 +68,7 @@ _STATES_SQL = ", ".join(f"'{state.value}'" for state in WorkflowState)
 _REASON_CODES_SQL = ", ".join(f"'{reason.value}'" for reason in ReasonCode)
 _EVENT_TYPES = frozenset({"dispatch_claimed", "state_transition"})
 _EVENT_TYPES_SQL = ", ".join(f"'{event_type}'" for event_type in sorted(_EVENT_TYPES))
+_TURN_STARTING_MARKER: JsonObject = {"__controller_checkpoint": "turn_starting"}
 
 _SCHEMA_META_DDL = """CREATE TABLE schema_meta (
     key TEXT PRIMARY KEY NOT NULL CHECK(length(key) > 0),
@@ -1003,6 +1005,14 @@ class Ledger:
             execution_rows = self._db().execute("SELECT * FROM executions ORDER BY run_id, milestone_id").fetchall()
             for row in execution_rows:
                 execution = self._execution_from_row(row)
+                milestone_state = _row_state(
+                    self._db()
+                    .execute(
+                        "SELECT current_state FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                        (str(execution.run_id), str(execution.milestone_id)),
+                    )
+                    .fetchone()[0]
+                )
                 if execution.status not in {ExecutionStatus.PLANNED, ExecutionStatus.CANCELLED}:
                     lease = leases.get(str(execution.workspace_path))
                     if lease is None or lease.owner_run_id != execution.run_id:
@@ -1024,6 +1034,8 @@ class Ledger:
                         ControllerCheckpoint.TURN_DURABLE,
                     }:
                         raise CorruptSchemaError("started execution has incomplete thread authority")
+                    if milestone_state is not WorkflowState.RUNNING:
+                        raise CorruptSchemaError("started execution is not paired with RUNNING workflow state")
                 elif execution.status is ExecutionStatus.COMPLETED:
                     if (
                         execution.checkpoint is not ControllerCheckpoint.RESULT_DURABLE
@@ -1034,6 +1046,8 @@ class Ledger:
                         or execution.protected_after_sha256 is None
                     ):
                         raise CorruptSchemaError("completed execution is missing terminal evidence")
+                    if milestone_state is not WorkflowState.COMPLETED:
+                        raise CorruptSchemaError("completed execution is not paired with COMPLETED workflow state")
                 elif execution.status is ExecutionStatus.UNCERTAIN_PRE_IDENTITY and execution.thread_id is not None:
                     raise CorruptSchemaError("pre-identity uncertainty cannot carry a thread identity")
                 elif execution.status is ExecutionStatus.FAILED and (
@@ -1042,6 +1056,15 @@ class Ledger:
                     or execution.protected_after_sha256 is None
                 ):
                     raise CorruptSchemaError("failed execution is missing terminal evidence")
+                if execution.status is ExecutionStatus.FAILED and milestone_state is not WorkflowState.FAILED:
+                    raise CorruptSchemaError("failed execution is not paired with FAILED workflow state")
+                if execution.status is ExecutionStatus.CANCELLED and milestone_state is not WorkflowState.CANCELLED:
+                    raise CorruptSchemaError("cancelled execution is not paired with CANCELLED workflow state")
+                if (
+                    execution.status is ExecutionStatus.UNCERTAIN_PRE_IDENTITY
+                    and milestone_state is not WorkflowState.STARTING
+                ):
+                    raise CorruptSchemaError("pre-identity uncertainty is not paired with STARTING workflow state")
                 event_rows = (
                     self._db()
                     .execute(
@@ -1653,6 +1676,33 @@ class Ledger:
             execution = self.get_execution(capsule.run_id, capsule.milestone_id)
             if execution.workspace_path != capsule.workspace_path:
                 raise WorkspaceLeaseConflict("durable execution selected a different workspace")
+            active_statuses = tuple(
+                status.value
+                for status in ExecutionStatus
+                if status
+                not in {
+                    ExecutionStatus.COMPLETED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }
+            )
+            placeholders = ", ".join("?" for _ in active_statuses)
+            active_owner = (
+                self._db()
+                .execute(
+                    "SELECT x.run_id, x.milestone_id, x.status FROM executions x "
+                    "JOIN workspace_leases l ON l.workspace_path = x.workspace_path "
+                    f"WHERE x.workspace_path = ? AND x.status IN ({placeholders}) "
+                    "AND NOT (x.run_id = ? AND x.milestone_id = ?)",
+                    (str(capsule.workspace_path), *active_statuses, str(capsule.run_id), str(capsule.milestone_id)),
+                )
+                .fetchone()
+            )
+            if active_owner is not None:
+                raise WorkspaceLeaseConflict(
+                    "workspace already has a nonterminal execution owner "
+                    f"{active_owner['run_id']}/{active_owner['milestone_id']}"
+                )
             owner = (
                 self._db()
                 .execute(
@@ -1744,6 +1794,9 @@ class Ledger:
                 or current.checkpoint is not ControllerCheckpoint.THREAD_STARTING
             ):
                 raise StaleWriter("thread identity requires a planned leased execution")
+            workflow = self.get_milestone(run, milestone)
+            if workflow.state is not WorkflowState.STARTING:
+                raise StaleWriter("thread identity requires a STARTING workflow state")
             self._db().execute(
                 "UPDATE executions SET status = ?, checkpoint = ?, thread_id = ?, updated_at = ? "
                 "WHERE run_id = ? AND milestone_id = ?",
@@ -1756,7 +1809,25 @@ class Ledger:
                     str(milestone),
                 ),
             )
-            return self.get_execution(run, milestone)
+            self._db().execute(
+                "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (WorkflowState.RUNNING.value, now, str(run), str(milestone)),
+            )
+            event = self._append_event_in_transaction(
+                run,
+                milestone,
+                from_state=WorkflowState.STARTING,
+                to_state=WorkflowState.RUNNING,
+                event_type="state_transition",
+                reason=None,
+                dispatch_id=None,
+                data=None,
+            )
+            expected = self.get_execution(run, milestone)
+            if self.current_state(run, milestone) is not WorkflowState.RUNNING:
+                raise CorruptSchemaError("thread identity write did not advance workflow state")
+            self._verify_event(event)
+            return expected
 
     def record_thread_starting(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
         run = _run_id(run_id)
@@ -1792,6 +1863,26 @@ class Ledger:
             self._db().execute(
                 "UPDATE executions SET status = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
                 (ExecutionStatus.UNCERTAIN_PRE_IDENTITY.value, now, str(run), str(milestone)),
+            )
+            return self.get_execution(run, milestone)
+
+    def record_turn_starting(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
+        """Durably mark the SDK turn boundary before making an external call."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            if current.status is not ExecutionStatus.THREAD_STARTED or current.thread_id is None:
+                raise StaleWriter("turn start requires a durable SDK thread")
+            if current.turn_id is not None:
+                return current
+            if current.turn_output == _TURN_STARTING_MARKER:
+                return current
+            self._db().execute(
+                "UPDATE executions SET turn_output_json = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (_encode_json(_TURN_STARTING_MARKER), now, str(run), str(milestone)),
             )
             return self.get_execution(run, milestone)
 
@@ -1852,9 +1943,17 @@ class Ledger:
         milestone = _milestone_id(milestone_id)
         after_digest = _sha256(protected_after_sha256, field_name="protected-path digest")
         now = utc_now()
+        outcome_status = result.get("status") if isinstance(result, Mapping) else None
+        outcome_failed = isinstance(outcome_status, str) and outcome_status.strip().lower() in {
+            "failed",
+            "failure",
+            "blocked",
+            "cancelled",
+            "error",
+        }
         terminal = (
             ExecutionStatus.COMPLETED
-            if validation.exit_code == 0 and not validation.timed_out
+            if validation.exit_code == 0 and not validation.timed_out and not outcome_failed
             else ExecutionStatus.FAILED
         )
         with self._transaction():
@@ -1863,6 +1962,9 @@ class Ledger:
                 return current
             if current.status is not ExecutionStatus.THREAD_STARTED or current.turn_id is None:
                 raise StaleWriter("terminal result requires a durable SDK turn")
+            workflow = self.get_milestone(run, milestone)
+            if workflow.state is not WorkflowState.RUNNING:
+                raise StaleWriter("terminal result requires a RUNNING workflow state")
             self._db().execute(
                 "UPDATE executions SET status = ?, checkpoint = ?, result_json = ?, validation_argv_json = ?, "
                 "validation_exit_code = ?, validation_stdout_sha256 = ?, validation_stderr_sha256 = ?, "
@@ -1872,7 +1974,14 @@ class Ledger:
                     terminal.value,
                     ControllerCheckpoint.RESULT_DURABLE.value,
                     _encode_json(result),
-                    _encode_json(list(validation.argv)),
+                    _encode_json(
+                        list(validation.argv)
+                        if validation.error_code is None
+                        else {
+                            "argv": list(validation.argv),
+                            "error_code": validation.error_code.value,
+                        }
+                    ),
                     validation.exit_code,
                     validation.stdout_sha256,
                     validation.stderr_sha256,
@@ -1884,7 +1993,30 @@ class Ledger:
                     str(milestone),
                 ),
             )
-            return self.get_execution(run, milestone)
+            target = WorkflowState.COMPLETED if terminal is ExecutionStatus.COMPLETED else WorkflowState.FAILED
+            self._db().execute(
+                "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (target.value, now, str(run), str(milestone)),
+            )
+            event = self._append_event_in_transaction(
+                run,
+                milestone,
+                from_state=WorkflowState.RUNNING,
+                to_state=target,
+                event_type="state_transition",
+                reason=WorkflowReason(
+                    ReasonCode.TERMINAL_OUTCOME
+                    if terminal is ExecutionStatus.COMPLETED
+                    else ReasonCode.EXECUTION_FAILURE
+                ),
+                dispatch_id=None,
+                data=None,
+            )
+            result_record = self.get_execution(run, milestone)
+            if self.current_state(run, milestone) is not target:
+                raise CorruptSchemaError("terminal execution write did not advance workflow state")
+            self._verify_event(event)
+            return result_record
 
     def cancel_execution(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
         run = _run_id(run_id)
@@ -1892,12 +2024,10 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
-            if current.status in {
-                ExecutionStatus.COMPLETED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-                ExecutionStatus.UNCERTAIN_PRE_IDENTITY,
-            }:
+            if current.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                return current
+            workflow = self.get_milestone(run, milestone)
+            if workflow.state in TERMINAL_STATES:
                 return current
             self._db().execute(
                 "UPDATE executions SET status = ?, checkpoint = ?, updated_at = ? "
@@ -1910,7 +2040,23 @@ class Ledger:
                     str(milestone),
                 ),
             )
-            return self.get_execution(run, milestone)
+            self._db().execute(
+                "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (WorkflowState.CANCELLED.value, now, str(run), str(milestone)),
+            )
+            event = self._append_event_in_transaction(
+                run,
+                milestone,
+                from_state=workflow.state,
+                to_state=WorkflowState.CANCELLED,
+                event_type="state_transition",
+                reason=None,
+                dispatch_id=None,
+                data=None,
+            )
+            result_record = self.get_execution(run, milestone)
+            self._verify_event(event)
+            return result_record
 
     def get_execution(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
         run = _run_id(run_id)
@@ -2139,6 +2285,18 @@ class Ledger:
                 argv_decoded = json.loads(str(argv_raw))
             except json.JSONDecodeError as exc:
                 raise SchemaError("validation argv is not valid JSON") from exc
+            error_code: ValidationFailureCode | None = None
+            if isinstance(argv_decoded, dict):
+                encoded_argv = argv_decoded.get("argv")
+                encoded_error = argv_decoded.get("error_code")
+                if set(argv_decoded) != {"argv", "error_code"} or not isinstance(encoded_argv, list):
+                    raise SchemaError("validation observation envelope is invalid")
+                if encoded_error is not None:
+                    try:
+                        error_code = ValidationFailureCode(str(encoded_error))
+                    except ValueError as exc:
+                        raise SchemaError("validation error code is unsupported") from exc
+                argv_decoded = encoded_argv
             if not isinstance(argv_decoded, list) or any(not isinstance(item, str) for item in argv_decoded):
                 raise SchemaError("validation argv is not a string list")
             required = (
@@ -2157,6 +2315,7 @@ class Ledger:
                 _sha256(str(row["validation_stderr_sha256"]), field_name="validation stderr digest"),
                 bool(row["validation_timed_out"]),
                 float(row["validation_duration_seconds"]),
+                error_code,
             )
         return ExecutionRecord(
             RunId(row["run_id"]),

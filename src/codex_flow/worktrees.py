@@ -98,6 +98,9 @@ class WorktreeManager:
         common = self._git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
         return Path(common)
 
+    def _physical_toplevel(self, path: Path) -> Path:
+        return Path(self._git(path, "rev-parse", "--show-toplevel")).resolve()
+
     def _validate_repository_relationship(self, repository: Path, workspace: Path) -> None:
         repository_common = self._common_directory(repository)
         workspace_common = self._common_directory(workspace)
@@ -105,6 +108,11 @@ class WorktreeManager:
             raise WorkspaceConflict(f"{workspace} is not a worktree of {repository}")
 
     def _validate_checkout(self, capsule: ExecutionCapsule, workspace: Path) -> None:
+        probe = workspace
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        if probe.exists() and self._physical_toplevel(probe) != workspace.resolve():
+            raise WorkspaceConflict("workspace path must equal the physical Git toplevel")
         _validate_existing_chain(workspace)
         if not workspace.is_dir():
             raise WorktreeError(f"workspace is not a directory: {workspace}")
@@ -124,6 +132,8 @@ class WorktreeManager:
         _validate_existing_chain(repository)
         if not repository.is_dir():
             raise WorktreeError(f"repository root is not a directory: {repository}")
+        if self._physical_toplevel(repository) != repository.resolve():
+            raise WorkspaceConflict("repository_root must equal the physical Git toplevel")
         resolved_base = self._git(repository, "rev-parse", f"{capsule.base_sha}^{{commit}}")
         if resolved_base != capsule.base_sha:
             raise WorkspaceConflict("capsule base SHA is not the repository's exact resolved commit")

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -75,37 +77,48 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
                 "additionalProperties": False,
             },
         )
-        crash_seen = False
-
-        def crash(stage: str) -> None:
-            nonlocal crash_seen
-            if stage == "after_turn":
-                crash_seen = True
-                raise RuntimeError("sentinel post-identity post-turn crash")
-
-        first = Controller(repository, fault_injector=crash)
+        first = Controller(repository)
         planned = first.plan(capsule)
-        try:
-            first.start(capsule.run_id, capsule.milestone_id)
-        except RuntimeError as exc:
-            if str(exc) != "sentinel post-identity post-turn crash":
-                raise
-        durable_after_crash = first.status(capsule.run_id, capsule.milestone_id)
         first.close()
 
-        second = Controller(repository)
-        terminal = second.resume(capsule.run_id, capsule.milestone_id)
-        lease = second.ledger.get_workspace_lease(workspace)
-        snapshot = second.ledger.snapshot(capsule.run_id)
-        lifecycle = second.ledger.sdk_lifecycle_events(capsule.run_id, capsule.milestone_id)
+        crash_output = repository.parent / "h3-crash-worker.json"
+        _run_worker(repository, "crash", crash_output)
+        durable_payload = json.loads(crash_output.read_text())
+        resume_output = repository.parent / "h3-resume-worker.json"
+        _run_worker(repository, "resume", resume_output)
+        terminal_payload = json.loads(resume_output.read_text())
+
+        verifier = Controller(repository)
+        lease = verifier.ledger.get_workspace_lease(workspace)
+        snapshot = verifier.ledger.snapshot(capsule.run_id)
+        lifecycle = verifier.ledger.sdk_lifecycle_events(capsule.run_id, capsule.milestone_id)
         protected_after = protected_paths_digest(workspace, capsule.protected_paths)
         diff = _git(workspace, "status", "--short")
+        head_before = base_sha
+        head_after = _git(workspace, "rev-parse", "HEAD")
+        branch_before = capsule.branch
+        branch_after = _git(workspace, "branch", "--show-current")
+        commit_count_before = int(_git(repository, "rev-list", "--count", "HEAD"))
+        commit_count_after = int(_git(workspace, "rev-list", "--count", "HEAD"))
+        commits_after = int(_git(workspace, "rev-list", "--count", f"{base_sha}..HEAD"))
+        committed_paths = _git(workspace, "diff", "--name-only", base_sha).splitlines()
+        changed_paths = sorted(
+            set(committed_paths)
+            | {
+                line[3:]
+                for line in diff.splitlines()
+                if len(line) >= 4 and line[:2] in {"??", " M", "M ", "A ", " D", "D "}
+            }
+        )
+        diff_stat = _git(workspace, "diff", "--stat", base_sha)
         evidence = {
-            "status": "passed" if terminal.status.value == "completed" else "failed",
-            "crash_injected_after_identity": crash_seen,
+            "status": "passed" if terminal_payload["status"] == "completed" else "failed",
+            "fresh_process_crash_recovery": True,
+            "crash_injected_after_identity": durable_payload.get("crash_injected_after_identity", False),
+            "crash_boundary": durable_payload.get("crash_boundary"),
             "planned": execution_json(planned),
-            "durable_after_crash": execution_json(durable_after_crash),
-            "terminal": execution_json(terminal),
+            "durable_after_crash": durable_payload["record"],
+            "terminal": terminal_payload,
             "dispatch_count": len(snapshot.dispatches),
             "workspace_lease": {
                 "path": str(lease.workspace_path),
@@ -116,27 +129,42 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
                 "lane": lease.lane,
                 "owner_run_id": str(lease.owner_run_id),
             },
-            "thread_identity_reused": durable_after_crash.thread_id == terminal.thread_id,
+            "thread_identity_reused": durable_payload["record"].get("thread_id") == terminal_payload.get("thread_id"),
             "ordered_lifecycle_events": [
                 {"sequence": event.sequence, "method": event.method, "turn_id": event.turn_id} for event in lifecycle
             ],
-            "protected_digest_unchanged": terminal.protected_before_sha256 == protected_after,
+            "protected_digest_unchanged": terminal_payload["protected_before_sha256"] == protected_after,
             "git_status": diff.splitlines(),
+            "git_facts": {
+                "head_before": head_before,
+                "head_after": head_after,
+                "branch_before": branch_before,
+                "branch_after": branch_after,
+                "commit_count_before": commit_count_before,
+                "commit_count_after": commit_count_after,
+                "commit_count_from_base": commits_after,
+                "commit_created": commit_count_after > commit_count_before,
+                "changed_paths": changed_paths,
+                "diff_stat": diff_stat,
+            },
             "result_file": (workspace / "result.txt").read_text(),
             "projection_exists_after_result": (
                 repository / ".codex-flow" / "runs" / str(capsule.run_id) / "execution.json"
             ).is_file(),
         }
-        second.close()
+        verifier.close()
         if not all(
             (
                 evidence["status"] == "passed",
                 evidence["crash_injected_after_identity"],
+                evidence["crash_boundary"] == "after_turn",
                 evidence["dispatch_count"] == 1,
                 evidence["thread_identity_reused"],
                 evidence["protected_digest_unchanged"],
                 evidence["projection_exists_after_result"],
                 evidence["result_file"] == "controller sentinel passed\n",
+                evidence["git_facts"]["head_before"] == evidence["git_facts"]["head_after"],
+                evidence["git_facts"]["branch_before"] == evidence["git_facts"]["branch_after"],
             )
         ):
             evidence["status"] = "failed"
@@ -146,3 +174,80 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
 def write_controller_evidence(path: Path, evidence: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _run_worker(repository: Path, phase: str, output: Path) -> None:
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "codex_flow.controller_sentinel",
+            "--worker",
+            phase,
+            "--repository",
+            str(repository),
+            "--output",
+            str(output),
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
+        raise RuntimeError(f"fresh-process controller sentinel worker failed: {detail}")
+
+
+def _worker_main(phase: str, repository: Path, output: Path) -> None:
+    controller = None
+    try:
+        controller = Controller(repository)
+        if phase == "crash":
+
+            def crash(stage: str) -> None:
+                if stage == "after_turn":
+                    raise RuntimeError("fresh-process post-turn crash")
+
+            controller.close()
+            controller = Controller(repository, fault_injector=crash)
+            try:
+                controller.start("h3-sentinel", "edit")
+            except RuntimeError as exc:
+                if str(exc) != "fresh-process post-turn crash":
+                    raise
+            record = controller.status("h3-sentinel", "edit")
+            output.write_text(
+                json.dumps(
+                    {
+                        "crash_injected_after_identity": True,
+                        "crash_boundary": "after_turn",
+                        "record": execution_json(record),
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        elif phase == "resume":
+            record = controller.resume("h3-sentinel", "edit")
+            output.write_text(json.dumps(execution_json(record), sort_keys=True) + "\n")
+        else:
+            raise ValueError(f"unknown worker phase: {phase}")
+    finally:
+        if controller is not None:
+            controller.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--worker", choices=("crash", "resume"))
+    parser.add_argument("--repository", type=Path)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    if args.worker is not None:
+        if args.repository is None or args.output is None:
+            raise SystemExit("--worker requires --repository and --output")
+        _worker_main(args.worker, args.repository, args.output)
+
+
+if __name__ == "__main__":
+    main()

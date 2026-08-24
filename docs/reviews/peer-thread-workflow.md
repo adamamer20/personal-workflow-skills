@@ -681,6 +681,23 @@ or worktree and with the result durable before projections. H4 follows.
 
 Successor: H4.
 
+### Completion evidence
+
+Status: complete for the SDK-first controller lane. The H3 repair closes the
+trusted same-UID review boundary for ignored and committed mutation scope,
+repository-bound ledgers, physical worktree toplevels, single nonterminal
+workspace ownership, durable uncertain-turn recovery, atomic identity/terminal/
+cancellation transitions, base-SHA protected baselines, strict capsule JSON,
+typed validation launch failures, and structured terminal outcomes.
+
+`make check` passed with 94 tests, Ruff, the cross-project validator,
+compilation, and pre-commit; `git diff --check` is clean. The final opt-in real
+sentinel is retained at `docs/reviews/evidence/h3-controller-sentinel.json` and
+records a fresh-process crash worker, fresh-process resume worker, one dispatch,
+one reused SDK identity/workspace, durable result before projection, unchanged
+HEAD/branch, zero created commits, changed path `result.txt`, and protected-path
+digest parity. No external provider or release gate remains open for H3.
+
 ## Milestone H4 — Add decisions, review, repair, and limits
 
 Outcome: each milestone carries explicit objective/visual/architecture

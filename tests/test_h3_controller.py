@@ -16,7 +16,14 @@ from typer.testing import CliRunner
 
 from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig
 from codex_flow.cli import app
-from codex_flow.controller import Controller, ResumeRequired, UncertainPreIdentity, capsule_json
+from codex_flow.controller import (
+    Controller,
+    ResumeRequired,
+    UncertainPreIdentity,
+    UncertainTurn,
+    capsule_from_json,
+    capsule_json,
+)
 from codex_flow.domain import (
     ControllerCheckpoint,
     ExecutionCapsule,
@@ -28,10 +35,11 @@ from codex_flow.domain import (
     Sandbox,
     ThreadIdentity,
     TurnObservation,
+    ValidationFailureCode,
     ValidationSpec,
     WorkspaceMode,
 )
-from codex_flow.ledger import _V2_TABLE_DDL, CURRENT_SCHEMA_VERSION, Ledger
+from codex_flow.ledger import _V2_TABLE_DDL, CURRENT_SCHEMA_VERSION, Ledger, WorkspaceLeaseConflict
 from codex_flow.worktrees import WorkspaceConflict
 
 
@@ -549,3 +557,196 @@ def test_v2_ledger_migrates_forward_to_canonical_h3_schema() -> None:
         assert ledger.schema_identity == "codex_flow_h3_v3"
         assert "checkpoint" in ledger.schema_columns("executions")
         ledger.close()
+
+
+def test_ignored_out_of_scope_file_is_rejected() -> None:
+    class IgnoringAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            (self.config.cwd / ".git" / "info" / "exclude").write_text("ignored.txt\n")
+            (self.config.cwd / "ignored.txt").write_text("outside\n")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=lambda config: IgnoringAdapter(config, _service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        controller.close()
+
+
+def test_validation_launch_oserror_is_typed_and_durable() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=_factory(_service()))
+        capsule = replace(
+            _capsule(repository, repository, base, branch), validation=ValidationSpec(("missing-validation",), 1)
+        )
+        controller.plan(capsule)
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "validation_executable_unavailable"}
+        assert terminal.validation is not None
+        assert terminal.validation.error_code is ValidationFailureCode.EXECUTABLE_UNAVAILABLE
+        assert "missing-validation" not in json.dumps(terminal.result)
+        controller.close()
+
+
+def test_failed_structured_terminal_outcome_cannot_become_completed() -> None:
+    class FailingOutcomeAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            return replace(observation, structured_output={"status": "failed"})
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=lambda config: FailingOutcomeAdapter(config, _service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "sdk_terminal_outcome_failed"}
+        controller.close()
+
+
+def test_identity_and_running_transition_are_one_causal_commit() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("injected")
+
+        controller = Controller(repository, adapter_factory=_factory(_service()), fault_injector=crash)
+        controller.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="injected"):
+            controller.start("run", "m1")
+        record = controller.status("run", "m1")
+        assert record.status is ExecutionStatus.THREAD_STARTED
+        events = controller.ledger.events("run", "m1")
+        assert [(event.from_state.value, event.to_state.value) for event in events] == [
+            ("PLANNED", "STARTING"),
+            ("STARTING", "RUNNING"),
+        ]
+        controller.close()
+
+
+def test_uncertain_turn_checkpoint_never_replays_external_turn() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "before_sdk_turn":
+                raise RuntimeError("stop")
+
+        first = Controller(repository, adapter_factory=_factory(service), fault_injector=crash)
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="stop"):
+            first.start("run", "m1")
+        first.close()
+        second = Controller(repository, adapter_factory=_factory(service))
+        with pytest.raises(UncertainTurn):
+            second.resume("run", "m1")
+        assert service["turns"] == 0
+        second.close()
+
+
+def test_committed_out_of_scope_mutation_fails_closed() -> None:
+    class CommittingAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            (self.config.cwd / "outside.txt").write_text("committed\n")
+            _git(self.config.cwd, "add", "outside.txt")
+            _git(self.config.cwd, "commit", "-qm", "out of scope")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=lambda config: CommittingAdapter(config, _service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        controller.close()
+
+
+def test_branch_change_fails_closed_even_when_paths_are_owned() -> None:
+    class BranchChangingAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            _git(self.config.cwd, "branch", "-m", "agent/changed")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, adapter_factory=lambda config: BranchChangingAdapter(config, _service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "branch_or_history_changed"}
+        controller.close()
+
+
+def test_existing_worktree_subdirectory_is_rejected() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, _branch = _repository(repository)
+        workspace = repository.parent / "repo.worktrees" / "existing"
+        workspace.parent.mkdir()
+        _git(repository, "worktree", "add", "-b", "agent/existing", str(workspace), base)
+        controller = Controller(repository, adapter_factory=_factory(_service()))
+        capsule = _capsule(
+            repository,
+            workspace / "nested",
+            base,
+            "agent/existing",
+            mode=WorkspaceMode.EXISTING_WORKTREE,
+            lane="existing",
+        )
+        with pytest.raises(WorkspaceConflict, match="physical Git toplevel"):
+            controller.plan(capsule)
+        controller.close()
+
+
+def test_nonterminal_workspace_owner_blocks_parallel_milestone() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        service = _service()
+        controller = Controller(repository, adapter_factory=_factory(service))
+        first = _capsule(repository, repository, base, branch, milestone="one")
+        second = _capsule(repository, repository, base, branch, milestone="two")
+        controller.plan(first)
+        controller.plan(second)
+        controller.ledger.claim_dispatch("run", "one", "executor", 1)
+        controller.ledger.acquire_workspace_lease(first)
+        with pytest.raises(WorkspaceLeaseConflict, match="nonterminal execution owner"):
+            controller.ledger.acquire_workspace_lease(second)
+        controller.close()
+
+
+def test_capsule_json_rejects_stringified_numeric_fields() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        value = capsule_json(_capsule(repository, repository, base, branch))
+        value["capsule_version"] = "1"
+        with pytest.raises(ValueError, match="capsule_version"):
+            capsule_from_json(value)
+        value = capsule_json(_capsule(repository, repository, base, branch))
+        assert isinstance(value["validation"], dict)
+        value["validation"]["timeout_seconds"] = "5"
+        with pytest.raises(ValueError, match="timeout_seconds"):
+            capsule_from_json(value)
