@@ -1218,6 +1218,37 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   config are unchanged. Full-H3 self-review has zero open P0/P1; H4 remains
   blocked pending fresh independent objective and architecture promotion
   review of the exact repaired candidate.
+- 2026-08-24: the latest final review confirmed four remaining propagation
+  blockers. Implementation `eb25987` closes H3-ARCH-003B with one canonical,
+  double-captured pre-external authorization operation used before adapter
+  construction and every SDK start/resume/turn boundary. The durable
+  per-milestone baseline now binds its exact Git-authority digest at the same
+  checkpoint; restart and fresh resume reverify HEAD, content, empty-directory
+  topology, protected paths, config/index/refs/history, physical lease facts,
+  and every accepted predecessor before external work. Authorization races
+  fail closed and restore the last safe durable checkpoint when no call was
+  made. H3-ARCH-005B is closed by transaction-ordering physical lease
+  selection before contender checks: the insertion winner reacquires
+  idempotently, unrelated capsule-only PLANNED rows are not active owners, and
+  losing lexical/symlink aliases receive `WorkspaceLeaseConflict`. Eight
+  threaded and four process interleavings plus identity-crash recovery prove
+  one runnable owner, adapter, thread, and retained lease. H3-ARCH-006B is
+  closed by a field-typed MCP server schema that rejects every unknown,
+  noncanonical, nested, and colliding header shape before projection while
+  retaining canonical native MCP fields and process-only secret references.
+  H3-ARCH-007 is closed by the shared recursive schema predicate: all objects
+  are closed and fully required, arrays have explicit items, scalar/schema
+  keywords are closed, and byte/depth/property/item limits are enforced again
+  after SDK decoding. Focused adversarial validation passed 50 tests; the full
+  H3 suite passed 181 tests, the combined H2/SDK suite passed 50 tests, and
+  `make check` passed all 254 tests plus formatting, lint, validators,
+  compileall, and pre-commit. The active native profile still projects its
+  three configured MCP servers with zero ephemeral secret references. The
+  retained real sentinel was not rerun because SDK/provider/model/permission,
+  bundled app-server transport, and the canonical sentinel schema are
+  unchanged. Full-H3 self-review found zero open P0/P1. H4 remains blocked
+  pending fresh independent objective and architecture promotion review of
+  this exact repaired candidate.
 
 ## Next execution
 
@@ -1233,10 +1264,10 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: the five-finding H3 architecture repair is implemented in
-`06a332e`; deterministic gates and the retained authorized real sentinel are
-green in the existing semantic workspace. The repaired H3 candidate is ready
-for fresh independent promotion review.
+Dispatch status: the four final H3 architecture propagation repairs are
+implemented in `eb25987`; deterministic gates and the retained authorized real
+sentinel are green in the existing semantic workspace. The repaired H3
+candidate is ready for fresh independent promotion review.
 
 Next action: independently review the exact post-repair H3 HEAD for objective
 and architecture promotion with zero open P0/P1. The retained real evidence

@@ -32,6 +32,19 @@
   execution without reconstructable baseline or compatibility authority fails
   same-thread resume closed instead of guessing.
 
+Before adapter construction and immediately before every SDK
+`thread_start`/`thread_resume`/turn call, one canonical authorization operation
+double-captures the physical worktree authority and requires two identical
+bounded observations. The observation must exactly equal the durable
+per-milestone baseline HEAD, file/type/mode/content and empty-directory
+topology, protected-path digest, Git config/index/refs/reflogs/history and
+operation metadata, physical lease facts, and every applicable accepted
+predecessor terminal snapshot. The Git-authority digest is bound atomically
+with the schema-v8 baseline and native-profile facts. A restart never adopts
+new authority. If authorization rejects after a durable external-call marker
+but before the call, the marker returns to its prior safe checkpoint; a crash
+at the actual call boundary remains uncertain and non-replayable.
+
 Native-profile facts v2 recursively fingerprint each configured `skills`,
 `plugins`, and `memories` tree through no-follow directory descriptors. The
 identity covers relative path bytes, type and ownership metadata, file-content
@@ -55,7 +68,13 @@ directory type/mode/content, empty subdirectories, symlink rejection, hardlink
 count, terminal HEAD, and Git authority. Every completed predecessor is
 verified before a successor baseline, lease, adapter, or external call.
 
-Native config projection is structural. Literal MCP HTTP headers become
+Native config projection is a closed field-typed schema for native MCP server
+definitions. Supported command/URL, arguments, working directory, timeouts,
+enablement/required flags, tool filters, bearer reference, environment,
+environment-reference, and HTTP-header fields retain their native semantics;
+all other fields fail closed. Concatenated, camel-case, case, separator,
+nested, or colliding aliases of `http_headers` and `env_http_headers` are
+rejected before projection. Literal MCP HTTP headers become
 `env_http_headers` references backed only by the SDK child's ephemeral
 environment; sensitive MCP stdio environment entries become `env_vars`
 references. Authorization, proxy authorization, cookies, arbitrary header
@@ -64,6 +83,17 @@ header shapes cannot reach the ledger, artifacts, evidence, errors, or private
 runtime files. Conflicting environment semantics fail closed. Existing native
 references such as provider `env_key`, MCP `bearer_token_env_var`, and
 `env_http_headers` remain references.
+
+Execution output schemas use one strict recursive predicate at capsule
+construction/deserialization and again after the SDK response. The root and
+every nested object must explicitly declare `properties`, list every property
+exactly once in `required`, and set `additionalProperties = false`; arrays must
+declare one explicit item schema; scalars accept only their type. Unsupported
+keywords, optional or duplicate requirements, undeclared/missing output, and
+open or itemless containers fail closed. Schema/output depth is limited to 32,
+each object to 128 properties, a schema/output to 1,024 total properties, each
+array to 1,024 items, property names to 256 UTF-8 bytes, and structured output
+to 1 MiB.
 
 ## Native runtime/profile/private-state matrix
 
@@ -104,11 +134,15 @@ native `danger-full-access`/`never`, an injected post-turn process boundary,
 fresh-process same-thread resume, the allowed workspace edit, equal Git-authority
 digests, and unchanged global native config bytes. Schema-v8 terminal authority,
 canonical workspace identity, directory topology, discovery-cycle rejection,
-and secret projection retain the proven SDK/provider/model/permission route.
-The active `codex-lb` profile still projects with zero ephemeral secret
-references and the pinned runtime's config diagnostic loads it successfully;
-no additional real provider run was consumed. External-write denial is not an H3
-requirement when the inherited native profile permits repository-external writes.
+secret projection, exact pre-external revalidation, deterministic lease
+selection, and strict recursive output schemas retain the proven
+SDK/provider/model/permission route. Repair implementation `eb25987` leaves the
+retained sentinel bytes and canonical schema unchanged. The active `codex-lb`
+profile still projects all three configured MCP servers with zero ephemeral
+secret references and the pinned runtime's config diagnostic loads it
+successfully; no additional real provider run was consumed. External-write
+denial is not an H3 requirement when the inherited native profile permits
+repository-external writes.
 
 Desktop visibility, idle wake, remote hosts, permission-profile survival, and
 native review remain outside H3. Later milestones must label each as proven,
