@@ -30,6 +30,11 @@ class Sandbox(str, Enum):
     FULL_ACCESS = "full_access"
 
 
+class NativePermissionMode(str, Enum):
+    INHERIT_NATIVE = "inherit_native"
+    READ_ONLY = "read_only"
+
+
 class ReasoningEffort(str, Enum):
     """Explicit reasoning effort; no implicit SDK default is accepted."""
 
@@ -600,11 +605,12 @@ class ExecutionCapsule:
     reasoning_effort: ReasoningEffort
     prompt: str
     output_schema: JsonObject
+    permission_mode: NativePermissionMode = NativePermissionMode.INHERIT_NATIVE
 
     def __post_init__(self) -> None:
         if isinstance(self.capsule_version, bool) or not isinstance(self.capsule_version, int):
             raise ValueError("execution capsule version must be an integer")
-        if self.capsule_version != 1:
+        if self.capsule_version != 2:
             raise ValueError("unsupported execution capsule version")
         if not self.repository_root.is_absolute() or not self.workspace_path.is_absolute():
             raise ValueError("repository and workspace paths must be absolute")
@@ -687,7 +693,7 @@ class ExecutionIntegrityRecord:
     run_id: RunId
     milestone_id: MilestoneId
     provenance: str
-    sandbox_policy_sha256: str | None
+    native_profile_sha256: str | None
     git_authority_before_sha256: str | None
     git_authority_after_sha256: str | None
     created_at: str

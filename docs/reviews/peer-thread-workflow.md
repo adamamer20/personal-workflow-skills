@@ -591,8 +591,8 @@ H3 — add controller-owned worktrees and SDK execution.
 agent-usable vertical slice. The controller validates and leases the selected
 current checkout or semantic managed Git worktree from an explicit
 repository/base commit, starts or resumes exactly one SDK executor under
-`Sandbox.workspace_write`, runs explicit validation, and persists a typed
-terminal result before any projection or notification.
+the effective native Codex permission/profile, runs explicit validation, and
+persists a typed terminal result before any projection or notification.
 
 Acceptance modes: `objective`, `architecture`.
 
@@ -603,8 +603,9 @@ Acceptance modes: `objective`, `architecture`.
 - H3 schema migration and typed ledger methods in `ledger.py` for repository,
   worktree lease, SDK thread identity, turn identity, capsule, validation, and
   terminal result facts;
-- `backends/codex_sdk.py` only to support explicit workspace-write execution and
-  fresh-process resume through the proven stable high-level SDK;
+- `backends/codex_sdk.py` and a narrow typed native-profile projection to
+  support permission/profile inheritance and fresh-process resume through the
+  proven stable high-level SDK;
 - `cli.py`, artifact projections, focused tests, `workflow.toml` only if H3
   requires a minimal single-route default, and retained H3 sentinel evidence.
 
@@ -616,7 +617,8 @@ Acceptance modes: `objective`, `architecture`.
   automatic notifications, remote hosts, push/merge, and legacy retirement are
   H4+;
 - models never select repository roots, base refs, worktree paths, mutable or
-  protected paths, validation commands, model ids, reasoning effort, or sandbox.
+  protected paths, validation commands, model ids, or reasoning effort. Native
+  Codex owns the default permission authority; a capsule may only narrow it.
 
 ### Contracts and failure behavior
 
@@ -625,7 +627,8 @@ Acceptance modes: `objective`, `architecture`.
    absolute repository/workspace roots, semantic program/lane slug, branch,
    resolved full base SHA, normalized mutable/protected path sets, explicit
    validation argv/timeout, executor model/effort, prompt input, and a strict
-   structured-output schema. Prompt bodies remain in owned capsule artifacts,
+   structured-output schema, and permission mode (`inherit_native` by default,
+   or explicit `read_only`). Prompt bodies remain in owned capsule artifacts,
    not generic ledger metadata/events.
 2. `WorktreeManager` uses argument-vector Git subprocesses, validates the
    repository and ancestors without symlinks, resolves the supplied base before
@@ -653,6 +656,25 @@ Acceptance modes: `objective`, `architecture`.
 7. `cancel` is idempotent, terminal, and never deletes a worktree, archives a
    task, or discards Git changes automatically. `status` is read-only and emits
    stable JSON plus concise human output.
+8. The SDK child uses the normal bundled app-server launch path and a typed,
+   fail-closed projection of the active native Codex configuration. Provider,
+   model catalog, MCP, skill, plugin, memory, project, hook, shell-environment,
+   and permission semantics are preserved; model/effort/cwd remain capsule
+   inputs. Mutable sessions/databases/logs use a private `CODEX_HOME`. Provider
+   authentication remains an environment-key reference and no secret value is
+   projected or persisted.
+9. `inherit_native` supplies no SDK approval or sandbox override. A `read_only`
+   capsule supplies only the stricter read-only sandbox override and preserves
+   native approval behavior. The typed lattice has no broadening value and
+   fails closed if monotonic restriction cannot be established. Native config
+   is re-read and identity/digest checked for each new execution, so a later
+   native restriction is inherited automatically.
+10. Worktree selection, mutable/protected path checks, Git-authority snapshots,
+    and validation are ownership and evidence controls, not an OS containment
+    boundary. H3 does not claim to contain hostile same-UID native code beyond
+    the effective native Codex permissions. Repository-external effects are
+    governed by that native authority and are not unconditionally reclassified
+    as controller failure.
 
 ### Acceptance and validation
 
@@ -663,13 +685,20 @@ Acceptance modes: `objective`, `architecture`.
   projection ordering, cancel idempotency, and every crash injection boundary;
 - fresh-process adapter tests prove resume initializes a new SDK client and
   rejects identity change without a CLI/direct-RPC fallback;
+- deterministic parity tests prove a blank private home selects built-in
+  `openai`, the projected profile selects exact `codex-lb` provider facts,
+  unrestricted and restricted native profiles are inherited on the next
+  execution, no broadening mode exists, global config bytes are unchanged, and
+  explicit read-only mode is the only SDK permission override;
 - a disposable real Git repository sentinel plans and starts a bounded editing
   milestone, injects a controller stop after durable SDK identity, resumes in a
   fresh process, runs validation, and reaches one terminal structured result;
 - retained evidence records one dispatch, one worktree lease/path, one SDK
   thread identity, a semantic program/lane workspace reused across resume,
   ordered turns/events, before/after protected-path hashes,
-  validation output digest, final Git diff/commit facts, and no duplicate owner;
+  validation output digest, final Git diff/commit facts, sanitized effective
+  provider/profile/permission facts and digest, unchanged global native config,
+  and no duplicate owner;
 - `make check`, focused H3 tests, `git diff --check`, complete diff self-review,
   and zero open P0/P1.
 
@@ -683,32 +712,25 @@ Successor: H4.
 
 ### Completion evidence
 
-Status: deterministic integrity repair complete; promotion is externally
-blocked and H4 remains blocked. The repair seals the production Python SDK
-child route inside a controller-owned Bubblewrap mount boundary, keeps the
-leased workspace as the only executor-writable host root, overlays protected,
-controller-state, and Git-dir paths read-only, and makes in-process adapter
-injection an explicitly trusted hermetic-test seam rather than a production
-containment claim. A bounded durable Git-authority snapshot now covers HEAD and
-branch identity, refs, reflogs, index, repository/worktree configuration, and
-selected stable operation metadata with explicit file/byte limits. Schema v4
-persists the sandbox-policy digest and Git-authority before/after digests across
-the post-turn crash boundary.
-
-Focused H2/H3/SDK tests pass 86/86 and `make check` passes 109 tests, Ruff, the
-cross-project validator, compilation, and pre-commit. Hermetic regressions deny
-direct, symlink, and hardlink repository-external writes while allowing the
-leased-workspace edit; they also deny protected, controller-state, and
-`.git/config` writes and detect commit-then-hard-reset, branch, config, index,
-and committed-history mutations. The retained evidence at
-`docs/reviews/evidence/h3-controller-sentinel.json` preserves the prior live
-baseline and truthfully marks the integrity rerun `external_blocked`: after two
-launcher defects were diagnosed and repaired, the final actual-SDK attempt
-failed before an executor turn with `usage_limit_exceeded`. The repaired live
-route therefore has no fabricated negative-write proof. The smallest remaining
-prerequisite is restored Codex account credit (or the reported usage reset),
-followed by one unchanged-model opt-in H3 sentinel rerun and inspection of its
-explicit denied external-write plus Git-authority before/after evidence.
+Status: deterministic native-permission/profile correction complete, but the
+real promotion gate is blocked after its single authorized run failed before
+terminal evidence; H4 remains blocked.
+The user superseded the mandatory Bubblewrap containment contract: H3 now
+inherits the same native Codex permission authority and automatically follows
+later native restrictions. The bounded Git-authority snapshot remains required
+for HEAD/branch, refs, reflogs, index, repository/worktree configuration, and
+stable operation metadata, but it is evidence/contract enforcement rather than
+an OS sandbox claim. Schema v5 replaces the obsolete sandbox-policy authority
+with a sanitized native provider/profile/permission digest while retaining
+Git-authority before/after evidence. The single corrected real SDK run reached
+the first SDK turn and injected post-turn crash boundary, then fresh-process
+resume failed because the native runtime had legitimately added private config
+state and reprojection treated that private change as source drift. The
+launcher now atomically restores the validated projection for each fresh SDK
+process, with a regression covering runtime-added private config. No second
+real run was performed. Retained v3 evidence labels provider/profile terminal
+proof, Git parity, and global-config parity `not_proven`; external-write denial
+is not an H3 gate.
 
 ## Milestone H4 — Add decisions, review, repair, and limits
 
@@ -1021,6 +1043,21 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   executor turn. H3 promotion and H4 remain blocked on one unchanged-model live
   sentinel rerun after credit/reset; no denied-write evidence is inferred from
   the deterministic probe or the absence of an external file change.
+- 2026-08-24: the user corrected the H3 permission contract. Harness agents
+  must inherit native Codex permissions rather than add mandatory Bubblewrap
+  containment. The continuation removes hard-coded workspace-write/deny-all
+  production overrides, projects the active native provider/profile into
+  private mutable runtime state, adds monotonic optional read-only restriction,
+  and keeps worktree/Git controls as ownership and evidence boundaries only.
+  The prior usage-limit diagnosis is superseded by the missing `codex-lb`
+  provider projection; H4 remains blocked pending corrected deterministic and
+  real-sentinel evidence plus independent promotion review.
+- 2026-08-24: the one authorized corrected real sentinel run reached the SDK
+  turn and injected post-turn crash boundary, but resume rejected native
+  runtime-added private config as a projection conflict. Deterministic repair
+  now restores the validated projection atomically between SDK processes and
+  keeps mutable sessions private. The run was not repeated; corrected terminal
+  provider/profile, Git-parity, and global-config evidence remain open.
 
 ## Next execution
 
@@ -1036,15 +1073,14 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: integrity repair implementation and deterministic validation
-are complete in the existing semantic program workspace. Promotion is
-externally blocked by the local Codex account usage limit. Reuse this exact
-workspace; do not allocate another worktree or change model/transport.
+Dispatch status: implementation and deterministic repair are green in the
+existing semantic workspace. The consumed real run did not produce corrected
+terminal evidence, so H3 cannot be promoted.
 
-Next action: after credit is restored or the reported reset occurs, rerun the
-opt-in real H3 sentinel with `gpt-5.6-luna`/`medium` and no code/config changes.
-Promote only if it uses the actual Python SDK route, explicitly records the
-denied bounded external-write attempt, completes the allowed workspace edit,
-and retains matching Git-authority before/after evidence. Then perform the
-remaining exact-range promotion decision with zero open P0/P1. H4 remains
-blocked until those gates close.
+Next action: the planning owner must decide whether to authorize one new real
+H3 sentinel run of the repaired exact commit with unchanged
+`gpt-5.6-luna`/`medium`. Promotion still requires the actual Python SDK route
+through `codex-lb`, sanitized native permission/profile parity, the allowed
+workspace edit and durable resume, unchanged Git authority, unchanged global
+Codex config bytes, and an independent review with zero open P0/P1. External-
+write denial is not an H3 gate. H4 remains blocked.

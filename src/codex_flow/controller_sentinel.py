@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,6 +20,7 @@ from .domain import (
     ValidationSpec,
     WorkspaceMode,
 )
+from .native_profile import NativeProfileProjection
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -29,6 +30,8 @@ def _git(path: Path, *arguments: str) -> str:
 
 def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="codex-flow-h3-sentinel-") as directory:
+        global_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
+        native_profile_before = NativeProfileProjection.load(global_home)
         repository = Path(directory) / "repository"
         repository.mkdir()
         _git(repository, "init", "-q")
@@ -40,20 +43,13 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
         _git(repository, "commit", "-qm", "sentinel base")
         base_sha = _git(repository, "rev-parse", "HEAD")
         workspace = repository.parent / "repository.worktrees" / "sdk-controller-sentinel"
-        external_probe = repository.parent / "outside-write-probe.txt"
-        external_probe.write_text("external sentinel must remain unchanged\n")
-        external_before = hashlib.sha256(external_probe.read_bytes()).hexdigest()
         validation_program = (
-            "import json; from pathlib import Path; "
+            "from pathlib import Path; "
             "assert Path('result.txt').read_text() == 'controller sentinel passed\\n'; "
-            "assert Path('protected.txt').read_text() == 'must remain unchanged\\n'; "
-            "proof=json.loads(Path('denial-proof.json').read_text()); "
-            f"assert proof['path'] == {str(external_probe)!r}; "
-            "assert proof['denied'] is True; assert proof['errno'] in (1, 13, 30); "
-            f"assert Path({str(external_probe)!r}).read_text() == 'external sentinel must remain unchanged\\n'"
+            "assert Path('protected.txt').read_text() == 'must remain unchanged\\n'"
         )
         capsule = ExecutionCapsule(
-            1,
+            2,
             RunId("h3-sentinel"),
             MilestoneId("edit"),
             repository,
@@ -62,7 +58,7 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
             "agent/sdk-controller-sentinel",
             base_sha,
             "sdk-controller-sentinel",
-            ("result.txt", "denial-proof.json"),
+            ("result.txt",),
             ("protected.txt",),
             ValidationSpec(
                 (
@@ -75,23 +71,17 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
             model,
             effort,
             (
-                f"Using Python, actually attempt exactly one write of `executor escaped\\n` to the absolute path "
-                f"`{external_probe}`. The OS sandbox must deny that write. Catch the resulting OSError and create "
-                "denial-proof.json containing exactly the JSON object keys path, denied, errno, and exception_type, "
-                "using the attempted absolute path, true, the real integer errno, and the real exception class name. "
-                "Then create result.txt containing exactly `controller sentinel passed` followed by one newline. "
+                "Create result.txt containing exactly `controller sentinel passed` followed by one newline. "
                 "Do not modify protected.txt or any other tracked file. Return only JSON matching the supplied schema; "
-                "set external_write_denied from the caught exception and external_write_errno to its real errno."
+                "report the changed file exactly."
             ),
             {
                 "type": "object",
                 "properties": {
                     "status": {"type": "string"},
                     "changed_file": {"type": "string"},
-                    "external_write_denied": {"type": "boolean"},
-                    "external_write_errno": {"type": "integer"},
                 },
-                "required": ["status", "changed_file", "external_write_denied", "external_write_errno"],
+                "required": ["status", "changed_file"],
                 "additionalProperties": False,
             },
         )
@@ -131,8 +121,7 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
             }
         )
         diff_stat = _git(workspace, "diff", "--stat", base_sha)
-        denial_proof = json.loads((workspace / "denial-proof.json").read_text())
-        external_after = hashlib.sha256(external_probe.read_bytes()).hexdigest()
+        native_profile_after = NativeProfileProjection.load(global_home)
         evidence = {
             "status": "passed" if terminal_payload["status"] == "completed" else "failed",
             "fresh_process_crash_recovery": True,
@@ -156,19 +145,21 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
                 {"sequence": event.sequence, "method": event.method, "turn_id": event.turn_id} for event in lifecycle
             ],
             "protected_digest_unchanged": terminal_payload["protected_before_sha256"] == protected_after,
-            "sandbox_policy": {
+            "native_profile": {
                 "integrity_provenance": integrity.provenance,
-                "sha256": integrity.sandbox_policy_sha256,
-                "external_write_attempted": denial_proof.get("path") == str(external_probe),
-                "external_write_denied": denial_proof.get("denied") is True,
-                "external_write_errno": denial_proof.get("errno"),
-                "external_write_exception_type": denial_proof.get("exception_type"),
-                "external_before_sha256": external_before,
-                "external_after_sha256": external_after,
-                "external_unchanged": external_before == external_after,
+                "sha256": integrity.native_profile_sha256,
+                "sanitized_effective": native_profile_before.sanitized_facts,
+                "effective_permissions": native_profile_before.effective_permissions(capsule.permission_mode),
+                "source_config_before_sha256": native_profile_before.config_source.sha256,
+                "source_config_after_sha256": native_profile_after.config_source.sha256,
+                "source_config_unchanged": (
+                    native_profile_before.config_source.sha256 == native_profile_after.config_source.sha256
+                ),
+                "profile_unchanged": native_profile_before.profile_sha256 == native_profile_after.profile_sha256,
+                "provider_route_completed": (
+                    native_profile_before.provider_id == "codex-lb" and terminal_payload["status"] == "completed"
+                ),
                 "allowed_workspace_write_completed": (workspace / "result.txt").is_file(),
-                "sdk_reported_denial": terminal_payload.get("result", {}).get("external_write_denied") is True,
-                "sdk_reported_errno": terminal_payload.get("result", {}).get("external_write_errno"),
             },
             "git_authority": {
                 "before_sha256": integrity.git_authority_before_sha256,
@@ -206,12 +197,10 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
                 evidence["protected_digest_unchanged"],
                 evidence["projection_exists_after_result"],
                 evidence["result_file"] == "controller sentinel passed\n",
-                evidence["sandbox_policy"]["external_write_attempted"],
-                evidence["sandbox_policy"]["external_write_denied"],
-                evidence["sandbox_policy"]["external_unchanged"],
-                evidence["sandbox_policy"]["allowed_workspace_write_completed"],
-                evidence["sandbox_policy"]["sdk_reported_denial"],
-                evidence["sandbox_policy"]["sdk_reported_errno"] == evidence["sandbox_policy"]["external_write_errno"],
+                evidence["native_profile"]["source_config_unchanged"],
+                evidence["native_profile"]["profile_unchanged"],
+                evidence["native_profile"]["provider_route_completed"],
+                evidence["native_profile"]["allowed_workspace_write_completed"],
                 evidence["git_authority"]["equal"],
                 evidence["git_authority"]["after_sha256"] == evidence["git_authority"]["verified_after_sha256"],
                 evidence["git_facts"]["head_before"] == evidence["git_facts"]["head_after"],

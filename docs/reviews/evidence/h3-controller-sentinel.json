@@ -1,9 +1,25 @@
 {
   "baseline_evidence_status": "passed_before_h3_integrity_repair",
-  "evidence_version": "h3-controller-sentinel/v2",
-  "promotion_status": "external_blocked",
+  "evidence_version": "h3-controller-sentinel/v3",
+  "promotion_status": "blocked_after_consumed_native_profile_rerun",
+  "native_permission_profile_rerun": {
+    "actual_python_sdk_route": true,
+    "effort": "medium",
+    "failure_phase": "fresh_process_resume",
+    "global_config_unchanged": "not_proven_by_completed_sentinel",
+    "git_authority_parity": "not_proven_by_completed_sentinel",
+    "model": "gpt-5.6-luna",
+    "observed_partial_outcome": "the first SDK process completed its turn and reached the injected post-turn crash boundary; the fresh resume process stopped before terminal evidence",
+    "outcome": "failed_before_terminal_evidence",
+    "provider_profile_terminal_proof": "not_proven",
+    "reason_code": "private_runtime_config_reprojection_conflict",
+    "repair_after_attempt": "fresh SDK processes now atomically restore the validated projected config while retaining private session state; deterministic regression is green",
+    "rerun_performed_after_repair": false,
+    "status": "failed"
+  },
   "integrity_repair_rerun": {
     "actual_python_sdk_route": true,
+    "contract_status": "superseded_by_native_permission_inheritance_requirement",
     "deterministic_policy_probe": {
       "allowed_workspace_write": "proven",
       "controller_state_write": "denied",
@@ -319,7 +335,7 @@
   "projection_exists_after_result": true,
   "protected_digest_unchanged": true,
   "result_file": "controller sentinel passed\n",
-  "status": "passed",
+  "status": "failed",
   "terminal": {
     "capsule_path": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository/.codex-flow/capsules/h3-sentinel/edit.json",
     "capsule_sha256": "0eb713e2117203b20dbea270749603c18a17afee7ce55c34801b1bd53b932124",

@@ -63,8 +63,10 @@ from .domain import (
     is_transition_allowed,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(4)
-SUPPORTED_SCHEMA_VERSIONS = frozenset({SchemaVersion(1), SchemaVersion(2), SchemaVersion(3), CURRENT_SCHEMA_VERSION})
+CURRENT_SCHEMA_VERSION = SchemaVersion(5)
+SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {SchemaVersion(1), SchemaVersion(2), SchemaVersion(3), SchemaVersion(4), CURRENT_SCHEMA_VERSION}
+)
 _STATES_SQL = ", ".join(f"'{state.value}'" for state in WorkflowState)
 _REASON_CODES_SQL = ", ".join(f"'{reason.value}'" for reason in ReasonCode)
 _EVENT_TYPES = frozenset({"dispatch_claimed", "state_transition"})
@@ -192,7 +194,7 @@ _V3_TABLE_DDL = {
     "executions": _EXECUTIONS_DDL,
     "sdk_lifecycle_events": _SDK_EVENTS_DDL,
 }
-_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+_EXECUTION_INTEGRITY_V4_DDL = """CREATE TABLE execution_integrity (
     run_id TEXT NOT NULL,
     milestone_id TEXT NOT NULL,
     provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'controller_v1')),
@@ -206,7 +208,22 @@ _EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
        OR (provenance = 'controller_v1' AND sandbox_policy_sha256 IS NOT NULL)),
     FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
 )"""
-_V4_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
+_V4_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_V4_DDL}
+_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'legacy_sandbox_v4', 'controller_v2')),
+    native_profile_sha256 TEXT CHECK(native_profile_sha256 IS NULL OR length(native_profile_sha256) = 64),
+    git_authority_before_sha256 TEXT CHECK(git_authority_before_sha256 IS NULL OR length(git_authority_before_sha256) = 64),
+    git_authority_after_sha256 TEXT CHECK(git_authority_after_sha256 IS NULL OR length(git_authority_after_sha256) = 64),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, milestone_id),
+    CHECK((provenance IN ('legacy_v3', 'legacy_sandbox_v4') AND native_profile_sha256 IS NULL)
+       OR (provenance = 'controller_v2' AND native_profile_sha256 IS NOT NULL)),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_V5_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
 
 
 def _canonical_ddl(sql: str) -> str:
@@ -280,7 +297,8 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(1): "codex_flow_h2_v1",
     SchemaVersion(2): "codex_flow_h2_v2",
     SchemaVersion(3): "codex_flow_h3_v3",
-    CURRENT_SCHEMA_VERSION: "codex_flow_h3_integrity_v4",
+    SchemaVersion(4): "codex_flow_h3_integrity_v4",
+    CURRENT_SCHEMA_VERSION: "codex_flow_h3_native_profile_v5",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -639,7 +657,7 @@ class Ledger:
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V4_TABLE_DDL:
+        if table not in _V5_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -722,7 +740,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V4_TABLE_DDL.values():
+                for statement in _V5_TABLE_DDL.values():
                     self._db().execute(statement)
                 self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -748,6 +766,7 @@ class Ledger:
             SchemaVersion(2): _V2_TABLE_DDL,
             SchemaVersion(3): _V3_TABLE_DDL,
             SchemaVersion(4): _V4_TABLE_DDL,
+            SchemaVersion(5): _V5_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -845,7 +864,7 @@ class Ledger:
                 "run_id": ("TEXT", 1, 1),
                 "milestone_id": ("TEXT", 1, 2),
                 "provenance": ("TEXT", 1, 0),
-                "sandbox_policy_sha256": ("TEXT", 0, 0),
+                "native_profile_sha256": ("TEXT", 0, 0),
                 "git_authority_before_sha256": ("TEXT", 0, 0),
                 "git_authority_after_sha256": ("TEXT", 0, 0),
                 "created_at": ("TEXT", 1, 0),
@@ -860,6 +879,10 @@ class Ledger:
             expected.pop("sdk_lifecycle_events")
         if version < SchemaVersion(4):
             expected.pop("execution_integrity")
+        elif version == SchemaVersion(4):
+            expected["execution_integrity"]["sandbox_policy_sha256"] = expected["execution_integrity"].pop(
+                "native_profile_sha256"
+            )
         for table, expected_columns in expected.items():
             rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
@@ -1149,6 +1172,9 @@ class Ledger:
                         raise CorruptSchemaError("Git authority after-state lacks its pre-turn authority")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(4):
+            self._migrate_v4_to_v5()
+            return
         if version == SchemaVersion(3):
             self._migrate_v3_to_v4()
             return
@@ -1218,7 +1244,7 @@ class Ledger:
         self._validate_shape(SchemaVersion(3))
         self._validate_rows()
         with self._transaction(validate_authority=False):
-            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(_EXECUTION_INTEGRITY_V4_DDL)
             self._db().execute(
                 "INSERT INTO execution_integrity(run_id, milestone_id, provenance, sandbox_policy_sha256, "
                 "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
@@ -1226,6 +1252,32 @@ class Ledger:
                 "FROM executions WHERE status != ?",
                 (ExecutionStatus.PLANNED.value,),
             )
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(int(SchemaVersion(4))),),
+            )
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(4)],),
+            )
+            self._fault("after_migration")
+        self._migrate_v4_to_v5()
+
+    def _migrate_v4_to_v5(self) -> None:
+        self._validate_schema_metadata(SchemaVersion(4))
+        self._validate_shape(SchemaVersion(4))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._db().execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v4")
+            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(
+                "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
+                "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
+                "SELECT run_id, milestone_id, CASE WHEN provenance = 'controller_v1' "
+                "THEN 'legacy_sandbox_v4' ELSE 'legacy_v3' END, NULL, git_authority_before_sha256, "
+                "git_authority_after_sha256, created_at, updated_at FROM execution_integrity_v4"
+            )
+            self._db().execute("DROP TABLE execution_integrity_v4")
             self._db().execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(int(CURRENT_SCHEMA_VERSION)),),
@@ -1694,15 +1746,15 @@ class Ledger:
     # H3 controller facts
     # ------------------------------------------------------------------
 
-    def record_sandbox_policy(
+    def record_native_profile(
         self,
         run_id: RunId | str,
         milestone_id: MilestoneId | str,
-        sandbox_policy_sha256: str,
+        native_profile_sha256: str,
     ) -> ExecutionIntegrityRecord:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
-        policy = _sha256(sandbox_policy_sha256, field_name="sandbox policy digest")
+        profile = _sha256(native_profile_sha256, field_name="native profile digest")
         now = utc_now()
         with self._transaction():
             self.get_execution(run, milestone)
@@ -1716,14 +1768,14 @@ class Ledger:
             )
             if existing is not None:
                 record = self._execution_integrity_from_row(existing)
-                if record.sandbox_policy_sha256 != policy:
-                    raise StaleWriter("execution is already bound to a different sandbox policy")
+                if record.native_profile_sha256 != profile:
+                    raise StaleWriter("execution is already bound to a different native profile")
                 return record
             self._db().execute(
-                "INSERT INTO execution_integrity(run_id, milestone_id, provenance, sandbox_policy_sha256, "
+                "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
                 "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
-                "VALUES (?, ?, 'controller_v1', ?, NULL, NULL, ?, ?)",
-                (str(run), str(milestone), policy, now, now),
+                "VALUES (?, ?, 'controller_v2', ?, NULL, NULL, ?, ?)",
+                (str(run), str(milestone), profile, now, now),
             )
             return self.get_execution_integrity(run, milestone)
 
@@ -2521,15 +2573,12 @@ class Ledger:
 
     @staticmethod
     def _execution_integrity_from_row(row: sqlite3.Row) -> ExecutionIntegrityRecord:
+        native_profile = row["native_profile_sha256"] if "native_profile_sha256" in row.keys() else None
         return ExecutionIntegrityRecord(
             RunId(row["run_id"]),
             MilestoneId(row["milestone_id"]),
             str(row["provenance"]),
-            (
-                _sha256(str(row["sandbox_policy_sha256"]), field_name="sandbox policy digest")
-                if row["sandbox_policy_sha256"] is not None
-                else None
-            ),
+            (_sha256(str(native_profile), field_name="native profile digest") if native_profile is not None else None),
             (
                 _sha256(str(row["git_authority_before_sha256"]), field_name="Git authority before digest")
                 if row["git_authority_before_sha256"] is not None

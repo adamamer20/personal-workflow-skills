@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
-import sys
 import threading
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, SdkSandboxPolicy
+from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
 from codex_flow.cli import app
 from codex_flow.controller import (
     Controller,
@@ -33,16 +34,24 @@ from codex_flow.domain import (
     ExecutionStatus,
     LifecycleEvent,
     MilestoneId,
+    NativePermissionMode,
     ReasoningEffort,
     RunId,
-    Sandbox,
     ThreadIdentity,
     TurnObservation,
     ValidationFailureCode,
     ValidationSpec,
     WorkspaceMode,
 )
-from codex_flow.ledger import _V2_TABLE_DDL, CURRENT_SCHEMA_VERSION, CorruptSchemaError, Ledger, WorkspaceLeaseConflict
+from codex_flow.ledger import (
+    _V2_TABLE_DDL,
+    _V4_TABLE_DDL,
+    CURRENT_SCHEMA_VERSION,
+    CorruptSchemaError,
+    Ledger,
+    WorkspaceLeaseConflict,
+)
+from codex_flow.native_profile import NativeProfileError, NativeProfileProjection
 from codex_flow.worktrees import WorkspaceConflict
 
 
@@ -75,7 +84,7 @@ def _capsule(
     lane: str = "program",
 ) -> ExecutionCapsule:
     return ExecutionCapsule(
-        1,
+        2,
         RunId(run),
         MilestoneId(milestone),
         repository,
@@ -99,20 +108,65 @@ def _capsule(
     )
 
 
-def _test_sandbox_policy(root: Path) -> SdkSandboxPolicy:
-    workspace = root / "workspace"
-    workspace.mkdir()
-    protected = workspace / "protected.txt"
-    protected.write_text("protected\n")
-    runtime = root / "runtime"
-    auth = root / "auth.json"
-    auth.write_text("{}\n")
-    return SdkSandboxPolicy(
-        workspace,
-        (protected,),
-        runtime / "home",
-        auth,
+def _test_native_profile(native_home: Path) -> NativeProfileProjection:
+    native_home.mkdir(mode=0o700)
+    native_home.chmod(0o700)
+    for name in ("memories", "plugins", "skills"):
+        (native_home / name).mkdir(mode=0o700)
+    catalog = native_home / "models.json"
+    catalog.write_text('{"fetched_at":"2026-08-24T00:00:00Z","client_version":"0.147.0","models":[]}\n')
+    catalog.chmod(0o600)
+    (native_home / "config.toml").write_text(
+        f'''model_provider = "codex-lb"
+model_catalog_json = "{catalog}"
+personality = "pragmatic"
+approval_policy = "never"
+approvals_reviewer = "user"
+sandbox_mode = "danger-full-access"
+
+[model_providers.codex-lb]
+name = "openai"
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+env_key = "CODEX_LB_API_KEY"
+requires_openai_auth = true
+supports_websockets = true
+
+[agents]
+enabled = true
+
+[features]
+memories = true
+
+[hooks]
+
+[marketplaces]
+
+[mcp_servers]
+
+[plugins]
+
+[profiles]
+
+[projects]
+
+[shell_environment_policy]
+
+[skills]
+'''
     )
+    (native_home / "config.toml").chmod(0o600)
+    auth = native_home / "auth.json"
+    auth.write_text("{}\n")
+    auth.chmod(0o600)
+    return NativeProfileProjection.load(native_home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+
+def _test_native_runtime(root: Path) -> tuple[Path, NativeRuntimeConfig]:
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    profile = _test_native_profile(root / "native-home")
+    return workspace, NativeRuntimeConfig(root / "runtime" / "home", profile)
 
 
 class FakeAdapter:
@@ -364,74 +418,6 @@ def test_sdk_change_outside_mutable_paths_fails_closed() -> None:
         controller.close()
 
 
-def test_production_sdk_mount_boundary_denies_external_protected_controller_and_git_writes() -> None:
-    with TemporaryDirectory() as directory:
-        repository = Path(directory) / "repo"
-        base, branch = _repository(repository)
-        outside = repository.parent / "external.txt"
-        outside.write_text("external before\n")
-        external_link = repository / "external-link.txt"
-        external_link.symlink_to(outside)
-        controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
-        capsule = _capsule(repository, repository, base, branch)
-        controller.plan(capsule)
-        policy, policy_sha256 = controller._sandbox_policy(capsule)
-        policy.prepare()
-        assert len(policy_sha256) == 64
-        script = """
-from pathlib import Path
-import sys
-workspace, outside, external_link, protected, controller_state, git_config = map(Path, sys.argv[1:])
-for label, target in (
-    ('external', outside),
-    ('external_symlink', external_link),
-    ('protected', protected),
-    ('controller', controller_state),
-    ('git_config', git_config),
-):
-    try:
-        target.write_text(label + ' escaped\\n')
-    except OSError:
-        print(label + '=denied')
-    else:
-        print(label + '=allowed')
-try:
-    (workspace / 'external-hardlink.txt').hardlink_to(outside)
-except OSError:
-    print('external_hardlink=denied')
-else:
-    print('external_hardlink=allowed')
-(workspace / 'result.txt').write_text('allowed\\n')
-"""
-        command = policy.wrap_command(
-            (
-                sys.executable,
-                "-c",
-                script,
-                str(repository),
-                str(outside),
-                str(external_link),
-                str(repository / "protected.txt"),
-                str(repository / ".codex-flow" / "executor.txt"),
-                str(repository / ".git" / "config"),
-            )
-        )
-        completed = subprocess.run(command, text=True, capture_output=True, check=True, timeout=10)
-        assert set(completed.stdout.splitlines()) == {
-            "external=denied",
-            "external_symlink=denied",
-            "external_hardlink=denied",
-            "protected=denied",
-            "controller=denied",
-            "git_config=denied",
-        }
-        assert (repository / "result.txt").read_text() == "allowed\n"
-        assert outside.read_text() == "external before\n"
-        assert (repository / "protected.txt").read_text() == "protected\n"
-        assert not (repository / ".codex-flow" / "executor.txt").exists()
-        controller.close()
-
-
 def test_managed_worktree_is_semantic_and_reused_across_milestones() -> None:
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
@@ -501,7 +487,7 @@ def test_capsule_rejects_path_overlap_and_nonsemantic_managed_path() -> None:
         base, branch = _repository(repository)
         with pytest.raises(ValueError, match="must not overlap"):
             ExecutionCapsule(
-                1,
+                2,
                 RunId("run"),
                 MilestoneId("m"),
                 repository,
@@ -588,7 +574,7 @@ def test_cli_status_on_absent_state_is_read_only() -> None:
         assert not (root / ".codex-flow").exists()
 
 
-def test_adapter_fresh_process_resume_initializes_client_and_workspace_write() -> None:
+def test_adapter_fresh_process_resume_inherits_native_permissions() -> None:
     class Thread:
         id = "thread-1"
 
@@ -612,25 +598,68 @@ def test_adapter_fresh_process_resume_initializes_client_and_workspace_write() -
 
     with TemporaryDirectory() as directory:
         client = Client()
-        policy = _test_sandbox_policy(Path(directory))
+        workspace, runtime = _test_native_runtime(Path(directory))
         adapter = CodexSdkAdapter(
             CodexSdkConfig(
                 "gpt-test",
                 ReasoningEffort.MEDIUM,
-                sandbox=Sandbox.WORKSPACE_WRITE,
-                cwd=policy.workspace,
-                sandbox_policy=policy,
+                sandbox=None,
+                cwd=workspace,
+                native_runtime=runtime,
+                permission_mode=NativePermissionMode.INHERIT_NATIVE,
             ),
             client_factory=lambda: client,
             sdk=Sdk(),
         )
         assert adapter.resume_thread(ThreadIdentity("thread-1")) == ThreadIdentity("thread-1")
-        assert client.calls[0][1]["sandbox"] == "write"
-        assert client.calls[0][1]["cwd"] == str(policy.workspace)
-        assert client.calls[0][1]["config"] == policy.thread_config
+        assert "sandbox" not in client.calls[0][1]
+        assert "approval_mode" not in client.calls[0][1]
+        assert client.calls[0][1]["cwd"] == str(workspace)
 
 
-def test_production_adapter_uses_only_the_sealed_sdk_child_invocation() -> None:
+def test_adapter_read_only_request_is_the_only_sdk_permission_override() -> None:
+    class Thread:
+        id = "thread-1"
+
+    class Client:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        def thread_start(self, **kwargs: object) -> Thread:
+            self.kwargs = kwargs
+            return Thread()
+
+        def close(self) -> None:
+            pass
+
+    class Sdk:
+        Sandbox = type("Sandbox", (), {"read_only": "read"})
+        ApprovalMode = type("Approval", (), {"deny_all": "deny"})
+        ReasoningEffort = type("Effort", (), {"medium": "medium"})
+        SkillInput = None
+        version = "test"
+
+    with TemporaryDirectory() as directory:
+        client = Client()
+        workspace, runtime = _test_native_runtime(Path(directory))
+        adapter = CodexSdkAdapter(
+            CodexSdkConfig(
+                "gpt-test",
+                ReasoningEffort.MEDIUM,
+                sandbox=None,
+                cwd=workspace,
+                native_runtime=runtime,
+                permission_mode=NativePermissionMode.READ_ONLY,
+            ),
+            client_factory=lambda: client,
+            sdk=Sdk(),
+        )
+        assert adapter.start_thread() == ThreadIdentity("thread-1")
+        assert client.kwargs["sandbox"] == "read"
+        assert "approval_mode" not in client.kwargs
+
+
+def test_production_adapter_uses_normal_sdk_child_with_private_native_home() -> None:
     captured: dict[str, object] = {}
 
     class Thread:
@@ -664,34 +693,170 @@ def test_production_adapter_uses_only_the_sealed_sdk_child_invocation() -> None:
             return Client()
 
     with TemporaryDirectory() as directory:
-        policy = _test_sandbox_policy(Path(directory))
+        workspace, runtime = _test_native_runtime(Path(directory))
         adapter = CodexSdkAdapter(
             CodexSdkConfig(
                 "gpt-test",
                 ReasoningEffort.MEDIUM,
-                sandbox=Sandbox.WORKSPACE_WRITE,
-                cwd=policy.workspace,
-                sandbox_policy=policy,
+                sandbox=None,
+                cwd=workspace,
+                native_runtime=runtime,
+                permission_mode=NativePermissionMode.INHERIT_NATIVE,
             ),
             sdk=Sdk(),
         )
         assert adapter.start_thread() == ThreadIdentity("thread-production")
         sdk_config = captured["sdk_config"]
         assert isinstance(sdk_config, dict)
-        launch = sdk_config["launch_args_override"]
-        assert isinstance(launch, tuple)
-        assert launch[0] == "/usr/bin/bwrap"
-        assert "--ro-bind" in launch and "--bind" in launch
-        assert "sandbox_workspace_write.writable_roots=[]" in launch
-        assert "sandbox_workspace_write.exclude_tmpdir_env_var=true" in launch
-        assert "sandbox_workspace_write.exclude_slash_tmp=true" in launch
-        assert sdk_config["env"] == policy.environment
-        assert policy.environment["TMPDIR"] == str(policy.workspace)
+        assert "launch_args_override" not in sdk_config
+        assert sdk_config["env"] == {"CODEX_HOME": str(runtime.runtime_home)}
+        assert sdk_config["cwd"] == str(workspace)
+        assert (runtime.runtime_home / "config.toml").is_file()
+        for name in ("memories", "plugins", "skills"):
+            assert (runtime.runtime_home / name).is_symlink()
         thread_start = captured["thread_start"]
         assert isinstance(thread_start, dict)
-        assert thread_start["config"] == policy.thread_config
-        assert thread_start["sandbox"] == "write"
+        assert "sandbox" not in thread_start
+        assert "approval_mode" not in thread_start
         adapter.close()
+
+
+def _doctor_config_details(home: Path) -> dict[str, object]:
+    import codex_cli_bin
+
+    environment = {
+        "CODEX_HOME": str(home),
+        "HOME": str(home),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "CODEX_LB_API_KEY": "test-only",
+        "HTTP_PROXY": "http://127.0.0.1:9",
+        "HTTPS_PROXY": "http://127.0.0.1:9",
+        "NO_PROXY": "",
+    }
+    completed = subprocess.run(
+        (str(codex_cli_bin.bundled_codex_path()), "doctor", "--json"),
+        text=True,
+        capture_output=True,
+        env=environment,
+        timeout=20,
+        check=False,
+    )
+    report = json.loads(completed.stdout)
+    return report["checks"]["config.load"]["details"]
+
+
+def test_blank_private_home_selects_builtin_openai_but_projection_selects_codex_lb() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        blank = root / "blank"
+        blank.mkdir(mode=0o700)
+        assert _doctor_config_details(blank)["model provider"] == "openai"
+
+        workspace, runtime = _test_native_runtime(root / "projected")
+        runtime.prepare()
+        projected = tomllib.loads((runtime.runtime_home / "config.toml").read_text())
+        assert projected["model_provider"] == "codex-lb"
+        assert projected["model_providers"]["codex-lb"] == {
+            "base_url": "http://127.0.0.1:2455/backend-api/codex",
+            "env_key": "CODEX_LB_API_KEY",
+            "name": "openai",
+            "requires_openai_auth": True,
+            "supports_websockets": True,
+            "wire_api": "responses",
+        }
+        assert workspace.is_dir()
+
+
+def test_native_permission_change_is_inherited_by_the_next_runtime_without_global_mutation() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        home = root / "native-home"
+        first = _test_native_profile(home)
+        source_before = (home / "config.toml").read_bytes()
+        runtime_one = NativeRuntimeConfig(root / "runtime-one", first)
+        runtime_one.prepare()
+        private_config = runtime_one.runtime_home / "config.toml"
+        private_config.write_text(
+            private_config.read_text() + '\n[projects."/runtime-added"]\ntrust_level = "trusted"\n'
+        )
+        runtime_one.prepare()
+        assert private_config.read_text() == first.projected_toml
+        assert first.effective_permissions(NativePermissionMode.INHERIT_NATIVE)["sandbox_mode"] == (
+            "danger-full-access"
+        )
+        assert (home / "config.toml").read_bytes() == source_before
+
+        updated = source_before.replace(b'sandbox_mode = "danger-full-access"', b'sandbox_mode = "read-only"')
+        (home / "config.toml").write_bytes(updated)
+        (home / "config.toml").chmod(0o600)
+        second = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        NativeRuntimeConfig(root / "runtime-two", second).prepare()
+        assert second.profile_sha256 != first.profile_sha256
+        assert second.effective_permissions(NativePermissionMode.INHERIT_NATIVE)["sandbox_mode"] == "read-only"
+        assert second.effective_permissions(NativePermissionMode.READ_ONLY)["monotonic"] is True
+        with pytest.raises(ValueError):
+            NativePermissionMode("danger_full_access")
+
+
+def test_native_profile_rejects_secret_fields_symlinks_and_launch_time_mutation() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        home = root / "native-home"
+        profile = _test_native_profile(home)
+        config = home / "config.toml"
+        original = config.read_text()
+
+        config.write_text(original + '\n[mcp_servers.leaky.env]\nAPI_TOKEN = "must-not-project"\n')
+        config.chmod(0o600)
+        with pytest.raises(NativeProfileError, match="secret-bearing"):
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+        config.write_text(original.replace('personality = "pragmatic"', 'personality = "changed"'))
+        config.chmod(0o600)
+        with pytest.raises(NativeProfileError, match="changed during launch"):
+            NativeRuntimeConfig(root / "runtime", profile).prepare()
+
+        real_config = root / "real-config.toml"
+        real_config.write_text(original)
+        real_config.chmod(0o600)
+        config.unlink()
+        config.symlink_to(real_config)
+        with pytest.raises(NativeProfileError, match="opened safely"):
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+
+def test_capsule_read_only_mode_reaches_sdk_as_a_monotonic_native_restriction() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        profile = _test_native_profile(Path(directory) / "native-home")
+        captured: list[CodexSdkConfig] = []
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            captured.append(config)
+            return FakeAdapter(config, _service())
+
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            _trusted_test_native_profile=profile,
+        )
+        capsule = replace(
+            _capsule(repository, repository, base, branch),
+            permission_mode=NativePermissionMode.READ_ONLY,
+        )
+        controller.plan(capsule)
+        assert controller.start("run", "m1").status is ExecutionStatus.COMPLETED
+        assert captured[0].permission_mode is NativePermissionMode.READ_ONLY
+        assert captured[0].native_runtime is not None
+        assert captured[0].native_runtime.native_profile.effective_permissions(NativePermissionMode.READ_ONLY) == {
+            "mode": "read_only",
+            "sandbox_mode": "read-only",
+            "approval_policy": "never",
+            "native_sandbox_mode": "danger-full-access",
+            "monotonic": True,
+        }
+        controller.close()
 
 
 def test_v2_ledger_migrates_forward_to_canonical_h3_schema() -> None:
@@ -713,8 +878,32 @@ def test_v2_ledger_migrates_forward_to_canonical_h3_schema() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_integrity_v4"
+        assert ledger.schema_identity == "codex_flow_h3_native_profile_v5"
         assert "checkpoint" in ledger.schema_columns("executions")
+        ledger.close()
+
+
+def test_v4_sandbox_authority_schema_migrates_to_truthful_native_profile_authority() -> None:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "workflow.db"
+        connection = sqlite3.connect(path)
+        for ddl in _V4_TABLE_DDL.values():
+            connection.execute(ddl)
+        connection.executemany(
+            "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+            (
+                ("schema_version", "4"),
+                ("migration_marker", "complete"),
+                ("schema_identity", "codex_flow_h3_integrity_v4"),
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        ledger = Ledger(path)
+        assert ledger.schema_identity == "codex_flow_h3_native_profile_v5"
+        assert "native_profile_sha256" in ledger.schema_columns("execution_integrity")
+        assert "sandbox_policy_sha256" not in ledger.schema_columns("execution_integrity")
         ledger.close()
 
 
@@ -1016,7 +1205,28 @@ def test_terminal_execution_cannot_reopen_without_its_integrity_authority_row() 
             Ledger(database)
 
 
-def test_mutable_symlink_external_write_is_rejected() -> None:
+def test_native_external_write_alone_is_not_reclassified_as_controller_failure() -> None:
+    class NativeExternalAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            (self.config.cwd.parent / "native-authority.txt").write_text("allowed by native profile\n")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: NativeExternalAdapter(config, _service()),
+        )
+        controller.plan(_capsule(repository, repository, base, branch))
+        assert controller.start("run", "m1").status is ExecutionStatus.COMPLETED
+        assert (repository.parent / "native-authority.txt").read_text() == "allowed by native profile\n"
+        controller.close()
+
+
+def test_mutable_artifact_symlink_is_rejected_even_when_native_external_write_succeeds() -> None:
     class SymlinkAdapter(FakeAdapter):
         def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
             observation = super().run_turn(thread, input, output_schema=output_schema)
@@ -1044,7 +1254,7 @@ def test_mutable_symlink_external_write_is_rejected() -> None:
         controller.close()
 
 
-def test_mutable_hardlink_external_write_is_rejected() -> None:
+def test_mutable_artifact_hardlink_is_rejected_even_when_native_external_write_succeeds() -> None:
     class HardlinkAdapter(FakeAdapter):
         def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
             observation = super().run_turn(thread, input, output_schema=output_schema)

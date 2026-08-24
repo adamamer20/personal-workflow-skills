@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from .artifacts import write_owned_artifact
-from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, SdkSandboxPolicy
+from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
 from .domain import (
     ControllerCheckpoint,
     ExecutionCapsule,
@@ -25,10 +25,10 @@ from .domain import (
     ExecutionStatus,
     JsonObject,
     MilestoneId,
+    NativePermissionMode,
     ReasonCode,
     ReasoningEffort,
     RunId,
-    Sandbox,
     Schema,
     ThreadIdentity,
     TurnObservation,
@@ -39,6 +39,7 @@ from .domain import (
     WorkspaceMode,
 )
 from .ledger import Ledger
+from .native_profile import NativeProfileProjection
 from .worktrees import WorktreeManager
 
 
@@ -242,6 +243,7 @@ def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
         "reasoning_effort": capsule.reasoning_effort.value,
         "prompt": capsule.prompt,
         "output_schema": capsule.output_schema,
+        "permission_mode": capsule.permission_mode.value,
     }
 
 
@@ -263,6 +265,7 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         "reasoning_effort",
         "prompt",
         "output_schema",
+        "permission_mode",
     }
     if set(value) != expected:
         raise ValueError(f"capsule keys must be exactly {sorted(expected)!r}")
@@ -306,6 +309,7 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
     prompt = require_string("prompt")
     workspace_mode = require_string("workspace_mode")
     effort = require_string("reasoning_effort")
+    permission_mode = require_string("permission_mode")
     run_id = require_string("run_id")
     milestone_id = require_string("milestone_id")
     return ExecutionCapsule(
@@ -325,6 +329,7 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         ReasoningEffort(effort),
         prompt,
         cast(JsonObject, schema),
+        NativePermissionMode(permission_mode),
     )
 
 
@@ -441,6 +446,7 @@ class Controller:
         state_root: Path,
         *,
         _trusted_test_adapter_factory: AdapterFactory | None = None,
+        _trusted_test_native_profile: NativeProfileProjection | None = None,
         worktrees: WorktreeManager | None = None,
         fault_injector: ControllerFaultInjector | None = None,
     ) -> None:
@@ -457,6 +463,8 @@ class Controller:
         self.ledger = Ledger(self.state_dir / "workflow.db")
         # In-process adapter injection is a trusted hermetic-test seam. The
         # production constructor always resolves the sealed SDK child route.
+        self._production_adapter = _trusted_test_adapter_factory is None
+        self._trusted_test_native_profile = _trusted_test_native_profile
         self._adapter_factory = _trusted_test_adapter_factory or _adapter_factory
         self._worktrees = worktrees or WorktreeManager()
         self._fault_injector = fault_injector
@@ -571,51 +579,26 @@ class Controller:
             raise ControllerError(f"unable to inspect Git workspace: {' '.join(arguments)}")
         return result.stdout
 
-    def _sandbox_policy(self, capsule: ExecutionCapsule) -> tuple[SdkSandboxPolicy, str]:
-        git_dir = Path(
-            self._git_output(capsule.workspace_path, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
-        ).resolve()
-        common_dir = Path(
-            self._git_output(capsule.workspace_path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        ).resolve()
-        dot_git = capsule.workspace_path / ".git"
-        protected = tuple(capsule.workspace_path / path for path in capsule.protected_paths)
-        workspace_device = os.stat(capsule.workspace_path).st_dev
-        for path in protected:
-            self._assert_safe_tree(path, workspace_device)
-        read_only = tuple(
-            sorted(
-                {
-                    self.state_dir.resolve(),
-                    git_dir,
-                    common_dir,
-                    *(path.resolve() for path in protected),
-                    *((dot_git.resolve(),) if dot_git.exists() else ()),
-                },
-                key=os.fspath,
-            )
-        )
+    def _native_runtime(self, capsule: ExecutionCapsule) -> tuple[NativeRuntimeConfig | None, str]:
         runtime_root = self.state_dir / "sdk-runtime" / str(capsule.run_id) / str(capsule.milestone_id)
         global_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
-        policy = SdkSandboxPolicy(
-            capsule.workspace_path,
-            read_only,
-            runtime_root / "home",
-            global_home / "auth.json",
+        native_profile = (
+            NativeProfileProjection.load(global_home) if self._production_adapter else self._trusted_test_native_profile
         )
+        runtime = NativeRuntimeConfig(runtime_root / "home", native_profile) if native_profile is not None else None
         facts: JsonObject = {
-            "schema": "codex-flow/sdk-sandbox-policy/v1",
-            "workspace": os.fspath(policy.workspace),
-            "host_root": "read_only",
-            "read_only_paths": [os.fspath(path) for path in policy.read_only_paths],
-            "runtime_home_source": os.fspath(policy.runtime_home),
-            "runtime_home_mount": os.fspath(policy.runtime_mount),
-            "runtime_tmp": os.fspath(policy.workspace),
-            "auth_source": os.fspath(policy.auth_source),
-            "thread_config": policy.thread_config,
-            "launcher": os.fspath(policy.bubblewrap),
+            "schema": "codex-flow/native-runtime-profile/v1",
+            "workspace": os.fspath(capsule.workspace_path),
+            "effective_permissions": (
+                native_profile.effective_permissions(capsule.permission_mode)
+                if native_profile is not None
+                else {"test_seam": True}
+            ),
+            "runtime_home": os.fspath(runtime.runtime_home) if runtime is not None else None,
+            "native_profile": native_profile.sanitized_facts if native_profile is not None else {"test_seam": True},
+            "transport": "openai-codex-sdk-app-server",
         }
-        return policy, _digest_bytes(_canonical_json(facts))
+        return runtime, _digest_bytes(_canonical_json(facts))
 
     def _committed_workspace_paths(self, capsule: ExecutionCapsule) -> frozenset[str]:
         """Return every path touched by every commit after the capsule base.
@@ -821,15 +804,16 @@ class Controller:
         if current_digest != record.protected_before_sha256:
             raise ControllerError("protected paths changed between plan and start")
         self.ledger.acquire_workspace_lease(capsule)
-        sandbox_policy, sandbox_policy_sha256 = self._sandbox_policy(capsule)
-        self.ledger.record_sandbox_policy(capsule.run_id, capsule.milestone_id, sandbox_policy_sha256)
+        native_runtime, native_profile_sha256 = self._native_runtime(capsule)
+        self.ledger.record_native_profile(capsule.run_id, capsule.milestone_id, native_profile_sha256)
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
                 capsule.reasoning_effort,
-                sandbox=Sandbox.WORKSPACE_WRITE,
+                sandbox=None,
                 cwd=capsule.workspace_path,
-                sandbox_policy=sandbox_policy,
+                native_runtime=native_runtime,
+                permission_mode=(capsule.permission_mode if native_runtime is not None else None),
             )
         )
         try:
@@ -870,15 +854,16 @@ class Controller:
         self._assert_protected_clean(capsule)
         self._assert_workspace_history(capsule)
         self.ledger.acquire_workspace_lease(capsule)
-        sandbox_policy, sandbox_policy_sha256 = self._sandbox_policy(capsule)
-        self.ledger.record_sandbox_policy(capsule.run_id, capsule.milestone_id, sandbox_policy_sha256)
+        native_runtime, native_profile_sha256 = self._native_runtime(capsule)
+        self.ledger.record_native_profile(capsule.run_id, capsule.milestone_id, native_profile_sha256)
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
                 capsule.reasoning_effort,
-                sandbox=Sandbox.WORKSPACE_WRITE,
+                sandbox=None,
                 cwd=capsule.workspace_path,
-                sandbox_policy=sandbox_policy,
+                native_runtime=native_runtime,
+                permission_mode=(capsule.permission_mode if native_runtime is not None else None),
             )
         )
         try:
@@ -1076,7 +1061,7 @@ class Controller:
             "turn_id": record.turn_id,
             "result": record.result,
             "integrity_provenance": integrity.provenance if integrity else None,
-            "sandbox_policy_sha256": integrity.sandbox_policy_sha256 if integrity else None,
+            "native_profile_sha256": integrity.native_profile_sha256 if integrity else None,
             "git_authority_before_sha256": integrity.git_authority_before_sha256 if integrity else None,
             "git_authority_after_sha256": integrity.git_authority_after_sha256 if integrity else None,
             "validation": (
