@@ -148,8 +148,14 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
             "native_profile": {
                 "integrity_provenance": integrity.provenance,
                 "sha256": integrity.native_profile_sha256,
+                "compatibility_sha256": integrity.native_compatibility_sha256,
+                "effective_permission_sha256": integrity.effective_permission_sha256,
                 "sanitized_effective": native_profile_before.sanitized_facts,
-                "effective_permissions": native_profile_before.effective_permissions(capsule.permission_mode),
+                "effective_permissions": (
+                    integrity.effective_permission.facts
+                    if integrity.effective_permission is not None
+                    else native_profile_before.effective_permissions(capsule.permission_mode)
+                ),
                 "source_config_before_sha256": native_profile_before.config_source.sha256,
                 "source_config_after_sha256": native_profile_after.config_source.sha256,
                 "source_config_unchanged": (
@@ -199,6 +205,8 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
                 evidence["result_file"] == "controller sentinel passed\n",
                 evidence["native_profile"]["source_config_unchanged"],
                 evidence["native_profile"]["profile_unchanged"],
+                evidence["native_profile"]["compatibility_sha256"] is not None,
+                evidence["native_profile"]["effective_permission_sha256"] is not None,
                 evidence["native_profile"]["provider_route_completed"],
                 evidence["native_profile"]["allowed_workspace_write_completed"],
                 evidence["git_authority"]["equal"],

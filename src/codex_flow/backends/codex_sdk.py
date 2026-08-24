@@ -25,6 +25,7 @@ from ..domain import (
     CodexFlowError,
     JsonObject,
     LifecycleEvent,
+    NativePermissionAuthority,
     NativePermissionMode,
     ReasoningEffort,
     Sandbox,
@@ -90,6 +91,7 @@ class CodexSdkConfig:
     ephemeral: bool = False
     native_runtime: NativeRuntimeConfig | None = None
     permission_mode: NativePermissionMode | None = None
+    effective_permission: NativePermissionAuthority | None = None
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -100,8 +102,12 @@ class CodexSdkConfig:
             raise ValueError(f"SDK working directory does not exist: {self.cwd}")
         if self.permission_mode is not None and self.native_runtime is None:
             raise ValueError("native permission inheritance requires a validated native runtime profile")
+        if self.permission_mode is not None and self.effective_permission is None:
+            raise ValueError("native permission inheritance requires durable effective authority")
         if self.permission_mode is not None and self.sandbox is not None:
             raise ValueError("native permission mode cannot carry a separate sandbox override")
+        if self.effective_permission is not None and self.permission_mode is None:
+            raise ValueError("effective native authority requires a native permission mode")
         if self.native_runtime is not None and self.cwd is None:
             raise ValueError("native runtime execution requires an explicit SDK cwd")
 
@@ -353,12 +359,25 @@ class CodexSdkAdapter:
         runtime = self.config.native_runtime
         if runtime is None:  # pragma: no cover - constructor invariant
             raise UnsupportedCapability("native permission inheritance has no validated profile")
-        runtime.native_profile.effective_permissions(mode)
-        if mode is NativePermissionMode.INHERIT_NATIVE:
-            return {}
-        if mode is NativePermissionMode.READ_ONLY:
-            return {"sandbox": _wire_sandbox(self._sdk, Sandbox.READ_ONLY)}
-        raise UnsupportedCapability("unsupported native permission restriction")
+        native = runtime.native_profile.effective_authority(NativePermissionMode.INHERIT_NATIVE)
+        effective = self.config.effective_permission
+        if effective is None:  # pragma: no cover - constructor invariant
+            raise UnsupportedCapability("durable effective native authority is missing")
+        if effective.meet(native) != effective:
+            raise UnsupportedCapability("durable effective authority would broaden the current native profile")
+        kwargs: dict[str, Any] = {}
+        if effective.sandbox_mode != native.sandbox_mode:
+            sandbox = {
+                "read-only": Sandbox.READ_ONLY,
+                "workspace-write": Sandbox.WORKSPACE_WRITE,
+                "danger-full-access": Sandbox.FULL_ACCESS,
+            }[effective.sandbox_mode]
+            kwargs["sandbox"] = _wire_sandbox(self._sdk, sandbox)
+        if effective.approval_policy != native.approval_policy:
+            if effective.approval_policy != "never":
+                raise UnsupportedCapability("installed SDK cannot retain the prior native approval restriction")
+            kwargs["approval_mode"] = _wire_approval_mode(self._sdk)
+        return kwargs
 
     @property
     def sdk_version(self) -> str:

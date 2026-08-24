@@ -25,6 +25,7 @@ from .domain import (
     ExecutionStatus,
     JsonObject,
     MilestoneId,
+    NativePermissionAuthority,
     NativePermissionMode,
     ReasonCode,
     ReasoningEffort,
@@ -38,7 +39,7 @@ from .domain import (
     WorkflowState,
     WorkspaceMode,
 )
-from .ledger import Ledger
+from .ledger import Ledger, NativeCompatibilityConflict, NativePermissionConflict
 from .native_profile import NativeProfileProjection
 from .worktrees import WorktreeManager
 
@@ -57,6 +58,14 @@ class UncertainPreIdentity(ControllerError):
 
 class UncertainTurn(ControllerError):
     """An external SDK turn may have happened without a durable response."""
+
+
+class UnsafeResumeCompatibilityChange(ControllerError):
+    """Provider, routing, or discovery facts no longer support same-thread resume."""
+
+
+class UnsafeResumePermissionChange(ControllerError):
+    """Native permission authorities cannot be restricted monotonically."""
 
 
 class Adapter(Protocol):
@@ -579,26 +588,44 @@ class Controller:
             raise ControllerError(f"unable to inspect Git workspace: {' '.join(arguments)}")
         return result.stdout
 
-    def _native_runtime(self, capsule: ExecutionCapsule) -> tuple[NativeRuntimeConfig | None, str]:
+    def _native_runtime(
+        self, capsule: ExecutionCapsule
+    ) -> tuple[NativeRuntimeConfig | None, str, str, NativePermissionAuthority]:
         runtime_root = self.state_dir / "sdk-runtime" / str(capsule.run_id) / str(capsule.milestone_id)
         global_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
         native_profile = (
             NativeProfileProjection.load(global_home) if self._production_adapter else self._trusted_test_native_profile
         )
         runtime = NativeRuntimeConfig(runtime_root / "home", native_profile) if native_profile is not None else None
+        effective_permission = (
+            native_profile.effective_authority(capsule.permission_mode)
+            if native_profile is not None
+            else NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "workspace-write", "never")
+        )
         facts: JsonObject = {
             "schema": "codex-flow/native-runtime-profile/v1",
             "workspace": os.fspath(capsule.workspace_path),
             "effective_permissions": (
-                native_profile.effective_permissions(capsule.permission_mode)
-                if native_profile is not None
-                else {"test_seam": True}
+                effective_permission.facts if native_profile is not None else {"test_seam": True}
             ),
             "runtime_home": os.fspath(runtime.runtime_home) if runtime is not None else None,
             "native_profile": native_profile.sanitized_facts if native_profile is not None else {"test_seam": True},
             "transport": "openai-codex-sdk-app-server",
         }
-        return runtime, _digest_bytes(_canonical_json(facts))
+        compatibility_facts: JsonObject = {
+            "schema": "codex-flow/native-runtime-compatibility/v1",
+            "workspace": os.fspath(capsule.workspace_path),
+            "native_compatibility_sha256": (
+                native_profile.compatibility_sha256 if native_profile is not None else "test-seam"
+            ),
+            "transport": "openai-codex-sdk-app-server",
+        }
+        return (
+            runtime,
+            _digest_bytes(_canonical_json(facts)),
+            _digest_bytes(_canonical_json(compatibility_facts)),
+            effective_permission,
+        )
 
     def _committed_workspace_paths(self, capsule: ExecutionCapsule) -> frozenset[str]:
         """Return every path touched by every commit after the capsule base.
@@ -804,8 +831,16 @@ class Controller:
         if current_digest != record.protected_before_sha256:
             raise ControllerError("protected paths changed between plan and start")
         self.ledger.acquire_workspace_lease(capsule)
-        native_runtime, native_profile_sha256 = self._native_runtime(capsule)
-        self.ledger.record_native_profile(capsule.run_id, capsule.milestone_id, native_profile_sha256)
+        native_runtime, native_profile_sha256, compatibility_sha256, effective_permission = self._native_runtime(
+            capsule
+        )
+        self.ledger.record_native_profile(
+            capsule.run_id,
+            capsule.milestone_id,
+            native_profile_sha256,
+            compatibility_sha256,
+            effective_permission,
+        )
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
@@ -814,6 +849,7 @@ class Controller:
                 cwd=capsule.workspace_path,
                 native_runtime=native_runtime,
                 permission_mode=(capsule.permission_mode if native_runtime is not None else None),
+                effective_permission=(effective_permission if native_runtime is not None else None),
             )
         )
         try:
@@ -854,8 +890,23 @@ class Controller:
         self._assert_protected_clean(capsule)
         self._assert_workspace_history(capsule)
         self.ledger.acquire_workspace_lease(capsule)
-        native_runtime, native_profile_sha256 = self._native_runtime(capsule)
-        self.ledger.record_native_profile(capsule.run_id, capsule.milestone_id, native_profile_sha256)
+        native_runtime, native_profile_sha256, compatibility_sha256, candidate_permission = self._native_runtime(
+            capsule
+        )
+        try:
+            integrity = self.ledger.rebind_native_profile_for_resume(
+                capsule.run_id,
+                capsule.milestone_id,
+                native_profile_sha256,
+                compatibility_sha256,
+                candidate_permission,
+            )
+        except NativeCompatibilityConflict as exc:
+            raise UnsafeResumeCompatibilityChange(str(exc)) from exc
+        except NativePermissionConflict as exc:
+            raise UnsafeResumePermissionChange(str(exc)) from exc
+        if integrity.effective_permission is None:  # pragma: no cover - controller_v3 schema invariant
+            raise UnsafeResumePermissionChange("durable effective native permission is missing")
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
@@ -864,6 +915,7 @@ class Controller:
                 cwd=capsule.workspace_path,
                 native_runtime=native_runtime,
                 permission_mode=(capsule.permission_mode if native_runtime is not None else None),
+                effective_permission=(integrity.effective_permission if native_runtime is not None else None),
             )
         )
         try:
@@ -1062,6 +1114,11 @@ class Controller:
             "result": record.result,
             "integrity_provenance": integrity.provenance if integrity else None,
             "native_profile_sha256": integrity.native_profile_sha256 if integrity else None,
+            "native_compatibility_sha256": integrity.native_compatibility_sha256 if integrity else None,
+            "effective_permission": (
+                integrity.effective_permission.facts if integrity and integrity.effective_permission else None
+            ),
+            "effective_permission_sha256": integrity.effective_permission_sha256 if integrity else None,
             "git_authority_before_sha256": integrity.git_authority_before_sha256 if integrity else None,
             "git_authority_after_sha256": integrity.git_authority_after_sha256 if integrity else None,
             "validation": (

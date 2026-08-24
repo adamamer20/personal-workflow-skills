@@ -643,7 +643,12 @@ Acceptance modes: `objective`, `architecture`.
    SDK thread, persists its real identity immediately, executes the turn, runs
    validation, and persists the terminal result in that causal order.
 4. A fresh controller process can `resume` only from durable facts. When thread
-   identity exists it uses SDK `thread_resume` and the same worktree/route.
+   identity exists it re-resolves native configuration and atomically persists
+   the meet of prior effective permission authority and the current native
+   authority before adapter creation or SDK `thread_resume`. Native tightening
+   is inherited, native broadening retains the prior restriction, and changed
+   provider/routing/catalog/discovery compatibility fails closed under a typed
+   reason distinct from permission change. It then uses the same worktree/route.
    `start` or `resume` never creates a second dispatch, lease, worktree, or thread.
 5. The unavoidable crash window after an external SDK start but before durable
    identity fails closed as an explicit uncertain pre-identity transport fact;
@@ -663,12 +668,15 @@ Acceptance modes: `objective`, `architecture`.
    inputs. Mutable sessions/databases/logs use a private `CODEX_HOME`. Provider
    authentication remains an environment-key reference and no secret value is
    projected or persisted.
-9. `inherit_native` supplies no SDK approval or sandbox override. A `read_only`
-   capsule supplies only the stricter read-only sandbox override and preserves
-   native approval behavior. The typed lattice has no broadening value and
-   fails closed if monotonic restriction cannot be established. Native config
-   is re-read and identity/digest checked for each new execution, so a later
-   native restriction is inherited automatically.
+9. `inherit_native` supplies no SDK approval or sandbox override while current
+   native authority equals the execution's durable authority. A `read_only`
+   capsule supplies only the stricter read-only sandbox override. Schema v6
+   stores immutable native compatibility identity separately from sanitized
+   effective permission facts and digest. Before resume, their typed meet is
+   committed atomically; an SDK override is supplied only when required to
+   retain a prior stricter sandbox/approval authority. The lattice has no
+   broadening value and fails closed if monotonic restriction cannot be
+   established.
 10. Worktree selection, mutable/protected path checks, Git-authority snapshots,
     and validation are ownership and evidence controls, not an OS containment
     boundary. H3 does not claim to contain hostile same-UID native code beyond
@@ -690,6 +698,15 @@ Acceptance modes: `objective`, `architecture`.
   unrestricted and restricted native profiles are inherited on the next
   execution, no broadening mode exists, global config bytes are unchanged, and
   explicit read-only mode is the only SDK permission override;
+- crash/concurrency regressions prove `danger-full-access` to `read-only`
+  resumes exactly once under read-only after durable rebind,
+  `read-only` to `danger-full-access` remains read-only, incompatible native
+  compatibility changes make no adapter/external call, and capsule read-only
+  remains monotonic;
+- no-follow runtime-home regressions cover existing and ancestor symlinks,
+  non-directory/device substitution, clean private creation, and unchanged
+  external target content/metadata; cancelled/terminal executions reject every
+  public turn/checkpoint mutator after close/reopen;
 - a disposable real Git repository sentinel plans and starts a bounded editing
   milestone, injects a controller stop after durable SDK identity, resumes in a
   fresh process, runs validation, and reaches one terminal structured result;
@@ -720,8 +737,9 @@ inherits the same native Codex permission authority and automatically follows
 later native restrictions. The bounded Git-authority snapshot remains required
 for HEAD/branch, refs, reflogs, index, repository/worktree configuration, and
 stable operation metadata, but it is evidence/contract enforcement rather than
-an OS sandbox claim. Schema v5 replaces the obsolete sandbox-policy authority
-with a sanitized native provider/profile/permission digest while retaining
+an OS sandbox claim. Schema v6 replaces the obsolete single profile binding
+with immutable compatibility identity plus sanitized monotonic effective
+permission facts/digest while retaining
 Git-authority before/after evidence. The single corrected real SDK run reached
 the first SDK turn and injected post-turn crash boundary, then fresh-process
 resume failed because the native runtime had legitimately added private config
@@ -735,6 +753,14 @@ thread identity, injected post-turn crash, fresh-process resume, an allowed
 workspace edit, equal Git-authority digests, and unchanged source Codex config
 bytes. Retained evidence records the sanitized provider/profile/permission
 facts and digests without secrets. External-write denial is not an H3 gate.
+The objective review of `3014c568824e3f5d1474766f6b17f5b1dddddf49`
+returned P0=0/P1=2/P2=2. The repair makes native permission changes monotonic
+across resume, moves runtime-home setup to descriptor-anchored no-follow
+creation, preserves terminal cancellation immutability, and updates the schema
+and compatibility truth. The retained real sentinel was not rerun: the repair
+does not change its proven SDK/provider/model route, while permission tightening
+and unsafe-path rejection are deterministic gates and global native config is
+protected.
 
 ## Milestone H4 — Add decisions, review, repair, and limits
 
@@ -1071,6 +1097,21 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   authority, unchanged global Codex config bytes, and sanitized profile and
   provider digests. H3 has zero self-reviewed P0/P1; H4 remains blocked pending
   independent objective and architecture promotion review.
+- 2026-08-24: objective promotion review of `3014c568` returned
+  P0=0/P1=2/P2=2: resume rejected native tightening instead of monotonically
+  rebinding it, runtime-home mkdir/chmod could follow a symlink before lstat,
+  cancelled executions accepted a late turn observation, and compatibility
+  documentation was stale. The existing Sol Medium owner repaired these in
+  schema v6 with an atomic permission meet before adapter creation, distinct
+  compatibility failure, descriptor-anchored no-follow runtime preparation,
+  terminal mutator guards, and deterministic crash/concurrency/path regressions.
+  Focused H2/H3/SDK validation passed 100 tests, the tightening concurrency
+  regression passed five additional consecutive runs, and `make check` passed
+  all 123 tests plus formatting, lint, validator, compileall, and pre-commit.
+  Full H3 self-review found zero open P0/P1.
+  The prior passing real sentinel remains the production-route evidence; no new
+  live run was consumed because transport/provider/model behavior did not
+  change. H4 remains blocked pending fresh objective and architecture reviews.
 
 ## Next execution
 
@@ -1086,9 +1127,9 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: implementation, deterministic repair, and the one authorized
-real sentinel are green in the existing semantic workspace. The exact H3
-candidate is ready for independent promotion review.
+Dispatch status: the objective-review repair, deterministic gates, and the
+retained authorized real sentinel are green in the existing semantic workspace.
+The repaired H3 candidate is ready for fresh independent promotion review.
 
 Next action: independently review the exact H3 candidate for objective and
 architecture promotion with zero open P0/P1. The retained real evidence proves

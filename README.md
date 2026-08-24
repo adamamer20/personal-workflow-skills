@@ -23,7 +23,10 @@ The capsule selects `current_checkout`, `existing_worktree`, or
 `<repo>.worktrees/<lane>` with branch `agent/<lane>`; the same program/lane
 lease is reused across sequential milestones and fresh-process recovery.
 SQLite owns capsule digests, workspace leases, dispatch/thread/turn identity,
-ordered SDK lifecycle events, validation, and terminal results. The controller
+ordered SDK lifecycle events, immutable native compatibility identity,
+monotonic effective permission authority, validation, and terminal results.
+On resume, a newly stricter native policy is durably rebound before the SDK
+call, while a newly broader policy cannot broaden the execution. The controller
 uses the published `openai-codex` Python SDK as its only Codex transport and
 never falls back to the CLI or direct app-server RPC.
 

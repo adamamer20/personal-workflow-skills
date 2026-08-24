@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
@@ -24,6 +25,7 @@ from codex_flow.controller import (
     ResumeRequired,
     UncertainPreIdentity,
     UncertainTurn,
+    UnsafeResumeCompatibilityChange,
     _run_validation,
     capsule_from_json,
     capsule_json,
@@ -34,21 +36,25 @@ from codex_flow.domain import (
     ExecutionStatus,
     LifecycleEvent,
     MilestoneId,
+    NativePermissionAuthority,
     NativePermissionMode,
     ReasoningEffort,
     RunId,
     ThreadIdentity,
     TurnObservation,
     ValidationFailureCode,
+    ValidationObservation,
     ValidationSpec,
     WorkspaceMode,
 )
 from codex_flow.ledger import (
     _V2_TABLE_DDL,
     _V4_TABLE_DDL,
+    _V5_TABLE_DDL,
     CURRENT_SCHEMA_VERSION,
     CorruptSchemaError,
     Ledger,
+    StaleWriter,
     WorkspaceLeaseConflict,
 )
 from codex_flow.native_profile import NativeProfileError, NativeProfileProjection
@@ -270,6 +276,182 @@ def test_post_identity_crash_requires_fresh_process_resume_without_duplicates() 
         assert service["turns"] == 1
         assert len(second.ledger.snapshot("run").dispatches) == 1
         assert second.ledger.get_workspace_lease(repository).owner_run_id == RunId("run")
+        second.close()
+
+
+def test_resume_atomically_inherits_native_permission_tightening_once() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        home = root / "native-home"
+        initial = _test_native_profile(home)
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("injected crash")
+
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(service),
+            _trusted_test_native_profile=initial,
+            fault_injector=crash,
+        )
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="injected crash"):
+            first.start("run", "m1")
+        before_integrity = first.ledger.get_execution_integrity("run", "m1")
+        first.close()
+
+        config = home / "config.toml"
+        config.write_bytes(config.read_bytes().replace(b"danger-full-access", b"read-only"))
+        config.chmod(0o600)
+        restricted = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        entered = threading.Event()
+        release = threading.Event()
+        controllers: list[Controller] = []
+
+        class SlowResume(FakeAdapter):
+            def resume_thread(self, thread: ThreadIdentity) -> ThreadIdentity:
+                integrity = controllers[0].ledger.get_execution_integrity("run", "m1")
+                assert integrity.effective_permission is not None
+                assert integrity.effective_permission.sandbox_mode == "read-only"
+                entered.set()
+                assert release.wait(5)
+                return super().resume_thread(thread)
+
+        def factory(config: CodexSdkConfig) -> SlowResume:
+            assert config.effective_permission is not None
+            assert config.effective_permission.sandbox_mode == "read-only"
+            return SlowResume(config, service)
+
+        controllers.extend(
+            [
+                Controller(
+                    repository,
+                    _trusted_test_adapter_factory=factory,
+                    _trusted_test_native_profile=restricted,
+                ),
+                Controller(
+                    repository,
+                    _trusted_test_adapter_factory=factory,
+                    _trusted_test_native_profile=restricted,
+                ),
+            ]
+        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_resume = pool.submit(controllers[0].resume, "run", "m1")
+            assert entered.wait(2)
+            second_resume = pool.submit(controllers[1].resume, "run", "m1")
+            time.sleep(0.1)
+            assert service["resumes"] == 0
+            release.set()
+            assert first_resume.result(timeout=5).status is ExecutionStatus.COMPLETED
+            assert second_resume.result(timeout=5).status is ExecutionStatus.COMPLETED
+        assert service["resumes"] == 1
+        after_integrity = controllers[0].ledger.get_execution_integrity("run", "m1")
+        assert after_integrity.effective_permission == restricted.effective_authority(
+            NativePermissionMode.INHERIT_NATIVE
+        )
+        assert after_integrity.native_profile_sha256 != before_integrity.native_profile_sha256
+        assert after_integrity.native_compatibility_sha256 == before_integrity.native_compatibility_sha256
+        for controller in controllers:
+            controller.close()
+
+
+def test_resume_never_broadens_a_prior_native_restriction() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        home = root / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        config.write_bytes(config.read_bytes().replace(b"danger-full-access", b"read-only"))
+        config.chmod(0o600)
+        restricted = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("injected crash")
+
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(service),
+            _trusted_test_native_profile=restricted,
+            fault_injector=crash,
+        )
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="injected crash"):
+            first.start("run", "m1")
+        first.close()
+
+        config.write_bytes(config.read_bytes().replace(b"read-only", b"danger-full-access"))
+        config.chmod(0o600)
+        broader = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        captured: list[CodexSdkConfig] = []
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            captured.append(config)
+            return FakeAdapter(config, service)
+
+        second = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            _trusted_test_native_profile=broader,
+        )
+        assert second.resume("run", "m1").status is ExecutionStatus.COMPLETED
+        assert captured[0].effective_permission is not None
+        assert captured[0].effective_permission.sandbox_mode == "read-only"
+        second.close()
+
+
+def test_resume_rejects_compatibility_change_before_adapter_creation() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        home = root / "native-home"
+        initial = _test_native_profile(home)
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("injected crash")
+
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(service),
+            _trusted_test_native_profile=initial,
+            fault_injector=crash,
+        )
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="injected crash"):
+            first.start("run", "m1")
+        first.close()
+
+        config = home / "config.toml"
+        config.write_bytes(config.read_bytes().replace(b"127.0.0.1:2455", b"127.0.0.1:2456"))
+        config.chmod(0o600)
+        incompatible = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, service)
+
+        second = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            _trusted_test_native_profile=incompatible,
+        )
+        with pytest.raises(UnsafeResumeCompatibilityChange, match="compatibility changed"):
+            second.resume("run", "m1")
+        assert adapter_creations == 0
+        assert service["resumes"] == 0
         second.close()
 
 
@@ -532,6 +714,60 @@ def test_cancel_is_idempotent_and_keeps_workspace() -> None:
         controller.close()
 
 
+def test_cancelled_execution_rejects_all_turn_checkpoint_mutators_after_reopen() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        cancelled = controller.cancel("run", "m1")
+        controller.close()
+
+        reopened = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        authority = NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
+        observation = TurnObservation(
+            ThreadIdentity("thread-stale"),
+            "turn-stale",
+            "completed",
+            json.dumps({"status": "done"}),
+            {"status": "done"},
+            (),
+        )
+        validation = ValidationObservation(
+            ("true",),
+            0,
+            "0" * 64,
+            "0" * 64,
+            False,
+            0.01,
+        )
+        calls = (
+            lambda: reopened.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority),
+            lambda: reopened.ledger.record_thread_starting("run", "m1"),
+            lambda: reopened.ledger.record_pre_identity_uncertainty("run", "m1"),
+            lambda: reopened.ledger.record_thread_identity("run", "m1", ThreadIdentity("thread-stale")),
+            lambda: reopened.ledger.record_git_authority_before("run", "m1", "2" * 64),
+            lambda: reopened.ledger.record_turn_starting("run", "m1"),
+            lambda: reopened.ledger.record_turn("run", "m1", observation),
+            lambda: reopened.ledger.rebind_native_profile_for_resume("run", "m1", "0" * 64, "1" * 64, authority),
+            lambda: reopened.ledger.record_terminal_execution(
+                "run",
+                "m1",
+                result={"status": "done"},
+                validation=validation,
+                protected_after_sha256="3" * 64,
+                git_authority_after_sha256="4" * 64,
+            ),
+        )
+        for call in calls:
+            with pytest.raises(StaleWriter):
+                call()
+        after = reopened.status("run", "m1")
+        assert after == cancelled
+        assert reopened.ledger.sdk_lifecycle_events("run", "m1") == ()
+        reopened.close()
+
+
 def test_cli_plan_status_and_cancel_emit_stable_json() -> None:
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
@@ -607,6 +843,7 @@ def test_adapter_fresh_process_resume_inherits_native_permissions() -> None:
                 cwd=workspace,
                 native_runtime=runtime,
                 permission_mode=NativePermissionMode.INHERIT_NATIVE,
+                effective_permission=runtime.native_profile.effective_authority(NativePermissionMode.INHERIT_NATIVE),
             ),
             client_factory=lambda: client,
             sdk=Sdk(),
@@ -615,6 +852,51 @@ def test_adapter_fresh_process_resume_inherits_native_permissions() -> None:
         assert "sandbox" not in client.calls[0][1]
         assert "approval_mode" not in client.calls[0][1]
         assert client.calls[0][1]["cwd"] == str(workspace)
+
+
+def test_adapter_resume_retains_prior_read_only_authority_when_native_broadens() -> None:
+    class Thread:
+        id = "thread-1"
+
+    class Client:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        def thread_resume(self, thread_id: str, **kwargs: object) -> Thread:
+            assert thread_id == "thread-1"
+            self.kwargs = kwargs
+            return Thread()
+
+        def close(self) -> None:
+            pass
+
+    class Sdk:
+        Sandbox = type("Sandbox", (), {"read_only": "read"})
+        ApprovalMode = type("Approval", (), {"deny_all": "deny"})
+        ReasoningEffort = type("Effort", (), {"medium": "medium"})
+        SkillInput = None
+        version = "test"
+
+    with TemporaryDirectory() as directory:
+        client = Client()
+        workspace, runtime = _test_native_runtime(Path(directory))
+        retained = NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
+        adapter = CodexSdkAdapter(
+            CodexSdkConfig(
+                "gpt-test",
+                ReasoningEffort.MEDIUM,
+                sandbox=None,
+                cwd=workspace,
+                native_runtime=runtime,
+                permission_mode=NativePermissionMode.INHERIT_NATIVE,
+                effective_permission=retained,
+            ),
+            client_factory=lambda: client,
+            sdk=Sdk(),
+        )
+        assert adapter.resume_thread(ThreadIdentity("thread-1")) == ThreadIdentity("thread-1")
+        assert client.kwargs["sandbox"] == "read"
+        assert "approval_mode" not in client.kwargs
 
 
 def test_adapter_read_only_request_is_the_only_sdk_permission_override() -> None:
@@ -650,6 +932,7 @@ def test_adapter_read_only_request_is_the_only_sdk_permission_override() -> None
                 cwd=workspace,
                 native_runtime=runtime,
                 permission_mode=NativePermissionMode.READ_ONLY,
+                effective_permission=runtime.native_profile.effective_authority(NativePermissionMode.READ_ONLY),
             ),
             client_factory=lambda: client,
             sdk=Sdk(),
@@ -702,6 +985,7 @@ def test_production_adapter_uses_normal_sdk_child_with_private_native_home() -> 
                 cwd=workspace,
                 native_runtime=runtime,
                 permission_mode=NativePermissionMode.INHERIT_NATIVE,
+                effective_permission=runtime.native_profile.effective_authority(NativePermissionMode.INHERIT_NATIVE),
             ),
             sdk=Sdk(),
         )
@@ -825,6 +1109,76 @@ def test_native_profile_rejects_secret_fields_symlinks_and_launch_time_mutation(
             NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
 
 
+def test_runtime_home_rejects_symlinks_without_mutating_their_targets() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        profile = _test_native_profile(root / "native-home")
+        external = root / "external"
+        external.mkdir(mode=0o755)
+        marker = external / "marker.txt"
+        marker.write_text("unchanged\n")
+        before_mode = os.lstat(external).st_mode
+
+        runtime_home = root / "runtime-home"
+        runtime_home.symlink_to(external, target_is_directory=True)
+        with pytest.raises(NativeProfileError, match="unsafe ancestor"):
+            NativeRuntimeConfig(runtime_home, profile).prepare()
+        assert marker.read_text() == "unchanged\n"
+        assert os.lstat(external).st_mode == before_mode
+
+        ancestor_target = root / "ancestor-target"
+        ancestor_target.mkdir(mode=0o755)
+        ancestor_marker = ancestor_target / "marker.txt"
+        ancestor_marker.write_text("unchanged\n")
+        ancestor_mode = os.lstat(ancestor_target).st_mode
+        (root / "runtime-parent").symlink_to(ancestor_target, target_is_directory=True)
+        with pytest.raises(NativeProfileError, match="unsafe ancestor"):
+            NativeRuntimeConfig(root / "runtime-parent" / "home", profile).prepare()
+        assert ancestor_marker.read_text() == "unchanged\n"
+        assert os.lstat(ancestor_target).st_mode == ancestor_mode
+        assert not (ancestor_target / "home").exists()
+
+        real_home = root / "real-home"
+        real_home.mkdir(mode=0o700)
+        external_config = root / "external-config.toml"
+        external_config.write_text("unchanged\n")
+        external_config.chmod(0o600)
+        config_mode = os.lstat(external_config).st_mode
+        (real_home / "config.toml").symlink_to(external_config)
+        with pytest.raises(NativeProfileError, match="safe regular file"):
+            NativeRuntimeConfig(real_home, profile).prepare()
+        assert external_config.read_text() == "unchanged\n"
+        assert os.lstat(external_config).st_mode == config_mode
+
+
+def test_runtime_home_rejects_non_directories_and_creates_private_tree() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        profile = _test_native_profile(root / "native-home")
+        substituted = root / "substituted"
+        substituted.write_text("not a directory\n")
+        before = substituted.read_bytes()
+        with pytest.raises(NativeProfileError, match="unsafe ancestor"):
+            NativeRuntimeConfig(substituted / "home", profile).prepare()
+        assert substituted.read_bytes() == before
+
+        device_before = os.stat("/dev/null")
+        with pytest.raises(NativeProfileError, match="unsafe ancestor"):
+            NativeRuntimeConfig(Path("/dev/null"), profile).prepare()
+        device_after = os.stat("/dev/null")
+        assert (device_after.st_mode, device_after.st_size, device_after.st_mtime_ns) == (
+            device_before.st_mode,
+            device_before.st_size,
+            device_before.st_mtime_ns,
+        )
+
+        clean = root / "private" / "nested" / "home"
+        NativeRuntimeConfig(clean, profile).prepare()
+        assert stat.S_IMODE(os.lstat(clean).st_mode) == 0o700
+        assert (clean / "config.toml").is_file()
+        assert stat.S_IMODE(os.lstat(clean / "config.toml").st_mode) == 0o600
+
+
 def test_capsule_read_only_mode_reaches_sdk_as_a_monotonic_native_restriction() -> None:
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
@@ -878,7 +1232,7 @@ def test_v2_ledger_migrates_forward_to_canonical_h3_schema() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_native_profile_v5"
+        assert ledger.schema_identity == "codex_flow_h3_permission_authority_v6"
         assert "checkpoint" in ledger.schema_columns("executions")
         ledger.close()
 
@@ -901,9 +1255,34 @@ def test_v4_sandbox_authority_schema_migrates_to_truthful_native_profile_authori
         connection.close()
 
         ledger = Ledger(path)
-        assert ledger.schema_identity == "codex_flow_h3_native_profile_v5"
+        assert ledger.schema_identity == "codex_flow_h3_permission_authority_v6"
         assert "native_profile_sha256" in ledger.schema_columns("execution_integrity")
         assert "sandbox_policy_sha256" not in ledger.schema_columns("execution_integrity")
+        ledger.close()
+
+
+def test_v5_native_profile_schema_migrates_to_permission_authority_v6() -> None:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "workflow.db"
+        connection = sqlite3.connect(path)
+        for ddl in _V5_TABLE_DDL.values():
+            connection.execute(ddl)
+        connection.executemany(
+            "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+            (
+                ("schema_version", "5"),
+                ("migration_marker", "complete"),
+                ("schema_identity", "codex_flow_h3_native_profile_v5"),
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        ledger = Ledger(path)
+        assert ledger.schema_version == CURRENT_SCHEMA_VERSION
+        assert ledger.schema_identity == "codex_flow_h3_permission_authority_v6"
+        assert "native_compatibility_sha256" in ledger.schema_columns("execution_integrity")
+        assert "effective_permission_json" in ledger.schema_columns("execution_integrity")
         ledger.close()
 
 

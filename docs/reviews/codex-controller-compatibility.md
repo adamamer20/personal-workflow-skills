@@ -9,12 +9,19 @@
   and therefore follows the active native Codex config on each new execution.
   A capsule may request `read_only` as a typed monotonic restriction; no H3
   value can broaden native authority.
-- Runtime: local Linux, with Git worktrees and the repository-local SQLite v3
-  ledger as authority.
+- Runtime: local Linux, with Git worktrees and the repository-local SQLite
+  schema v6 ledger as authority. Schema v6 separates immutable native
+  compatibility identity from mutable effective permission authority.
 - Workspace modes: current checkout, an exact existing linked worktree, or a
   controller-created semantic sibling managed worktree.
-- Resume: a new controller and SDK client use `thread_resume` with the durable
-  identity and reject any identity change.
+- Resume: before a new SDK client or `thread_resume`, the controller re-resolves
+  native configuration and atomically persists the meet of the durable and
+  current permission authorities. Tightening is inherited; broadening retains
+  the prior restriction. Provider, routing, model-catalog, or discovery changes
+  fail closed as a distinct same-thread compatibility error.
+- Migration: schema-v5 terminal history is preserved as legacy evidence. An
+  in-flight v5 execution has no reconstructable split compatibility/permission
+  authority and therefore fails same-thread resume closed instead of guessing.
 
 ## Native runtime/profile/private-state matrix
 
@@ -23,7 +30,7 @@
 | Bundled runtime/app-server | Python SDK | Normal SDK child launch; no CLI/direct-RPC transport and no mandatory Bubblewrap wrapper |
 | Provider/profile semantics | Native Codex config | Typed projection preserves selected provider definition, model catalog, permissions, MCP, skills, plugins, memories, hooks, projects, and shell environment; sanitized facts plus digest are durable |
 | Model, effort, cwd/workspace | Controller capsule | Explicit SDK thread/turn inputs; they do not alter inherited permission authority |
-| Approval and sandbox | Native Codex by default | No SDK override for `inherit_native`; optional `read_only` supplies only a monotonic sandbox restriction |
+| Approval and sandbox | Native Codex by default | Schema-v6 effective authority is rebound before resume; optional `read_only` and previously inherited restrictions can only be retained or tightened |
 | Session/database/log state | Controller-private `CODEX_HOME` | New runtime home per run/milestone; global config is source-only and byte-hashed before/after the real sentinel |
 | Provider authentication | Environment key reference | `env_key` name is projected and recorded; secret values are neither copied into config nor persisted |
 | Worktree/Git controls | Controller ownership/evidence | Leases, mutation contract, and bounded Git-authority snapshots remain; they are not an OS containment claim |
@@ -45,15 +52,15 @@ projection.
 
 ## Evidence
 
-`docs/reviews/evidence/h3-controller-sentinel.json` retains the earlier editing
-baseline plus the failed corrected native-profile run. The corrected run reached
-the SDK turn and injected post-turn crash boundary, but fresh resume stopped on
-a private-config reprojection conflict before terminal evidence. That defect is
-deterministically repaired, but no second real run was performed. Sanitized
-`codex-lb` terminal parity, unchanged Git authority, and unchanged global native
-config therefore remain unproven for the corrected exact route. External-write
-denial is not an H3 requirement when the inherited native profile permits
-repository-external writes.
+`docs/reviews/evidence/h3-controller-sentinel.json` retains the passing corrected
+run for implementation commit `04e0f889678770bfecd7da3c0a8cbd03344f123f`.
+It proves one Python-SDK/bundled-app-server dispatch through `codex-lb`, inherited
+native `danger-full-access`/`never`, an injected post-turn process boundary,
+fresh-process same-thread resume, the allowed workspace edit, equal Git-authority
+digests, and unchanged global native config bytes. The schema-v6 monotonic-resume
+repair is deterministic and does not invalidate those production-route facts;
+no additional real run was consumed. External-write denial is not an H3
+requirement when the inherited native profile permits repository-external writes.
 
 Desktop visibility, idle wake, remote hosts, permission-profile survival, and
 native review remain outside H3. Later milestones must label each as proven,

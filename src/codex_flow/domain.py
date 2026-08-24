@@ -35,6 +35,63 @@ class NativePermissionMode(str, Enum):
     READ_ONLY = "read_only"
 
 
+@dataclass(frozen=True, slots=True)
+class NativePermissionAuthority:
+    """Effective native authority retained monotonically across SDK processes."""
+
+    mode: NativePermissionMode
+    sandbox_mode: str
+    approval_policy: str
+
+    def __post_init__(self) -> None:
+        if self.sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
+            raise ValueError("effective native sandbox mode is unsupported")
+        if self.approval_policy not in {"untrusted", "on-request", "never"}:
+            raise ValueError("effective native approval policy is unsupported")
+        if self.mode is NativePermissionMode.READ_ONLY and self.sandbox_mode != "read-only":
+            raise ValueError("read-only capsule mode must retain a read-only sandbox")
+
+    @property
+    def facts(self) -> JsonObject:
+        return {
+            "mode": self.mode.value,
+            "sandbox_mode": self.sandbox_mode,
+            "approval_policy": self.approval_policy,
+            "monotonic": True,
+        }
+
+    @classmethod
+    def from_facts(cls, value: Mapping[str, JsonValue]) -> NativePermissionAuthority:
+        if set(value) != {"mode", "sandbox_mode", "approval_policy", "monotonic"}:
+            raise ValueError("effective native permission facts have an unsupported shape")
+        if value.get("monotonic") is not True:
+            raise ValueError("effective native permission facts are not monotonic")
+        mode = value.get("mode")
+        sandbox = value.get("sandbox_mode")
+        approval = value.get("approval_policy")
+        if not isinstance(mode, str) or not isinstance(sandbox, str) or not isinstance(approval, str):
+            raise ValueError("effective native permission facts have invalid values")
+        return cls(NativePermissionMode(mode), sandbox, approval)
+
+    def meet(self, candidate: NativePermissionAuthority) -> NativePermissionAuthority:
+        """Return the no-broader authority, rejecting incomparable approvals."""
+
+        sandbox_rank = {"read-only": 0, "workspace-write": 1, "danger-full-access": 2}
+        sandbox = min((self.sandbox_mode, candidate.sandbox_mode), key=sandbox_rank.__getitem__)
+        if self.approval_policy == candidate.approval_policy:
+            approval = self.approval_policy
+        elif "never" in {self.approval_policy, candidate.approval_policy}:
+            approval = "never"
+        else:
+            raise ValueError("native approval policies are incomparable")
+        mode = (
+            NativePermissionMode.READ_ONLY
+            if NativePermissionMode.READ_ONLY in {self.mode, candidate.mode}
+            else NativePermissionMode.INHERIT_NATIVE
+        )
+        return NativePermissionAuthority(mode, sandbox, approval)
+
+
 class ReasoningEffort(str, Enum):
     """Explicit reasoning effort; no implicit SDK default is accepted."""
 
@@ -694,6 +751,9 @@ class ExecutionIntegrityRecord:
     milestone_id: MilestoneId
     provenance: str
     native_profile_sha256: str | None
+    native_compatibility_sha256: str | None
+    effective_permission: NativePermissionAuthority | None
+    effective_permission_sha256: str | None
     git_authority_before_sha256: str | None
     git_authority_after_sha256: str | None
     created_at: str

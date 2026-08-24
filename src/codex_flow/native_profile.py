@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TypeAlias, cast
 from urllib.parse import urlsplit
 
-from .domain import JsonObject, NativePermissionMode
+from .domain import JsonObject, NativePermissionAuthority, NativePermissionMode
 
 _MAX_CONFIG_BYTES = 1_048_576
 _MAX_MODEL_CATALOG_BYTES = 8_388_608
@@ -118,6 +118,7 @@ class NativeProfileProjection:
     native_sandbox_mode: str
     native_approval_policy: str
     projected_config_sha256: str
+    compatibility_sha256: str
     profile_sha256: str
 
     @classmethod
@@ -228,6 +229,29 @@ class NativeProfileProjection:
             "controller_overrides": ["cwd", "model", "reasoning_effort", "workspace"],
             "private_mutable_state": True,
         }
+        compatibility_facts = {
+            key: value for key, value in facts.items() if key not in {"permissions", "projected_config_sha256"}
+        }
+        compatibility_preserved = {
+            key: value for key, value in preserved.items() if key not in {"approval_policy", "sandbox_mode"}
+        }
+        compatibility_facts["compatible_config_sha256"] = hashlib.sha256(
+            _render_toml(compatibility_preserved).encode("utf-8")
+        ).hexdigest()
+        compatibility_facts["discovery_identities"] = [
+            {
+                "name": mount.target_name,
+                "device": mount.identity.device,
+                "inode": mount.identity.inode,
+                "mode": mount.identity.mode,
+                "links": mount.identity.links,
+                "modified_ns": mount.identity.modified_ns,
+            }
+            for mount in mounts
+        ]
+        compatibility_digest = hashlib.sha256(
+            json.dumps(compatibility_facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
         profile_digest = hashlib.sha256(
             json.dumps(facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -247,6 +271,7 @@ class NativeProfileProjection:
             native_sandbox_mode,
             native_approval_policy,
             projected_digest,
+            compatibility_digest,
             profile_digest,
         )
         result.verify_sources()
@@ -272,6 +297,7 @@ class NativeProfileProjection:
             },
             "model_catalog_sha256": self.model_catalog_source.sha256,
             "projected_config_sha256": self.projected_config_sha256,
+            "compatibility_sha256": self.compatibility_sha256,
             "profile_sha256": self.profile_sha256,
             "discovery_surfaces": [mount.target_name for mount in self.discovery_mounts],
             "controller_overrides": ["cwd", "model", "reasoning_effort", "workspace"],
@@ -302,59 +328,182 @@ class NativeProfileProjection:
             ):
                 raise NativeProfileError("native discovery surface changed during launch")
 
+    def effective_authority(self, requested: NativePermissionMode) -> NativePermissionAuthority:
+        """Return native permissions or a controller-requested monotonic restriction."""
+
+        sandbox_mode = self.native_sandbox_mode if requested is NativePermissionMode.INHERIT_NATIVE else "read-only"
+        authority = NativePermissionAuthority(requested, sandbox_mode, self.native_approval_policy)
+        native = NativePermissionAuthority(
+            NativePermissionMode.INHERIT_NATIVE,
+            self.native_sandbox_mode,
+            self.native_approval_policy,
+        )
+        if authority.meet(native) != authority:
+            raise NativeProfileError("requested permissions would broaden native authority")
+        return authority
+
     def effective_permissions(self, requested: NativePermissionMode) -> JsonObject:
         """Return native permissions or a controller-requested monotonic restriction."""
 
-        if requested is NativePermissionMode.INHERIT_NATIVE:
-            sandbox_mode = self.native_sandbox_mode
-        elif requested is NativePermissionMode.READ_ONLY:
-            sandbox_mode = "read-only"
-        else:  # pragma: no cover - exhaustive enum guard
-            raise NativeProfileError("unsupported native permission request")
-        rank = {"read-only": 0, "workspace-write": 1, "danger-full-access": 2}
-        if rank[sandbox_mode] > rank[self.native_sandbox_mode]:
-            raise NativeProfileError("requested permissions would broaden native authority")
-        return {
-            "mode": requested.value,
-            "sandbox_mode": sandbox_mode,
-            "approval_policy": self.native_approval_policy,
-            "native_sandbox_mode": self.native_sandbox_mode,
-            "monotonic": True,
-        }
+        facts = self.effective_authority(requested).facts
+        facts["native_sandbox_mode"] = self.native_sandbox_mode
+        return facts
 
     def prepare_runtime_home(self, runtime_home: Path) -> None:
         """Create private mutable state while exposing native discovery semantics."""
 
-        runtime_home.mkdir(parents=True, exist_ok=True, mode=0o700)
-        runtime_home.chmod(0o700)
-        metadata = os.lstat(runtime_home)
-        if not stat.S_ISDIR(metadata.st_mode) or runtime_home.resolve() != runtime_home:
-            raise NativeProfileError("private native runtime home is not a real directory")
-        self.verify_sources()
-        config_path = runtime_home / "config.toml"
-        expected = self.projected_toml.encode("utf-8")
-        if config_path.is_symlink():
-            raise NativeProfileError("private native profile path is a symlink")
-        if config_path.exists():
-            current, _ = _read_regular(
-                config_path,
-                _MAX_CONFIG_BYTES,
-                label="private native profile",
-                require_private_permissions=True,
-            )
-            if current != expected:
-                _replace_private_profile(config_path, expected)
-        else:
-            _write_new_file(config_path, expected)
-        for mount in self.discovery_mounts:
-            target = runtime_home / mount.target_name
-            if target.is_symlink():
-                if os.readlink(target) != os.fspath(mount.source):
-                    raise NativeProfileError("private native discovery link changed")
-            elif target.exists():
-                raise NativeProfileError("private native discovery path was substituted")
+        descriptor = _open_private_runtime_home(runtime_home)
+        try:
+            self.verify_sources()
+            expected = self.projected_toml.encode("utf-8")
+            try:
+                current = _read_private_file_at(descriptor, "config.toml")
+            except FileNotFoundError:
+                _write_new_file_at(descriptor, "config.toml", expected)
             else:
-                target.symlink_to(mount.source, target_is_directory=True)
+                if current != expected:
+                    _replace_private_profile_at(descriptor, expected)
+            for mount in self.discovery_mounts:
+                try:
+                    metadata = os.stat(mount.target_name, dir_fd=descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    os.symlink(
+                        os.fspath(mount.source),
+                        mount.target_name,
+                        target_is_directory=True,
+                        dir_fd=descriptor,
+                    )
+                else:
+                    if not stat.S_ISLNK(metadata.st_mode):
+                        raise NativeProfileError("private native discovery path was substituted")
+                    if os.readlink(mount.target_name, dir_fd=descriptor) != os.fspath(mount.source):
+                        raise NativeProfileError("private native discovery link changed")
+            _verify_open_directory_path(runtime_home, descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _open_private_runtime_home(path: Path) -> int:
+    """Open/create an absolute directory tree without following any symlink."""
+
+    if not path.is_absolute() or ".." in path.parts:
+        raise NativeProfileError("private native runtime home must be an absolute normalized path")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
+    try:
+        for part in path.parts[1:]:
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                try:
+                    child = os.open(part, flags, dir_fd=descriptor)
+                except OSError as exc:
+                    raise NativeProfileError("private native runtime home contains an unsafe ancestor") from exc
+            except OSError as exc:
+                raise NativeProfileError("private native runtime home contains an unsafe ancestor") from exc
+            os.close(descriptor)
+            descriptor = child
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise NativeProfileError("private native runtime home must be an owned directory")
+        os.fchmod(descriptor, 0o700)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _verify_open_directory_path(path: Path, descriptor: int) -> None:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        current = os.open("/", flags)
+        try:
+            for part in path.parts[1:]:
+                child = os.open(part, flags, dir_fd=current)
+                os.close(current)
+                current = child
+            metadata = os.fstat(current)
+        finally:
+            os.close(current)
+    except OSError as exc:
+        raise NativeProfileError("private native runtime home changed during preparation") from exc
+    opened = os.fstat(descriptor)
+    if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+        raise NativeProfileError("private native runtime home changed during preparation")
+
+
+def _read_private_file_at(directory: int, name: str) -> bytes:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory)
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError):
+            raise
+        raise NativeProfileError("private native profile is not a safe regular file") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o077
+            or metadata.st_size > _MAX_CONFIG_BYTES
+        ):
+            raise NativeProfileError("private native profile is not a safe regular file")
+        chunks: list[bytes] = []
+        remaining = _MAX_CONFIG_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65_536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        value = b"".join(chunks)
+        if len(value) > _MAX_CONFIG_BYTES:
+            raise NativeProfileError("private native profile is too large")
+        return value
+    finally:
+        os.close(descriptor)
+
+
+def _write_new_file_at(directory: int, name: str, value: bytes) -> None:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        _write_all(descriptor, value)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _replace_private_profile_at(directory: int, value: bytes) -> None:
+    temporary = ".config.toml.codex-flow-tmp"
+    try:
+        os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise NativeProfileError("private native profile replacement path is unavailable")
+    try:
+        _write_new_file_at(directory, temporary, value)
+        os.replace(temporary, "config.toml", src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    except Exception:
+        try:
+            metadata = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                os.unlink(temporary, dir_fd=directory)
+        raise
 
 
 def _write_all(descriptor: int, value: bytes) -> None:
@@ -364,37 +513,6 @@ def _write_all(descriptor: int, value: bytes) -> None:
         if written <= 0:
             raise OSError("short private native profile write")
         offset += written
-
-
-def _write_new_file(path: Path, value: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
-    try:
-        _write_all(descriptor, value)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _replace_private_profile(path: Path, value: bytes) -> None:
-    """Atomically discard runtime-added private config before a fresh child."""
-
-    temporary = path.with_name(".config.toml.codex-flow-tmp")
-    if temporary.is_symlink() or temporary.exists():
-        raise NativeProfileError("private native profile replacement path is unavailable")
-    try:
-        _write_new_file(temporary, value)
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except Exception:
-        if temporary.exists() and not temporary.is_symlink():
-            metadata = os.lstat(temporary)
-            if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
-                temporary.unlink()
-        raise
 
 
 def _validate_top_level(data: Mapping[str, object]) -> None:

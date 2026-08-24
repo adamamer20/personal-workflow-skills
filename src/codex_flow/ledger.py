@@ -38,6 +38,7 @@ from .domain import (
     LifecycleEvent,
     MilestoneId,
     MilestoneRecord,
+    NativePermissionAuthority,
     PostIdentityExecutionFailure,
     PreIdentityTransportFailure,
     ReasonCode,
@@ -63,9 +64,16 @@ from .domain import (
     is_transition_allowed,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(5)
+CURRENT_SCHEMA_VERSION = SchemaVersion(6)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {SchemaVersion(1), SchemaVersion(2), SchemaVersion(3), SchemaVersion(4), CURRENT_SCHEMA_VERSION}
+    {
+        SchemaVersion(1),
+        SchemaVersion(2),
+        SchemaVersion(3),
+        SchemaVersion(4),
+        SchemaVersion(5),
+        CURRENT_SCHEMA_VERSION,
+    }
 )
 _STATES_SQL = ", ".join(f"'{state.value}'" for state in WorkflowState)
 _REASON_CODES_SQL = ", ".join(f"'{reason.value}'" for reason in ReasonCode)
@@ -209,7 +217,7 @@ _EXECUTION_INTEGRITY_V4_DDL = """CREATE TABLE execution_integrity (
     FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
 )"""
 _V4_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_V4_DDL}
-_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+_EXECUTION_INTEGRITY_V5_DDL = """CREATE TABLE execution_integrity (
     run_id TEXT NOT NULL,
     milestone_id TEXT NOT NULL,
     provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'legacy_sandbox_v4', 'controller_v2')),
@@ -223,7 +231,32 @@ _EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
        OR (provenance = 'controller_v2' AND native_profile_sha256 IS NOT NULL)),
     FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
 )"""
-_V5_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
+_V5_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_V5_DDL}
+_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'legacy_sandbox_v4', 'legacy_profile_v5', 'controller_v3')),
+    native_profile_sha256 TEXT CHECK(native_profile_sha256 IS NULL OR length(native_profile_sha256) = 64),
+    native_compatibility_sha256 TEXT CHECK(native_compatibility_sha256 IS NULL OR length(native_compatibility_sha256) = 64),
+    effective_permission_json TEXT CHECK(effective_permission_json IS NULL OR length(effective_permission_json) BETWEEN 1 AND 512),
+    effective_permission_sha256 TEXT CHECK(effective_permission_sha256 IS NULL OR length(effective_permission_sha256) = 64),
+    git_authority_before_sha256 TEXT CHECK(git_authority_before_sha256 IS NULL OR length(git_authority_before_sha256) = 64),
+    git_authority_after_sha256 TEXT CHECK(git_authority_after_sha256 IS NULL OR length(git_authority_after_sha256) = 64),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, milestone_id),
+    CHECK((provenance IN ('legacy_v3', 'legacy_sandbox_v4') AND native_profile_sha256 IS NULL
+           AND native_compatibility_sha256 IS NULL AND effective_permission_json IS NULL
+           AND effective_permission_sha256 IS NULL)
+       OR (provenance = 'legacy_profile_v5' AND native_profile_sha256 IS NOT NULL
+           AND native_compatibility_sha256 IS NULL AND effective_permission_json IS NULL
+           AND effective_permission_sha256 IS NULL)
+       OR (provenance = 'controller_v3' AND native_profile_sha256 IS NOT NULL
+           AND native_compatibility_sha256 IS NOT NULL AND effective_permission_json IS NOT NULL
+           AND effective_permission_sha256 IS NOT NULL)),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_V6_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
 
 
 def _canonical_ddl(sql: str) -> str:
@@ -298,7 +331,8 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(2): "codex_flow_h2_v2",
     SchemaVersion(3): "codex_flow_h3_v3",
     SchemaVersion(4): "codex_flow_h3_integrity_v4",
-    CURRENT_SCHEMA_VERSION: "codex_flow_h3_native_profile_v5",
+    SchemaVersion(5): "codex_flow_h3_native_profile_v5",
+    CURRENT_SCHEMA_VERSION: "codex_flow_h3_permission_authority_v6",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -333,6 +367,14 @@ class InvalidTransition(LedgerError):
 
 class StaleWriter(LedgerError):
     """The caller's expected predecessor is no longer current."""
+
+
+class NativeCompatibilityConflict(LedgerError):
+    """Same-thread resume is unsafe under changed provider/discovery facts."""
+
+
+class NativePermissionConflict(LedgerError):
+    """Native permission authorities cannot be ordered monotonically."""
 
 
 class DispatchConflict(LedgerError):
@@ -657,7 +699,7 @@ class Ledger:
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V5_TABLE_DDL:
+        if table not in _V6_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -740,7 +782,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V5_TABLE_DDL.values():
+                for statement in _V6_TABLE_DDL.values():
                     self._db().execute(statement)
                 self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -767,6 +809,7 @@ class Ledger:
             SchemaVersion(3): _V3_TABLE_DDL,
             SchemaVersion(4): _V4_TABLE_DDL,
             SchemaVersion(5): _V5_TABLE_DDL,
+            SchemaVersion(6): _V6_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -865,6 +908,9 @@ class Ledger:
                 "milestone_id": ("TEXT", 1, 2),
                 "provenance": ("TEXT", 1, 0),
                 "native_profile_sha256": ("TEXT", 0, 0),
+                "native_compatibility_sha256": ("TEXT", 0, 0),
+                "effective_permission_json": ("TEXT", 0, 0),
+                "effective_permission_sha256": ("TEXT", 0, 0),
                 "git_authority_before_sha256": ("TEXT", 0, 0),
                 "git_authority_after_sha256": ("TEXT", 0, 0),
                 "created_at": ("TEXT", 1, 0),
@@ -883,6 +929,13 @@ class Ledger:
             expected["execution_integrity"]["sandbox_policy_sha256"] = expected["execution_integrity"].pop(
                 "native_profile_sha256"
             )
+            expected["execution_integrity"].pop("native_compatibility_sha256")
+            expected["execution_integrity"].pop("effective_permission_json")
+            expected["execution_integrity"].pop("effective_permission_sha256")
+        elif version == SchemaVersion(5):
+            expected["execution_integrity"].pop("native_compatibility_sha256")
+            expected["execution_integrity"].pop("effective_permission_json")
+            expected["execution_integrity"].pop("effective_permission_sha256")
         for table, expected_columns in expected.items():
             rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
@@ -1172,6 +1225,9 @@ class Ledger:
                         raise CorruptSchemaError("Git authority after-state lacks its pre-turn authority")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(5):
+            self._migrate_v5_to_v6()
+            return
         if version == SchemaVersion(4):
             self._migrate_v4_to_v5()
             return
@@ -1269,7 +1325,7 @@ class Ledger:
         self._validate_rows()
         with self._transaction(validate_authority=False):
             self._db().execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v4")
-            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(_EXECUTION_INTEGRITY_V5_DDL)
             self._db().execute(
                 "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
                 "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
@@ -1278,6 +1334,34 @@ class Ledger:
                 "git_authority_after_sha256, created_at, updated_at FROM execution_integrity_v4"
             )
             self._db().execute("DROP TABLE execution_integrity_v4")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(int(SchemaVersion(5))),),
+            )
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(5)],),
+            )
+            self._fault("after_migration")
+        self._migrate_v5_to_v6()
+
+    def _migrate_v5_to_v6(self) -> None:
+        self._validate_schema_metadata(SchemaVersion(5))
+        self._validate_shape(SchemaVersion(5))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._db().execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v5")
+            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(
+                "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
+                "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
+                "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
+                "SELECT run_id, milestone_id, CASE WHEN provenance = 'controller_v2' "
+                "THEN 'legacy_profile_v5' ELSE provenance END, native_profile_sha256, NULL, NULL, NULL, "
+                "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at "
+                "FROM execution_integrity_v5"
+            )
+            self._db().execute("DROP TABLE execution_integrity_v5")
             self._db().execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(int(CURRENT_SCHEMA_VERSION)),),
@@ -1751,13 +1835,23 @@ class Ledger:
         run_id: RunId | str,
         milestone_id: MilestoneId | str,
         native_profile_sha256: str,
+        native_compatibility_sha256: str,
+        effective_permission: NativePermissionAuthority,
     ) -> ExecutionIntegrityRecord:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
         profile = _sha256(native_profile_sha256, field_name="native profile digest")
+        compatibility = _sha256(native_compatibility_sha256, field_name="native compatibility digest")
+        permission_json = _encode_json(effective_permission.facts)
+        permission_sha256 = hashlib.sha256(permission_json.encode("utf-8")).hexdigest()
         now = utc_now()
         with self._transaction():
-            self.get_execution(run, milestone)
+            execution = self.get_execution(run, milestone)
+            if (
+                execution.status is not ExecutionStatus.PLANNED
+                or execution.checkpoint is not ControllerCheckpoint.WORKSPACE_LEASED
+            ):
+                raise StaleWriter("native profile binding requires a planned leased execution")
             existing = (
                 self._db()
                 .execute(
@@ -1768,14 +1862,56 @@ class Ledger:
             )
             if existing is not None:
                 record = self._execution_integrity_from_row(existing)
-                if record.native_profile_sha256 != profile:
+                if (
+                    record.native_profile_sha256 != profile
+                    or record.native_compatibility_sha256 != compatibility
+                    or record.effective_permission != effective_permission
+                ):
                     raise StaleWriter("execution is already bound to a different native profile")
                 return record
             self._db().execute(
                 "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
+                "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
                 "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
-                "VALUES (?, ?, 'controller_v2', ?, NULL, NULL, ?, ?)",
-                (str(run), str(milestone), profile, now, now),
+                "VALUES (?, ?, 'controller_v3', ?, ?, ?, ?, NULL, NULL, ?, ?)",
+                (str(run), str(milestone), profile, compatibility, permission_json, permission_sha256, now, now),
+            )
+            return self.get_execution_integrity(run, milestone)
+
+    def rebind_native_profile_for_resume(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        native_profile_sha256: str,
+        native_compatibility_sha256: str,
+        candidate_permission: NativePermissionAuthority,
+    ) -> ExecutionIntegrityRecord:
+        """Atomically retain the meet of durable and current native authority."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        profile = _sha256(native_profile_sha256, field_name="native profile digest")
+        compatibility = _sha256(native_compatibility_sha256, field_name="native compatibility digest")
+        now = utc_now()
+        with self._transaction():
+            execution = self.get_execution(run, milestone)
+            if execution.status is not ExecutionStatus.THREAD_STARTED or execution.thread_id is None:
+                raise StaleWriter("native profile resume rebind requires a durable active SDK thread")
+            current = self.get_execution_integrity(run, milestone)
+            if current.provenance != "controller_v3" or current.effective_permission is None:
+                raise NativeCompatibilityConflict("execution lacks resumable native compatibility authority")
+            if current.native_compatibility_sha256 != compatibility:
+                raise NativeCompatibilityConflict("native provider/routing/discovery compatibility changed")
+            try:
+                effective = current.effective_permission.meet(candidate_permission)
+            except ValueError as exc:
+                raise NativePermissionConflict("native permission authority changed incompatibly") from exc
+            permission_json = _encode_json(effective.facts)
+            permission_sha256 = hashlib.sha256(permission_json.encode("utf-8")).hexdigest()
+            self._db().execute(
+                "UPDATE execution_integrity SET native_profile_sha256 = ?, effective_permission_json = ?, "
+                "effective_permission_sha256 = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (profile, permission_json, permission_sha256, now, str(run), str(milestone)),
             )
             return self.get_execution_integrity(run, milestone)
 
@@ -1790,6 +1926,9 @@ class Ledger:
         authority = _sha256(git_authority_before_sha256, field_name="Git authority digest")
         now = utc_now()
         with self._transaction():
+            execution = self.get_execution(run, milestone)
+            if execution.status is not ExecutionStatus.THREAD_STARTED or execution.thread_id is None:
+                raise StaleWriter("Git authority binding requires a durable active SDK thread")
             current = self.get_execution_integrity(run, milestone)
             if current.git_authority_before_sha256 is not None:
                 if current.git_authority_before_sha256 != authority:
@@ -2077,8 +2216,12 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
-            if current.thread_id is not None:
-                raise StaleWriter("pre-identity uncertainty cannot replace a durable identity")
+            if (
+                current.status is not ExecutionStatus.PLANNED
+                or current.checkpoint is not ControllerCheckpoint.THREAD_STARTING
+                or current.thread_id is not None
+            ):
+                raise StaleWriter("pre-identity uncertainty requires the active thread-start boundary")
             self._db().execute(
                 "UPDATE executions SET status = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
                 (ExecutionStatus.UNCERTAIN_PRE_IDENTITY.value, now, str(run), str(milestone)),
@@ -2116,6 +2259,8 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
+            if current.status is not ExecutionStatus.THREAD_STARTED or current.thread_id is None:
+                raise StaleWriter("turn observation requires a durable active SDK thread")
             if current.thread_id != observation.thread_id:
                 raise StaleWriter("turn observation belongs to a different SDK thread")
             if current.turn_id is not None:
@@ -2574,11 +2719,36 @@ class Ledger:
     @staticmethod
     def _execution_integrity_from_row(row: sqlite3.Row) -> ExecutionIntegrityRecord:
         native_profile = row["native_profile_sha256"] if "native_profile_sha256" in row.keys() else None
+        native_compatibility = (
+            row["native_compatibility_sha256"] if "native_compatibility_sha256" in row.keys() else None
+        )
+        permission_raw = row["effective_permission_json"] if "effective_permission_json" in row.keys() else None
+        permission_digest = row["effective_permission_sha256"] if "effective_permission_sha256" in row.keys() else None
+        effective_permission = None
+        if permission_raw is not None:
+            decoded = _decode_json_object(str(permission_raw), field_name="effective native permission")
+            if decoded is None:  # pragma: no cover - non-null row contract
+                raise CorruptSchemaError("effective native permission is missing")
+            effective_permission = NativePermissionAuthority.from_facts(decoded)
+            actual_digest = hashlib.sha256(_encode_json(effective_permission.facts).encode("utf-8")).hexdigest()
+            if permission_digest != actual_digest:
+                raise CorruptSchemaError("effective native permission digest does not match its facts")
         return ExecutionIntegrityRecord(
             RunId(row["run_id"]),
             MilestoneId(row["milestone_id"]),
             str(row["provenance"]),
             (_sha256(str(native_profile), field_name="native profile digest") if native_profile is not None else None),
+            (
+                _sha256(str(native_compatibility), field_name="native compatibility digest")
+                if native_compatibility is not None
+                else None
+            ),
+            effective_permission,
+            (
+                _sha256(str(permission_digest), field_name="effective native permission digest")
+                if permission_digest is not None
+                else None
+            ),
             (
                 _sha256(str(row["git_authority_before_sha256"]), field_name="Git authority before digest")
                 if row["git_authority_before_sha256"] is not None
