@@ -666,17 +666,19 @@ Acceptance modes: `objective`, `architecture`.
    model catalog, MCP, skill, plugin, memory, project, hook, shell-environment,
    and permission semantics are preserved; model/effort/cwd remain capsule
    inputs. Mutable sessions/databases/logs use a private `CODEX_HOME`. Provider
-   authentication remains an environment-key reference and no secret value is
-   projected or persisted.
+   authentication remains environment-reference based. Literal sensitive MCP
+   headers and stdio environment entries are converted to process-only
+   references; no raw secret value is projected or persisted.
 9. `inherit_native` supplies no SDK approval or sandbox override while current
    native authority equals the execution's durable authority. A `read_only`
-   capsule supplies only the stricter read-only sandbox override. Schema v7
-   retains schema v6's immutable native compatibility identity separately from
-   sanitized effective permission facts and digest. Before resume, their typed
-   meet is committed atomically; an SDK override is supplied only when required to
-   retain a prior stricter sandbox/approval authority. The lattice has no
-   broadening value and fails closed if monotonic restriction cannot be
-   established.
+   capsule supplies only the stricter read-only sandbox override. Schema v8
+   retains schema v7's causal baseline and schema v6's immutable native
+   compatibility identity separately from sanitized effective permission facts
+   and digest, and adds accepted terminal workspace authority for successor
+   preflight. Before resume, the permission meet is committed atomically; an
+   SDK override is supplied only when required to retain a prior stricter
+   sandbox/approval authority. The lattice has no broadening value and fails
+   closed if monotonic restriction cannot be established.
 10. Worktree selection, mutable/protected path checks, Git-authority snapshots,
     and validation are ownership and evidence controls, not an OS containment
     boundary. H3 does not claim to contain hostile same-UID native code beyond
@@ -707,6 +709,19 @@ Acceptance modes: `objective`, `architecture`.
   non-directory/device substitution, clean private creation, and unchanged
   external target content/metadata; cancelled/terminal executions reject every
   public turn/checkpoint mutator after close/reopen;
+- recursive discovery regressions reject root, parent, nested, multi-node, and
+  dangling cycles on all three native surfaces before adapter construction;
+- managed and existing worktree regressions cover empty `.codex-flow` and
+  out-of-scope directory creation/removal/rename, while mutable-root empty
+  topology remains usable under deterministic scan bounds;
+- close/reopen successor regressions reject predecessor output content,
+  deletion, type, symlink, hardlink, empty-directory, and Git-authority drift
+  before baseline/lease/adapter authority;
+- lexical, relative, trailing-component, and symlink workspace aliases share
+  one physical lease and thread identity; noncanonical legacy keys fail closed;
+- structural config regressions scan alternate header and secret values across
+  private runtime files, ledger/artifacts, exceptions, and repository bytes,
+  while the active native profile still loads through the pinned runtime;
 - a disposable real Git repository sentinel plans and starts a bounded editing
   milestone, injects a controller stop after durable SDK identity, resumes in a
   fresh process, runs validation, and reaches one terminal structured result;
@@ -739,11 +754,10 @@ inherits the same native Codex permission authority and automatically follows
 later native restrictions. The bounded Git-authority snapshot remains required
 for HEAD/branch, refs, reflogs, index, repository/worktree configuration, and
 stable operation metadata, but it is evidence/contract enforcement rather than
-an OS sandbox claim. Schema v7 adds durable per-milestone workspace baselines
-and causal turn-start authority on top of schema v6, which replaces the obsolete
-single profile binding with immutable compatibility identity plus sanitized
-monotonic effective permission facts/digest while retaining Git-authority
-before/after evidence. The single corrected real SDK run reached
+an OS sandbox claim. Schema v8 retains schema v7 per-milestone baselines and
+causal turn-start authority, and adds accepted terminal HEAD/content facts for
+predecessor verification while preserving schema v6 monotonic permission and
+Git-authority evidence. The single corrected real SDK run reached
 the first SDK turn and injected post-turn crash boundary, then fresh-process
 resume failed because the native runtime had legitimately added private config
 state and reprojection treated that private change as source drift. The
@@ -1178,6 +1192,32 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   permission, and resume transport path did not change. H4 remains blocked
   pending fresh independent objective and architecture promotion review of
   this exact repair.
+- 2026-08-24: final architecture review confirmed five promotion blockers.
+  Implementation `06a332e` closes H3-ARCH-004A by rejecting discovery-root,
+  active-ancestor, multi-node, nested, and dangling link cycles on all native
+  discovery surfaces before adapter construction. It closes H3-ARCH-003A with
+  schema-v8 accepted terminal HEAD/mutable-root/Git-authority facts verified
+  before any successor baseline, lease, adapter, or external call; migrated v7
+  predecessors without reconstructable terminal facts require explicit
+  reconciliation. It closes H3-ARCH-001A with bounded no-follow directory-
+  topology deltas that expose empty-directory creation/removal/rename while
+  exempting only the actual repository-bound controller state tree. It closes
+  H3-ARCH-005 by canonicalizing physical repository/workspace paths before
+  capsule serialization and every execution/lease key or lookup, with legacy
+  noncanonical rows failing typed and closed. It closes H3-ARCH-006 through a
+  structural native-config projection: literal MCP HTTP headers and sensitive
+  stdio environment values become process-only environment references, while
+  raw authorization, proxy-authorization, cookie, arbitrary header, API key,
+  token, password, and client-secret bytes never enter durable private state.
+  The pinned runtime accepts the active projected `codex-lb` profile with zero
+  ephemeral secret references; its documented `env_http_headers` surface was
+  exercised directly without a provider turn. Focused H2/H3/SDK validation
+  passed 177 tests and `make check` passed all 200 tests plus formatting, lint,
+  validators, compileall, and pre-commit. The retained real sentinel was not
+  rerun because the active SDK/provider/model/permission route and projected
+  config are unchanged. Full-H3 self-review has zero open P0/P1; H4 remains
+  blocked pending fresh independent objective and architecture promotion
+  review of the exact repaired candidate.
 
 ## Next execution
 
@@ -1193,13 +1233,14 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: H3-ARCH-004 repair `84b3065`, deterministic gates, and the
-retained authorized real sentinel are green in the existing semantic workspace.
-The repaired H3 candidate is ready for fresh independent promotion review.
+Dispatch status: the five-finding H3 architecture repair is implemented in
+`06a332e`; deterministic gates and the retained authorized real sentinel are
+green in the existing semantic workspace. The repaired H3 candidate is ready
+for fresh independent promotion review.
 
-Next action: independently review the exact `84b3065` H3 candidate for objective
-and architecture promotion with zero open P0/P1. The retained real evidence proves
-the actual Python SDK route through `codex-lb`, sanitized native
+Next action: independently review the exact post-repair H3 HEAD for objective
+and architecture promotion with zero open P0/P1. The retained real evidence
+proves the actual Python SDK route through `codex-lb`, sanitized native
 permission/profile parity, the allowed workspace edit and durable resume,
 unchanged Git authority, and unchanged global Codex config bytes. External-
 write denial is not an H3 gate. H4 remains blocked until that review promotes
