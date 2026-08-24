@@ -1151,6 +1151,13 @@ class Controller:
             return self._cancel(run_id, milestone_id)
 
     def _cancel(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
+        current = self.ledger.get_execution(run_id, milestone_id)
+        if current.status in {
+            ExecutionStatus.COMPLETED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            return current
         return self.ledger.cancel_execution(run_id, milestone_id)
 
 

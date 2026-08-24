@@ -80,6 +80,13 @@ _REASON_CODES_SQL = ", ".join(f"'{reason.value}'" for reason in ReasonCode)
 _EVENT_TYPES = frozenset({"dispatch_claimed", "state_transition"})
 _EVENT_TYPES_SQL = ", ".join(f"'{event_type}'" for event_type in sorted(_EVENT_TYPES))
 _TURN_STARTING_MARKER: JsonObject = {"__controller_checkpoint": "turn_starting"}
+_TERMINAL_EXECUTION_STATUSES = frozenset(
+    {
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+    }
+)
 
 _SCHEMA_META_DDL = """CREATE TABLE schema_meta (
     key TEXT PRIMARY KEY NOT NULL CHECK(length(key) > 0),
@@ -1830,6 +1837,11 @@ class Ledger:
     # H3 controller facts
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _reject_terminal_execution(record: ExecutionRecord) -> None:
+        if record.status in _TERMINAL_EXECUTION_STATUSES:
+            raise StaleWriter("terminal execution rejects further mutation")
+
     def record_native_profile(
         self,
         run_id: RunId | str,
@@ -1847,6 +1859,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             execution = self.get_execution(run, milestone)
+            self._reject_terminal_execution(execution)
             if (
                 execution.status is not ExecutionStatus.PLANNED
                 or execution.checkpoint is not ControllerCheckpoint.WORKSPACE_LEASED
@@ -1895,6 +1908,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             execution = self.get_execution(run, milestone)
+            self._reject_terminal_execution(execution)
             if execution.status is not ExecutionStatus.THREAD_STARTED or execution.thread_id is None:
                 raise StaleWriter("native profile resume rebind requires a durable active SDK thread")
             current = self.get_execution_integrity(run, milestone)
@@ -1927,6 +1941,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             execution = self.get_execution(run, milestone)
+            self._reject_terminal_execution(execution)
             if execution.status is not ExecutionStatus.THREAD_STARTED or execution.thread_id is None:
                 raise StaleWriter("Git authority binding requires a durable active SDK thread")
             current = self.get_execution_integrity(run, milestone)
@@ -1982,6 +1997,7 @@ class Ledger:
             )
             if existing is not None:
                 record = self._execution_from_row(existing)
+                self._reject_terminal_execution(record)
                 expected = (
                     capsule_path,
                     capsule_digest,
@@ -2032,6 +2048,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             execution = self.get_execution(capsule.run_id, capsule.milestone_id)
+            self._reject_terminal_execution(execution)
             if execution.workspace_path != capsule.workspace_path:
                 raise WorkspaceLeaseConflict("durable execution selected a different workspace")
             active_statuses = tuple(
@@ -2143,6 +2160,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
+            self._reject_terminal_execution(current)
             if current.thread_id is not None:
                 if current.thread_id != thread_id:
                     raise StaleWriter("execution already owns a different SDK thread identity")
@@ -2193,6 +2211,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
+            self._reject_terminal_execution(current)
             if current.status is not ExecutionStatus.PLANNED:
                 raise StaleWriter("SDK thread start requires a planned execution")
             if current.checkpoint is ControllerCheckpoint.THREAD_STARTING:
@@ -2216,6 +2235,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
+            self._reject_terminal_execution(current)
             if (
                 current.status is not ExecutionStatus.PLANNED
                 or current.checkpoint is not ControllerCheckpoint.THREAD_STARTING
@@ -2236,6 +2256,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
+            self._reject_terminal_execution(current)
             if current.status is not ExecutionStatus.THREAD_STARTED or current.thread_id is None:
                 raise StaleWriter("turn start requires a durable SDK thread")
             if current.turn_id is not None:
@@ -2259,6 +2280,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
+            self._reject_terminal_execution(current)
             if current.status is not ExecutionStatus.THREAD_STARTED or current.thread_id is None:
                 raise StaleWriter("turn observation requires a durable active SDK thread")
             if current.thread_id != observation.thread_id:
@@ -2324,8 +2346,7 @@ class Ledger:
         )
         with self._transaction():
             current = self.get_execution(run, milestone)
-            if current.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}:
-                return current
+            self._reject_terminal_execution(current)
             if current.status is not ExecutionStatus.THREAD_STARTED or current.turn_id is None:
                 raise StaleWriter("terminal result requires a durable SDK turn")
             integrity = self.get_execution_integrity(run, milestone)
@@ -2398,8 +2419,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             current = self.get_execution(run, milestone)
-            if current.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                return current
+            self._reject_terminal_execution(current)
             workflow = self.get_milestone(run, milestone)
             if workflow.state in TERMINAL_STATES:
                 return current

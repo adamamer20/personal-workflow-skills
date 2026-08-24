@@ -54,6 +54,7 @@ from codex_flow.ledger import (
     CURRENT_SCHEMA_VERSION,
     CorruptSchemaError,
     Ledger,
+    RecordNotFound,
     StaleWriter,
     WorkspaceLeaseConflict,
 )
@@ -714,58 +715,202 @@ def test_cancel_is_idempotent_and_keeps_workspace() -> None:
         controller.close()
 
 
-def test_cancelled_execution_rejects_all_turn_checkpoint_mutators_after_reopen() -> None:
+def test_nonterminal_controller_fact_mutators_preserve_contractual_idempotency() -> None:
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
         base, branch = _repository(repository)
+        capsule = _capsule(repository, repository, base, branch)
         controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
-        controller.plan(_capsule(repository, repository, base, branch))
-        cancelled = controller.cancel("run", "m1")
-        controller.close()
+        planned = controller.plan(capsule)
+        assert (
+            controller.ledger.plan_execution(
+                capsule,
+                capsule_path=planned.capsule_path,
+                capsule_sha256=planned.capsule_sha256,
+                protected_before_sha256=planned.protected_before_sha256,
+            )
+            == planned
+        )
 
-        reopened = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        lease = controller.ledger.acquire_workspace_lease(capsule)
+        assert controller.ledger.acquire_workspace_lease(capsule) == lease
         authority = NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
+        profile = controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority)
+        assert controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority) == profile
+        controller.ledger.claim_dispatch("run", "m1", "executor", 1)
+        thread_starting = controller.ledger.record_thread_starting("run", "m1")
+        assert controller.ledger.record_thread_starting("run", "m1") == thread_starting
+        thread = ThreadIdentity("thread-idempotent")
+        thread_started = controller.ledger.record_thread_identity("run", "m1", thread)
+        assert controller.ledger.record_thread_identity("run", "m1", thread) == thread_started
+        git_before = controller.ledger.record_git_authority_before("run", "m1", "2" * 64)
+        assert controller.ledger.record_git_authority_before("run", "m1", "2" * 64) == git_before
+        turn_starting = controller.ledger.record_turn_starting("run", "m1")
+        assert controller.ledger.record_turn_starting("run", "m1") == turn_starting
         observation = TurnObservation(
-            ThreadIdentity("thread-stale"),
-            "turn-stale",
+            thread,
+            "turn-idempotent",
             "completed",
             json.dumps({"status": "done"}),
             {"status": "done"},
             (),
         )
-        validation = ValidationObservation(
-            ("true",),
-            0,
-            "0" * 64,
-            "0" * 64,
-            False,
-            0.01,
+        turn = controller.ledger.record_turn("run", "m1", observation)
+        assert controller.ledger.record_turn("run", "m1", observation) == turn
+        assert planned.status is ExecutionStatus.PLANNED
+        controller.close()
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED),
+)
+def test_terminal_execution_rejects_every_public_controller_fact_mutator_after_reopen(
+    terminal_status: ExecutionStatus,
+) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        capsule = _capsule(repository, repository, base, branch)
+        if terminal_status is ExecutionStatus.FAILED:
+            capsule = replace(capsule, validation=ValidationSpec(("false",), 5))
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(_service()),
+            _trusted_test_native_profile=_test_native_profile(root / "native-home"),
         )
-        calls = (
-            lambda: reopened.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority),
-            lambda: reopened.ledger.record_thread_starting("run", "m1"),
-            lambda: reopened.ledger.record_pre_identity_uncertainty("run", "m1"),
-            lambda: reopened.ledger.record_thread_identity("run", "m1", ThreadIdentity("thread-stale")),
-            lambda: reopened.ledger.record_git_authority_before("run", "m1", "2" * 64),
-            lambda: reopened.ledger.record_turn_starting("run", "m1"),
-            lambda: reopened.ledger.record_turn("run", "m1", observation),
-            lambda: reopened.ledger.rebind_native_profile_for_resume("run", "m1", "0" * 64, "1" * 64, authority),
-            lambda: reopened.ledger.record_terminal_execution(
-                "run",
-                "m1",
-                result={"status": "done"},
-                validation=validation,
-                protected_after_sha256="3" * 64,
-                git_authority_after_sha256="4" * 64,
-            ),
+        controller.plan(capsule)
+        terminal = (
+            controller.cancel("run", "m1")
+            if terminal_status is ExecutionStatus.CANCELLED
+            else controller.start("run", "m1")
         )
-        for call in calls:
+        assert terminal.status is terminal_status
+        try:
+            integrity = controller.ledger.get_execution_integrity("run", "m1")
+        except KeyError:
+            integrity = None
+        controller.close()
+
+        authority = (
+            integrity.effective_permission
+            if integrity is not None and integrity.effective_permission is not None
+            else NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
+        )
+        profile_sha256 = integrity.native_profile_sha256 if integrity is not None else "0" * 64
+        compatibility_sha256 = integrity.native_compatibility_sha256 if integrity is not None else "1" * 64
+        git_before_sha256 = (
+            integrity.git_authority_before_sha256
+            if integrity is not None and integrity.git_authority_before_sha256 is not None
+            else "2" * 64
+        )
+        git_after_sha256 = (
+            integrity.git_authority_after_sha256
+            if integrity is not None and integrity.git_authority_after_sha256 is not None
+            else "4" * 64
+        )
+        observation = TurnObservation(
+            terminal.thread_id or ThreadIdentity("thread-stale"),
+            terminal.turn_id or "turn-stale",
+            "completed",
+            json.dumps({"status": "done"}),
+            {"status": "done"},
+            (),
+        )
+        validation = terminal.validation or ValidationObservation(("true",), 0, "0" * 64, "0" * 64, False, 0.01)
+        result = terminal.result or {"status": "done"}
+        protected_after_sha256 = terminal.protected_after_sha256 or "3" * 64
+        database_path = repository / ".codex-flow" / "workflow.db"
+
+        def rows(current: Controller) -> tuple[Any, ...]:
+            try:
+                current_integrity = current.ledger.get_execution_integrity("run", "m1")
+            except KeyError:
+                current_integrity = None
+            try:
+                lease = current.ledger.get_workspace_lease(repository)
+            except RecordNotFound:
+                lease = None
+            return (
+                current.status("run", "m1"),
+                current_integrity,
+                lease,
+                current.ledger.sdk_lifecycle_events("run", "m1"),
+                current.ledger.events("run", "m1"),
+                current.ledger.snapshot("run"),
+            )
+
+        mutator_names = (
+            "record_native_profile",
+            "rebind_native_profile_for_resume",
+            "record_git_authority_before",
+            "plan_execution",
+            "acquire_workspace_lease",
+            "record_thread_identity",
+            "record_thread_starting",
+            "record_pre_identity_uncertainty",
+            "record_turn_starting",
+            "record_turn",
+            "record_terminal_execution",
+            "cancel_execution",
+        )
+
+        def mutate(current: Controller, mutator_name: str) -> None:
+            if mutator_name == "record_native_profile":
+                current.ledger.record_native_profile("run", "m1", profile_sha256, compatibility_sha256, authority)
+            elif mutator_name == "rebind_native_profile_for_resume":
+                current.ledger.rebind_native_profile_for_resume(
+                    "run", "m1", profile_sha256, compatibility_sha256, authority
+                )
+            elif mutator_name == "record_git_authority_before":
+                current.ledger.record_git_authority_before("run", "m1", git_before_sha256)
+            elif mutator_name == "plan_execution":
+                current.ledger.plan_execution(
+                    capsule,
+                    capsule_path=terminal.capsule_path,
+                    capsule_sha256=terminal.capsule_sha256,
+                    protected_before_sha256=terminal.protected_before_sha256,
+                )
+            elif mutator_name == "acquire_workspace_lease":
+                current.ledger.acquire_workspace_lease(capsule)
+            elif mutator_name == "record_thread_identity":
+                current.ledger.record_thread_identity("run", "m1", terminal.thread_id or ThreadIdentity("thread-stale"))
+            elif mutator_name == "record_thread_starting":
+                current.ledger.record_thread_starting("run", "m1")
+            elif mutator_name == "record_pre_identity_uncertainty":
+                current.ledger.record_pre_identity_uncertainty("run", "m1")
+            elif mutator_name == "record_turn_starting":
+                current.ledger.record_turn_starting("run", "m1")
+            elif mutator_name == "record_turn":
+                current.ledger.record_turn("run", "m1", observation)
+            elif mutator_name == "record_terminal_execution":
+                current.ledger.record_terminal_execution(
+                    "run",
+                    "m1",
+                    result=result,
+                    validation=validation,
+                    protected_after_sha256=protected_after_sha256,
+                    git_authority_after_sha256=git_after_sha256,
+                )
+            elif mutator_name == "cancel_execution":
+                current.ledger.cancel_execution("run", "m1")
+            else:
+                raise AssertionError(f"unhandled public mutator: {mutator_name}")
+
+        for mutator_name in mutator_names:
+            bytes_before = database_path.read_bytes()
+            reopened = Controller(
+                repository,
+                _trusted_test_adapter_factory=_factory(_service()),
+                _trusted_test_native_profile=_test_native_profile(root / f"native-home-{mutator_name}"),
+            )
+            rows_before = rows(reopened)
             with pytest.raises(StaleWriter):
-                call()
-        after = reopened.status("run", "m1")
-        assert after == cancelled
-        assert reopened.ledger.sdk_lifecycle_events("run", "m1") == ()
-        reopened.close()
+                mutate(reopened, mutator_name)
+            assert rows(reopened) == rows_before
+            reopened.close()
+            assert database_path.read_bytes() == bytes_before
 
 
 def test_cli_plan_status_and_cancel_emit_stable_json() -> None:

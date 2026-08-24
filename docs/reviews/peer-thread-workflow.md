@@ -1112,6 +1112,23 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   The prior passing real sentinel remains the production-route evidence; no new
   live run was consumed because transport/provider/model behavior did not
   change. H4 remains blocked pending fresh objective and architecture reviews.
+- 2026-08-24: objective re-review of `e580d291` returned P0=0/P1=1/P2=0:
+  terminal ledger calls could still acknowledge identical thread-identity and
+  terminal-result payloads without changing durable state. The bounded repair
+  now applies one terminal-execution guard before every equality/idempotency
+  branch across all 12 public H3 execution, checkpoint, lease, and integrity
+  mutators. Controller cancellation retains command-level idempotency through
+  a read-only terminal precheck. A table-driven close/reopen regression covers
+  COMPLETED, FAILED, and CANCELLED against every mutator and proves exact
+  database bytes, typed rows, lifecycle events, and workflow events remain
+  unchanged after each rejected stale call; a complementary regression retains
+  contractual nonterminal idempotency. Focused H2/H3/SDK tests passed 103 tests
+  and `make check` passed all 126 tests plus formatting, lint, validator,
+  compileall, and pre-commit; `git diff --check` is clean. Full H3 self-review
+  found zero open P0/P1. The passing real sentinel was not rerun because this
+  repair changes only hermetic ledger acknowledgement semantics, not the proven
+  provider/profile/permission route. H4 remains blocked pending fresh objective
+  and architecture promotion reviews.
 
 ## Next execution
 
@@ -1127,9 +1144,10 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: the objective-review repair, deterministic gates, and the
-retained authorized real sentinel are green in the existing semantic workspace.
-The repaired H3 candidate is ready for fresh independent promotion review.
+Dispatch status: the terminal-acknowledgement repair, deterministic gates, and
+the retained authorized real sentinel are green in the existing semantic
+workspace. The repaired H3 candidate is ready for fresh independent promotion
+review.
 
 Next action: independently review the exact H3 candidate for objective and
 architecture promotion with zero open P0/P1. The retained real evidence proves
