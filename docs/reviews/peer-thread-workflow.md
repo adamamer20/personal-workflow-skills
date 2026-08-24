@@ -491,14 +491,58 @@ for the same schema/path-integrity finding classes. The repository circuit
 breaker therefore prohibits another Luna repair and routes one fresh bounded
 continuation to Sol Medium without weakening H2 acceptance or opening H3.
 
-Sol continuation candidate: `a01596d` on parent `d32e190`; full H2 review range
-is `fab4cb6..a01596d`. It changes only `domain.py`, `ledger.py`, `artifacts.py`,
-and focused H2 tests. The executor and planning owner both ran `make check`
-successfully with 53 tests; focused H2 has 24 passing tests, diff checks are
-clean, and the executor worktree is clean. The candidate claims all five P1 and
-two P2 findings closed while retaining persisted v2 identity
-`codex_flow_h2_v2`. It remains unpromoted pending the fresh independent Sol High
-critical integrity review below.
+Rejected Sol continuation candidate: `a01596d` on parent `d32e190`; full H2
+review range is `fab4cb6..a01596d`. It changes only `domain.py`, `ledger.py`,
+`artifacts.py`, and focused H2 tests. The executor and planning owner both ran
+`make check` successfully with 53 tests; focused H2 has 24 passing tests, diff
+checks are clean, and the executor worktree is clean. Independent Sol High
+review denied promotion with P0=0/P1=3/P2=2. This commit remains evidence only
+and must not be integrated or promoted.
+
+Stable closure from the Sol High review: `H2-INT-001`, `H2-SEC-001`,
+`H2-SEC-003`, `H2-INT-003`, `H2-API-002`, `H2-API-003`, and `H2-API-004` are
+closed. `H2-SCHEMA-001`, `H2-SEC-002`, and `H2-INT-002` remain P1;
+`H2-API-001` remains partially open at P2 and new `H2-SEC-004` is P2.
+
+Required Sol repair-cycle-2 decisions:
+
+- Canonical schema identity covers the complete non-internal `sqlite_master`
+  object inventory, including object type, name, owning table, and exact owned
+  SQL where present. Reject every extra non-`sqlite_*` table, index, view, or
+  trigger before authority; continue validating internal autoindexes through
+  the exact constraint and PRAGMA checks. Fresh and migrated v2 inventories
+  must remain identical.
+- Audit every public mutator so a reported-successful create, claim, or
+  transition re-reads and validates its exact durable row/state/event inside the
+  transaction before commit. A trigger or other noncanonical object cannot
+  erase or rewrite a successful result silently, even if introduced after open.
+- Treat one successful first open as binding the Ledger instance to that exact
+  database device/inode. Preserve the expected identity across `close()` and
+  require it on `open()`/`reopen()`; never silently adopt another valid v2 file.
+  Reject `st_nlink != 1` at pinning and around every write transaction, and
+  revalidate the descriptor, directory entry, expected identity, and link count
+  before commit so a hardlink cannot export writes outside the repository.
+- Distinguish opening an existing file from atomically creating a missing file.
+  Track ownership of a newly created inode. If first open fails, remove only
+  that still-matching, single-link, empty/uncommitted owned inode through the
+  pinned parent descriptor; never delete a substituted path or a pre-existing
+  file. Preserve concurrent-first-opener behavior and close all descriptors.
+- Make the transition predicate itself the single canonical policy in code,
+  with no mutable/rebindable backing mapping or class attribute. Ledger calls
+  that predicate directly. Any exported transition mapping is a derived
+  read-only diagnostic whose mutation or rebinding cannot affect validation;
+  remove `StateMachine` if it provides no distinct required contract.
+- Restore root `codex_flow.__init__` exports to the exact H1 public baseline.
+  H2 remains available through explicit `codex_flow.domain`,
+  `codex_flow.ledger`, and `codex_flow.artifacts` modules; do not re-export H2
+  records, diagnostics, policy constants, projector internals, or exception
+  taxonomy from the package root without a real caller.
+
+This is failed Sol Medium repair/review cycle 1. Ordinary bounded repair resumes
+the same Sol Medium execution task and worktree. If the next independent review
+reopens any of these material schema/path/transition classes, the two-cycle Sol
+Medium circuit breaker routes one final fresh implementation continuation to Sol
+High; it does not permit another same-context loop or weaker acceptance.
 
 ### Successor milestone
 
@@ -657,57 +701,62 @@ installed-plugin and downstream-pin migration.
   successfully with 53 tests in the clean executor worktree. H2 remains
   unintegrated and H3 remains blocked pending one fresh independent Sol High
   review of the exact repair and full H2 range.
+- 2026-08-24: independent Sol High review denied `a01596d` with
+  P0=0/P1=3/P2=2 despite a green `make check`. It confirmed seven prior finding
+  classes closed, but reproduced an accepted extra trigger/view/index that
+  deletes a run while `create_run` reports success, writes escaping through a
+  pre-existing hardlink, silent adoption of a different valid ledger across
+  close/reopen, mutation of the transition policy's private backing dictionary,
+  broad unused root exports, and a zero-byte residue after failed first open.
+  H2 remains unintegrated and H3 remains blocked. Sol Medium repair/review cycle
+  1 failed; the same executor receives one bounded cycle-2 repair under the
+  decisions above.
 
 ## Next execution
 
-Milestone: H2-P3 — independently review Sol repair `a01596d` and the full H2
-range `fab4cb6..a01596d` for promotion.
+Milestone: H2-R3S — bounded repair cycle 2 on rejected Sol candidate `a01596d`.
 
-Dispatch status: queued once as
-`client-new-thread:c2253e11-e074-460d-bbd7-41e8ab635301` on native host
-`local`; do not reuse either implementation owner or either earlier reviewer,
-poll readiness, or retry creation.
+Dispatch status: pending exactly one MESSAGE to the existing Sol Medium
+execution task `01a03327-44bd-7240-9120-dc6949c5c349` on host `local`; do not
+create a replacement or apply a model override.
 
-Resolved route: `model=gpt-5.6-sol`, `thinking=high`.
+Resolved route: existing `model=gpt-5.6-sol`, `thinking=medium` execution owner;
+the MESSAGE operation resumes that task without native routing fields.
 
-Routing authorization: applicable user-owned root `AGENTS.md` policy for a
-critical architecture/security review after repeated ledger integrity failures.
-The native schema advertised the exact pair and accepted both fields in the
-queued creation request.
+Routing authorization: ordinary repair returns to the same H2 executor under
+the canonical H2 promotion contract. This is Sol Medium cycle 2 of at most 2.
 
 Planning thread: `01a032b0-8da1-7f20-bd7c-437be7538082`; callback host is
 `local`.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`.
 
-Owned surfaces: read-only inspection and validation of exact target `a01596d`,
-its repair range `d32e190..a01596d`, and full H2 range
-`fab4cb6..a01596d`; no source, test, plan, artifact, Git-history, or external-
-state mutation.
+Owned surfaces: continue from exact rejected target `a01596d`; modify only
+`src/codex_flow/domain.py`, `src/codex_flow/ledger.py`,
+`src/codex_flow/__init__.py`, and `tests/test_h2_ledger.py`; create one safe
+local repair commit on top of `a01596d` after inspecting the full H2 range.
 
-Protected surfaces: every repository path and candidate commit; H1
-adapter/sentinel/evidence, canonical plan, root tooling/instructions, plugin and
-skill code, dirty primary checkout, global Codex state, remotes, downstream
-repositories, unrelated worktrees, and H3+ execution/controller logic.
+Protected surfaces: immutable candidates `6db6146`, `d32e190`, and `a01596d`;
+`artifacts.py`, H1 adapter/sentinel/evidence, canonical plan, root tooling and
+instructions, plugin and skill code, dirty primary checkout, global Codex state,
+remotes, downstream repositories, unrelated worktrees, and H3+ logic.
 
-Acceptance: independently reproduce or refute closure of every stable and new
-finding across both rejected candidates and the Sol repair. Review beyond the
-repository tests. Verify canonical DDL structurally cannot be counterfeited,
-migrated and fresh v2 converge, every state/event/dispatch history is causal,
-transition policy is immutable, identifiers reject non-strings, public APIs
-cannot bypass atomic state ownership, and every successful write is reopenable.
-Adversarially test path, symlink, hardlink, inode-substitution, journal/locking,
-cleanup, close, and reopen behavior for the pinned `/proc/self/fd` SQLite path,
-plus anchored artifact projection. Recheck all 121 ledger edges, migration
-rollback, process races, fault rollback, durable-field exclusion, minimal API,
-direct-interface rules, exact diff scope, `make check`, and `git diff --check`.
-Return `ACCEPTED` only with zero open P0/P1 and no material scope deviation.
+Acceptance: implement every cycle-2 decision above and add stable regressions
+for extra trigger/view/index rejection, trigger-deleted write detection,
+pre-existing and mid-transaction hardlinks, valid-file substitution across
+reopen, transition-policy mutation/rebinding, exact H1 root exports, and safe
+failed-first-open cleanup. Preserve all previously green H2 matrix, causal
+history, migration, concurrency, rollback, sensitive-field, path, artifact,
+identifier, and API tests. Run focused H2 tests, `make check`,
+`git diff --check`, exact staged-path review, and full `fab4cb6..HEAD`
+self-review; finish with zero open P0/P1 and a clean worktree.
 
-Escalate only for: any surviving or new reproducible P0/P1, a material H2 plan
-or repository-instruction deviation, changed review target, inability to inspect
-the exact full range, or a required external side effect. Return findings and a
-stable reproduction; do not repair, integrate, or start H3 in the review task.
+Escalate only for: inability to preserve concurrent first-open semantics while
+performing safe owned-file cleanup, an inode/link invariant unavailable on the
+supported Linux runtime, a required public/persisted contract change outside
+the frozen decisions, a finding requiring a protected surface/external side
+effect, or an unresolved P0/P1 after ordinary repair. Do not start H3.
 
-Completion callback: return exactly one terminal `REVIEW_RESULT`, accurately
+Completion callback: return exactly one terminal `COMPLETION`, accurately
 labelled `BLOCKED`, or `FAILED` packet to planning thread
 `01a032b0-8da1-7f20-bd7c-437be7538082` on host `local`.
