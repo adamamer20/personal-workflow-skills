@@ -87,8 +87,8 @@ class CodexSdkConfig:
     def __post_init__(self) -> None:
         if not self.model.strip():
             raise ValueError("model must be explicit and non-empty")
-        if self.sandbox is not Sandbox.READ_ONLY:
-            raise ValueError("H1 requires the read-only sandbox")
+        if self.sandbox not in {Sandbox.READ_ONLY, Sandbox.WORKSPACE_WRITE}:
+            raise ValueError("controller SDK execution supports read-only or workspace-write sandboxing")
         if self.cwd is not None and not self.cwd.is_dir():
             raise ValueError(f"SDK working directory does not exist: {self.cwd}")
 
@@ -343,8 +343,11 @@ class CodexSdkAdapter:
     def resume_thread(self, thread: ThreadIdentity) -> ThreadIdentity:
         """Resume exactly the addressable thread and reject identity changes."""
 
-        client = self._require_client()
+        created_client = self._client is None
         try:
+            if self._client is None:
+                self._client = self._client_factory()
+            client = self._require_client()
             raw_thread = client.thread_resume(
                 thread.id,
                 approval_mode=_wire_approval_mode(self._sdk),
@@ -354,10 +357,16 @@ class CodexSdkAdapter:
             )
             resumed = _identity(raw_thread)
         except UnsupportedCapability:
+            if created_client:
+                self.close()
             raise
         except Exception as exc:
+            if created_client:
+                self.close()
             raise TerminalFailureAfterIdentity(f"SDK resume failed after thread identity {thread.id!r}") from exc
         if resumed.id != thread.id:
+            if created_client:
+                self.close()
             raise TerminalFailureAfterIdentity(
                 f"SDK resume changed thread identity from {thread.id!r} to {resumed.id!r}"
             )

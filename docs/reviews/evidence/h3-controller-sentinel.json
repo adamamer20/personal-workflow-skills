@@ -1,0 +1,374 @@
+{
+  "crash_injected_after_identity": true,
+  "dispatch_count": 1,
+  "durable_after_crash": {
+    "capsule_path": "/tmp/codex-flow-h3-sentinel-t8hkz9c0/repository/.codex-flow/capsules/h3-sentinel/edit.json",
+    "capsule_sha256": "346f65e7a080d5d397c91ae753c0421cac052436f1f7c6de88dbfb816ce7d86e",
+    "checkpoint": "turn_durable",
+    "created_at": "2026-08-24T12:25:52.731714Z",
+    "milestone_id": "edit",
+    "model": "gpt-5.6-luna",
+    "protected_after_sha256": null,
+    "protected_before_sha256": "4f6733594b89edc8ddd477b4ff1a0fd961bdfdad5caf062e07322717f54f27a2",
+    "reasoning_effort": "medium",
+    "result": null,
+    "run_id": "h3-sentinel",
+    "status": "thread_started",
+    "thread_id": "01a033bb-fd3b-7a03-92c2-bafd0c6715db",
+    "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2",
+    "updated_at": "2026-08-24T12:26:08.653447Z",
+    "validation": null,
+    "workspace_path": "/tmp/codex-flow-h3-sentinel-t8hkz9c0/repository.worktrees/sdk-controller-sentinel"
+  },
+  "git_status": [
+    "?? result.txt"
+  ],
+  "ordered_lifecycle_events": [
+    {
+      "method": "turn/started",
+      "sequence": 0,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "hook/started",
+      "sequence": 1,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "hook/completed",
+      "sequence": 2,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 3,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 4,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 5,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 6,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 7,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 8,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 9,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 10,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 11,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 12,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 13,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 14,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 15,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 16,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 17,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 18,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 19,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 20,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 21,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "sequence": 22,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 23,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 24,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 25,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 26,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "turn/diff/updated",
+      "sequence": 27,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "sequence": 28,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "turn/diff/updated",
+      "sequence": 29,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 30,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 31,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 32,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 33,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "sequence": 34,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "turn/diff/updated",
+      "sequence": 35,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 36,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 37,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/started",
+      "sequence": 38,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 39,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 40,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 41,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 42,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 43,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 44,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 45,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 46,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 47,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 48,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 49,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "item/completed",
+      "sequence": 50,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "sequence": 51,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "turn/diff/updated",
+      "sequence": 52,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "hook/started",
+      "sequence": 53,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "hook/completed",
+      "sequence": 54,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    },
+    {
+      "method": "turn/completed",
+      "sequence": 55,
+      "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2"
+    }
+  ],
+  "planned": {
+    "capsule_path": "/tmp/codex-flow-h3-sentinel-t8hkz9c0/repository/.codex-flow/capsules/h3-sentinel/edit.json",
+    "capsule_sha256": "346f65e7a080d5d397c91ae753c0421cac052436f1f7c6de88dbfb816ce7d86e",
+    "checkpoint": "capsule_planned",
+    "created_at": "2026-08-24T12:25:52.731714Z",
+    "milestone_id": "edit",
+    "model": "gpt-5.6-luna",
+    "protected_after_sha256": null,
+    "protected_before_sha256": "4f6733594b89edc8ddd477b4ff1a0fd961bdfdad5caf062e07322717f54f27a2",
+    "reasoning_effort": "medium",
+    "result": null,
+    "run_id": "h3-sentinel",
+    "status": "planned",
+    "thread_id": null,
+    "turn_id": null,
+    "updated_at": "2026-08-24T12:25:52.731714Z",
+    "validation": null,
+    "workspace_path": "/tmp/codex-flow-h3-sentinel-t8hkz9c0/repository.worktrees/sdk-controller-sentinel"
+  },
+  "projection_exists_after_result": true,
+  "protected_digest_unchanged": true,
+  "result_file": "controller sentinel passed\n",
+  "status": "passed",
+  "terminal": {
+    "capsule_path": "/tmp/codex-flow-h3-sentinel-t8hkz9c0/repository/.codex-flow/capsules/h3-sentinel/edit.json",
+    "capsule_sha256": "346f65e7a080d5d397c91ae753c0421cac052436f1f7c6de88dbfb816ce7d86e",
+    "checkpoint": "result_durable",
+    "created_at": "2026-08-24T12:25:52.731714Z",
+    "milestone_id": "edit",
+    "model": "gpt-5.6-luna",
+    "protected_after_sha256": "4f6733594b89edc8ddd477b4ff1a0fd961bdfdad5caf062e07322717f54f27a2",
+    "protected_before_sha256": "4f6733594b89edc8ddd477b4ff1a0fd961bdfdad5caf062e07322717f54f27a2",
+    "reasoning_effort": "medium",
+    "result": {
+      "changed_file": "result.txt",
+      "status": "created"
+    },
+    "run_id": "h3-sentinel",
+    "status": "completed",
+    "thread_id": "01a033bb-fd3b-7a03-92c2-bafd0c6715db",
+    "turn_id": "01a033bb-fddc-77d2-8ea9-8807f1ab67c2",
+    "updated_at": "2026-08-24T12:26:08.976604Z",
+    "validation": {
+      "argv": [
+        "python3",
+        "-c",
+        "from pathlib import Path; assert Path('result.txt').read_text() == 'controller sentinel passed\\n'; assert Path('protected.txt').read_text() == 'must remain unchanged\\n'"
+      ],
+      "duration_seconds": 0.01345729490276426,
+      "exit_code": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timed_out": false
+    },
+    "workspace_path": "/tmp/codex-flow-h3-sentinel-t8hkz9c0/repository.worktrees/sdk-controller-sentinel"
+  },
+  "thread_identity_reused": true,
+  "workspace_lease": {
+    "base_sha": "fac4b676cc7ddcb01017c0a96ba90083913d6590",
+    "branch": "agent/sdk-controller-sentinel",
+    "lane": "sdk-controller-sentinel",
+    "mode": "managed_worktree",
+    "owner_run_id": "h3-sentinel",
+    "path": "/tmp/codex-flow-h3-sentinel-t8hkz9c0/repository.worktrees/sdk-controller-sentinel",
+    "repository_root": "/tmp/codex-flow-h3-sentinel-t8hkz9c0/repository"
+  }
+}

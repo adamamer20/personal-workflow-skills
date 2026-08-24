@@ -715,7 +715,7 @@ class LedgerTests(unittest.TestCase):
             self.assertNotIn("closed_at", {row[1] for row in connection.execute("PRAGMA table_info(runs)")})
             connection.close()
             migrated = Ledger(path)
-            self.assertEqual(int(migrated.schema_version), 2)
+            self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
             self.assertIn("closed_at", migrated.schema_columns("runs"))
             self.assertEqual(migrated.current_state("r", "m"), WorkflowState.STARTING)
             self.assertEqual(migrated.get_dispatch("r/m/executor/1").role, "executor")

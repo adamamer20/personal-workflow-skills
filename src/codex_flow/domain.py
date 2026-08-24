@@ -7,10 +7,12 @@ Codex process or importing the SDK in its domain code.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import TypeAlias
 
@@ -137,6 +139,7 @@ class UnsupportedCapability(CodexFlowError):
 
 
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_LANE_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 
 
 class _ValidatedIdentifier(str):
@@ -462,3 +465,149 @@ class LedgerSnapshot:
     milestones: tuple[MilestoneRecord, ...]
     dispatches: tuple[DispatchClaim, ...]
     events: tuple[EventRecord, ...]
+
+
+# ---------------------------------------------------------------------------
+# H3 execution workspace and controller contracts
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceMode(str, Enum):
+    CURRENT_CHECKOUT = "current_checkout"
+    EXISTING_WORKTREE = "existing_worktree"
+    MANAGED_WORKTREE = "managed_worktree"
+
+
+class ExecutionStatus(str, Enum):
+    PLANNED = "planned"
+    THREAD_STARTED = "thread_started"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNCERTAIN_PRE_IDENTITY = "uncertain_pre_identity"
+
+
+class ControllerCheckpoint(str, Enum):
+    CAPSULE_PLANNED = "capsule_planned"
+    WORKSPACE_LEASED = "workspace_leased"
+    THREAD_STARTING = "thread_starting"
+    THREAD_IDENTITY_DURABLE = "thread_identity_durable"
+    TURN_DURABLE = "turn_durable"
+    VALIDATION_DURABLE = "validation_durable"
+    RESULT_DURABLE = "result_durable"
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationSpec:
+    argv: tuple[str, ...]
+    timeout_seconds: float
+
+    def __post_init__(self) -> None:
+        if not self.argv or any(not isinstance(item, str) or not item for item in self.argv):
+            raise ValueError("validation argv must contain non-empty strings")
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError("validation timeout must be positive")
+
+
+def _relative_paths(values: tuple[str, ...], *, label: str) -> None:
+    seen: set[str] = set()
+    for value in values:
+        path = Path(value)
+        if (
+            not value
+            or value == "."
+            or path.is_absolute()
+            or ".." in path.parts
+            or path.as_posix() != value
+            or value in seen
+        ):
+            raise ValueError(f"{label} must contain unique repository-relative paths")
+        seen.add(value)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCapsule:
+    capsule_version: int
+    run_id: RunId
+    milestone_id: MilestoneId
+    repository_root: Path
+    workspace_mode: WorkspaceMode
+    workspace_path: Path
+    branch: str
+    base_sha: str
+    lane: str
+    mutable_paths: tuple[str, ...]
+    protected_paths: tuple[str, ...]
+    validation: ValidationSpec
+    model: str
+    reasoning_effort: ReasoningEffort
+    prompt: str
+    output_schema: JsonObject
+
+    def __post_init__(self) -> None:
+        if self.capsule_version != 1:
+            raise ValueError("unsupported execution capsule version")
+        if not self.repository_root.is_absolute() or not self.workspace_path.is_absolute():
+            raise ValueError("repository and workspace paths must be absolute")
+        if _LANE_PATTERN.fullmatch(self.lane) is None:
+            raise ValueError("workspace lane must be a lowercase semantic slug")
+        if not self.branch or any(character.isspace() for character in self.branch):
+            raise ValueError("execution branch must be explicit and whitespace-free")
+        if self.workspace_mode is WorkspaceMode.MANAGED_WORKTREE and self.branch != f"agent/{self.lane}":
+            raise ValueError("managed worktree branch must match agent/<lane>")
+        if len(self.base_sha) != 40 or re.fullmatch(r"[0-9a-f]{40}", self.base_sha) is None:
+            raise ValueError("base SHA must be a resolved lowercase 40-character Git SHA")
+        _relative_paths(self.mutable_paths, label="mutable paths")
+        _relative_paths(self.protected_paths, label="protected paths")
+        for mutable in map(Path, self.mutable_paths):
+            for protected in map(Path, self.protected_paths):
+                if mutable == protected or mutable in protected.parents or protected in mutable.parents:
+                    raise ValueError("mutable and protected paths must not overlap")
+        if not self.model.strip() or not self.prompt.strip():
+            raise ValueError("model and prompt must be explicit")
+        if self.output_schema.get("type") != "object":
+            raise ValueError("execution output schema must require an object")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceLeaseRecord:
+    workspace_path: Path
+    repository_root: Path
+    mode: WorkspaceMode
+    branch: str
+    base_sha: str
+    lane: str
+    owner_run_id: RunId
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationObservation:
+    argv: tuple[str, ...]
+    exit_code: int
+    stdout_sha256: str
+    stderr_sha256: str
+    timed_out: bool
+    duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecord:
+    run_id: RunId
+    milestone_id: MilestoneId
+    workspace_path: Path
+    capsule_path: Path
+    capsule_sha256: str
+    model: str
+    reasoning_effort: ReasoningEffort
+    status: ExecutionStatus
+    checkpoint: ControllerCheckpoint
+    thread_id: ThreadIdentity | None
+    turn_id: str | None
+    turn_output: JsonObject | None
+    result: JsonObject | None
+    validation: ValidationObservation | None
+    protected_before_sha256: str
+    protected_after_sha256: str | None
+    created_at: str
+    updated_at: str

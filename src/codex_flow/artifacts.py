@@ -286,3 +286,67 @@ def rebuild_projections(
     """Convenience function for the canonical projection path."""
 
     return ArtifactProjector(repository_root, fault_injector=fault_injector).rebuild(ledger, run_id)
+
+
+def write_owned_artifact(
+    repository_root: str | Path,
+    relative_path: str | Path,
+    content: bytes,
+    *,
+    replace: bool,
+) -> Path:
+    """Write one controller-owned file through pinned no-follow directories."""
+
+    root = _repository_root(repository_root)
+    relative = Path(relative_path)
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise UnsafeArtifactPath("owned artifact path must be repository-relative")
+    descriptors = [_open_directory_chain(root)]
+    try:
+        for component in relative.parts[:-1]:
+            descriptors.append(_open_child_directory(descriptors[-1], component))
+        directory_fd = descriptors[-1]
+        name = relative.parts[-1]
+        _assert_regular_or_missing(directory_fd, name)
+        if not replace:
+            try:
+                existing_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            except FileNotFoundError:
+                existing_fd = None
+            if existing_fd is not None:
+                try:
+                    with os.fdopen(existing_fd, "rb") as stream:
+                        if stream.read() != content:
+                            raise ArtifactError(f"owned artifact already exists with different content: {relative}")
+                    return root / relative
+                finally:
+                    # fdopen owns the descriptor on the normal path.
+                    pass
+        temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _assert_regular_or_missing(directory_fd, name)
+            os.replace(temporary_name, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            raise
+        return root / relative
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)

@@ -5,6 +5,36 @@ both the source of the plugin and an installable Codex marketplace. It packages
 planning, milestone execution, event-based peer-thread handoff, and bounded
 code-audit instructions without embedding project-specific decisions.
 
+## Python SDK controller
+
+The installable `codex-flow` harness is directly callable by a Codex agent. Its
+canonical H3 vertical slice is:
+
+```bash
+codex-flow plan --capsule /absolute/path/to/capsule.json --state-root /absolute/checkout --json
+codex-flow start --run-id RUN --milestone-id MILESTONE --state-root /absolute/checkout --json
+codex-flow resume --run-id RUN --milestone-id MILESTONE --state-root /absolute/checkout --json
+codex-flow status --run-id RUN --milestone-id MILESTONE --state-root /absolute/checkout --json
+codex-flow cancel --run-id RUN --milestone-id MILESTONE --state-root /absolute/checkout --json
+```
+
+The capsule selects `current_checkout`, `existing_worktree`, or
+`managed_worktree`. Managed paths are always semantic siblings at
+`<repo>.worktrees/<lane>` with branch `agent/<lane>`; the same program/lane
+lease is reused across sequential milestones and fresh-process recovery.
+SQLite owns capsule digests, workspace leases, dispatch/thread/turn identity,
+ordered SDK lifecycle events, validation, and terminal results. The controller
+uses the published `openai-codex` Python SDK as its only Codex transport and
+never falls back to the CLI or direct app-server RPC.
+
+Run the opt-in real crash/resume sentinel only in a disposable repository:
+
+```bash
+CODEX_FLOW_REAL_SDK=1 uv run codex-flow controller-sentinel \
+  --real --model gpt-5.6-luna --effort medium \
+  --output docs/reviews/evidence/h3-controller-sentinel.json
+```
+
 ## Lifecycle
 
 ```text

@@ -9,7 +9,9 @@ SDK, subprocess, network, or worktree code belongs here.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Callable, Iterator, Mapping
@@ -20,19 +22,25 @@ from typing import Any, Literal
 
 from .domain import (
     TERMINAL_STATES,
+    ControllerCheckpoint,
     DispatchClaim,
     DispatchId,
     EventId,
     EventRecord,
     EventSequence,
+    ExecutionCapsule,
+    ExecutionRecord,
+    ExecutionStatus,
     Generation,
     JsonObject,
     LedgerSnapshot,
+    LifecycleEvent,
     MilestoneId,
     MilestoneRecord,
     PostIdentityExecutionFailure,
     PreIdentityTransportFailure,
     ReasonCode,
+    ReasoningEffort,
     RecoveryFact,
     ReviewRejected,
     RoleId,
@@ -41,15 +49,20 @@ from .domain import (
     SchemaVersion,
     TerminalFailureAfterIdentity,
     TerminalOutcome,
+    ThreadIdentity,
     TransportFailureBeforeIdentity,
+    TurnObservation,
+    ValidationObservation,
     WorkflowReason,
     WorkflowState,
+    WorkspaceLeaseRecord,
+    WorkspaceMode,
     coerce_state,
     is_transition_allowed,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(2)
-SUPPORTED_SCHEMA_VERSIONS = frozenset({SchemaVersion(1), CURRENT_SCHEMA_VERSION})
+CURRENT_SCHEMA_VERSION = SchemaVersion(3)
+SUPPORTED_SCHEMA_VERSIONS = frozenset({SchemaVersion(1), SchemaVersion(2), CURRENT_SCHEMA_VERSION})
 _STATES_SQL = ", ".join(f"'{state.value}'" for state in WorkflowState)
 _REASON_CODES_SQL = ", ".join(f"'{reason.value}'" for reason in ReasonCode)
 _EVENT_TYPES = frozenset({"dispatch_claimed", "state_transition"})
@@ -117,6 +130,65 @@ _V1_TABLE_DDL = {
     "events": _EVENTS_DDL,
 }
 _V2_TABLE_DDL = {**_V1_TABLE_DDL, "runs": _RUNS_V2_DDL}
+
+_EXECUTION_STATUSES_SQL = ", ".join(f"'{status.value}'" for status in ExecutionStatus)
+_CHECKPOINTS_SQL = ", ".join(f"'{checkpoint.value}'" for checkpoint in ControllerCheckpoint)
+_WORKSPACE_MODES_SQL = ", ".join(f"'{mode.value}'" for mode in WorkspaceMode)
+_WORKSPACE_LEASES_DDL = f"""CREATE TABLE workspace_leases (
+    workspace_path TEXT PRIMARY KEY NOT NULL CHECK(length(workspace_path) > 1),
+    repository_root TEXT NOT NULL CHECK(length(repository_root) > 1),
+    mode TEXT NOT NULL CHECK(mode IN ({_WORKSPACE_MODES_SQL})),
+    branch TEXT NOT NULL CHECK(length(branch) > 0),
+    base_sha TEXT NOT NULL CHECK(length(base_sha) = 40),
+    lane TEXT NOT NULL CHECK(length(lane) BETWEEN 1 AND 128),
+    owner_run_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(owner_run_id, lane),
+    FOREIGN KEY(owner_run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+)"""
+_EXECUTIONS_DDL = f"""CREATE TABLE executions (
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    capsule_path TEXT NOT NULL CHECK(length(capsule_path) > 1),
+    capsule_sha256 TEXT NOT NULL CHECK(length(capsule_sha256) = 64),
+    workspace_path TEXT NOT NULL CHECK(length(workspace_path) > 1),
+    model TEXT NOT NULL CHECK(length(model) > 0),
+    reasoning_effort TEXT NOT NULL CHECK(length(reasoning_effort) > 0),
+    status TEXT NOT NULL CHECK(status IN ({_EXECUTION_STATUSES_SQL})),
+    checkpoint TEXT NOT NULL CHECK(checkpoint IN ({_CHECKPOINTS_SQL})),
+    thread_id TEXT,
+    turn_id TEXT,
+    turn_output_json TEXT,
+    result_json TEXT,
+    validation_argv_json TEXT,
+    validation_exit_code INTEGER,
+    validation_stdout_sha256 TEXT,
+    validation_stderr_sha256 TEXT,
+    validation_timed_out INTEGER CHECK(validation_timed_out IN (0, 1)),
+    validation_duration_seconds REAL CHECK(validation_duration_seconds >= 0),
+    protected_before_sha256 TEXT NOT NULL CHECK(length(protected_before_sha256) = 64),
+    protected_after_sha256 TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, milestone_id),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_SDK_EVENTS_DDL = """CREATE TABLE sdk_lifecycle_events (
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL CHECK(length(turn_id) > 0),
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    method TEXT NOT NULL CHECK(length(method) > 0),
+    event_turn_id TEXT,
+    PRIMARY KEY(run_id, milestone_id, turn_id, sequence),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_V3_TABLE_DDL = {
+    **_V2_TABLE_DDL,
+    "workspace_leases": _WORKSPACE_LEASES_DDL,
+    "executions": _EXECUTIONS_DDL,
+    "sdk_lifecycle_events": _SDK_EVENTS_DDL,
+}
 
 
 def _canonical_ddl(sql: str) -> str:
@@ -188,7 +260,8 @@ def _schema_inventory(connection: sqlite3.Connection, *, temporary: bool = False
 
 _SCHEMA_IDENTITIES = {
     SchemaVersion(1): "codex_flow_h2_v1",
-    CURRENT_SCHEMA_VERSION: "codex_flow_h2_v2",
+    SchemaVersion(2): "codex_flow_h2_v2",
+    CURRENT_SCHEMA_VERSION: "codex_flow_h3_v3",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -227,6 +300,10 @@ class StaleWriter(LedgerError):
 
 class DispatchConflict(LedgerError):
     """A milestone/role is already owned by another logical dispatch."""
+
+
+class WorkspaceLeaseConflict(LedgerError):
+    """A workspace or execution owner conflicts with durable lease facts."""
 
 
 FaultInjector = Callable[[str], None]
@@ -280,6 +357,28 @@ def _decode_object(raw: str | None, *, field_name: str) -> JsonObject:
     if raw in (None, "{}"):
         return {}
     raise SchemaError(f"{field_name} contains unsupported durable content")
+
+
+def _encode_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _decode_json_object(raw: str | None, *, field_name: str) -> JsonObject | None:
+    if raw is None:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SchemaError(f"{field_name} is not valid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise SchemaError(f"{field_name} must be a JSON object")
+    return decoded
+
+
+def _sha256(value: str, *, field_name: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+    return value
 
 
 def _reason(value: WorkflowReason | ReasonCode | str | BaseException | None) -> WorkflowReason | None:
@@ -506,11 +605,21 @@ class Ledger:
         return self._connection
 
     def schema_columns(
-        self, table: Literal["schema_meta", "runs", "milestones", "dispatches", "events"]
+        self,
+        table: Literal[
+            "schema_meta",
+            "runs",
+            "milestones",
+            "dispatches",
+            "events",
+            "workspace_leases",
+            "executions",
+            "sdk_lifecycle_events",
+        ],
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V2_TABLE_DDL:
+        if table not in _V3_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -579,7 +688,7 @@ class Ledger:
             str(row[0]) for row in self._db().execute("SELECT key FROM schema_meta ORDER BY key").fetchall()
         }
         if metadata_keys != {"schema_version", "migration_marker", "schema_identity"}:
-            raise CorruptSchemaError("schema metadata keys are not the owned v2 contract")
+            raise CorruptSchemaError("schema metadata keys are not the owned contract")
         identity = self._db().execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()
         if identity is None or identity[0] != _SCHEMA_IDENTITIES[version]:
             raise CorruptSchemaError("schema identity does not match its version")
@@ -593,7 +702,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V2_TABLE_DDL.values():
+                for statement in _V3_TABLE_DDL.values():
                     self._db().execute(statement)
                 self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -614,7 +723,11 @@ class Ledger:
     def _validate_shape(self, version: SchemaVersion) -> None:
         if _schema_inventory(self._db(), temporary=True):
             raise CorruptSchemaError("ledger connection has unexpected temporary schema objects")
-        definitions = _V1_TABLE_DDL if version == SchemaVersion(1) else _V2_TABLE_DDL
+        definitions = {
+            SchemaVersion(1): _V1_TABLE_DDL,
+            SchemaVersion(2): _V2_TABLE_DDL,
+            SchemaVersion(3): _V3_TABLE_DDL,
+        }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
         if version == SchemaVersion(1):
@@ -664,9 +777,56 @@ class Ledger:
                 "data_json": ("TEXT", 0, 0),
                 "occurred_at": ("TEXT", 1, 0),
             },
+            "workspace_leases": {
+                "workspace_path": ("TEXT", 1, 1),
+                "repository_root": ("TEXT", 1, 0),
+                "mode": ("TEXT", 1, 0),
+                "branch": ("TEXT", 1, 0),
+                "base_sha": ("TEXT", 1, 0),
+                "lane": ("TEXT", 1, 0),
+                "owner_run_id": ("TEXT", 1, 0),
+                "created_at": ("TEXT", 1, 0),
+            },
+            "executions": {
+                "run_id": ("TEXT", 1, 1),
+                "milestone_id": ("TEXT", 1, 2),
+                "capsule_path": ("TEXT", 1, 0),
+                "capsule_sha256": ("TEXT", 1, 0),
+                "workspace_path": ("TEXT", 1, 0),
+                "model": ("TEXT", 1, 0),
+                "reasoning_effort": ("TEXT", 1, 0),
+                "status": ("TEXT", 1, 0),
+                "checkpoint": ("TEXT", 1, 0),
+                "thread_id": ("TEXT", 0, 0),
+                "turn_id": ("TEXT", 0, 0),
+                "turn_output_json": ("TEXT", 0, 0),
+                "result_json": ("TEXT", 0, 0),
+                "validation_argv_json": ("TEXT", 0, 0),
+                "validation_exit_code": ("INTEGER", 0, 0),
+                "validation_stdout_sha256": ("TEXT", 0, 0),
+                "validation_stderr_sha256": ("TEXT", 0, 0),
+                "validation_timed_out": ("INTEGER", 0, 0),
+                "validation_duration_seconds": ("REAL", 0, 0),
+                "protected_before_sha256": ("TEXT", 1, 0),
+                "protected_after_sha256": ("TEXT", 0, 0),
+                "created_at": ("TEXT", 1, 0),
+                "updated_at": ("TEXT", 1, 0),
+            },
+            "sdk_lifecycle_events": {
+                "run_id": ("TEXT", 1, 1),
+                "milestone_id": ("TEXT", 1, 2),
+                "turn_id": ("TEXT", 1, 3),
+                "sequence": ("INTEGER", 1, 4),
+                "method": ("TEXT", 1, 0),
+                "event_turn_id": ("TEXT", 0, 0),
+            },
         }
         if version == SchemaVersion(1):
             expected["runs"].pop("closed_at")
+        if version < SchemaVersion(3):
+            expected.pop("workspace_leases")
+            expected.pop("executions")
+            expected.pop("sdk_lifecycle_events")
         for table, expected_columns in expected.items():
             rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
@@ -691,6 +851,26 @@ class Ledger:
                 ("dispatches", "dispatch_id", "dispatch_id", "RESTRICT"),
             ),
         )
+        if version >= SchemaVersion(3):
+            self._require_unique_index("workspace_leases", ("owner_run_id", "lane"))
+            self._require_foreign_keys(
+                "workspace_leases",
+                (("runs", "owner_run_id", "run_id", "CASCADE"),),
+            )
+            self._require_foreign_keys(
+                "executions",
+                (
+                    ("milestones", "run_id", "run_id", "CASCADE"),
+                    ("milestones", "milestone_id", "milestone_id", "CASCADE"),
+                ),
+            )
+            self._require_foreign_keys(
+                "sdk_lifecycle_events",
+                (
+                    ("executions", "run_id", "run_id", "CASCADE"),
+                    ("executions", "milestone_id", "milestone_id", "CASCADE"),
+                ),
+            )
         foreign_keys = self._db().execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
@@ -718,12 +898,21 @@ class Ledger:
             raise CorruptSchemaError(f"ledger table {table!r} has unexpected foreign keys")
 
     def _validate_rows(self) -> None:
-        orphan_queries = (
+        has_h3 = any(item[1] == "executions" for item in _schema_inventory(self._db()))
+        orphan_queries = [
             "SELECT COUNT(*) FROM milestones m LEFT JOIN runs r ON r.run_id = m.run_id WHERE r.run_id IS NULL",
             "SELECT COUNT(*) FROM dispatches d LEFT JOIN milestones m ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id WHERE m.run_id IS NULL",
             "SELECT COUNT(*) FROM events e LEFT JOIN milestones m ON m.run_id = e.run_id AND m.milestone_id = e.milestone_id WHERE m.run_id IS NULL",
             "SELECT COUNT(*) FROM events e LEFT JOIN dispatches d ON d.dispatch_id = e.dispatch_id WHERE e.dispatch_id IS NOT NULL AND d.dispatch_id IS NULL",
-        )
+        ]
+        if has_h3:
+            orphan_queries.extend(
+                (
+                    "SELECT COUNT(*) FROM workspace_leases w LEFT JOIN runs r ON r.run_id = w.owner_run_id WHERE r.run_id IS NULL",
+                    "SELECT COUNT(*) FROM executions x LEFT JOIN milestones m ON m.run_id = x.run_id AND m.milestone_id = x.milestone_id WHERE m.run_id IS NULL",
+                    "SELECT COUNT(*) FROM sdk_lifecycle_events s LEFT JOIN executions x ON x.run_id = s.run_id AND x.milestone_id = s.milestone_id WHERE x.run_id IS NULL",
+                )
+            )
         if any(int(self._db().execute(query).fetchone()[0]) for query in orphan_queries):
             raise CorruptSchemaError("workflow ledger contains orphan rows")
         duplicate_queries = (
@@ -808,8 +997,69 @@ class Ledger:
                 replay_state = event.to_state
             if replay_state is not milestone.state:
                 raise CorruptSchemaError("milestone state does not match replayed history")
+        if has_h3:
+            lease_rows = self._db().execute("SELECT * FROM workspace_leases ORDER BY workspace_path").fetchall()
+            leases = {str(row["workspace_path"]): self._workspace_lease_from_row(row) for row in lease_rows}
+            execution_rows = self._db().execute("SELECT * FROM executions ORDER BY run_id, milestone_id").fetchall()
+            for row in execution_rows:
+                execution = self._execution_from_row(row)
+                if execution.status not in {ExecutionStatus.PLANNED, ExecutionStatus.CANCELLED}:
+                    lease = leases.get(str(execution.workspace_path))
+                    if lease is None or lease.owner_run_id != execution.run_id:
+                        raise CorruptSchemaError("active execution has no matching workspace lease")
+                if execution.status is ExecutionStatus.PLANNED:
+                    if (
+                        execution.checkpoint
+                        not in {
+                            ControllerCheckpoint.CAPSULE_PLANNED,
+                            ControllerCheckpoint.WORKSPACE_LEASED,
+                            ControllerCheckpoint.THREAD_STARTING,
+                        }
+                        or execution.thread_id
+                    ):
+                        raise CorruptSchemaError("planned execution has post-plan authority")
+                elif execution.status is ExecutionStatus.THREAD_STARTED:
+                    if execution.thread_id is None or execution.checkpoint not in {
+                        ControllerCheckpoint.THREAD_IDENTITY_DURABLE,
+                        ControllerCheckpoint.TURN_DURABLE,
+                    }:
+                        raise CorruptSchemaError("started execution has incomplete thread authority")
+                elif execution.status is ExecutionStatus.COMPLETED:
+                    if (
+                        execution.checkpoint is not ControllerCheckpoint.RESULT_DURABLE
+                        or execution.thread_id is None
+                        or execution.turn_id is None
+                        or execution.result is None
+                        or execution.validation is None
+                        or execution.protected_after_sha256 is None
+                    ):
+                        raise CorruptSchemaError("completed execution is missing terminal evidence")
+                elif execution.status is ExecutionStatus.UNCERTAIN_PRE_IDENTITY and execution.thread_id is not None:
+                    raise CorruptSchemaError("pre-identity uncertainty cannot carry a thread identity")
+                elif execution.status is ExecutionStatus.FAILED and (
+                    execution.checkpoint is not ControllerCheckpoint.RESULT_DURABLE
+                    or execution.result is None
+                    or execution.protected_after_sha256 is None
+                ):
+                    raise CorruptSchemaError("failed execution is missing terminal evidence")
+                event_rows = (
+                    self._db()
+                    .execute(
+                        "SELECT sequence FROM sdk_lifecycle_events WHERE run_id = ? AND milestone_id = ? "
+                        "ORDER BY turn_id, sequence",
+                        (str(execution.run_id), str(execution.milestone_id)),
+                    )
+                    .fetchall()
+                )
+                if execution.turn_id is not None and event_rows:
+                    sequences = tuple(int(item[0]) for item in event_rows)
+                    if sequences != tuple(range(len(sequences))):
+                        raise CorruptSchemaError("SDK lifecycle sequence is not contiguous")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(2):
+            self._migrate_v2_to_v3()
+            return
         if version != SchemaVersion(1):
             raise UnsupportedSchemaVersion(f"ledger schema {version} has no owned migration")
         self._validate_shape(version)
@@ -830,9 +1080,9 @@ class Ledger:
                 self._db().executemany(
                     "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
                     (
-                        ("schema_version", str(int(CURRENT_SCHEMA_VERSION))),
+                        ("schema_version", "2"),
                         ("migration_marker", "complete"),
-                        ("schema_identity", _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]),
+                        ("schema_identity", _SCHEMA_IDENTITIES[SchemaVersion(2)]),
                     ),
                 )
                 self._db().executemany(
@@ -848,6 +1098,24 @@ class Ledger:
             self._db().execute("PRAGMA foreign_keys = ON")
         if self._db().execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise CorruptSchemaError("migrated ledger violates the canonical foreign-key contract")
+        self._migrate_v2_to_v3()
+
+    def _migrate_v2_to_v3(self) -> None:
+        self._validate_schema_metadata(SchemaVersion(2))
+        self._validate_shape(SchemaVersion(2))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            for table in ("workspace_leases", "executions", "sdk_lifecycle_events"):
+                self._db().execute(_V3_TABLE_DDL[table])
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(int(CURRENT_SCHEMA_VERSION)),),
+            )
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION],),
+            )
+            self._fault("after_migration")
 
     @contextmanager
     def _transaction(self, *, validate_authority: bool = True) -> Iterator[None]:
@@ -1304,6 +1572,382 @@ class Ledger:
         return self._verify_event(expected)
 
     # ------------------------------------------------------------------
+    # H3 controller facts
+    # ------------------------------------------------------------------
+
+    def plan_execution(
+        self,
+        capsule: ExecutionCapsule,
+        *,
+        capsule_path: Path,
+        capsule_sha256: str,
+        protected_before_sha256: str,
+    ) -> ExecutionRecord:
+        capsule_digest = _sha256(capsule_sha256, field_name="capsule digest")
+        protected_digest = _sha256(protected_before_sha256, field_name="protected-path digest")
+        if not capsule_path.is_absolute():
+            raise ValueError("capsule path must be absolute")
+        now = utc_now()
+        with self._transaction():
+            self.get_run(capsule.run_id)
+            self.get_milestone(capsule.run_id, capsule.milestone_id)
+            existing = (
+                self._db()
+                .execute(
+                    "SELECT * FROM executions WHERE run_id = ? AND milestone_id = ?",
+                    (str(capsule.run_id), str(capsule.milestone_id)),
+                )
+                .fetchone()
+            )
+            if existing is not None:
+                record = self._execution_from_row(existing)
+                expected = (
+                    capsule_path,
+                    capsule_digest,
+                    capsule.workspace_path,
+                    capsule.model,
+                    capsule.reasoning_effort,
+                    protected_digest,
+                )
+                actual = (
+                    record.capsule_path,
+                    record.capsule_sha256,
+                    record.workspace_path,
+                    record.model,
+                    record.reasoning_effort,
+                    record.protected_before_sha256,
+                )
+                if actual != expected:
+                    raise WorkspaceLeaseConflict("execution capsule conflicts with its durable plan")
+                return record
+            self._db().execute(
+                "INSERT INTO executions(run_id, milestone_id, capsule_path, capsule_sha256, workspace_path, "
+                "model, reasoning_effort, status, checkpoint, thread_id, turn_id, turn_output_json, result_json, "
+                "validation_argv_json, validation_exit_code, validation_stdout_sha256, "
+                "validation_stderr_sha256, validation_timed_out, validation_duration_seconds, "
+                "protected_before_sha256, protected_after_sha256, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, ?, ?)",
+                (
+                    str(capsule.run_id),
+                    str(capsule.milestone_id),
+                    str(capsule_path),
+                    capsule_digest,
+                    str(capsule.workspace_path),
+                    capsule.model,
+                    capsule.reasoning_effort.value,
+                    ExecutionStatus.PLANNED.value,
+                    ControllerCheckpoint.CAPSULE_PLANNED.value,
+                    protected_digest,
+                    now,
+                    now,
+                ),
+            )
+            return self.get_execution(capsule.run_id, capsule.milestone_id)
+
+    def acquire_workspace_lease(
+        self,
+        capsule: ExecutionCapsule,
+    ) -> WorkspaceLeaseRecord:
+        now = utc_now()
+        with self._transaction():
+            execution = self.get_execution(capsule.run_id, capsule.milestone_id)
+            if execution.workspace_path != capsule.workspace_path:
+                raise WorkspaceLeaseConflict("durable execution selected a different workspace")
+            owner = (
+                self._db()
+                .execute(
+                    "SELECT * FROM workspace_leases WHERE owner_run_id = ? AND lane = ?",
+                    (str(capsule.run_id), capsule.lane),
+                )
+                .fetchone()
+            )
+            path_owner = (
+                self._db()
+                .execute(
+                    "SELECT * FROM workspace_leases WHERE workspace_path = ?",
+                    (str(capsule.workspace_path),),
+                )
+                .fetchone()
+            )
+            if owner is not None or path_owner is not None:
+                candidate = owner or path_owner
+                lease = self._workspace_lease_from_row(candidate)
+                expected = (
+                    capsule.workspace_path,
+                    capsule.repository_root,
+                    capsule.workspace_mode,
+                    capsule.branch,
+                    capsule.base_sha,
+                    capsule.lane,
+                    capsule.run_id,
+                )
+                actual = (
+                    lease.workspace_path,
+                    lease.repository_root,
+                    lease.mode,
+                    lease.branch,
+                    lease.base_sha,
+                    lease.lane,
+                    lease.owner_run_id,
+                )
+                if actual != expected:
+                    raise WorkspaceLeaseConflict("workspace is already leased under different facts")
+            else:
+                self._db().execute(
+                    "INSERT INTO workspace_leases(workspace_path, repository_root, mode, branch, base_sha, lane, "
+                    "owner_run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(capsule.workspace_path),
+                        str(capsule.repository_root),
+                        capsule.workspace_mode.value,
+                        capsule.branch,
+                        capsule.base_sha,
+                        capsule.lane,
+                        str(capsule.run_id),
+                        now,
+                    ),
+                )
+                lease = self._workspace_lease_from_row(
+                    self._db()
+                    .execute("SELECT * FROM workspace_leases WHERE workspace_path = ?", (str(capsule.workspace_path),))
+                    .fetchone()
+                )
+            if execution.status is ExecutionStatus.PLANNED:
+                self._db().execute(
+                    "UPDATE executions SET checkpoint = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                    (
+                        ControllerCheckpoint.WORKSPACE_LEASED.value,
+                        now,
+                        str(capsule.run_id),
+                        str(capsule.milestone_id),
+                    ),
+                )
+            return lease
+
+    def record_thread_identity(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        thread_id: ThreadIdentity,
+    ) -> ExecutionRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            if current.thread_id is not None:
+                if current.thread_id != thread_id:
+                    raise StaleWriter("execution already owns a different SDK thread identity")
+                return current
+            if (
+                current.status is not ExecutionStatus.PLANNED
+                or current.checkpoint is not ControllerCheckpoint.THREAD_STARTING
+            ):
+                raise StaleWriter("thread identity requires a planned leased execution")
+            self._db().execute(
+                "UPDATE executions SET status = ?, checkpoint = ?, thread_id = ?, updated_at = ? "
+                "WHERE run_id = ? AND milestone_id = ?",
+                (
+                    ExecutionStatus.THREAD_STARTED.value,
+                    ControllerCheckpoint.THREAD_IDENTITY_DURABLE.value,
+                    thread_id.id,
+                    now,
+                    str(run),
+                    str(milestone),
+                ),
+            )
+            return self.get_execution(run, milestone)
+
+    def record_thread_starting(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            if current.status is not ExecutionStatus.PLANNED:
+                raise StaleWriter("SDK thread start requires a planned execution")
+            if current.checkpoint is ControllerCheckpoint.THREAD_STARTING:
+                return current
+            if current.checkpoint is not ControllerCheckpoint.WORKSPACE_LEASED:
+                raise StaleWriter("SDK thread start requires a durable workspace lease")
+            self._db().execute(
+                "UPDATE executions SET checkpoint = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (
+                    ControllerCheckpoint.THREAD_STARTING.value,
+                    now,
+                    str(run),
+                    str(milestone),
+                ),
+            )
+            return self.get_execution(run, milestone)
+
+    def record_pre_identity_uncertainty(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            if current.thread_id is not None:
+                raise StaleWriter("pre-identity uncertainty cannot replace a durable identity")
+            self._db().execute(
+                "UPDATE executions SET status = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (ExecutionStatus.UNCERTAIN_PRE_IDENTITY.value, now, str(run), str(milestone)),
+            )
+            return self.get_execution(run, milestone)
+
+    def record_turn(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        observation: TurnObservation,
+    ) -> ExecutionRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            if current.thread_id != observation.thread_id:
+                raise StaleWriter("turn observation belongs to a different SDK thread")
+            if current.turn_id is not None:
+                if current.turn_id != observation.turn_id:
+                    raise StaleWriter("execution already owns a different SDK turn")
+                return current
+            for event in observation.events:
+                self._db().execute(
+                    "INSERT INTO sdk_lifecycle_events(run_id, milestone_id, turn_id, sequence, method, event_turn_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        str(run),
+                        str(milestone),
+                        observation.turn_id,
+                        event.sequence,
+                        event.method,
+                        event.turn_id,
+                    ),
+                )
+            self._db().execute(
+                "UPDATE executions SET checkpoint = ?, turn_id = ?, turn_output_json = ?, updated_at = ? "
+                "WHERE run_id = ? AND milestone_id = ?",
+                (
+                    ControllerCheckpoint.TURN_DURABLE.value,
+                    observation.turn_id,
+                    _encode_json(observation.structured_output or {}),
+                    now,
+                    str(run),
+                    str(milestone),
+                ),
+            )
+            return self.get_execution(run, milestone)
+
+    def record_terminal_execution(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        result: JsonObject,
+        validation: ValidationObservation,
+        protected_after_sha256: str,
+    ) -> ExecutionRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        after_digest = _sha256(protected_after_sha256, field_name="protected-path digest")
+        now = utc_now()
+        terminal = (
+            ExecutionStatus.COMPLETED
+            if validation.exit_code == 0 and not validation.timed_out
+            else ExecutionStatus.FAILED
+        )
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            if current.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}:
+                return current
+            if current.status is not ExecutionStatus.THREAD_STARTED or current.turn_id is None:
+                raise StaleWriter("terminal result requires a durable SDK turn")
+            self._db().execute(
+                "UPDATE executions SET status = ?, checkpoint = ?, result_json = ?, validation_argv_json = ?, "
+                "validation_exit_code = ?, validation_stdout_sha256 = ?, validation_stderr_sha256 = ?, "
+                "validation_timed_out = ?, validation_duration_seconds = ?, protected_after_sha256 = ?, "
+                "updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (
+                    terminal.value,
+                    ControllerCheckpoint.RESULT_DURABLE.value,
+                    _encode_json(result),
+                    _encode_json(list(validation.argv)),
+                    validation.exit_code,
+                    validation.stdout_sha256,
+                    validation.stderr_sha256,
+                    int(validation.timed_out),
+                    validation.duration_seconds,
+                    after_digest,
+                    now,
+                    str(run),
+                    str(milestone),
+                ),
+            )
+            return self.get_execution(run, milestone)
+
+    def cancel_execution(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            if current.status in {
+                ExecutionStatus.COMPLETED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+                ExecutionStatus.UNCERTAIN_PRE_IDENTITY,
+            }:
+                return current
+            self._db().execute(
+                "UPDATE executions SET status = ?, checkpoint = ?, updated_at = ? "
+                "WHERE run_id = ? AND milestone_id = ?",
+                (
+                    ExecutionStatus.CANCELLED.value,
+                    ControllerCheckpoint.RESULT_DURABLE.value,
+                    now,
+                    str(run),
+                    str(milestone),
+                ),
+            )
+            return self.get_execution(run, milestone)
+
+    def get_execution(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        row = (
+            self._db()
+            .execute("SELECT * FROM executions WHERE run_id = ? AND milestone_id = ?", (str(run), str(milestone)))
+            .fetchone()
+        )
+        if row is None:
+            raise RecordNotFound(f"execution {run}/{milestone} does not exist")
+        return self._execution_from_row(row)
+
+    def get_workspace_lease(self, workspace_path: Path) -> WorkspaceLeaseRecord:
+        row = (
+            self._db()
+            .execute("SELECT * FROM workspace_leases WHERE workspace_path = ?", (str(workspace_path),))
+            .fetchone()
+        )
+        if row is None:
+            raise RecordNotFound(f"workspace lease {workspace_path} does not exist")
+        return self._workspace_lease_from_row(row)
+
+    def sdk_lifecycle_events(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> tuple[LifecycleEvent, ...]:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        rows = (
+            self._db()
+            .execute(
+                "SELECT * FROM sdk_lifecycle_events WHERE run_id = ? AND milestone_id = ? ORDER BY turn_id, sequence",
+                (str(run), str(milestone)),
+            )
+            .fetchall()
+        )
+        return tuple(LifecycleEvent(int(row["sequence"]), str(row["method"]), row["event_turn_id"]) for row in rows)
+
+    # ------------------------------------------------------------------
     # Read-only snapshots and recovery facts
     # ------------------------------------------------------------------
 
@@ -1471,4 +2115,70 @@ class Ledger:
             str(row["occurred_at"]),
             DispatchId(row["dispatch_id"]) if row["dispatch_id"] is not None else None,
             data,
+        )
+
+    @staticmethod
+    def _workspace_lease_from_row(row: sqlite3.Row) -> WorkspaceLeaseRecord:
+        return WorkspaceLeaseRecord(
+            Path(str(row["workspace_path"])),
+            Path(str(row["repository_root"])),
+            WorkspaceMode(str(row["mode"])),
+            str(row["branch"]),
+            str(row["base_sha"]),
+            str(row["lane"]),
+            RunId(row["owner_run_id"]),
+            str(row["created_at"]),
+        )
+
+    @staticmethod
+    def _execution_from_row(row: sqlite3.Row) -> ExecutionRecord:
+        validation: ValidationObservation | None = None
+        argv_raw = row["validation_argv_json"]
+        if argv_raw is not None:
+            try:
+                argv_decoded = json.loads(str(argv_raw))
+            except json.JSONDecodeError as exc:
+                raise SchemaError("validation argv is not valid JSON") from exc
+            if not isinstance(argv_decoded, list) or any(not isinstance(item, str) for item in argv_decoded):
+                raise SchemaError("validation argv is not a string list")
+            required = (
+                row["validation_exit_code"],
+                row["validation_stdout_sha256"],
+                row["validation_stderr_sha256"],
+                row["validation_timed_out"],
+                row["validation_duration_seconds"],
+            )
+            if any(value is None for value in required):
+                raise SchemaError("validation observation is incomplete")
+            validation = ValidationObservation(
+                tuple(argv_decoded),
+                int(row["validation_exit_code"]),
+                _sha256(str(row["validation_stdout_sha256"]), field_name="validation stdout digest"),
+                _sha256(str(row["validation_stderr_sha256"]), field_name="validation stderr digest"),
+                bool(row["validation_timed_out"]),
+                float(row["validation_duration_seconds"]),
+            )
+        return ExecutionRecord(
+            RunId(row["run_id"]),
+            MilestoneId(row["milestone_id"]),
+            Path(str(row["workspace_path"])),
+            Path(str(row["capsule_path"])),
+            _sha256(str(row["capsule_sha256"]), field_name="capsule digest"),
+            str(row["model"]),
+            ReasoningEffort(str(row["reasoning_effort"])),
+            ExecutionStatus(str(row["status"])),
+            ControllerCheckpoint(str(row["checkpoint"])),
+            ThreadIdentity(str(row["thread_id"])) if row["thread_id"] is not None else None,
+            str(row["turn_id"]) if row["turn_id"] is not None else None,
+            _decode_json_object(row["turn_output_json"], field_name="turn output"),
+            _decode_json_object(row["result_json"], field_name="execution result"),
+            validation,
+            _sha256(str(row["protected_before_sha256"]), field_name="protected before digest"),
+            (
+                _sha256(str(row["protected_after_sha256"]), field_name="protected after digest")
+                if row["protected_after_sha256"] is not None
+                else None
+            ),
+            str(row["created_at"]),
+            str(row["updated_at"]),
         )

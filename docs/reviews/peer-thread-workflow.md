@@ -968,6 +968,17 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   concurrency, and deterministic transaction-boundary guarantees remain
   required and green. Under that product threat model H2 has zero open P0/P1 and
   is promoted; H3 is unblocked.
+- 2026-08-24: H3 implements the first agent-usable SDK controller vertical
+  slice: versioned capsules, SQLite v3 execution facts, program/lane-owned
+  current/existing/managed worktree leases, workspace-write SDK execution,
+  durable external-call and identity checkpoints, fresh-client resume,
+  explicit validation, result-before-projection ordering, and
+  `plan/start/resume/status/cancel`. The real disposable sentinel passed with
+  one dispatch, one semantic managed worktree, one thread id, 56 ordered SDK
+  events, an injected post-turn process boundary, successful fresh-client
+  `thread_resume`, unchanged protected paths, and a durable terminal result.
+  Hermetic tests and repository gates are green; H3 promotion remains pending
+  independent objective and architecture review of the exact candidate.
 
 ## Next execution
 
@@ -980,19 +991,17 @@ Execution workspace:
 - repository: `/home/adam/personal-workflow-skills`
 - path: `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller`
 - branch: `agent/python-sdk-controller`
-- base SHA: `a858d6f`
+- base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: direct single mutable owner in the existing semantic program
-workspace. The current native task schema cannot address that exact saved
-worktree path without allocating a different runtime worktree, so peer handoff
-is intentionally not used. This is a workspace-capability limitation, not a
-license to create another directory; the current planning/execution context owns
-H3 end to end.
+Dispatch status: implementation complete in the existing semantic program
+workspace; independent promotion review is next. Review uses the saved project
+in `local` mode and inspects this exact worktree by absolute path, without
+allocating another Git worktree or mutating the candidate.
 
 Owned scope, protected surfaces, contracts, acceptance, and promotion gates are
 the H3 section above. Implement `WorktreeManager` with current/existing/managed
 modes and sibling semantic roots, extend the sole SDK adapter and H2 ledger,
-deliver `codex-flow plan/start/resume/status/cancel`, run hermetic gates and the
-real disposable post-identity-crash sentinel, then obtain an independent
-objective plus architecture review without allocating a reviewer worktree.
+Review the full `6a2ac17..HEAD` H3 range, rerun the focused and repository gates,
+and verify the retained real sentinel. Promote only with zero open P0/P1; H4
+remains blocked until then.
