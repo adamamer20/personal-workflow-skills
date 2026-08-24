@@ -569,18 +569,92 @@ H3 — add controller-owned worktrees and SDK execution.
 
 ## Milestone H3 — Add controller-owned worktrees and execution
 
-Outcome: `flow plan`, `flow start`, `flow resume`, `flow status`, and
-`flow cancel` connect the H1 adapter to H2 state under explicit repository,
-base-commit, mutable-path, protected-path, and validation-command contracts.
+### Outcome and acceptance modes
 
-Acceptance: controller-created isolated worktree and lease; SDK executor starts
-once; crash recovery resumes by durable thread id; duplicate start is denied;
-terminal structured result is written before optional notification; transport
-failure never consumes an implementation/review cycle.
+`codex-flow plan`, `start`, `resume`, `status`, and `cancel` form the first
+agent-usable vertical slice. The controller creates and leases an isolated Git
+worktree from an explicit repository/base commit, starts or resumes exactly one
+SDK executor under `Sandbox.workspace_write`, runs explicit validation, and
+persists a typed terminal result before any projection or notification.
 
-Promotion gate: one disposable-repository milestone survives an injected
-controller crash and resumes to a verified terminal result without duplicate
-thread or worktree ownership.
+Acceptance modes: `objective`, `architecture`.
+
+### Mutable ownership
+
+- `src/codex_flow/worktrees.py`, `controller.py`, and narrow typed additions to
+  `domain.py`;
+- H3 schema migration and typed ledger methods in `ledger.py` for repository,
+  worktree lease, SDK thread identity, turn identity, capsule, validation, and
+  terminal result facts;
+- `backends/codex_sdk.py` only to support explicit workspace-write execution and
+  fresh-process resume through the proven stable high-level SDK;
+- `cli.py`, artifact projections, focused tests, `workflow.toml` only if H3
+  requires a minimal single-route default, and retained H3 sentinel evidence.
+
+### Protected surfaces and non-goals
+
+- H1 transport remains the only Codex backend; no CLI/app-server fallback;
+- H2 history and schema migrations are forward-only and canonical;
+- plugin/skill migration, multi-authority review, decisions, repair policy,
+  automatic notifications, remote hosts, push/merge, and legacy retirement are
+  H4+;
+- models never select repository roots, base refs, worktree paths, mutable or
+  protected paths, validation commands, model ids, reasoning effort, or sandbox.
+
+### Contracts and failure behavior
+
+1. A versioned `ExecutionCapsule` contains run/milestone identity, absolute
+   repository root, resolved full base SHA, normalized mutable/protected path
+   sets, explicit validation argv/timeout, executor model/effort, prompt input,
+   and a strict structured-output schema. Prompt bodies remain in owned capsule
+   artifacts, not generic ledger metadata/events.
+2. `WorktreeManager` uses argument-vector Git subprocesses, validates the
+   repository and ancestors without symlinks, resolves the supplied base before
+   mutation, and creates only
+   `.codex-flow/worktrees/<run-id>/<milestone-id>` with a durable exclusive lease.
+   Repeated acquisition is idempotent for the same contract and conflicts on
+   any changed repository/base/path/owner fact.
+3. `plan` validates and durably records the capsule without external side
+   effects. `start` claims the dispatch, creates/records the worktree, starts one
+   SDK thread, persists its real identity immediately, executes the turn, runs
+   validation, and persists the terminal result in that causal order.
+4. A fresh controller process can `resume` only from durable facts. When thread
+   identity exists it uses SDK `thread_resume` and the same worktree/route.
+   `start` or `resume` never creates a second dispatch, lease, worktree, or thread.
+5. The unavoidable crash window after an external SDK start but before durable
+   identity fails closed as an explicit uncertain pre-identity transport fact;
+   automatic recovery never starts another thread. The promotion sentinel
+   injects its resumable crash only after identity is committed.
+6. Validation runs from explicit argv with bounded timeout in the leased
+   worktree. Result status and validation observation commit before artifact
+   projection. Projection/notification failure cannot change the authoritative
+   result.
+7. `cancel` is idempotent, terminal, and never deletes a worktree, archives a
+   task, or discards Git changes automatically. `status` is read-only and emits
+   stable JSON plus concise human output.
+
+### Acceptance and validation
+
+- exhaustive hermetic tests cover capsule/path validation, worktree ownership,
+  same-contract idempotency, conflicting leases, dirty/protected path checks,
+  subprocess failure, stale writers, duplicate `start`, result-before-
+  projection ordering, cancel idempotency, and every crash injection boundary;
+- fresh-process adapter tests prove resume initializes a new SDK client and
+  rejects identity change without a CLI/direct-RPC fallback;
+- a disposable real Git repository sentinel plans and starts a bounded editing
+  milestone, injects a controller stop after durable SDK identity, resumes in a
+  fresh process, runs validation, and reaches one terminal structured result;
+- retained evidence records one dispatch, one worktree lease/path, one SDK
+  thread identity, ordered turns/events, before/after protected-path hashes,
+  validation output digest, final Git diff/commit facts, and no duplicate owner;
+- `make check`, focused H3 tests, `git diff --check`, complete diff self-review,
+  and zero open P0/P1.
+
+### Promotion gate and successor
+
+Promote only when the real disposable sentinel survives the injected post-
+identity crash and finishes through `codex-flow resume` with no duplicate thread
+or worktree and with the result durable before projections. H4 follows.
 
 Successor: H4.
 
@@ -608,6 +682,41 @@ acceptance with durable evidence and no callback dependency. Separate scenarios
 prove `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, and `FAILED` are mutually distinct
 and that implementation difficulty alone produces none of them.
 
+Mutable ownership: `workflow.toml`, `config.py`, H4 domain/result schemas,
+controller/ledger/artifact extensions, role prompt templates, focused tests, and
+retained H4 evidence. H3 worktree and SDK transports are extended, never
+duplicated. Plugin skills remain protected until H5.
+
+Implementation boundary:
+
+- `workflow.toml` owns model/effort mappings for planner, executor,
+  code-reviewer, visual-reviewer, architecture-reviewer, and recovery roles plus
+  turn, repair, compaction, validation, and wall-clock limits. Runtime validation
+  rejects unavailable routes without substitution.
+- Capsules declare required acceptance modes. Objective review uses a fresh
+  read-only Luna reviewer; visual-quality review uses a fresh read-only Sol High
+  reviewer over fixed rendered evidence; architecture review and recovery
+  diagnosis use Sol High. Multiple modes require all distinct authorities.
+- Typed reviewer output carries stable finding id, causal class, severity,
+  evidence, acceptance criterion, and whether it survives the exact prior
+  repair. New scope cannot impersonate a surviving finding.
+- A valid rejection resumes the executor/lease when useful. Non-convergence
+  creates a diagnostic continuation. Recovery returns finish-local,
+  change-strategy, `CONTINUE_WITH_REPLAN`, `NEEDS_DECISION`,
+  `EXTERNAL_BLOCKED`, or `FAILED`; only the last three are terminal/user-visible
+  outcomes, with the semantics frozen above.
+- A bounded planner turn answers `NEEDS_DECISION` only when existing intent can
+  resolve it; genuinely underdetermined product/contract/authority decisions are
+  persisted for the user. Notification remains non-authoritative.
+- Limits fail closed before another external turn, preserve the last durable
+  checkpoint, and never silently change model, effort, sandbox, or acceptance.
+
+Validation includes hermetic scenario tests for every role/mode/result,
+surviving-versus-new findings, recovery replans, budget exhaustion, stale
+reviewers, notification failure, and result ordering, plus one disposable real
+SDK milestone that is rejected, repaired, separately code/visual reviewed, and
+accepted with durable evidence.
+
 Successor: H5.
 
 ## Milestone H5 — Reduce workflow instructions to cognitive roles
@@ -627,6 +736,31 @@ Promotion gate: existing direct workflow remains reachable under an explicit
 legacy command while the controller path passes all repository validators and
 one medium real milestone.
 
+Mutable ownership: the three workflow skills, a new minimal `workflow-control`
+skill, plugin manifest/version/marketplace metadata as required, prompt-input
+fixtures, CLI help/docs, controller model-facing schemas, and H5 tests/evidence.
+
+Implementation boundary:
+
+- `plan-work` owns intent, decomposition, acceptance modes, and decision-ready
+  capsules; `execute-milestone` owns only implementation judgment inside one
+  capsule; `workflow-control` invokes the controller and reports durable status.
+- Remove native task creation, callback, recovery, model-routing, attempt-loop,
+  and ledger prose from model-visible skills only after the controller path is
+  reachable and proven. Keep one explicit legacy command during H5/H6; no hidden
+  dual routing.
+- Typed Python is the model-facing authoring language for capsules/results;
+  JSON/JSONL remains controller serialization. Prompt fixtures must contain the
+  intended skill once, acceptance/protected surfaces, and no obsolete peer-
+  transport policy.
+- Enforce a measured prompt-size budget and compare before/after prompt inputs.
+  Validator success alone is not behavioral proof.
+
+Validation: repository/plugin validators, focused prompt fixture assertions,
+CLI help and package install, legacy reachability, `make check`, diff checks,
+and a real medium milestone initiated by a Codex agent through
+`workflow-control`/`codex-flow` rather than native peer tools.
+
 Successor: H6.
 
 ## Milestone H6 — Production pilot and legacy retirement decision
@@ -643,6 +777,32 @@ outcomes and independent reviews pass; every unrun external gate stays open.
 Promotion gate: only proven reachability and required behavioral parity permit
 legacy disablement. Deletion is a separate authorized cleanup milestone after
 installed-plugin and downstream-pin migration.
+
+Acceptance modes: `objective`, `architecture`, plus `visual` for any pilot whose
+outcome includes rendered quality.
+
+Implementation boundary and evidence:
+
+- run one medium and one large real repository milestone through the canonical
+  controller entrypoint with fixed capsules, explicit routes, real worktrees,
+  structured execution/review/repair, and durable retained evidence;
+- compare duplicate ownership, terminal-result durability, recovery behavior,
+  planner prompt/compaction use, model turns, wall time, and notification
+  independence against the retained legacy baseline without inventing cost or
+  quality claims;
+- exercise local SDK compatibility directly. Record Desktop, idle wake, remote
+  host, permission-profile, and native-review capabilities as proven,
+  unsupported, not-exposed, or not-run; an unavailable optional capability does
+  not falsify the local controller pilot;
+- make a typed retirement decision: `retain_legacy`, `disable_hooks_keep_manual`,
+  or `ready_for_separate_cleanup`. Default to retention unless production
+  reachability and required behavioral parity are both proven.
+
+Promotion requires both pilots to deliver observable repository outcomes,
+independent required-mode reviews with zero P0/P1, one recovery/notification-
+failure scenario, green repository gates, retained evidence, and an explicit
+legacy decision. H6 never deletes installed plugins, global hooks, downstream
+pins, or legacy code; any cleanup remains a separately authorized follow-up.
 
 ## Assumptions
 
