@@ -8,6 +8,7 @@ SDK, subprocess, network, or worktree code belongs here.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import stat
@@ -15,7 +16,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .domain import (
     ALLOWED_TRANSITIONS,
@@ -49,13 +50,112 @@ from .domain import (
 
 CURRENT_SCHEMA_VERSION = SchemaVersion(2)
 SUPPORTED_SCHEMA_VERSIONS = frozenset({SchemaVersion(1), CURRENT_SCHEMA_VERSION})
-_SCHEMA_IDENTITIES = {SchemaVersion(1): "codex_flow_h2_v1", CURRENT_SCHEMA_VERSION: "codex_flow_h2_v2"}
-_SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
-
 _STATES_SQL = ", ".join(f"'{state.value}'" for state in WorkflowState)
 _REASON_CODES_SQL = ", ".join(f"'{reason.value}'" for reason in ReasonCode)
 _EVENT_TYPES = frozenset({"dispatch_claimed", "state_transition"})
 _EVENT_TYPES_SQL = ", ".join(f"'{event_type}'" for event_type in sorted(_EVENT_TYPES))
+
+_SCHEMA_META_DDL = """CREATE TABLE schema_meta (
+    key TEXT PRIMARY KEY NOT NULL CHECK(length(key) > 0),
+    value TEXT NOT NULL CHECK(length(value) > 0)
+)"""
+_RUNS_V1_DDL = """CREATE TABLE runs (
+    run_id TEXT PRIMARY KEY NOT NULL CHECK(length(run_id) BETWEEN 1 AND 128),
+    created_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(metadata_json = '{}')
+)"""
+_RUNS_V2_DDL = """CREATE TABLE runs (
+    run_id TEXT PRIMARY KEY NOT NULL CHECK(length(run_id) BETWEEN 1 AND 128),
+    created_at TEXT NOT NULL,
+    closed_at TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(metadata_json = '{}')
+)"""
+_MILESTONES_DDL = f"""CREATE TABLE milestones (
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    current_state TEXT NOT NULL CHECK(current_state IN ({_STATES_SQL})),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{{}}' CHECK(metadata_json = '{{}}'),
+    PRIMARY KEY(run_id, milestone_id),
+    FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+)"""
+_DISPATCHES_DDL = """CREATE TABLE dispatches (
+    dispatch_id TEXT PRIMARY KEY NOT NULL CHECK(length(dispatch_id) BETWEEN 1 AND 512),
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(length(role) BETWEEN 1 AND 128),
+    generation INTEGER NOT NULL CHECK(generation > 0),
+    claimed_at TEXT NOT NULL,
+    CHECK(dispatch_id = run_id || '/' || milestone_id || '/' || role || '/' || generation),
+    UNIQUE(run_id, milestone_id, role),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_EVENTS_DDL = f"""CREATE TABLE events (
+    event_id TEXT PRIMARY KEY NOT NULL CHECK(length(event_id) BETWEEN 1 AND 256),
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    from_state TEXT CHECK(from_state IS NULL OR from_state IN ({_STATES_SQL})),
+    to_state TEXT NOT NULL CHECK(to_state IN ({_STATES_SQL})),
+    event_type TEXT NOT NULL CHECK(event_type IN ({_EVENT_TYPES_SQL})),
+    reason_code TEXT CHECK(reason_code IS NULL OR reason_code IN ({_REASON_CODES_SQL})),
+    reason_detail TEXT CHECK(reason_detail IS NULL),
+    dispatch_id TEXT,
+    data_json TEXT CHECK(data_json IS NULL),
+    occurred_at TEXT NOT NULL,
+    CHECK(event_id = run_id || '/' || milestone_id || '/' || sequence),
+    UNIQUE(run_id, milestone_id, sequence),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE,
+    FOREIGN KEY(dispatch_id) REFERENCES dispatches(dispatch_id) ON DELETE RESTRICT
+)"""
+_V1_TABLE_DDL = {
+    "schema_meta": _SCHEMA_META_DDL,
+    "runs": _RUNS_V1_DDL,
+    "milestones": _MILESTONES_DDL,
+    "dispatches": _DISPATCHES_DDL,
+    "events": _EVENTS_DDL,
+}
+_V2_TABLE_DDL = {**_V1_TABLE_DDL, "runs": _RUNS_V2_DDL}
+
+
+def _canonical_ddl(sql: str) -> str:
+    """Return exact SQLite DDL modulo whitespace outside quoted values."""
+
+    canonical: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(sql):
+        character = sql[index]
+        if quote is None:
+            if character.isspace():
+                index += 1
+                continue
+            canonical.append(character)
+            if character in {"'", '"'}:
+                quote = character
+        else:
+            canonical.append(character)
+            if character == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    canonical.append(sql[index + 1])
+                    index += 1
+                else:
+                    quote = None
+        index += 1
+    return "".join(canonical)
+
+
+def _schema_fingerprint(definitions: Mapping[str, str]) -> str:
+    payload = "\n".join(f"{name}:{_canonical_ddl(sql)}" for name, sql in sorted(definitions.items()))
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+
+_SCHEMA_IDENTITIES = {
+    SchemaVersion(1): "codex_flow_h2_v1",
+    CURRENT_SCHEMA_VERSION: "codex_flow_h2_v2",
+}
+_SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
 
 class LedgerError(RuntimeError):
@@ -103,9 +203,11 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _identifier(value: str | Any, constructor: Callable[[str], Any], label: str) -> Any:
+def _identifier(value: str, constructor: Callable[[str], Any], label: str) -> Any:
+    if not isinstance(value, str):
+        raise ValueError(f"invalid {label}: expected a string, got {type(value).__name__}")
     try:
-        return constructor(value if isinstance(value, str) else str(value))
+        return constructor(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid {label}: {value!r}") from exc
 
@@ -181,46 +283,34 @@ def _absolute_path(path: str | Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def _path_components(path: Path) -> tuple[Path, ...]:
-    absolute = _absolute_path(path)
-    current = Path(absolute.anchor)
-    components = [current]
-    for part in absolute.parts[1:]:
-        current = current / part
-        components.append(current)
-    return tuple(components)
+def _open_parent_chain(path: Path) -> tuple[int, ...]:
+    """Create and pin every parent using no-follow directory descriptors."""
 
-
-def _validate_ledger_location(path: Path, *, create_parent: bool) -> tuple[tuple[int, int], ...]:
-    """Validate every lexical ancestor and the database entry without following symlinks."""
-
-    components = _path_components(path)
-    parent_components = components[:-1]
-    if create_parent:
-        for component in parent_components:
-            try:
-                metadata = os.lstat(component)
-            except FileNotFoundError:
-                component.mkdir()
-                metadata = os.lstat(component)
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                raise SchemaError(f"ledger ancestor is not a real directory: {component}")
-    fingerprints: list[tuple[int, int]] = []
-    for component in parent_components:
-        try:
-            metadata = os.lstat(component)
-        except FileNotFoundError as exc:
-            raise SchemaError(f"ledger ancestor disappeared: {component}") from exc
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise SchemaError(f"ledger ancestor is not a real directory: {component}")
-        fingerprints.append((metadata.st_dev, metadata.st_ino))
+    descriptors = [os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
     try:
-        metadata = os.lstat(path)
-    except FileNotFoundError:
-        return tuple(fingerprints)
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise SchemaError(f"ledger database is not a real file: {path}")
-    return tuple(fingerprints)
+        for component in path.parent.parts[1:]:
+            try:
+                next_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptors[-1],
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptors[-1])
+                except FileExistsError:
+                    pass
+                next_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptors[-1],
+                )
+            descriptors.append(next_fd)
+        return tuple(descriptors)
+    except (NotADirectoryError, OSError) as exc:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise SchemaError(f"ledger ancestor is not a stable real directory: {path.parent}") from exc
 
 
 class Ledger:
@@ -239,54 +329,92 @@ class Ledger:
         self._timeout = timeout
         self._fault_injector = fault_injector
         self._connection: sqlite3.Connection | None = None
+        self._database_fd: int | None = None
+        self._directory_fds: tuple[int, ...] = ()
         self._open()
 
     def _open(self) -> None:
         if self._connection is not None:
             return
+        directory_fds: tuple[int, ...] = ()
+        database_fd: int | None = None
+        connection: sqlite3.Connection | None = None
         try:
-            before = _validate_ledger_location(self.path, create_parent=True)
-            _validate_ledger_location(self.path, create_parent=False)
+            directory_fds = _open_parent_chain(self.path)
+            database_fd = os.open(
+                self.path.name,
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fds[-1],
+            )
+            pinned = os.fstat(database_fd)
+            if not stat.S_ISREG(pinned.st_mode):
+                raise SchemaError(f"ledger database is not a regular file: {self.path}")
+            linked = os.stat(self.path.name, dir_fd=directory_fds[-1], follow_symlinks=False)
+            if (pinned.st_dev, pinned.st_ino) != (linked.st_dev, linked.st_ino):
+                raise SchemaError("ledger database changed while being pinned")
+            self._fault("before_connect")
+            after_fault = os.fstat(database_fd)
+            if (after_fault.st_dev, after_fault.st_ino, after_fault.st_mode) != (
+                pinned.st_dev,
+                pinned.st_ino,
+                pinned.st_mode,
+            ):
+                raise SchemaError("pinned ledger descriptor changed before SQLite connect")
+            descriptor_path = f"/proc/self/fd/{database_fd}"
+            if not os.path.exists(descriptor_path):
+                raise SchemaError("supported Linux /proc descriptor path is unavailable")
             connection = sqlite3.connect(
-                str(self.path),
+                f"file:{descriptor_path}?mode=rw",
                 timeout=self._timeout,
                 isolation_level=None,
                 check_same_thread=False,
+                uri=True,
             )
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute(f"PRAGMA busy_timeout = {int(self._timeout * 1000)}")
-            after = _validate_ledger_location(self.path, create_parent=False)
-            if before != after:
-                connection.close()
-                raise SchemaError("ledger ancestors changed while opening")
             self._connection = connection
+            self._database_fd = database_fd
+            self._directory_fds = directory_fds
+            connection = None
+            database_fd = None
+            directory_fds = ()
             self._ensure_schema()
-        except LedgerError:
-            if self._connection is not None:
-                self._connection.close()
-                self._connection = None
-            raise
         except sqlite3.DatabaseError as exc:
-            if self._connection is not None:
-                self._connection.close()
-                self._connection = None
+            self.close()
             raise SchemaError(f"unable to open workflow ledger {self.path}") from exc
+        except OSError as exc:
+            self.close()
+            raise SchemaError(f"unable to pin workflow ledger {self.path}") from exc
         except BaseException:
-            if self._connection is not None:
-                self._connection.close()
-                self._connection = None
+            self.close()
             raise
+        finally:
+            if connection is not None:
+                connection.close()
+            if database_fd is not None:
+                os.close(database_fd)
+            for descriptor in reversed(directory_fds):
+                os.close(descriptor)
 
-    @property
-    def connection(self) -> sqlite3.Connection:
+    def _db(self) -> sqlite3.Connection:
         if self._connection is None:
             raise LedgerClosedError("workflow ledger is closed")
         return self._connection
 
+    def schema_columns(
+        self, table: Literal["schema_meta", "runs", "milestones", "dispatches", "events"]
+    ) -> tuple[str, ...]:
+        """Expose a narrow, immutable schema diagnostic without the raw connection."""
+
+        if table not in _V2_TABLE_DDL:
+            raise ValueError(f"unknown owned table: {table!r}")
+        return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
+
     @property
     def schema_version(self) -> SchemaVersion:
-        row = self.connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        row = self._db().execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
         if row is None:
             raise CorruptSchemaError("schema_version marker is missing")
         try:
@@ -294,8 +422,26 @@ class Ledger:
         except ValueError as exc:
             raise CorruptSchemaError("schema_version marker is not an integer") from exc
 
+    @property
+    def schema_identity(self) -> str:
+        """Return the verified immutable identity of the owned schema."""
+
+        row = self._db().execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()
+        if row is None:
+            raise CorruptSchemaError("schema_identity marker is missing")
+        return str(row[0])
+
+    @property
+    def journal_mode(self) -> str:
+        """Return SQLite's read-only journal-mode diagnostic."""
+
+        row = self._db().execute("PRAGMA journal_mode").fetchone()
+        if row is None:
+            raise SchemaError("SQLite did not report a journal mode")
+        return str(row[0])
+
     def _ensure_schema(self) -> None:
-        connection = self.connection
+        connection = self._db()
         tables = {
             str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
@@ -329,90 +475,24 @@ class Ledger:
         if version < CURRENT_SCHEMA_VERSION:
             self._migrate(version)
         self._validate_shape(CURRENT_SCHEMA_VERSION)
-        self._validate_rows()
+        try:
+            self._validate_rows()
+        except ValueError as exc:
+            raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
 
     def _create_schema(self) -> None:
-        sql = f"""
-            CREATE TABLE schema_meta (
-                key TEXT PRIMARY KEY NOT NULL CHECK(length(key) > 0),
-                value TEXT NOT NULL CHECK(length(value) > 0)
-            );
-            INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?);
-            INSERT INTO schema_meta(key, value) VALUES ('migration_marker', 'complete');
-
-            CREATE TABLE runs (
-                run_id TEXT PRIMARY KEY NOT NULL CHECK(length(run_id) BETWEEN 1 AND 128),
-                created_at TEXT NOT NULL,
-                closed_at TEXT,
-                metadata_json TEXT NOT NULL DEFAULT '{{}}'
-                    CHECK(metadata_json = '{{}}')
-            );
-
-            CREATE TABLE milestones (
-                run_id TEXT NOT NULL,
-                milestone_id TEXT NOT NULL,
-                current_state TEXT NOT NULL CHECK(current_state IN ({_STATES_SQL})),
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{{}}'
-                    CHECK(metadata_json = '{{}}'),
-                PRIMARY KEY(run_id, milestone_id),
-                FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE dispatches (
-                dispatch_id TEXT PRIMARY KEY NOT NULL CHECK(length(dispatch_id) BETWEEN 1 AND 512),
-                run_id TEXT NOT NULL,
-                milestone_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK(length(role) BETWEEN 1 AND 128),
-                generation INTEGER NOT NULL CHECK(generation > 0),
-                claimed_at TEXT NOT NULL,
-                CHECK(dispatch_id = run_id || '/' || milestone_id || '/' || role || '/' || generation),
-                UNIQUE(run_id, milestone_id, role),
-                FOREIGN KEY(run_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE events (
-                event_id TEXT PRIMARY KEY NOT NULL CHECK(length(event_id) BETWEEN 1 AND 256),
-                run_id TEXT NOT NULL,
-                milestone_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL CHECK(sequence > 0),
-                from_state TEXT CHECK(from_state IS NULL OR from_state IN ({_STATES_SQL})),
-                to_state TEXT NOT NULL CHECK(to_state IN ({_STATES_SQL})),
-                event_type TEXT NOT NULL CHECK(event_type IN ({_EVENT_TYPES_SQL})),
-                reason_code TEXT CHECK(reason_code IS NULL OR reason_code IN ({_REASON_CODES_SQL})),
-                reason_detail TEXT CHECK(reason_detail IS NULL),
-                dispatch_id TEXT,
-                data_json TEXT CHECK(data_json IS NULL),
-                occurred_at TEXT NOT NULL,
-                CHECK(event_id = run_id || '/' || milestone_id || '/' || sequence),
-                UNIQUE(run_id, milestone_id, sequence),
-                FOREIGN KEY(run_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE,
-                FOREIGN KEY(dispatch_id) REFERENCES dispatches(dispatch_id) ON DELETE RESTRICT
-            );
-        """
         try:
             with self._transaction():
-                # executescript manages the DDL transaction itself when
-                # isolation is disabled, so use individual statements inside
-                # our explicit write transaction to retain rollback semantics.
-                self.connection.execute(
-                    "CREATE TABLE schema_meta (key TEXT PRIMARY KEY NOT NULL CHECK(length(key) > 0), "
-                    "value TEXT NOT NULL CHECK(length(value) > 0))"
-                )
-                self.connection.execute(
+                for statement in _V2_TABLE_DDL.values():
+                    self._db().execute(statement)
+                self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
                     (str(int(CURRENT_SCHEMA_VERSION)),),
                 )
-                self.connection.execute("INSERT INTO schema_meta(key, value) VALUES ('migration_marker', 'complete')")
-                self.connection.execute(
+                self._db().execute("INSERT INTO schema_meta(key, value) VALUES ('migration_marker', 'complete')")
+                self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_identity', ?)", (_SCHEMA_IDENTITY,)
                 )
-                statements = [statement.strip() for statement in sql.split(";") if statement.strip()]
-                # The first three statements above are intentionally skipped
-                # from the generated block, leaving the four owned data tables.
-                for statement in statements[3:]:
-                    self.connection.execute(statement)
         except sqlite3.OperationalError as exc:
             # Two first openers may observe an empty file concurrently.  The
             # loser waits for the winner's transaction, then observes the
@@ -424,11 +504,24 @@ class Ledger:
     def _validate_shape(self, version: SchemaVersion) -> None:
         required_tables = {"schema_meta", "runs", "milestones", "dispatches", "events"}
         tables = {
-            str(row[0])
-            for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            str(row[0]) for row in self._db().execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
-        if tables - required_tables:
-            raise CorruptSchemaError(f"unexpected tables in workflow ledger: {sorted(tables - required_tables)!r}")
+        if tables != required_tables:
+            raise CorruptSchemaError(f"workflow ledger has unexpected owned tables: {sorted(tables)!r}")
+        definitions = _V1_TABLE_DDL if version == SchemaVersion(1) else _V2_TABLE_DDL
+        actual_definitions: dict[str, str] = {}
+        for table in definitions:
+            row = (
+                self._db()
+                .execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,))
+                .fetchone()
+            )
+            if row is None or row[0] is None:
+                raise CorruptSchemaError(f"ledger table {table!r} has no owned DDL")
+            actual_definitions[table] = str(row[0])
+        if _schema_fingerprint(actual_definitions) != _schema_fingerprint(definitions):
+            raise CorruptSchemaError("ledger DDL fingerprint does not match the canonical owned schema")
+
         expected: dict[str, dict[str, tuple[str, int, int]]] = {
             "schema_meta": {
                 "key": ("TEXT", 1, 1),
@@ -474,41 +567,10 @@ class Ledger:
         if version == SchemaVersion(1):
             expected["runs"].pop("closed_at")
         for table, expected_columns in expected.items():
-            rows = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+            rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
             if actual != expected_columns:
                 raise CorruptSchemaError(f"ledger table {table!r} has an unexpected column contract")
-
-        signatures = {
-            "schema_meta": ("CHECK(LENGTH(KEY)>0)", "CHECK(LENGTH(VALUE)>0)"),
-            "runs": ("CHECK(LENGTH(RUN_ID)BETWEEN1AND128)", "CHECK(METADATA_JSON='{}')"),
-            "milestones": ("CHECK(CURRENT_STATEIN(", "CHECK(METADATA_JSON='{}')"),
-            "dispatches": (
-                "CHECK(LENGTH(ROLE)BETWEEN1AND128)",
-                "CHECK(GENERATION>0)",
-                "CHECK(DISPATCH_ID=RUN_ID||'/'||MILESTONE_ID||'/'||ROLE||'/'||GENERATION)",
-            ),
-            "events": (
-                "CHECK(SEQUENCE>0)",
-                "CHECK(TO_STATEIN(",
-                "CHECK(EVENT_TYPEIN(",
-                "CHECK(REASON_CODEISNULLORREASON_CODEIN(",
-                "CHECK(REASON_DETAILISNULL)",
-                "CHECK(DATA_JSONISNULL)",
-                "CHECK(EVENT_ID=RUN_ID||'/'||MILESTONE_ID||'/'||SEQUENCE)",
-            ),
-        }
-        for table, fragments in signatures.items():
-            row = self.connection.execute(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
-            ).fetchone()
-            if row is None or row[0] is None:
-                raise CorruptSchemaError(f"ledger table {table!r} has no owned SQL definition")
-            compact = "".join(str(row[0]).upper().split())
-            if any(fragment not in compact for fragment in fragments):
-                raise CorruptSchemaError(f"ledger table {table!r} is missing an integrity constraint")
-            if table in {"milestones", "events"} and any(state.value not in str(row[0]) for state in WorkflowState):
-                raise CorruptSchemaError(f"ledger table {table!r} does not constrain all workflow states")
 
         self._require_unique_index("dispatches", ("run_id", "milestone_id", "role"))
         self._require_unique_index("events", ("run_id", "milestone_id", "sequence"))
@@ -528,16 +590,16 @@ class Ledger:
                 ("dispatches", "dispatch_id", "dispatch_id", "RESTRICT"),
             ),
         )
-        foreign_keys = self.connection.execute("PRAGMA foreign_keys").fetchone()
+        foreign_keys = self._db().execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
 
     def _require_unique_index(self, table: str, columns: tuple[str, ...]) -> None:
-        for row in self.connection.execute(f"PRAGMA index_list({table})").fetchall():
+        for row in self._db().execute(f"PRAGMA index_list({table})").fetchall():
             if int(row[2]) != 1:
                 continue
             index_columns = tuple(
-                str(info[2]) for info in self.connection.execute(f"PRAGMA index_info({row[1]})").fetchall()
+                str(info[2]) for info in self._db().execute(f"PRAGMA index_info({row[1]})").fetchall()
             )
             if index_columns == columns:
                 return
@@ -547,7 +609,7 @@ class Ledger:
         actual = tuple(
             (str(row[2]), str(row[3]), str(row[4]), str(row[6]).upper())
             for row in sorted(
-                self.connection.execute(f"PRAGMA foreign_key_list({table})").fetchall(),
+                self._db().execute(f"PRAGMA foreign_key_list({table})").fetchall(),
                 key=lambda row: (int(row[0]), int(row[1])),
             )
         )
@@ -561,25 +623,24 @@ class Ledger:
             "SELECT COUNT(*) FROM events e LEFT JOIN milestones m ON m.run_id = e.run_id AND m.milestone_id = e.milestone_id WHERE m.run_id IS NULL",
             "SELECT COUNT(*) FROM events e LEFT JOIN dispatches d ON d.dispatch_id = e.dispatch_id WHERE e.dispatch_id IS NOT NULL AND d.dispatch_id IS NULL",
         )
-        if any(int(self.connection.execute(query).fetchone()[0]) for query in orphan_queries):
+        if any(int(self._db().execute(query).fetchone()[0]) for query in orphan_queries):
             raise CorruptSchemaError("workflow ledger contains orphan rows")
         duplicate_queries = (
             "SELECT COUNT(*) FROM (SELECT run_id, milestone_id FROM milestones GROUP BY run_id, milestone_id HAVING COUNT(*) > 1)",
             "SELECT COUNT(*) FROM (SELECT run_id, milestone_id, role FROM dispatches GROUP BY run_id, milestone_id, role HAVING COUNT(*) > 1)",
             "SELECT COUNT(*) FROM (SELECT run_id, milestone_id, sequence FROM events GROUP BY run_id, milestone_id, sequence HAVING COUNT(*) > 1)",
         )
-        if any(int(self.connection.execute(query).fetchone()[0]) for query in duplicate_queries):
+        if any(int(self._db().execute(query).fetchone()[0]) for query in duplicate_queries):
             raise CorruptSchemaError("workflow ledger contains duplicate logical rows")
-        run_rows = self.connection.execute("SELECT * FROM runs ORDER BY run_id").fetchall()
+        run_rows = self._db().execute("SELECT * FROM runs ORDER BY run_id").fetchall()
         for row in run_rows:
             RunId(row["run_id"])
             _decode_object(row["metadata_json"], field_name="run metadata")
-        milestone_rows = self.connection.execute("SELECT * FROM milestones ORDER BY run_id, milestone_id").fetchall()
+        milestone_rows = self._db().execute("SELECT * FROM milestones ORDER BY run_id, milestone_id").fetchall()
         milestone_keys = {(str(row["run_id"]), str(row["milestone_id"])) for row in milestone_rows}
-        dispatch_rows = self.connection.execute(
-            "SELECT * FROM dispatches ORDER BY run_id, milestone_id, role"
-        ).fetchall()
+        dispatch_rows = self._db().execute("SELECT * FROM dispatches ORDER BY run_id, milestone_id, role").fetchall()
         dispatch_keys = set()
+        dispatches_by_id: dict[DispatchId, DispatchClaim] = {}
         for row in dispatch_rows:
             key = (str(row["run_id"]), str(row["milestone_id"]), str(row["role"]))
             if key in dispatch_keys:
@@ -592,17 +653,43 @@ class Ledger:
                 raise CorruptSchemaError("dispatch identity does not match its columns")
             if (str(dispatch.run_id), str(dispatch.milestone_id)) not in milestone_keys:
                 raise CorruptSchemaError("dispatch points outside its milestone")
-        event_rows = self.connection.execute("SELECT * FROM events ORDER BY run_id, milestone_id, sequence").fetchall()
+            dispatches_by_id[dispatch.dispatch_id] = dispatch
+        event_rows = self._db().execute("SELECT * FROM events ORDER BY run_id, milestone_id, sequence").fetchall()
         events_by_milestone: dict[tuple[str, str], list[EventRecord]] = {}
+        claim_counts = dict.fromkeys(dispatches_by_id, 0)
         for row in event_rows:
             event = self._event_from_row(row)
+            try:
+                _event_type(event.event_type)
+            except ValueError as exc:
+                raise CorruptSchemaError("event has an unsupported kind") from exc
             if event.event_id != EventId(f"{event.run_id}/{event.milestone_id}/{int(event.sequence)}"):
                 raise CorruptSchemaError("event identity does not match its columns")
             events_by_milestone.setdefault((str(event.run_id), str(event.milestone_id)), []).append(event)
             if event.from_state is None or event.to_state not in ALLOWED_TRANSITIONS[event.from_state]:
                 raise CorruptSchemaError("event contains a forbidden state transition")
-            if event.dispatch_id is not None and event.event_type != "dispatch_claimed":
-                raise CorruptSchemaError("only dispatch claims may reference a dispatch")
+            if event.event_type == "dispatch_claimed":
+                if (
+                    event.dispatch_id is None
+                    or event.reason is None
+                    or event.reason.code is not ReasonCode.DISPATCH_CLAIMED
+                    or event.from_state is not WorkflowState.PLANNED
+                    or event.to_state is not WorkflowState.STARTING
+                ):
+                    raise CorruptSchemaError("dispatch claim event has an invalid causal contract")
+                dispatch = dispatches_by_id.get(event.dispatch_id)
+                if dispatch is None or (dispatch.run_id, dispatch.milestone_id) != (
+                    event.run_id,
+                    event.milestone_id,
+                ):
+                    raise CorruptSchemaError("dispatch claim event does not match its dispatch row")
+                claim_counts[event.dispatch_id] += 1
+            elif event.dispatch_id is not None or (
+                event.reason is not None and event.reason.code is ReasonCode.DISPATCH_CLAIMED
+            ):
+                raise CorruptSchemaError("normal state transition carries dispatch authority")
+        if any(count != 1 for count in claim_counts.values()):
+            raise CorruptSchemaError("every dispatch row must have exactly one matching claim event")
         for row in milestone_rows:
             key = (str(row["run_id"]), str(row["milestone_id"]))
             milestone = self._milestone_from_row(row)
@@ -610,39 +697,62 @@ class Ledger:
             sequences = tuple(int(event.sequence) for event in history)
             if sequences != tuple(range(1, len(history) + 1)):
                 raise CorruptSchemaError("milestone event sequence is not contiguous")
-            if history and history[-1].to_state is not milestone.state:
-                raise CorruptSchemaError("milestone state does not match its last event")
-            if not history and milestone.state is not WorkflowState.PLANNED:
-                raise CorruptSchemaError("non-planned milestone has no causal history")
+            replay_state = WorkflowState.PLANNED
+            for event in history:
+                if event.from_state is not replay_state:
+                    raise CorruptSchemaError("milestone event history is non-causal")
+                replay_state = event.to_state
+            if replay_state is not milestone.state:
+                raise CorruptSchemaError("milestone state does not match replayed history")
 
     def _migrate(self, version: SchemaVersion) -> None:
         if version != SchemaVersion(1):
             raise UnsupportedSchemaVersion(f"ledger schema {version} has no owned migration")
         self._validate_shape(version)
         self._validate_rows()
-        with self._transaction():
-            columns = {str(row[1]) for row in self.connection.execute("PRAGMA table_info(runs)").fetchall()}
-            if "closed_at" not in columns:
-                self.connection.execute("ALTER TABLE runs ADD COLUMN closed_at TEXT")
-            self.connection.execute(
-                "INSERT INTO schema_meta(key, value) VALUES ('migration_marker', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (f"v{int(CURRENT_SCHEMA_VERSION)}",),
-            )
-            self.connection.execute(
-                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                (str(int(CURRENT_SCHEMA_VERSION)),),
-            )
-            self.connection.execute(
-                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
-                (_SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION],),
-            )
-            self._fault("after_migration")
-            self.connection.execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+        rows = {
+            "runs": [tuple(row) for row in self._db().execute("SELECT run_id, created_at, metadata_json FROM runs")],
+            "milestones": [tuple(row) for row in self._db().execute("SELECT * FROM milestones")],
+            "dispatches": [tuple(row) for row in self._db().execute("SELECT * FROM dispatches")],
+            "events": [tuple(row) for row in self._db().execute("SELECT * FROM events")],
+        }
+        self._db().execute("PRAGMA foreign_keys = OFF")
+        try:
+            with self._transaction():
+                for table in ("events", "dispatches", "milestones", "runs"):
+                    self._db().execute(f"DROP TABLE {table}")
+                for table in ("runs", "milestones", "dispatches", "events"):
+                    self._db().execute(_V2_TABLE_DDL[table])
+                self._db().executemany(
+                    "INSERT INTO runs(run_id, created_at, closed_at, metadata_json) VALUES (?, ?, NULL, ?)",
+                    rows["runs"],
+                )
+                for table in ("milestones", "dispatches", "events"):
+                    placeholders = ", ".join("?" for _ in rows[table][0]) if rows[table] else ""
+                    if placeholders:
+                        self._db().executemany(f"INSERT INTO {table} VALUES ({placeholders})", rows[table])
+                self._db().execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'migration_marker'",
+                    (f"v{int(CURRENT_SCHEMA_VERSION)}",),
+                )
+                self._db().execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                    (str(int(CURRENT_SCHEMA_VERSION)),),
+                )
+                self._db().execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                    (_SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION],),
+                )
+                self._fault("after_migration")
+                self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+        finally:
+            self._db().execute("PRAGMA foreign_keys = ON")
+        if self._db().execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise CorruptSchemaError("migrated ledger violates the canonical foreign-key contract")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
-        connection = self.connection
+        connection = self._db()
         connection.execute("BEGIN IMMEDIATE")
         try:
             yield
@@ -663,6 +773,12 @@ class Ledger:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
+        if self._database_fd is not None:
+            os.close(self._database_fd)
+            self._database_fd = None
+        for descriptor in reversed(self._directory_fds):
+            os.close(descriptor)
+        self._directory_fds = ()
 
     def reopen(self) -> Ledger:
         self.close()
@@ -689,20 +805,21 @@ class Ledger:
         checked, encoded = _empty_object(metadata, field_name="run metadata")
         created = utc_now()
         with self._transaction():
-            existing = self.connection.execute("SELECT * FROM runs WHERE run_id = ?", (str(run),)).fetchone()
+            existing = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(run),)).fetchone()
             if existing is not None:
                 if _decode_object(existing["metadata_json"], field_name="run metadata") != checked:
                     raise LedgerError(f"run {run} already exists with different metadata")
                 return self._run_from_row(existing)
-            self.connection.execute(
+            self._db().execute(
                 "INSERT INTO runs(run_id, created_at, closed_at, metadata_json) VALUES (?, ?, NULL, ?)",
                 (str(run), created, encoded),
             )
+            self._validate_rows()
             return RunRecord(run, created, None, checked)
 
     def get_run(self, run_id: RunId | str) -> RunRecord:
         run = _run_id(run_id)
-        row = self.connection.execute("SELECT * FROM runs WHERE run_id = ?", (str(run),)).fetchone()
+        row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(run),)).fetchone()
         if row is None:
             raise RecordNotFound(f"run {run} does not exist")
         return self._run_from_row(row)
@@ -712,10 +829,12 @@ class Ledger:
         closed = utc_now()
         with self._transaction():
             self.get_run(run)
-            self.connection.execute(
+            self._db().execute(
                 "UPDATE runs SET closed_at = COALESCE(closed_at, ?) WHERE run_id = ?", (closed, str(run))
             )
-            return self.get_run(run)
+            record = self.get_run(run)
+            self._validate_rows()
+            return record
 
     def create_milestone(
         self,
@@ -730,26 +849,31 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             self.get_run(run)
-            existing = self.connection.execute(
-                "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?", (str(run), str(milestone))
-            ).fetchone()
+            existing = (
+                self._db()
+                .execute("SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?", (str(run), str(milestone)))
+                .fetchone()
+            )
             if existing is not None:
                 if _decode_object(existing["metadata_json"], field_name="milestone metadata") != checked:
                     raise LedgerError(f"milestone {milestone} already exists with different metadata")
                 return self._milestone_from_row(existing)
-            self.connection.execute(
+            self._db().execute(
                 "INSERT INTO milestones(run_id, milestone_id, current_state, created_at, updated_at, metadata_json) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (str(run), str(milestone), WorkflowState.PLANNED.value, now, now, encoded),
             )
+            self._validate_rows()
             return MilestoneRecord(run, milestone, WorkflowState.PLANNED, now, now, checked)
 
     def get_milestone(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> MilestoneRecord:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
-        row = self.connection.execute(
-            "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?", (str(run), str(milestone))
-        ).fetchone()
+        row = (
+            self._db()
+            .execute("SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?", (str(run), str(milestone)))
+            .fetchone()
+        )
         if row is None:
             raise RecordNotFound(f"milestone {milestone} does not exist")
         return self._milestone_from_row(row)
@@ -776,26 +900,30 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             self.get_run(run)
-            existing = self.connection.execute(
-                "SELECT * FROM dispatches WHERE dispatch_id = ?", (str(dispatch_id),)
-            ).fetchone()
+            existing = (
+                self._db().execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
+            )
             if existing is not None:
                 return self._dispatch_from_row(existing)
-            owner = self.connection.execute(
-                "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = ?",
-                (str(run), str(milestone), str(role_value)),
-            ).fetchone()
+            owner = (
+                self._db()
+                .execute(
+                    "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = ?",
+                    (str(run), str(milestone), str(role_value)),
+                )
+                .fetchone()
+            )
             if owner is not None:
                 raise DispatchConflict(f"milestone {milestone} role {role_value} is owned by {owner['dispatch_id']}")
             current = self.get_milestone(run, milestone)
             if current.state is not WorkflowState.PLANNED:
                 raise InvalidTransition(f"dispatch claim requires PLANNED, found {current.state.value}")
-            self.connection.execute(
+            self._db().execute(
                 "INSERT INTO dispatches(dispatch_id, run_id, milestone_id, role, generation, claimed_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (str(dispatch_id), str(run), str(milestone), str(role_value), int(generation_value), now),
             )
-            self.connection.execute(
+            self._db().execute(
                 "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
                 (WorkflowState.STARTING.value, now, str(run), str(milestone)),
             )
@@ -811,11 +939,12 @@ class Ledger:
                 data=None,
             )
             self._fault("after_event_insert")
+            self._validate_rows()
             return DispatchClaim(dispatch_id, run, milestone, role_value, generation_value, now)
 
     def get_dispatch(self, dispatch_id: DispatchId | str) -> DispatchClaim:
-        dispatch = DispatchId(dispatch_id if isinstance(dispatch_id, str) else str(dispatch_id))
-        row = self.connection.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (str(dispatch),)).fetchone()
+        dispatch = DispatchId(dispatch_id)
+        row = self._db().execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (str(dispatch),)).fetchone()
         if row is None:
             raise RecordNotFound(f"dispatch {dispatch} does not exist")
         return self._dispatch_from_row(row)
@@ -845,10 +974,12 @@ class Ledger:
         normalized_reason = _reason(reason)
         if data is not None:
             _empty_object(data, field_name="event data")
-        dispatch = None
-        if dispatch_id is not None:
-            dispatch = DispatchId(dispatch_id if isinstance(dispatch_id, str) else str(dispatch_id))
+        dispatch = DispatchId(dispatch_id) if dispatch_id is not None else None
         normalized_event_type = _event_type(event_type or "state_transition")
+        if normalized_event_type != "state_transition" or dispatch is not None:
+            raise ValueError("normal state transitions cannot carry dispatch authority")
+        if normalized_reason is not None and normalized_reason.code is ReasonCode.DISPATCH_CLAIMED:
+            raise ValueError("dispatch_claimed reason is reserved for claim_dispatch")
         with self._transaction():
             current = self.get_milestone(run, milestone)
             if expected_value is not None and current.state is not expected_value:
@@ -857,18 +988,8 @@ class Ledger:
                 )
             if target not in ALLOWED_TRANSITIONS[current.state]:
                 raise InvalidTransition(f"{current.state.value} -> {target.value} is not allowed")
-            if dispatch is not None and (
-                dispatch.parts[0] != current.run_id or dispatch.parts[1] != current.milestone_id
-            ):
-                raise DispatchConflict("event dispatch identity does not belong to the milestone")
-            if dispatch is not None:
-                dispatch_row = self.connection.execute(
-                    "SELECT 1 FROM dispatches WHERE dispatch_id = ?", (str(dispatch),)
-                ).fetchone()
-                if dispatch_row is None:
-                    raise RecordNotFound(f"dispatch {dispatch} does not exist")
             now = utc_now()
-            self.connection.execute(
+            self._db().execute(
                 "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
                 (target.value, now, str(current.run_id), str(current.milestone_id)),
             )
@@ -886,6 +1007,7 @@ class Ledger:
                 data=None,
             )
             self._fault("after_event_insert")
+            self._validate_rows()
             return event
 
     def _append_event_in_transaction(
@@ -900,16 +1022,20 @@ class Ledger:
         dispatch_id: DispatchId | None,
         data: JsonObject | None,
     ) -> EventRecord:
-        last = self.connection.execute(
-            "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE run_id = ? AND milestone_id = ?",
-            (str(run_id), str(milestone_id)),
-        ).fetchone()
+        last = (
+            self._db()
+            .execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE run_id = ? AND milestone_id = ?",
+                (str(run_id), str(milestone_id)),
+            )
+            .fetchone()
+        )
         sequence = EventSequence(int(last[0]) + 1)
         event_id = EventId(f"{run_id}/{milestone_id}/{int(sequence)}")
         encoded_data = None
         if data is not None:
             _empty_object(data, field_name="event data")
-        self.connection.execute(
+        self._db().execute(
             "INSERT INTO events(event_id, run_id, milestone_id, sequence, from_state, to_state, event_type, "
             "reason_code, reason_detail, dispatch_id, data_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -927,7 +1053,7 @@ class Ledger:
                 utc_now(),
             ),
         )
-        row = self.connection.execute("SELECT * FROM events WHERE event_id = ?", (str(event_id),)).fetchone()
+        row = self._db().execute("SELECT * FROM events WHERE event_id = ?", (str(event_id),)).fetchone()
         assert row is not None
         return self._event_from_row(row)
 
@@ -938,34 +1064,50 @@ class Ledger:
     def events(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> tuple[EventRecord, ...]:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
-        rows = self.connection.execute(
-            "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? ORDER BY sequence",
-            (str(run), str(milestone)),
-        ).fetchall()
+        rows = (
+            self._db()
+            .execute(
+                "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? ORDER BY sequence",
+                (str(run), str(milestone)),
+            )
+            .fetchall()
+        )
         return tuple(self._event_from_row(row) for row in rows)
 
     def recovery_facts(self, run_id: RunId | str) -> tuple[RecoveryFact, ...]:
         run = _run_id(run_id)
-        rows = self.connection.execute(
-            "SELECT d.*, m.current_state FROM dispatches d JOIN milestones m "
-            "ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id "
-            "WHERE d.run_id = ? ORDER BY d.milestone_id, d.role, d.generation",
-            (str(run),),
-        ).fetchall()
+        rows = (
+            self._db()
+            .execute(
+                "SELECT d.*, m.current_state FROM dispatches d JOIN milestones m "
+                "ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id "
+                "WHERE d.run_id = ? ORDER BY d.milestone_id, d.role, d.generation",
+                (str(run),),
+            )
+            .fetchall()
+        )
         facts: list[RecoveryFact] = []
         for row in rows:
             state = _row_state(row["current_state"])
             if state in TERMINAL_STATES:
                 continue
             dispatch = self._dispatch_from_row(row)
-            last_sequence = self.connection.execute(
-                "SELECT MAX(sequence) FROM events WHERE run_id = ? AND milestone_id = ?",
-                (str(dispatch.run_id), str(dispatch.milestone_id)),
-            ).fetchone()[0]
-            last = self.connection.execute(
-                "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? AND sequence = ?",
-                (str(dispatch.run_id), str(dispatch.milestone_id), int(last_sequence)),
-            ).fetchone()
+            last_sequence = (
+                self._db()
+                .execute(
+                    "SELECT MAX(sequence) FROM events WHERE run_id = ? AND milestone_id = ?",
+                    (str(dispatch.run_id), str(dispatch.milestone_id)),
+                )
+                .fetchone()[0]
+            )
+            last = (
+                self._db()
+                .execute(
+                    "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? AND sequence = ?",
+                    (str(dispatch.run_id), str(dispatch.milestone_id), int(last_sequence)),
+                )
+                .fetchone()
+            )
             if last is None:
                 raise SchemaError(f"dispatch {dispatch.dispatch_id} has no causal event")
             facts.append(RecoveryFact(dispatch, state, self._event_from_row(last)))
@@ -977,15 +1119,23 @@ class Ledger:
         # without allowing it to become an authority for future writes.
         with self._read_transaction():
             record = self.get_run(run)
-            milestone_rows = self.connection.execute(
-                "SELECT * FROM milestones WHERE run_id = ? ORDER BY milestone_id", (str(run),)
-            ).fetchall()
-            dispatch_rows = self.connection.execute(
-                "SELECT * FROM dispatches WHERE run_id = ? ORDER BY milestone_id, role, generation", (str(run),)
-            ).fetchall()
-            event_rows = self.connection.execute(
-                "SELECT * FROM events WHERE run_id = ? ORDER BY milestone_id, sequence", (str(run),)
-            ).fetchall()
+            milestone_rows = (
+                self._db()
+                .execute("SELECT * FROM milestones WHERE run_id = ? ORDER BY milestone_id", (str(run),))
+                .fetchall()
+            )
+            dispatch_rows = (
+                self._db()
+                .execute(
+                    "SELECT * FROM dispatches WHERE run_id = ? ORDER BY milestone_id, role, generation", (str(run),)
+                )
+                .fetchall()
+            )
+            event_rows = (
+                self._db()
+                .execute("SELECT * FROM events WHERE run_id = ? ORDER BY milestone_id, sequence", (str(run),))
+                .fetchall()
+            )
             return LedgerSnapshot(
                 record,
                 tuple(self._milestone_from_row(row) for row in milestone_rows),
@@ -995,12 +1145,12 @@ class Ledger:
 
     @contextmanager
     def _read_transaction(self) -> Iterator[None]:
-        self.connection.execute("BEGIN")
+        self._db().execute("BEGIN")
         try:
             yield
         finally:
             try:
-                self.connection.execute("ROLLBACK")
+                self._db().execute("ROLLBACK")
             except sqlite3.DatabaseError:
                 pass
 

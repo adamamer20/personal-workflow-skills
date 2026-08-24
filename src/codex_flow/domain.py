@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import TypeAlias
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -190,9 +191,9 @@ class DispatchId(str):
         role: RoleId | str,
         generation: Generation | int | str,
     ) -> DispatchId:
-        run = RunId(str(run_id))
-        milestone = MilestoneId(str(milestone_id))
-        role_value = RoleId(str(role))
+        run = RunId(run_id)
+        milestone = MilestoneId(milestone_id)
+        role_value = RoleId(role)
         generation_value = Generation(generation)
         return cls(f"{run}/{milestone}/{role_value}/{generation_value}")
 
@@ -295,7 +296,7 @@ TERMINAL_STATES: frozenset[WorkflowState] = frozenset(
 )
 
 
-ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
+_ALLOWED_TRANSITIONS = {
     WorkflowState.PLANNED: frozenset(
         {WorkflowState.STARTING, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED}
     ),
@@ -334,6 +335,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.FAILED: frozenset(),
     WorkflowState.CANCELLED: frozenset(),
 }
+ALLOWED_TRANSITIONS: Mapping[WorkflowState, frozenset[WorkflowState]] = MappingProxyType(_ALLOWED_TRANSITIONS)
 
 
 def coerce_state(value: WorkflowState | str) -> WorkflowState:

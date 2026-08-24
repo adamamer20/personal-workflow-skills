@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import inspect
+import os
 import sqlite3
 import unittest
 from multiprocessing import Process, Queue
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import codex_flow.artifacts as artifacts_module
+import codex_flow.ledger as ledger_module
 from codex_flow.artifacts import ArtifactError, ArtifactProjector, UnsafeArtifactPath, rebuild_projections
 from codex_flow.domain import (
     ALLOWED_TRANSITIONS,
@@ -21,7 +25,9 @@ from codex_flow.domain import (
 from codex_flow.ledger import (
     _EVENT_TYPES_SQL,
     _REASON_CODES_SQL,
+    _SCHEMA_IDENTITY,
     _STATES_SQL,
+    _V2_TABLE_DDL,
     CorruptSchemaError,
     DispatchConflict,
     InvalidTransition,
@@ -127,6 +133,23 @@ class LedgerTests(unittest.TestCase):
         identity = DispatchId.from_parts("run-1", "m-1", "executor", 3)
         self.assertEqual(identity, "run-1/m-1/executor/3")
         self.assertEqual(identity.parts[3], 3)
+        with self.assertRaises(ValueError):
+            DispatchId.from_parts(7, "m-1", "executor", 1)  # type: ignore[arg-type]
+        with TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "workflow.db")
+            with self.assertRaises(ValueError):
+                ledger.create_run(7)  # type: ignore[arg-type]
+            ledger.create_run("r")
+            with self.assertRaises(ValueError):
+                ledger.create_milestone("r", 7)  # type: ignore[arg-type]
+            ledger.create_milestone("r", "m")
+            with self.assertRaises(ValueError):
+                ledger.claim_dispatch("r", "m", 7, 1)  # type: ignore[arg-type]
+
+    def test_transition_policy_is_immutable_to_callers(self) -> None:
+        with self.assertRaises(TypeError):
+            ALLOWED_TRANSITIONS[WorkflowState.PLANNED] = frozenset()  # type: ignore[index]
+        self.assertIn(WorkflowState.STARTING, ALLOWED_TRANSITIONS[WorkflowState.PLANNED])
 
     def test_matrix_and_terminal_immutability_are_explicit(self) -> None:
         self.assertEqual(
@@ -250,6 +273,34 @@ class LedgerTests(unittest.TestCase):
             facts = ledger.recovery_facts("r")
             self.assertEqual(len(facts), 1)
             self.assertEqual(facts[0].dispatch.dispatch_id, claim.dispatch_id)
+            self.assertEqual(ledger.journal_mode, "delete")
+            self.assertFalse(hasattr(ledger, "connection"))
+
+    def test_invalid_event_dispatch_combinations_fail_before_mutation(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            ledger = Ledger(path)
+            ledger.create_run("r")
+            ledger.create_milestone("r", "m")
+            claim = ledger.claim_dispatch("r", "m", "executor", 1)
+            before = ledger.snapshot("r")
+            invalid = (
+                {"event_type": "dispatch_claimed"},
+                {"dispatch_id": claim.dispatch_id},
+                {"reason": ReasonCode.DISPATCH_CLAIMED},
+            )
+            for arguments in invalid:
+                with self.assertRaises(ValueError):
+                    ledger.transition(
+                        "r",
+                        "m",
+                        WorkflowState.RUNNING,
+                        expected_state=WorkflowState.STARTING,
+                        **arguments,  # type: ignore[arg-type]
+                    )
+                self.assertEqual(ledger.snapshot("r"), before)
+            ledger.reopen()
+            self.assertEqual(ledger.snapshot("r"), before)
 
     def test_reopen_rejects_database_and_ancestor_symlink_swaps(self) -> None:
         with TemporaryDirectory() as directory:
@@ -281,6 +332,41 @@ class LedgerTests(unittest.TestCase):
             db_dir.symlink_to(outside, target_is_directory=True)
             with self.assertRaises(SchemaError):
                 ledger.reopen()
+
+    def test_database_hardlink_substitution_cannot_redirect_writes(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "workflow.db"
+            original = root / "workflow-original.db"
+            attacker = root / "attacker.db"
+            Ledger(path).close()
+            attacker_ledger = Ledger(attacker)
+            attacker_ledger.create_run("attacker")
+            attacker_ledger.close()
+            swapped = False
+
+            def swap(stage: str) -> None:
+                nonlocal swapped
+                if stage == "before_connect" and not swapped:
+                    swapped = True
+                    path.rename(original)
+                    os.link(attacker, path)
+
+            ledger = Ledger(path, fault_injector=swap)
+            ledger.create_run("pinned")
+            self.assertEqual(ledger.get_run("pinned").run_id, "pinned")
+            ledger.close()
+            original_connection = sqlite3.connect(original)
+            self.assertEqual(original_connection.execute("SELECT run_id FROM runs").fetchall(), [("pinned",)])
+            original_connection.close()
+            attacker_connection = sqlite3.connect(attacker)
+            self.assertEqual(attacker_connection.execute("SELECT run_id FROM runs").fetchall(), [("attacker",)])
+            attacker_connection.close()
+            self.assertFalse(any(root.glob("*-journal")))
+            path.unlink()
+            original.rename(path)
+            reopened = Ledger(path)
+            self.assertEqual(reopened.get_run("pinned").run_id, "pinned")
 
     def test_reason_categories_do_not_collapse(self) -> None:
         self.assertEqual(PreIdentityTransportFailure().code, ReasonCode.TRANSPORT_FAILURE)
@@ -317,6 +403,17 @@ class LedgerTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "workflow.db"
             _make_v1_fixture(path)
+            connection = sqlite3.connect(path)
+            connection.execute("INSERT INTO runs VALUES ('r', 't0', '{}')")
+            connection.execute("INSERT INTO milestones VALUES ('r', 'm', 'STARTING', 't0', 't1', '{}')")
+            connection.execute("INSERT INTO dispatches VALUES ('r/m/executor/1', 'r', 'm', 'executor', 1, 't1')")
+            connection.execute(
+                "INSERT INTO events VALUES "
+                "('r/m/1', 'r', 'm', 1, 'PLANNED', 'STARTING', 'dispatch_claimed', "
+                "'dispatch_claimed', NULL, 'r/m/executor/1', NULL, 't1')"
+            )
+            connection.commit()
+            connection.close()
 
             def fault(stage: str) -> None:
                 if stage == "after_migration":
@@ -332,8 +429,15 @@ class LedgerTests(unittest.TestCase):
             connection.close()
             migrated = Ledger(path)
             self.assertEqual(int(migrated.schema_version), 2)
-            self.assertIn("closed_at", {row[1] for row in migrated.connection.execute("PRAGMA table_info(runs)")})
+            self.assertIn("closed_at", migrated.schema_columns("runs"))
+            self.assertEqual(migrated.current_state("r", "m"), WorkflowState.STARTING)
+            self.assertEqual(migrated.get_dispatch("r/m/executor/1").role, "executor")
+            self.assertEqual(len(migrated.events("r", "m")), 1)
+            migrated_identity = migrated.schema_identity
             migrated.close()
+            fresh = Ledger(Path(directory) / "fresh.db")
+            self.assertEqual(migrated_identity, fresh.schema_identity)
+            fresh.close()
             connection = sqlite3.connect(path)
             connection.execute("UPDATE schema_meta SET value = '999' WHERE key = 'schema_version'")
             connection.commit()
@@ -361,6 +465,83 @@ class LedgerTests(unittest.TestCase):
             connection.close()
             with self.assertRaises(CorruptSchemaError):
                 Ledger(path)
+
+    def test_comment_only_counterfeit_constraint_is_rejected(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "comment-counterfeit.db"
+            connection = sqlite3.connect(path)
+            for table, ddl in _V2_TABLE_DDL.items():
+                if table == "runs":
+                    ddl = ddl.replace(
+                        "CHECK(length(run_id) BETWEEN 1 AND 128)",
+                        "/* CHECK(length(run_id) BETWEEN 1 AND 128) */",
+                    )
+                connection.execute(ddl)
+            connection.executemany(
+                "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+                (("schema_version", "2"), ("migration_marker", "complete"), ("schema_identity", _SCHEMA_IDENTITY)),
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaises(CorruptSchemaError):
+                Ledger(path)
+
+    def test_reopen_rejects_discontinuous_and_noncausal_histories(self) -> None:
+        for corruption in ("discontinuous", "noncausal"):
+            with self.subTest(corruption=corruption), TemporaryDirectory() as directory:
+                path = Path(directory) / "workflow.db"
+                ledger = Ledger(path)
+                ledger.create_run("r")
+                ledger.create_milestone("r", "m")
+                ledger.claim_dispatch("r", "m", "executor", 1)
+                ledger.transition("r", "m", WorkflowState.RUNNING, expected_state=WorkflowState.STARTING)
+                ledger.close()
+                connection = sqlite3.connect(path)
+                if corruption == "discontinuous":
+                    connection.execute("UPDATE events SET sequence = 3, event_id = 'r/m/3' WHERE sequence = 2")
+                else:
+                    connection.execute(
+                        "UPDATE events SET from_state = 'PLANNED', to_state = 'FAILED' WHERE sequence = 2"
+                    )
+                    connection.execute(
+                        "UPDATE milestones SET current_state = 'FAILED' WHERE run_id = 'r' AND milestone_id = 'm'"
+                    )
+                connection.commit()
+                connection.close()
+                with self.assertRaises(CorruptSchemaError):
+                    Ledger(path)
+
+    def test_reopen_rejects_orphaned_or_duplicate_dispatch_authority(self) -> None:
+        for corruption in ("orphaned", "duplicate"):
+            with self.subTest(corruption=corruption), TemporaryDirectory() as directory:
+                path = Path(directory) / "workflow.db"
+                ledger = Ledger(path)
+                ledger.create_run("r")
+                ledger.create_milestone("r", "m")
+                claim = ledger.claim_dispatch("r", "m", "executor", 1)
+                ledger.close()
+                connection = sqlite3.connect(path)
+                if corruption == "orphaned":
+                    connection.execute("DELETE FROM events WHERE dispatch_id = ?", (str(claim.dispatch_id),))
+                    connection.execute(
+                        "UPDATE milestones SET current_state = 'PLANNED' WHERE run_id = 'r' AND milestone_id = 'm'"
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO events SELECT 'r/m/2', run_id, milestone_id, 2, from_state, to_state, "
+                        "event_type, reason_code, reason_detail, dispatch_id, data_json, occurred_at "
+                        "FROM events WHERE sequence = 1"
+                    )
+                connection.commit()
+                connection.close()
+                with self.assertRaises(CorruptSchemaError):
+                    Ledger(path)
+
+    def test_linux_directory_flags_are_direct_attributes(self) -> None:
+        for module in (ledger_module, artifacts_module):
+            source = inspect.getsource(module)
+            self.assertIn("os.O_DIRECTORY", source)
+            self.assertNotIn('getattr(os, "O_DIRECTORY"', source)
 
     def test_concurrent_processes_establish_one_owner(self) -> None:
         with TemporaryDirectory() as directory:

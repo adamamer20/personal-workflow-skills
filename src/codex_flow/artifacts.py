@@ -124,10 +124,10 @@ def _repository_root(path: str | Path) -> Path:
 def _open_directory_chain(path: Path) -> int:
     """Open every ancestor with O_NOFOLLOW and retain the final directory fd."""
 
-    current_fd = os.open(path.anchor, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    current_fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
     try:
         for component in path.parts[1:]:
-            next_fd = os.open(component, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW, dir_fd=current_fd)
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current_fd)
             os.close(current_fd)
             current_fd = next_fd
         return current_fd
@@ -140,7 +140,7 @@ def _open_directory_chain(path: Path) -> int:
 
 
 def _open_child_directory(parent_fd: int, name: str) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
         return os.open(name, flags, dir_fd=parent_fd)
     except FileNotFoundError:
@@ -178,7 +178,7 @@ class ArtifactProjector:
         self._fault_injector = fault_injector
 
     def rebuild(self, ledger: Ledger, run_id: RunId | str) -> ProjectionPaths:
-        run = RunId(run_id if isinstance(run_id, str) else str(run_id))
+        run = RunId(run_id)
         root = self.repository_root
         try:
             ledger.path.relative_to(root)
