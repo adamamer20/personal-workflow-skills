@@ -401,6 +401,14 @@ concurrency, transactions, migration safety, path safety, and scope adherence.
 Any repair returns to a fresh bounded implementation context under the existing
 H2 contract and is re-reviewed.
 
+### Current candidate
+
+Implementation candidate: `6db6146` (parent `fab4cb6`, the executor's
+cherry-picked equivalent of planning commit `256233a`). The candidate changes
+only `domain.py`, new `ledger.py`, new `artifacts.py`, package exports, and
+focused H2 tests. Executor and planning-owner reruns of `make check` are green
+with 39 tests; independent promotion review remains open.
+
 ### Successor milestone
 
 H3 — add controller-owned worktrees and SDK execution.
@@ -517,14 +525,18 @@ installed-plugin and downstream-pin migration.
   resumed thread, explicit Luna/medium routing, 45 ordered events, unchanged
   read-only repositories, truthful optional-capability labels, and a clean
   executor worktree. Selected H2 as the next executable milestone.
+- 2026-08-24: H2 implementation candidate `6db6146` returned with a clean
+  worktree and zero self-review P0/P1. Planning verification confirmed the
+  five-path scope and reran `make check` successfully with 39 tests. Candidate
+  promotion is withheld pending the required independent review of transition
+  completeness, concurrency/idempotency, transactional rollback and migration,
+  metadata/path safety, and projection authority.
 
 ## Next execution
 
-Milestone: H2 — implement the durable ledger and state machine.
+Milestone: H2R — independently review H2 candidate `6db6146` for promotion.
 
-Dispatch status: queued once as
-`client-new-thread:8a2c70f3-78ef-4eaa-b7f5-5377a594e5b9` on native host
-`local`; no retry or readiness polling is authorized.
+Dispatch status: not yet dispatched.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
@@ -537,22 +549,24 @@ by the native creator when available.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`.
 
-Owned surfaces: H2 mutable ownership only.
+Owned surfaces: read-only inspection and validation of exact candidate
+`6db6146` against H2; no source, test, plan, artifact, Git-history, or external
+state mutation.
 
-Protected surfaces: H1 adapter/sentinel/evidence, root tooling/instructions,
-plugin and skill code, dirty primary checkout, global Codex state, remotes,
-downstream repositories, and H3+ execution/controller logic.
+Protected surfaces: every repository path and candidate commit; H1
+adapter/sentinel/evidence, root tooling/instructions, plugin and skill code,
+dirty primary checkout, global Codex state, remotes, downstream repositories,
+and H3+ execution/controller logic.
 
-Acceptance: exact typed state machine; versioned constrained SQLite schema;
-transactional idempotent dispatch claims and events; concurrent single-owner
-proof; rollback and reopen recovery; atomic rebuildable projections; path and
-SQL safety; no external side effects; `make check`; zero open P0/P1 followed by
-fresh independent review.
+Acceptance: independently reproduce or refute the exact typed state-machine,
+schema/migration, transactional event, concurrent idempotency, reopen recovery,
+projection, metadata and path-safety claims; identify plan/test coverage gaps;
+rerun decisive gates; report `ACCEPTED` only with zero P0/P1 and no material
+scope deviation.
 
-Escalate only for: a required schema/state contract change; evidence that
-SQLite cannot provide the specified local durability/concurrency semantics; a
-security or data-integrity risk; unavoidable dependency or external-state
-mutation; or a P0/P1 finding that cannot be repaired within H2.
+Escalate only for: any reproducible P0/P1 or material H2 plan deviation, changed
+review target, inability to inspect the exact commit, or a required external
+side effect. Return findings; do not repair them in the review task.
 
 Completion callback: return exactly one terminal `COMPLETION`, `BLOCKED`, or
 `FAILED` packet to the planning task using the exact native callback route.
