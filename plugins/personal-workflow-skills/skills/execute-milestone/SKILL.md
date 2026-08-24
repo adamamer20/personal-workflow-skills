@@ -27,7 +27,8 @@ contains independent parallel work with disjoint ownership.
 Before mutation, read repository instructions, the canonical plan, relevant
 code/tests, branch, and worktree status. State the milestone outcome, active
 scope and non-goals, owned and protected surfaces, dependencies, acceptance and
-promotion gates, review requirement, and escalation target. Shared runners,
+promotion gates, explicit acceptance modes, implementation/review authorities,
+review requirement, and escalation target. Shared runners,
 registries, schemas, models, persisted or public contracts, and production
 entrypoints have one implementation owner.
 
@@ -37,40 +38,57 @@ do not build parallel scaffolding or a duplicate execution route.
 
 ## Model routing
 
-The planning and handoff creator resolve the execution role to a concrete
+The planning and handoff creator resolve each implementation or review
+authority to a concrete
 native pair under the governing user/`AGENTS.md` policy. The default authorized
 pairs are `gpt-5.6-luna` with `thinking=high` for bounded or mechanical work,
 `gpt-5.6-luna` with `thinking=xhigh` for substantial milestones and independent
-normal reviews, `gpt-5.6-sol` with `thinking=medium` for visual-judgment
-implementation, and `gpt-5.6-sol` with `thinking=high` for critical visual
-direction or promotion review, architecture/security review, or planning. The
+objective/code reviews, `gpt-5.6-sol` with `thinking=medium` for visual-judgment
+implementation and recovery implementation, and `gpt-5.6-sol` with
+`thinking=high` for visual-quality promotion review, architecture/security
+review, recovery diagnosis, or planning. The
 creator applies the resolved pair to a fresh peer's native `create_thread` call;
 this skill cannot change the model of the task that is already running.
 
-Visual-judgment work includes slide composition, landing pages, frontend or UI
-design, visual systems, and rendered-document quality when acceptance depends
-on composition, hierarchy, responsive behavior, or inspection of the rendered
-result. Sol Medium is the default for that implementation. Sol High owns new or
-system-wide visual direction, weak or conflicting references, remediation after
-repeated visual misses, and the independent final qualitative promotion review.
-Use Luna for visually adjacent execution only when the target and acceptance
-criteria are frozen and the remaining work is mechanical and objectively
-verifiable. Classify by the judgment needed for acceptance, not by file type.
+Every milestone declares one or more acceptance modes: `objective`, `visual`,
+and `architecture`. Derive authorities per mode rather than from file type. An
+objective gate uses Luna for code correctness. A visual gate uses Sol Medium
+when implementation must inspect and judge renders, and a separate Sol High
+qualitative reviewer for promotion. An architecture gate uses Sol High. A
+frontend or slide milestone with objective and visual modes must pass both
+authorities; code correctness never implies visual quality. Luna remains useful
+for a frozen visual target and precise mechanical wiring, export, asset, or CSS
+repair.
 
-Luna execution has a bounded implementation/review circuit breaker. If two
-complete repair and re-review cycles fail to close the same material blocker,
-or the same class of finding is reopened, stop iterating in that Luna context.
-Reach the nearest safe checkpoint, preserve the current diff, validation
-evidence, review findings, and remaining acceptance gap, and send a bounded
-continuation through the planning route for a fresh `gpt-5.6-sol` task with
-`thinking=medium`. If that Sol Medium continuation also completes two repair
-and re-review cycles without closing the blocker, preserve the same bounded
-evidence and escalate once through the planning route to a fresh
-`gpt-5.6-sol` task with `thinking=high`. If Sol High exhausts ordinary repair,
-return a terminal `BLOCKED` or `FAILED` outcome instead of continuing the loop.
-Do not weaken the gate, silently expand scope, or reuse the exhausted task. A
-more specific Sol High route still wins immediately for critical visual,
-architecture, or security work.
+## Recovery and replanning
+
+Non-convergence changes the problem-solving authority or approach; it does not
+terminate the milestone. Reach a safe checkpoint and preserve the diff,
+validation evidence, exact findings, accepted intent, and remaining gap in a
+diagnostic continuation packet. A Sol recovery owner has a bias toward
+completion and classifies the next action:
+
+- finish the bounded local repair;
+- replace the implementation strategy and continue;
+- use `CONTINUE_WITH_REPLAN` to revise an implementation-level architecture
+  assumption and continue when accepted outcome, public/persisted contracts,
+  security/privacy boundary, material cost, destructive behavior, and scope do
+  not change;
+- return `NEEDS_DECISION` only when user intent is genuinely underdetermined or
+  materially different valid choices require user authority;
+- return `EXTERNAL_BLOCKED` only for a missing credential, permission, service,
+  hardware, or other external prerequisite; or
+- return `FAILED` only when evidence shows the goal is not reasonably achievable
+  under the accepted constraints.
+
+`CONTINUE_WITH_REPLAN` is nonterminal and normally stays inside the controller
+or planning/recovery authority. A recovery owner may update the canonical plan
+and continue when the capsule explicitly grants that authority and the change
+stays within accepted intent. Otherwise send one concise replan notice to the
+planning owner, which updates the plan and resumes execution without involving
+the user. Never escalate merely because implementation is difficult, a prior
+plan was wrong, or another model failed to converge. Do not repeat an unchanged
+failed approach, weaken gates, or silently expand scope.
 
 Skill installation alone does not authorize model overrides. Without an
 applicable user authorization, the creator omits `model` and `thinking` and
@@ -95,17 +113,22 @@ Independent review is a peer-thread promotion gate only when the plan names a
 high-risk or subjective gate. Use one fresh reviewer. A second review is
 justified only after a P0/P1 repair materially changes the reviewed surface.
 
-## Escalate material decisions only
+## Escalate genuine user decisions only
 
-Message the exact planning thread id only when:
+Message the exact planning thread id for `NEEDS_DECISION` only when:
 
-- required scope must materially expand;
-- an accepted architecture or ownership boundary must change;
+- required scope must materially expand beyond accepted intent;
+- an accepted product architecture or ownership boundary must materially change;
 - a public or persisted contract must change unexpectedly;
-- repository evidence contradicts an accepted plan decision;
+- repository evidence leaves two or more materially different valid choices;
 - an uncovered security, privacy, data-integrity, permission, or destructive
   operation decision is required; or
-- a dependency or environment limitation makes the accepted outcome impossible.
+- destructive or externally authoritative action needs new user authorization.
+
+Use `EXTERNAL_BLOCKED`, not `NEEDS_DECISION`, when the intent is clear but a
+credential, permission, service, hardware resource, or external-state change is
+missing. Implementation-level architecture correction with unchanged intent is
+replanning, not user escalation.
 
 Do not escalate ordinary implementation choices, helper structure, naming,
 routine test or lint failures, debugging, ordinary refactoring, progress,
@@ -117,7 +140,8 @@ the planning thread. If the decision blocks safe work, stop the execution turn;
 the planning thread replies to this execution thread when a decision exists.
 
 This restriction governs mid-execution messages. It does not remove the
-required terminal callback for a final `BLOCKED` or `FAILED` outcome.
+required terminal callback for a final `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, or
+`FAILED` outcome.
 
 ## Hard context rollover
 
@@ -208,10 +232,15 @@ Every terminal exit must attempt exactly one bounded callback to the exact
 planning route before this execution task ends:
 
 - `COMPLETION` only when all milestone gates pass;
-- `ESCALATION` with `Status: BLOCKED` when a dependency, decision, permission,
-  or environment prevents completion; or
-- `ESCALATION` with `Status: FAILED` when the milestone exhausts ordinary repair
-  without satisfying its gates.
+- `ESCALATION` with `Status: NEEDS_DECISION` only for a genuinely
+  underdetermined material decision or missing user authority;
+- `ESCALATION` with `Status: EXTERNAL_BLOCKED` only when an external
+  prerequisite prevents otherwise-defined work; or
+- `ESCALATION` with `Status: FAILED` only when the accepted goal is not
+  reasonably achievable under its constraints.
+
+`CONTINUE_WITH_REPLAN` is never a terminal callback. It updates durable workflow
+state and continues automatically.
 
 The packet includes:
 

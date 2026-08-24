@@ -64,6 +64,27 @@ repositories, and later milestones remain protected unless the canonical plan
 explicitly assigns them to the current owner. Do not silently substitute
 models, reasoning effort, transports, permissions, or acceptance gates.
 
+## Controller routing and recovery semantics
+
+- Model milestones with explicit `objective`, `visual`, and `architecture`
+  acceptance modes. Derive implementation and independent review authorities
+  per mode; never infer them from file extension or repository area.
+- Objective/code review uses Luna. Visual-judgment implementation and rendered-
+  quality review use Sol, with a separate objective reviewer when both modes
+  apply. Architecture and recovery diagnosis use Sol High.
+- Non-convergence changes authority or approach; it does not terminate work.
+  The recovery authority may finish locally, replace the implementation
+  strategy, or update an implementation-level architecture assumption and
+  continue when accepted outcome, public/persisted contracts, security/privacy
+  boundary, material cost, destructive behavior, and scope remain unchanged.
+- `CONTINUE_WITH_REPLAN` is internal and nonterminal. `NEEDS_DECISION` is only
+  for genuinely underdetermined user intent or missing user authority.
+  `EXTERNAL_BLOCKED` is only for missing credentials, permission, service,
+  hardware, or another external prerequisite. `FAILED` means evidence shows the
+  goal is not reasonably achievable under accepted constraints.
+- Never escalate to the user merely because implementation is difficult, a
+  previous model did not converge, or an implementation plan was disproven.
+
 ## Safety and review
 
 - Do not use `eval` or `exec`.
@@ -71,8 +92,8 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   disposable Git repository and `Sandbox.read_only`, then compare before/after
   bytes. Archive only the sentinel thread it created after proof.
 - Tests, manifests, counts, and status metadata support evidence; they do not
-  replace a real observable outcome. A missing SDK capability is a truthful
-  `BLOCKED` result with the smallest decision-ready gap.
+  replace a real observable outcome. A missing required SDK capability is a
+  truthful `EXTERNAL_BLOCKED` result with the smallest actionable prerequisite.
 - Before committing, inspect the exact staged paths, run `git diff --check`,
   and self-review the complete milestone diff. Do not push, merge, rebase, stash, or
   discard changes without separate authorization.

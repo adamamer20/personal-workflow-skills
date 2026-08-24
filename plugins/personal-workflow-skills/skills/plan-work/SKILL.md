@@ -43,38 +43,55 @@ values:
 | Substantial decision-ready milestone | `gpt-5.6-luna` | `xhigh` |
 | Bounded or mechanical milestone | `gpt-5.6-luna` | `high` |
 | Visual-judgment implementation | `gpt-5.6-sol` | `medium` |
-| Critical visual direction, repeated-failure remediation, or final qualitative promotion review | `gpt-5.6-sol` | `high` |
-| Luna implementation/review loop after two unsuccessful repair cycles | `gpt-5.6-sol` | `medium` |
-| Sol Medium implementation/review loop after two further unsuccessful repair cycles | `gpt-5.6-sol` | `high` |
-| Independent normal code review | `gpt-5.6-luna` | `xhigh` |
-| Critical architecture/security review or planning | `gpt-5.6-sol` | `high` |
+| Recovery implementation after demonstrated non-convergence | `gpt-5.6-sol` | `medium` |
+| Independent objective/code review | `gpt-5.6-luna` | `xhigh` |
+| Independent visual-quality review | `gpt-5.6-sol` | `high` |
+| Architecture/security review, recovery diagnosis, or planning | `gpt-5.6-sol` | `high` |
 
-Classify the acceptance judgment before applying the generic milestone-size
-route. Slide composition, landing pages, frontend or UI design, visual systems,
-and rendered-document quality are visual-judgment work when success depends on
-composition, hierarchy, responsive behavior, or inspection of the rendered
-result. Route that implementation to Sol Medium even when the implementation
-steps are otherwise decision-ready. Route new or system-wide visual direction,
-weak or conflicting references, remediation after repeated visual misses, and
-the independent final qualitative promotion review to Sol High. Use Luna for
-visually adjacent work only when the design target and acceptance criteria are
-already frozen and the remaining work is mechanical and objectively verifiable.
-The presence of frontend, CSS, slide, or document files alone does not determine
-the route.
+Classify every milestone by one or more explicit acceptance modes before
+applying the generic milestone-size route:
 
-Apply a bounded circuit breaker to Luna execution. If two complete
-implementation/review repair cycles fail to close the same material blocker, or
-the same class of finding is reopened, stop assigning further iterations to
-that Luna context. Preserve the current diff, validation evidence, open review
-findings, and remaining acceptance gap in a continuation capsule, then route a
-fresh execution task to Sol Medium. Do not interpret escalation as permission to
-weaken acceptance, expand scope, or reuse the exhausted task. If the fresh Sol
-Medium continuation also completes two repair and re-review cycles without
-closing the blocker, preserve the same bounded evidence and escalate once to a
-fresh Sol High execution task. If Sol High exhausts ordinary repair, return a
-terminal `BLOCKED` or `FAILED` outcome to the planning owner rather than forming
-an indefinite loop. A more specific Sol High route still wins immediately for
-critical visual, architecture, or security work.
+- `objective`: correctness is established by code, contracts, tests, or other
+  deterministic evidence;
+- `visual`: acceptance requires judgment of rendered composition, hierarchy,
+  density, typography, responsiveness, or overall visual quality; and
+- `architecture`: acceptance requires a material system-boundary, security, or
+  architectural judgment.
+
+Derive implementation and review authorities independently for every required
+mode. Objective code review uses Luna XHigh. Visual-quality implementation uses
+Sol Medium and its independent qualitative promotion review uses Sol High.
+Architecture review uses Sol High. A milestone with objective and visual modes
+needs both code correctness and rendered-quality gates; passing one never
+implies passing the other. Use Luna for visually adjacent work only when the
+target is frozen and the remaining change is mechanical and objectively
+verifiable. The presence of frontend, CSS, slide, or document files alone does
+not determine the route.
+
+When an execution owner demonstrably stops converging, change the problem-
+solving authority or approach; do not terminate the milestone merely because a
+previous model or plan failed. Preserve the current diff, validation evidence,
+findings, accepted intent, and remaining gap in a diagnostic continuation
+packet. Sol then classifies the continuation and normally keeps working:
+
+1. finish a bounded remaining repair;
+2. replace a failed implementation strategy and continue;
+3. update an implementation-level architecture assumption and continue when
+   outcome, public/persisted contracts, security boundary, cost, and scope stay
+   within accepted intent;
+4. return `NEEDS_DECISION` only when user intent is genuinely underdetermined or
+   materially different valid choices require user authority;
+5. return `EXTERNAL_BLOCKED` only for a missing permission, credential, service,
+   hardware, or other external prerequisite; or
+6. return `FAILED` only when evidence shows the goal is not reasonably
+   achievable under the accepted constraints.
+
+`CONTINUE_WITH_REPLAN` is an internal workflow event, not a terminal result or
+user escalation. A routing handoff changes authority and approach; it does not
+weaken acceptance, silently expand scope, or end the milestone by itself. Bias
+recovery toward completion. Never escalate merely because implementation is
+difficult, the original approach was wrong, or a previous model did not
+converge.
 
 If no applicable user authorization exists, mark the capsule
 `routing_status: not_authorized`, omit native overrides, and do not claim that
@@ -122,6 +139,8 @@ Use this plan shape, omitting empty sections rather than filling placeholders:
 
 ## Milestone M1 — <name>
 Outcome
+Acceptance modes: objective | visual | architecture
+Implementation and review authorities
 Mutable ownership
 Protected surfaces
 Dependencies

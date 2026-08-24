@@ -100,6 +100,13 @@ REVIEWING -> REPAIR_REQUIRED -> RUNNING
 any non-terminal state -> BLOCKED | FAILED | CANCELLED
 ```
 
+`BLOCKED` is the durable H2 spelling for an external prerequisite failure only;
+the model/controller result contract exposes it as `EXTERNAL_BLOCKED`.
+`NEEDS_DECISION` is reserved for genuinely underdetermined user intent or
+missing user authority. `FAILED` means the accepted goal is not reasonably
+achievable under its constraints. `CONTINUE_WITH_REPLAN` is a causal internal
+event that returns to `RUNNING`, never a terminal state.
+
 Every dispatch has logical identity
 `<run-id>/<milestone-id>/<role>/<generation>`. A Codex thread id, title, host,
 client queue handle, worktree path, or process id is metadata and never workflow
@@ -111,12 +118,20 @@ raw SDK or app-server envelopes outside this adapter. Direct app-server JSON-RPC
 is out of scope unless a later explicit milestone replaces the SDK after a
 documented capability failure.
 
-Normal execution uses one executor thread, one independent review thread or
-native detached review when the installed stable SDK proves that contract, one
-repair in the original executor, and one re-review. Ordinary repair resumes the
-same executor. A fresh implementation owner is reserved for stable unresolved
-findings, a material architecture change, proven owner unavailability, or an
-explicit context rollover.
+Every milestone declares one or more acceptance modes: `objective`, `visual`,
+and `architecture`. The controller derives implementation and review authorities
+per mode rather than from filenames or one generic reviewer role. Normal
+objective execution uses one executor plus an independent code reviewer. Visual
+quality uses Sol for render-aware implementation and a separate Sol High
+qualitative reviewer; a mixed objective/visual milestone must pass both. An
+architecture gate uses Sol High. Passing one authority never implies passing
+another.
+
+Repair normally resumes the same executor. Demonstrated non-convergence creates
+a diagnostic continuation for a recovery authority, which finishes locally,
+changes implementation strategy, or replans and continues. It is not an
+automatic terminal or user escalation. A fresh owner is also valid for proven
+unavailability or explicit context rollover.
 
 ## Contracts and invariants
 
@@ -140,14 +155,22 @@ explicit context rollover.
 - Model and reasoning mappings live only in `workflow.toml`; the controller
   validates them against the runtime before dispatch and fails closed without
   silent substitution.
-- Planner, executor, reviewer, and decision outputs use versioned typed
-  contracts and JSON Schema at the model boundary. Free-form final prose is
-  supplementary, not state authority.
-- Reason codes are stable: `decision_required`, `acceptance_ambiguity`,
+- Planner, executor, code-reviewer, visual-reviewer, architecture-reviewer,
+  recovery, and decision outputs use versioned typed contracts and JSON Schema
+  at the model boundary. Free-form final prose is supplementary, not state
+  authority.
+- Acceptance modes, implementation authority, and each required promotion
+  authority are durable milestone inputs. The controller may require multiple
+  independent reviews for distinct modes without treating them as repeated
+  review waves.
+- The base reason codes are `decision_required`, `acceptance_ambiguity`,
   `contract_change`, `environment_blocked`, `review_rejected`,
-  `context_rollover`, and `transport_failure`.
-- `transport_failure` is controller-owned. Model escalation requires a material
-  decision or a stable finding/causal class that survives a validated repair.
+  `context_rollover`, and `transport_failure`. H4 adds typed
+  `continue_with_replan` and `architecture_replan` recovery outcomes without
+  turning them into terminal failure categories.
+- `transport_failure` is controller-owned. A surviving finding or disproven plan
+  triggers diagnosis/replan; only underdetermined intent or missing user
+  authority becomes `NEEDS_DECISION`.
 - No polling loop is introduced. A foreground `run` may consume its own event
   stream; recovery and human inspection use bounded snapshots or explicit
   commands.
@@ -278,8 +301,8 @@ built.
 Promote only when required local start, schema-bounded completion, same-thread
 resume, event capture, explicit model/reasoning control, and sandbox isolation
 are proven against the stable SDK. A missing required capability returns
-`BLOCKED` with the smallest documented decision; it does not silently introduce
-CLI or direct app-server transport.
+`EXTERNAL_BLOCKED` with the smallest actionable prerequisite; it does not
+silently introduce CLI or direct app-server transport.
 
 ### Review requirement and successor
 
@@ -395,15 +418,13 @@ creating a worktree, or depending on messages.
 ### Promotion gate and review requirement
 
 The implementation candidate passes every acceptance check with zero self-review
-P0/P1, then receives one fresh independent read-only review of the exact commit.
-The initial candidate and ordinary repair use Luna XHigh review; after the
-repeated-failure circuit breaker routes implementation to Sol Medium, its
-promotion review uses a fresh Sol High critical integrity context. H2 promotes
-only with zero open P0/P1 on ledger correctness, concurrency, transactions,
-migration safety, path safety, and scope adherence. Ordinary repair returns to
-the same H2 executor and is re-reviewed. A fresh implementation context is
-reserved for explicit context rollover or the configured repeated-failure
-circuit breaker.
+P0/P1, then receives one fresh independent read-only integrity review of the
+exact commit. H2 promotes only with zero open P0/P1 on ledger correctness,
+concurrency, transactions, migration safety, path safety, and scope adherence.
+A rejected candidate is diagnosed and repaired against concrete findings; model
+or context changes improve the approach but never form an attempt-count terminal
+gate. User intervention is required only for a genuine material decision or new
+authority, not because a repair is difficult.
 
 ### Current candidate
 
@@ -486,10 +507,9 @@ Required continuation decisions:
 - Use direct `os.O_DIRECTORY` access on the supported Linux runtime; do not use
   an indirect fallback for this security-critical interface.
 
-The Luna implementation/review loop has now completed two unsuccessful cycles
-for the same schema/path-integrity finding classes. The repository circuit
-breaker therefore prohibits another Luna repair and routes one fresh bounded
-continuation to Sol Medium without weakening H2 acceptance or opening H3.
+Repeated Luna non-convergence on the same schema/path-integrity classes produced
+a diagnostic continuation for a fresh Sol Medium recovery owner, without
+weakening H2 acceptance or opening H3.
 
 Rejected Sol continuation candidate: `a01596d` on parent `d32e190`; full H2
 review range is `fab4cb6..a01596d`. It changes only `domain.py`, `ledger.py`,
@@ -538,11 +558,10 @@ Required Sol repair-cycle-2 decisions:
   records, diagnostics, policy constants, projector internals, or exception
   taxonomy from the package root without a real caller.
 
-This is failed Sol Medium repair/review cycle 1. Ordinary bounded repair resumes
-the same Sol Medium execution task and worktree. If the next independent review
-reopens any of these material schema/path/transition classes, the two-cycle Sol
-Medium circuit breaker routes one final fresh implementation continuation to Sol
-High; it does not permit another same-context loop or weaker acceptance.
+Ordinary bounded repair resumes the same Sol Medium execution task and worktree.
+The next independent review either promotes H2 or returns concrete evidence for
+diagnosis and continued repair/replan. A failed check does not itself terminate
+the milestone, choose a model ladder, or require user intervention.
 
 ### Successor milestone
 
@@ -567,19 +586,27 @@ Successor: H4.
 
 ## Milestone H4 — Add decisions, review, repair, and limits
 
-Outcome: material decision requests wake a bounded planner turn; completed work
-receives independent review; repair resumes the original executor; stable
-finding identities and causal classes govern the single escalation boundary;
-limits and budgets live in `workflow.toml`.
+Outcome: each milestone carries explicit objective/visual/architecture
+acceptance modes; routing produces separate executor, code-reviewer,
+visual-reviewer, architecture-reviewer, and recovery authorities as required.
+Material decision requests wake a bounded planner turn; repair resumes the
+original executor when useful; stable finding identities and causal classes
+drive diagnosis rather than attempt counts; limits and budgets live in
+`workflow.toml`.
 
-Acceptance: decision, accepted, repair-required, environment-blocked,
-context-rollover, and transport-failure scenarios have deterministic integration
-tests; review is read-only; new reviewer scope cannot masquerade as a surviving
-finding; thread and compaction limits fail closed.
+Acceptance: completed, continue-with-replan, needs-decision, repair-required,
+external-blocked, context-rollover, and transport-failure scenarios have typed
+deterministic integration tests. Replanning continues automatically when intent,
+public/persisted contracts, security/privacy boundary, material cost,
+destructive behavior, and scope are unchanged. Review is read-only; mixed
+acceptance modes require every distinct authority; new reviewer scope cannot
+masquerade as a surviving finding; thread and compaction limits fail closed.
 
-Promotion gate: one end-to-end disposable milestone exercises review rejection,
-same-executor repair, and acceptance with durable evidence and no callback
-dependency.
+Promotion gate: one end-to-end disposable milestone exercises objective and
+visual review, review rejection, automatic architecture replan, repair, and
+acceptance with durable evidence and no callback dependency. Separate scenarios
+prove `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, and `FAILED` are mutually distinct
+and that implementation difficulty alone produces none of them.
 
 Successor: H5.
 
@@ -590,9 +617,11 @@ capsule and writes one result, and a small `workflow-control` skill invokes the
 controller. Routing, recovery, callbacks, and state-machine prose are removed
 from model-visible skills and owned once by code/configuration.
 
-Acceptance: `codex debug prompt-input` fixtures show one routing policy, the
-intended skill only, protected surfaces and acceptance retained, no obsolete
-handoff protocol in executor prompts, and an enforced prompt-size budget.
+Acceptance: `codex debug prompt-input` fixtures show one routing policy, explicit
+acceptance modes, distinct code/visual/architecture authorities, completion-
+biased recovery, the intended skill only, protected surfaces and acceptance
+retained, no obsolete handoff protocol in executor prompts, and an enforced
+prompt-size budget.
 
 Promotion gate: existing direct workflow remains reachable under an explicit
 legacy command while the controller path passes all repository validators and
@@ -689,9 +718,9 @@ installed-plugin and downstream-pin migration.
   that redirects SQLite writes, caller mutation of the exported transition
   table, invalid event/dispatch combinations that make committed databases
   unreopenable, and public raw-connection mutation; it also found indirect
-  `O_DIRECTORY` access and non-string identifier coercion. The two-cycle Luna
-  circuit breaker is reached. H2 remains unintegrated, H3 remains blocked, and
-  one fresh Sol Medium continuation was selected for the bounded repair.
+  `O_DIRECTORY` access and non-string identifier coercion. H2 remained
+  unintegrated and H3 blocked; the evidence was handed to a fresh Sol Medium
+  recovery owner for bounded diagnosis and repair.
 - 2026-08-24: Sol Medium continuation `a01596d` returned on exact parent
   `d32e190`, changing four authorized H2 paths. It reports immutable transition
   policy, strict identifier types, pre-mutation event/dispatch validation,
@@ -708,13 +737,22 @@ installed-plugin and downstream-pin migration.
   pre-existing hardlink, silent adoption of a different valid ledger across
   close/reopen, mutation of the transition policy's private backing dictionary,
   broad unused root exports, and a zero-byte residue after failed first open.
-  H2 remains unintegrated and H3 remains blocked. Sol Medium repair/review cycle
-  1 failed; the same executor receives one bounded cycle-2 repair under the
-  decisions above.
+  H2 remains unintegrated and H3 remains blocked. The same executor receives one
+  bounded repair against the concrete findings above.
+- 2026-08-24: the user replaced attempt-count routing ladders with typed
+  acceptance and completion-biased recovery. Future milestones declare
+  objective, visual, and architecture modes and receive distinct authorities.
+  Non-convergence triggers diagnosis, strategy change, or architecture replan
+  and continued execution. Only underdetermined intent or new user authority is
+  `NEEDS_DECISION`; missing external prerequisites are `EXTERNAL_BLOCKED`; only
+  proven infeasibility is `FAILED`. The already-dispatched H2 repair remains the
+  sole owner and will receive one final independent integrity verification
+  before promotion; no automatic model ladder or user interruption follows from
+  a failed check.
 
 ## Next execution
 
-Milestone: H2-R3S — bounded repair cycle 2 on rejected Sol candidate `a01596d`.
+Milestone: H2-R3S — bounded repair on rejected Sol candidate `a01596d`.
 
 Dispatch status: delivered exactly once to existing Sol Medium execution task
 `01a03327-44bd-7240-9120-dc6949c5c349` on host `local`; do not poll, send a
@@ -724,7 +762,7 @@ Resolved route: existing `model=gpt-5.6-sol`, `thinking=medium` execution owner;
 the MESSAGE operation resumes that task without native routing fields.
 
 Routing authorization: ordinary repair returns to the same H2 executor under
-the canonical H2 promotion contract. This is Sol Medium cycle 2 of at most 2.
+the canonical H2 promotion contract. There is no attempt-count terminal rule.
 
 Planning thread: `01a032b0-8da1-7f20-bd7c-437be7538082`; callback host is
 `local`.
@@ -751,12 +789,13 @@ identifier, and API tests. Run focused H2 tests, `make check`,
 `git diff --check`, exact staged-path review, and full `fab4cb6..HEAD`
 self-review; finish with zero open P0/P1 and a clean worktree.
 
-Escalate only for: inability to preserve concurrent first-open semantics while
-performing safe owned-file cleanup, an inode/link invariant unavailable on the
-supported Linux runtime, a required public/persisted contract change outside
-the frozen decisions, a finding requiring a protected surface/external side
-effect, or an unresolved P0/P1 after ordinary repair. Do not start H3.
+Escalate only as `NEEDS_DECISION` for a genuinely underdetermined material
+contract or missing user authority; use `EXTERNAL_BLOCKED` for an unavailable
+Linux inode/link primitive or other external prerequisite, and `FAILED` only if
+the H2 outcome is not reasonably achievable under its accepted constraints.
+Local difficulty or a remaining reproducible finding requires diagnosis and
+continued repair, not user interruption. Do not start H3.
 
 Completion callback: return exactly one terminal `COMPLETION`, accurately
-labelled `BLOCKED`, or `FAILED` packet to planning thread
+labelled `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, or `FAILED` packet to planning thread
 `01a032b0-8da1-7f20-bd7c-437be7538082` on host `local`.

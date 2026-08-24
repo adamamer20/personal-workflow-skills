@@ -131,8 +131,8 @@ timeout, or empty response as automatic retry authorization.
 
 ## MESSAGE
 
-Send one `ESCALATION`, `COMPLETION`, `REVIEW_RESULT`, or `ROLLOVER_HANDOFF` packet
-to an existing peer thread.
+Send one `ESCALATION`, `COMPLETION`, `REVIEW_RESULT`, `REPLAN_NOTICE`, or
+`ROLLOVER_HANDOFF` packet to an existing peer thread.
 
 1. Use the exact thread id when supplied. Use `hostId` only when it came from
    `create_thread` or `list_threads`; omit it rather than inventing or deriving
@@ -149,8 +149,10 @@ to an existing peer thread.
 
 For an execution callback, send `COMPLETION` only after the requested terminal
 state and required checks pass. When the execution contract requires a callback
-on every terminal outcome, send `ESCALATION` with explicit `BLOCKED` or `FAILED`
-status instead of disappearing or presenting it as completion.
+on every terminal outcome, distinguish `NEEDS_DECISION`, `EXTERNAL_BLOCKED`,
+and `FAILED` instead of collapsing them into generic `BLOCKED` or presenting
+them as completion. `REPLAN_NOTICE` and `CONTINUE_WITH_REPLAN` are nonterminal:
+they keep work moving and never imply that the user must intervene.
 
 If dispatch fails, do not silently end. Put `callback_status: unsent`, the exact
 target, native error, and the complete unsent packet in the current task's final

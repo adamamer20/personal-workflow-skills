@@ -11,33 +11,35 @@
   child/subagent.
 - Substantial milestones normally use Luna XHigh with `$execute-milestone`;
   bounded or mechanical work may use Luna High directly.
-- A milestone whose acceptance depends on subjective visual judgment uses Sol
-  Medium by default. This includes slide composition, landing pages, frontend
-  or UI design, visual systems, and rendered-document quality. Use Sol High for
-  new or system-wide visual direction, weak or conflicting references,
-  remediation after repeated visual misses, or the independent final
-  qualitative promotion review. Luna is appropriate for visually adjacent work
-  only after the target and acceptance criteria are frozen and the remaining
-  execution is mechanical and objectively verifiable.
-- If Luna completes two implementation/review repair cycles without closing the
-  same material blocker, or the same class of finding is reopened, stop that
-  Luna context and route the bounded continuation to a fresh Sol Medium task.
-  If that Sol Medium continuation also completes two unsuccessful repair cycles
-  on the same blocker or finding class, route it once to fresh Sol High. Carry
-  the current diff, validation evidence, open findings, and remaining acceptance
-  gap at each handoff. If Sol High exhausts ordinary repair, return a terminal
-  `BLOCKED` or `FAILED` outcome instead of continuing the loop. Do not weaken the
-  gate or silently expand scope. A more specific Sol High route still wins
-  immediately for critical visual, architecture, or security work.
+- Every milestone declares one or more acceptance modes: `objective`, `visual`,
+  and `architecture`. Route by the judgment required for acceptance, not by file
+  type. Objective code review uses Luna XHigh. Visual-judgment implementation
+  uses Sol Medium and independent visual-quality promotion review uses Sol High.
+  Architecture/security review uses Sol High. When objective and visual modes
+  both apply, require both authorities; passing code tests never implies that a
+  rendered result is good. Luna is appropriate for visually adjacent work only
+  after the target is frozen and the remaining execution is mechanical and
+  objectively verifiable.
+- When an owner stops converging, preserve the diff, evidence, findings,
+  accepted intent, and remaining gap for a Sol diagnostic continuation. Sol
+  finishes a bounded repair, changes implementation strategy, or replans and
+  continues when outcome, public/persisted contracts, security boundary,
+  material cost, destructive behavior, and scope remain within accepted intent.
+  A change of authority or approach is not a terminal condition. Escalate to the
+  user only as `NEEDS_DECISION` when intent is genuinely underdetermined or new
+  authority is required. Use `EXTERNAL_BLOCKED` only for missing credentials,
+  permissions, services, hardware, or other external prerequisites, and
+  `FAILED` only when the goal is not reasonably achievable under accepted
+  constraints. `CONTINUE_WITH_REPLAN` is internal and nonterminal.
 - These defaults are user-owned routing authorization for native peer creation:
   when a fresh peer is created, the handoff must pass the exact pair
   `model=gpt-5.6-luna, thinking=xhigh` for a substantial milestone or
-  independent normal code review, `model=gpt-5.6-luna, thinking=high` for
+  independent objective/code review, `model=gpt-5.6-luna, thinking=high` for
   bounded/mechanical work, `model=gpt-5.6-sol, thinking=medium` for visual-
-  judgment implementation or a Luna review-loop escalation, and
-  `model=gpt-5.6-sol, thinking=high` for a Sol Medium review-loop escalation,
-  critical visual direction or promotion review, architecture/security review,
-  or planning. The most specific applicable user instruction wins.
+  judgment or recovery implementation, and `model=gpt-5.6-sol, thinking=high`
+  for visual-quality promotion review, recovery diagnosis,
+  architecture/security review, or planning. The most specific applicable user
+  instruction wins.
 - A plugin installation alone is not authorization to override native task
   settings. If the native schema does not advertise an authorized pair, or
   native creation rejects that pair, stop without retrying, substituting a
@@ -48,10 +50,11 @@
   state that routing was not enforced.
 - Execution threads message the planning thread only for a material escalation
   or terminal milestone outcome. Every terminal outcome returns exactly one
-  `COMPLETION` or accurately labelled `BLOCKED`/`FAILED` escalation using the
-  exact callback thread/host route. Keep the planning thread unarchived while a
-  peer owes it a callback. The planning thread never polls execution and
-  execution sends no routine progress updates.
+  `COMPLETION` or accurately labelled `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, or
+  `FAILED` escalation using the exact callback thread/host route. Replanning
+  within accepted intent continues automatically and is not terminal. Keep the
+  planning thread unarchived while a peer owes it a callback. The planning
+  thread never polls execution and execution sends no routine progress updates.
 - A failed-looking START is never automatic retry authorization. Reconcile it
   once without creating anything; if the host is unavailable, preserve an
   uncertain recovery capsule. Before replacing a peer whose callback is missing,
@@ -94,6 +97,9 @@
   status bookkeeping support but do not replace observable outcome proof.
 - Route every failed gate to one remediation or stop decision. A failed optional
   branch blocks that branch, not the whole program when a safe route remains.
+- Escalate to the user only when intent is genuinely underdetermined or an
+  operation needs user authority. Difficulty, non-convergence, or a disproven
+  implementation plan triggers diagnosis and replanning, not user interruption.
 
 ## Universal Invariants
 

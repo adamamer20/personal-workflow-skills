@@ -88,9 +88,7 @@ def validate_manifest() -> None:
     version = manifest.get("version")
     if not isinstance(version, str):
         fail("plugin manifest must contain a string version")
-    baseline_match = re.fullmatch(
-        r"(\d+)\.(\d+)\.(\d+)\+codex\.(\d+)", BASELINE_PLUGIN_VERSION
-    )
+    baseline_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)\+codex\.(\d+)", BASELINE_PLUGIN_VERSION)
     current_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)\+codex\.(\d+)", version)
     if baseline_match is None or current_match is None:
         fail("plugin version must use semver plus a codex build timestamp")
@@ -224,9 +222,7 @@ def validate_skill(skill_dir: Path) -> None:
 
 def validate_independence() -> None:
     plan = (SKILLS_ROOT / "plan-work" / "SKILL.md").read_text(encoding="utf-8")
-    execute = (SKILLS_ROOT / "execute-milestone" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    execute = (SKILLS_ROOT / "execute-milestone" / "SKILL.md").read_text(encoding="utf-8")
     if "$execute-milestone" in plan or "$plan-work" in execute:
         fail("planning and execution skills must not depend on each other")
 
@@ -266,7 +262,7 @@ def validate_execute_milestone_contract() -> None:
     required_text = (
         "exactly one decision-ready milestone",
         "planning thread owns the program plan",
-        "Escalate material decisions only",
+        "Escalate genuine user decisions only",
         "Do not poll, wait for, or repeatedly list",
         "Hard context rollover",
         "self-review",
@@ -278,8 +274,10 @@ def validate_execute_milestone_contract() -> None:
         "planning callback `threadId`",
         "Never derive a host",
         "Every terminal exit must attempt exactly one bounded callback",
-        "Status: BLOCKED",
+        "Status: NEEDS_DECISION",
+        "Status: EXTERNAL_BLOCKED",
         "Status: FAILED",
+        "`CONTINUE_WITH_REPLAN` is never a terminal callback",
         "callback_status: sent|unsent",
         "complete unsent packet",
         "Recovery after interruption",
@@ -317,6 +315,8 @@ def validate_thread_handoff_contract() -> None:
         "complete unsent packet",
         "Do not wait for the peer",
         "Send exactly one",
+        "`NEEDS_DECISION`, `EXTERNAL_BLOCKED`, and `FAILED`",
+        "`REPLAN_NOTICE` and `CONTINUE_WITH_REPLAN` are nonterminal",
         "Never poll",
         "Never retry a create or an uncertain send",
         "silently use a fallback transport",
@@ -333,10 +333,7 @@ def validate_thread_handoff_contract() -> None:
 
 
 def validate_native_routing_contract() -> None:
-    workflow_text = {
-        name: " ".join(path.read_text(encoding="utf-8").split())
-        for name, path in WORKFLOW_PATHS.items()
-    }
+    workflow_text = {name: " ".join(path.read_text(encoding="utf-8").split()) for name, path in WORKFLOW_PATHS.items()}
     combined = " ".join(workflow_text.values())
     for stale in STALE_ROUTING_CONTRACTS:
         if stale in combined:
@@ -352,14 +349,20 @@ def validate_native_routing_contract() -> None:
         "`gpt-5.6-sol`",
         "Visual-judgment implementation",
         "`medium`",
-        "Classify the acceptance judgment before applying the generic milestone-size route",
+        "explicit acceptance modes",
+        "`objective`",
+        "`visual`",
+        "`architecture`",
         "The presence of frontend, CSS, slide, or document files alone does not determine the route",
-        "Luna implementation/review loop after two unsuccessful repair cycles",
-        "Sol Medium implementation/review loop after two further unsuccessful repair cycles",
-        "two complete implementation/review repair cycles fail to close the same material blocker",
-        "route a fresh execution task to Sol Medium",
-        "escalate once to a fresh Sol High execution task",
-        "terminal `BLOCKED` or `FAILED` outcome",
+        "Independent objective/code review",
+        "Independent visual-quality review",
+        "diagnostic continuation packet",
+        "`CONTINUE_WITH_REPLAN` is an internal workflow event",
+        "return `NEEDS_DECISION` only when user intent is genuinely underdetermined",
+        "return `EXTERNAL_BLOCKED` only for a missing permission",
+        "return `FAILED` only when evidence shows the goal is not reasonably achievable",
+        "A routing handoff changes authority and approach; it does not",
+        "Never escalate merely because implementation is difficult",
         "schema advertises both fields",
         "substitute another model",
         "resolved exact native pair",
@@ -397,14 +400,16 @@ def validate_native_routing_contract() -> None:
         "gpt-5.6-luna",
         "gpt-5.6-sol",
         "thinking=medium",
-        "Sol Medium is the default for that implementation",
-        "Sol High owns new or system-wide visual direction",
-        "Classify by the judgment needed for acceptance, not by file type",
-        "bounded implementation/review circuit breaker",
-        "two complete repair and re-review cycles fail to close the same material blocker",
-        "fresh `gpt-5.6-sol` task with `thinking=medium`",
-        "fresh `gpt-5.6-sol` task with `thinking=high`",
-        "If Sol High exhausts ordinary repair",
+        "Every milestone declares one or more acceptance modes",
+        "An objective gate uses Luna for code correctness",
+        "A visual gate uses Sol Medium",
+        "separate Sol High qualitative reviewer",
+        "Non-convergence changes the problem-solving authority or approach",
+        "`CONTINUE_WITH_REPLAN` is nonterminal",
+        "return `NEEDS_DECISION` only when user intent is genuinely underdetermined",
+        "return `EXTERNAL_BLOCKED` only for a missing credential",
+        "return `FAILED` only when evidence shows the goal is not reasonably achievable",
+        "Never escalate merely because implementation is difficult",
         "Skill installation alone does not authorize model overrides",
         "omits `model` and `thinking`",
         "dispatch fails closed",
@@ -419,15 +424,15 @@ def validate_native_routing_contract() -> None:
     readme_required = (
         "Authorized native routing defaults:",
         "Visual-judgment implementation",
-        "Sol Medium is the default",
-        "Use Sol High for novel or system-wide visual direction",
-        "Luna remains appropriate only when the visual target and acceptance criteria are already frozen",
-        "Luna implementation/review loop after two unsuccessful repair cycles",
-        "Sol Medium implementation/review loop after two further unsuccessful repair cycles",
-        "two complete repair and re-review cycles fail to close the same material blocker",
-        "fresh Sol Medium execution context",
-        "fresh Sol High",
-        "do not create an indefinite review loop",
+        "acceptance modes: `objective`, `visual`, and `architecture`",
+        "Objective code review uses Luna XHigh",
+        "Sol Medium implements and Sol High performs",
+        "A mixed objective/visual milestone must pass both gates",
+        "Non-convergence triggers diagnosis and a change of authority or approach",
+        "`CONTINUE_WITH_REPLAN` is internal and nonterminal",
+        "`NEEDS_DECISION` only when user intent is genuinely underdetermined",
+        "`EXTERNAL_BLOCKED` only for a missing external prerequisite",
+        "Difficulty or a disproven plan alone never summons the user",
         "Native `model`",
         "Native `thinking`",
         "explicit user request or applicable user-owned `AGENTS.md` policy",
@@ -442,7 +447,7 @@ def validate_native_routing_contract() -> None:
         "model enforcement is confirmed only",
         "Execution capsules carry the exact planning callback `threadId`",
         "planning task remains unarchived",
-        "accurately labelled `BLOCKED`/`FAILED` escalation",
+        "accurately labelled `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, or `FAILED`",
         "callback_status: unsent",
         "Runtime recovery is deliberately retry-free",
         "last turn is `interrupted`",
@@ -467,13 +472,16 @@ def validate_global_agents_template() -> None:
         "model=gpt-5.6-luna, thinking=high",
         "model=gpt-5.6-sol, thinking=medium",
         "model=gpt-5.6-sol, thinking=high",
-        "subjective visual judgment uses Sol Medium by default",
-        "Use Sol High for new or system-wide visual direction",
-        "remaining execution is mechanical and objectively verifiable",
-        "two implementation/review repair cycles without closing the same material blocker",
-        "route the bounded continuation to a fresh Sol Medium task",
-        "route it once to fresh Sol High",
-        "return a terminal `BLOCKED` or `FAILED` outcome",
+        "Every milestone declares one or more acceptance modes",
+        "Route by the judgment required for acceptance, not by file type",
+        "Objective code review uses Luna XHigh",
+        "independent visual-quality promotion review uses Sol High",
+        "passing code tests never implies that a rendered result is good",
+        "When an owner stops converging",
+        "A change of authority or approach is not a terminal condition",
+        "Escalate to the user only as `NEEDS_DECISION`",
+        "Use `EXTERNAL_BLOCKED` only for missing credentials",
+        "`CONTINUE_WITH_REPLAN` is internal and nonterminal",
         "user-owned routing authorization",
         "plugin installation alone is not authorization",
         "native schema does not advertise an authorized pair",
@@ -482,6 +490,7 @@ def validate_global_agents_template() -> None:
         "one non-waiting `list_threads` reconciliation snapshot",
         "never retries `create_thread`",
         "Every terminal outcome returns exactly one",
+        "accurately labelled `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, or `FAILED`",
         "Keep the planning thread unarchived",
         "never polls execution",
         "failed-looking START is never automatic retry authorization",
