@@ -369,10 +369,15 @@ installed-plugin and downstream-pin migration.
 
 Milestone: H1 — prove the stable Python SDK contract.
 
+Dispatch status: queued once as
+`client-new-thread:c028534a-299e-4b44-b35e-86a9b7d75401` on native host
+`local`; no retry or readiness polling is authorized.
+
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
 Routing authorization: applicable user-owned `AGENTS.md` substantial-milestone
-policy in this task.
+policy in this task. The native schema advertised the exact pair and accepted
+both fields in the queued creation request.
 
 Planning thread: current task; exact callback thread/host route must be supplied
 by the native creator when available.
