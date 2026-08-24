@@ -1278,13 +1278,14 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: the four final H3 architecture propagation repairs are
-implemented in `eb25987`; deterministic gates and the retained authorized real
-sentinel are green in the existing semantic workspace. The repaired H3
-candidate is ready for fresh independent promotion review.
+Dispatch status: the H3-ARCH-006C, H3-ARCH-007A, and H3-ARCH-007B repairs are
+implemented in `40644dc` on top of the prior H3 architecture repairs;
+deterministic gates and the retained authorized real sentinel are green in the
+existing semantic workspace. The repaired H3 candidate is ready for fresh
+independent promotion review.
 
-Next action: independently review the exact post-repair H3 HEAD for objective
-and architecture promotion with zero open P0/P1. The retained real evidence
+Next action: independently review exact post-repair H3 HEAD `40644dc` for
+objective and architecture promotion with zero open P0/P1. The retained real evidence
 proves the actual Python SDK route through `codex-lb`, sanitized native
 permission/profile parity, the allowed workspace edit and durable resume,
 unchanged Git authority, and unchanged global Codex config bytes. External-
