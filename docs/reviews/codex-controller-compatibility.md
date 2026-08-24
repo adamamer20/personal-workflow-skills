@@ -112,7 +112,7 @@ writes.
 | Model, effort, cwd/workspace | Controller capsule | Explicit SDK thread/turn inputs; they do not alter inherited permission authority |
 | Approval and sandbox | Native Codex by default | Schema-v6 effective authority is rebound before resume; optional `read_only` and previously inherited restrictions can only be retained or tightened |
 | Session/database/log state | Controller-private `CODEX_HOME` | New runtime home per run/milestone; projected config contains references only; global config remains source-only |
-| Provider/MCP authentication | Environment references | Provider `env_key`, MCP bearer/header references, and structurally converted literal header or every stdio environment value reach only the SDK child environment; raw values are never persisted |
+| Provider/MCP authentication | Environment references | Provider `env_key`, MCP bearer/header references, and structurally converted literal headers plus every stdio environment value reach only the SDK child environment; raw values are never persisted |
 | Worktree/Git controls | Controller ownership/evidence | Canonical physical leases, schema-v8 baselines/terminal snapshots, bounded topology facts, and Git authority remain ownership/evidence controls, not an OS containment claim |
 
 ## Persisted-empty-thread boundary
