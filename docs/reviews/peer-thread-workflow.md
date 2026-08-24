@@ -663,14 +663,17 @@ installed-plugin and downstream-pin migration.
 Milestone: H2-P3 — independently review Sol repair `a01596d` and the full H2
 range `fab4cb6..a01596d` for promotion.
 
-Dispatch status: pending one fresh native peer creation; do not reuse either
-implementation owner or either earlier reviewer and do not retry an uncertain
-creation.
+Dispatch status: queued once as
+`client-new-thread:c2253e11-e074-460d-bbd7-41e8ab635301` on native host
+`local`; do not reuse either implementation owner or either earlier reviewer,
+poll readiness, or retry creation.
 
 Resolved route: `model=gpt-5.6-sol`, `thinking=high`.
 
 Routing authorization: applicable user-owned root `AGENTS.md` policy for a
 critical architecture/security review after repeated ledger integrity failures.
+The native schema advertised the exact pair and accepted both fields in the
+queued creation request.
 
 Planning thread: `01a032b0-8da1-7f20-bd7c-437be7538082`; callback host is
 `local`.
