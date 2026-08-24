@@ -134,10 +134,12 @@ class NativeRuntimeConfig:
 
     @property
     def environment(self) -> dict[str, str]:
-        return {
-            "CODEX_HOME": os.fspath(self.runtime_home),
-            **dict(self.native_profile.ephemeral_environment),
-        }
+        environment = dict(self.native_profile.ephemeral_environment)
+        # CODEX_HOME is reserved by the controller's SDK process.  A literal
+        # native MCP value with that name is delivered through the projection's
+        # deterministic collision alias and remapped only in the MCP child.
+        environment["CODEX_HOME"] = os.fspath(self.runtime_home)
+        return environment
 
 
 def _load_sdk() -> _SdkSurface:

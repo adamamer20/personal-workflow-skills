@@ -602,6 +602,7 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
             # Every literal is treated as sensitive.  The projected TOML gets
             # only an env_vars reference; the value is retained solely in the
             # SDK child environment for this process.
+            collision_alias: str | None = None
             for key, raw_value in sorted(literal_environment.items()):
                 if (
                     not isinstance(key, str)
@@ -612,8 +613,37 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
                 ):
                     raise NativeProfileError("native MCP environment values must be bounded string entries")
                 register_environment_name(server_name, key, "env")
-                _record_ephemeral(ephemeral, key, raw_value, protected=protected_environment)
-                references.append(key)
+                reference = key
+                if key in protected_environment:
+                    if key != "CODEX_HOME":
+                        _record_ephemeral(ephemeral, key, raw_value, protected=protected_environment)
+                    collision_alias = _collision_environment_alias(server_name, key)
+                    register_environment_name(server_name, collision_alias, "literal_env_alias")
+                    _record_ephemeral(ephemeral, collision_alias, raw_value, protected=protected_environment)
+                    reference = collision_alias
+                else:
+                    _record_ephemeral(ephemeral, key, raw_value, protected=protected_environment)
+                references.append(reference)
+            if collision_alias is not None:
+                command = projected_server.get("command")
+                args = projected_server.get("args", [])
+                if not isinstance(command, str) or not command:
+                    raise NativeProfileError("CODEX_HOME MCP collision requires a stdio command")
+                if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+                    raise NativeProfileError("CODEX_HOME MCP collision requires a string argument list")
+                # The pinned app-server only exposes env_vars as names copied
+                # from its own environment; it has no alias map.  A fixed
+                # argv shell shim is therefore the narrowest source-bound
+                # mechanism: the SDK keeps its private CODEX_HOME, while the
+                # MCP child receives the native value under its original name.
+                projected_server["command"] = "/bin/sh"
+                projected_server["args"] = [
+                    "-c",
+                    f'export CODEX_HOME="${collision_alias}"; exec "$@"',
+                    "--",
+                    command,
+                    *args,
+                ]
         if references:
             projected_server["env_vars"] = sorted(references)
         elif "env_vars" in raw_server:
@@ -708,6 +738,11 @@ def _mcp_string_list(value: object, *, environment_keys: bool = False) -> list[s
 def _ephemeral_reference(kind: str, server_name: str, field_name: str) -> str:
     identity = f"{kind}\0{server_name}\0{field_name}".encode()
     return f"CODEX_FLOW_MCP_{kind}_{hashlib.sha256(identity).hexdigest()[:24].upper()}"
+
+
+def _collision_environment_alias(server_name: str, field_name: str) -> str:
+    identity = f"ENV_COLLISION\0{server_name}\0{field_name}".encode()
+    return f"CODEX_FLOW_MCP_COLLISION_{hashlib.sha256(identity).hexdigest()[:24].upper()}"
 
 
 def _record_ephemeral(

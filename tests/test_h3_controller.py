@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import tomllib
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -34,6 +35,7 @@ from codex_flow.controller import (
     _run_validation,
     capsule_from_json,
     capsule_json,
+    load_capsule,
 )
 from codex_flow.domain import (
     ControllerCheckpoint,
@@ -62,8 +64,10 @@ from codex_flow.ledger import (
     CorruptSchemaError,
     Ledger,
     RecordNotFound,
+    SchemaError,
     StaleWriter,
     WorkspaceLeaseConflict,
+    _decode_json_object,
 )
 from codex_flow.native_profile import NativeProfileError, NativeProfileProjection
 from codex_flow.worktrees import WorkspaceConflict
@@ -1857,6 +1861,80 @@ def test_capsule_detaches_nested_schema_aliases_and_keeps_digest_stable() -> Non
             capsule.output_schema["required"].append("later")  # type: ignore[attr-defined]
 
 
+class _StatefulItemsMapping(Mapping[str, Any]):
+    """Expose a valid first item snapshot and a different later view."""
+
+    def __init__(self, first: dict[str, Any], later: dict[str, Any]) -> None:
+        self._first = first
+        self._later = later
+        self.items_calls = 0
+
+    def __getitem__(self, key: str) -> Any:
+        return self._first[key]
+
+    def __iter__(self):
+        return iter(self._first)
+
+    def __len__(self) -> int:
+        return len(self._first)
+
+    def items(self):
+        self.items_calls += 1
+        return tuple((self._first if self.items_calls == 1 else self._later).items())
+
+
+class _StatefulRequiredSequence(Sequence[str]):
+    def __init__(self, values: list[str]) -> None:
+        self._values = values
+
+    def __getitem__(self, index: int | slice) -> str | Sequence[str]:
+        return self._values[index]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+class _DuplicateItemsMapping(_StatefulItemsMapping):
+    def items(self):
+        self.items_calls += 1
+        child = {"type": "string"}
+        return (("status", child), ("status", child))
+
+
+def test_capsule_freezes_one_owned_snapshot_before_schema_validation() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        properties = _StatefulItemsMapping(
+            {"status": {"type": "string"}},
+            {"status": {"type": "boolean"}, "forged": {"type": "string"}},
+        )
+        schema = {
+            "type": "object",
+            "properties": properties,
+            "required": _StatefulRequiredSequence(["status"]),
+            "additionalProperties": False,
+        }
+        capsule = replace(_capsule(repository, repository, base, branch), output_schema=schema)
+        assert properties.items_calls == 1
+        assert capsule.output_schema["properties"]["status"]["type"] == "string"
+
+
+def test_capsule_rejects_stateful_mapping_that_changes_before_owned_snapshot() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        properties = _DuplicateItemsMapping({"status": {"type": "string"}}, {})
+        schema = {
+            "type": "object",
+            "properties": properties,
+            "required": [],
+            "additionalProperties": False,
+        }
+        with pytest.raises(ValueError):
+            replace(_capsule(repository, repository, base, branch), output_schema=schema)
+
+
 def test_plan_revalidates_counterfeit_schema_before_any_ledger_write() -> None:
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
@@ -1875,6 +1953,36 @@ def test_plan_revalidates_counterfeit_schema_before_any_ledger_write() -> None:
         with pytest.raises(RecordNotFound):
             controller.ledger.get_execution("run", "m1")
         controller.close()
+
+
+@pytest.mark.parametrize(
+    "encoding",
+    ("utf-16", "utf-32"),
+)
+def test_load_capsule_rejects_non_utf8_bom_encodings(encoding: str) -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        capsule = replace(_capsule(repository, repository, base, branch), prompt="résumé")
+        path = repository / "capsule.json"
+        payload = json.dumps(capsule_json(capsule), ensure_ascii=False, sort_keys=True).encode(encoding)
+        path.write_bytes(payload)
+        with pytest.raises(ControllerError, match="not valid JSON"):
+            load_capsule(path)
+
+
+def test_load_capsule_accepts_strict_utf8_non_ascii_and_ledger_rejects_bom_text() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        capsule = replace(_capsule(repository, repository, base, branch), prompt="résumé")
+        path = repository / "capsule.json"
+        path.write_bytes(json.dumps(capsule_json(capsule), ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        loaded, _digest = load_capsule(path)
+        assert loaded.prompt == "résumé"
+
+        with pytest.raises(SchemaError, match="not valid JSON"):
+            _decode_json_object("\ufeff{}", field_name="event data")
 
 
 def test_cancel_is_idempotent_and_keeps_workspace() -> None:
@@ -2431,6 +2539,40 @@ def test_blank_private_home_selects_builtin_openai_but_projection_selects_codex_
         assert workspace.is_dir()
 
 
+def test_active_native_profile_projects_all_mcp_servers_through_pinned_runtime_parser() -> None:
+    import codex_cli_bin
+
+    source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
+    source_before = (source_home / "config.toml").read_bytes()
+    profile = NativeProfileProjection.load(source_home, environment={"CODEX_LB_API_KEY": "test-only"})
+    projected = tomllib.loads(profile.projected_toml)
+    assert profile.provider_id == "codex-lb"
+    assert set(projected["mcp_servers"]) == {"chrome-devtools", "playwright", "node_repl"}
+
+    with TemporaryDirectory() as directory:
+        runtime = NativeRuntimeConfig(Path(directory) / "runtime-home", profile)
+        runtime.prepare()
+        environment = {key: value for key, value in os.environ.items() if key not in {"CODEX_HOME", "HOME"}}
+        environment.update(runtime.environment)
+        environment["HOME"] = directory
+        environment["CODEX_LB_API_KEY"] = "test-only"
+        diagnostic = subprocess.run(
+            (str(codex_cli_bin.bundled_codex_path()), "doctor", "--json"),
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        report = json.loads(diagnostic.stdout)
+        config_check = report["checks"]["config.load"]
+        assert config_check["status"] == "ok"
+        assert config_check["details"]["model provider"] == "codex-lb"
+        assert config_check["details"]["mcp servers"] == "3"
+        assert (Path(directory) / "runtime-home" / "config.toml").read_bytes() == profile.projected_toml.encode()
+    assert (source_home / "config.toml").read_bytes() == source_before
+
+
 def test_native_permission_change_is_inherited_by_the_next_runtime_without_global_mutation() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
@@ -2977,6 +3119,47 @@ command = "sh"
         adapter.start_thread()
         assert captured["env"] == {"CODEX_HOME": str(runtime.runtime_home), **values}
         adapter.close()
+
+
+def test_native_profile_preserves_controller_codex_home_and_delivers_source_value_to_mcp_child() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        home = root / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        config.write_text(
+            config.read_text()
+            + """
+[mcp_servers.collision]
+command = "/bin/sh"
+args = ["-c", "printf %s \\\"$CODEX_HOME\\\""]
+
+[mcp_servers.collision.env]
+CODEX_HOME = "/native/source-home"
+"""
+        )
+        config.chmod(0o600)
+        profile = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        projected = tomllib.loads(profile.projected_toml)["mcp_servers"]["collision"]
+        assert projected["command"] == "/bin/sh"
+        assert "CODEX_HOME" not in projected["env_vars"]
+        aliases = [name for name in projected["env_vars"] if name.startswith("CODEX_FLOW_MCP_COLLISION_")]
+        assert len(aliases) == 1
+        alias = aliases[0]
+        assert dict(profile.ephemeral_environment)[alias] == "/native/source-home"
+
+        runtime = NativeRuntimeConfig(root / "runtime-home", profile)
+        runtime.prepare()
+        assert runtime.environment["CODEX_HOME"] == str(runtime.runtime_home)
+        child = subprocess.run(
+            (projected["command"], *projected["args"]),
+            env={**os.environ, **runtime.environment},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert child.stdout == "/native/source-home"
+        assert set(tomllib.loads(profile.projected_toml)["mcp_servers"]) == {"collision"}
 
 
 @pytest.mark.parametrize(

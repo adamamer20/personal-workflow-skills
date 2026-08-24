@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -21,6 +21,7 @@ JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | dict[str, "JsonValue"] | list["JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]
 Schema: TypeAlias = Mapping[str, JsonValue]
+MAX_JSON_BYTES = 16 * 1_048_576
 
 
 class StrictJSONError(ValueError):
@@ -79,16 +80,41 @@ def _validate_interoperable_json(value: object) -> None:
         raise StrictJSONError("JSON contains a non-finite number")
 
 
-def strict_json_loads(value: str | bytes | bytearray) -> object:
+def strict_json_loads(value: str | bytes | bytearray, *, max_bytes: int = MAX_JSON_BYTES) -> object:
     """Decode only unambiguous, finite JSON values.
 
     The decoder rejects NaN/Infinity, oversized exponents that become
-    non-finite, and duplicate keys recursively at every object depth.
+    non-finite, duplicate keys recursively at every object depth, non-UTF-8
+    byte encodings, and every Unicode byte-order mark.
     """
 
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("JSON byte limit must be a positive integer")
+    if isinstance(value, bytes | bytearray):
+        raw = bytes(value)
+        if len(raw) > max_bytes:
+            raise StrictJSONError("JSON exceeds the byte limit")
+        if raw.startswith((b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff", b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+            raise StrictJSONError("JSON must be strict UTF-8 without a byte-order mark")
+        try:
+            text = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise StrictJSONError("JSON is not valid strict UTF-8") from exc
+    elif isinstance(value, str):
+        try:
+            encoded = value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise StrictJSONError("JSON contains invalid Unicode") from exc
+        if len(encoded) > max_bytes:
+            raise StrictJSONError("JSON exceeds the byte limit")
+        text = value
+    else:
+        raise StrictJSONError("JSON input must be text or bytes")
+    if text.startswith("\ufeff"):
+        raise StrictJSONError("JSON must be strict UTF-8 without a byte-order mark")
     try:
         decoded = json.loads(
-            value,
+            text,
             object_pairs_hook=_strict_json_pairs,
             parse_constant=_strict_json_constant,
             parse_float=_strict_json_float,
@@ -106,16 +132,39 @@ def freeze_json(value: object) -> object:
 
     if isinstance(value, Mapping):
         frozen: dict[str, object] = {}
-        for key, child in value.items():
+        try:
+            entries = tuple(value.items())
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise ValueError("JSON mappings must expose one stable item snapshot") from exc
+        for entry in entries:
+            if isinstance(entry, str | bytes | bytearray):
+                raise ValueError("JSON mappings must expose key/value pairs")
+            try:
+                pair = tuple(entry)
+            except (TypeError, ValueError, RuntimeError) as exc:
+                raise ValueError("JSON mappings must expose key/value pairs") from exc
+            if len(pair) != 2:
+                raise ValueError("JSON mappings must expose key/value pairs")
+            key, child = pair
             if not isinstance(key, str):
                 raise ValueError("JSON object keys must be strings")
+            if key in frozen:
+                raise ValueError("JSON mappings must not contain duplicate keys")
             frozen[key] = freeze_json(child)
         return MappingProxyType(frozen)
-    if isinstance(value, list | tuple):
-        return _FrozenList(freeze_json(child) for child in value)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        try:
+            entries = tuple(value)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise ValueError("JSON sequences must expose one stable item snapshot") from exc
+        return _FrozenList(freeze_json(child) for child in entries)
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("JSON values must contain only finite numbers")
-    if value is None or isinstance(value, str | int | bool | float):
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise ValueError("JSON strings must not contain unpaired Unicode surrogates")
+        return value
+    if value is None or isinstance(value, int | bool | float):
         return value
     raise ValueError("JSON values must use supported scalar, mapping, and list types")
 
@@ -830,7 +879,6 @@ class ExecutionCapsule:
         if not self.model.strip() or not self.prompt.strip():
             raise ValueError("model and prompt must be explicit")
         try:
-            validate_output_schema(self.output_schema)
             # A frozen dataclass alone is not sufficient here: callers can
             # retain and mutate nested dict/list aliases after construction.
             # Own the entire schema tree before it can reach a digest, SDK,
@@ -840,6 +888,7 @@ class ExecutionCapsule:
             raise ValueError("execution output schema is not a valid JSON object") from exc
         if not isinstance(canonical_schema, Mapping):  # pragma: no cover - predicate already enforces object root
             raise ValueError("execution output schema must be an object")
+        validate_output_schema(canonical_schema)
         object.__setattr__(self, "output_schema", canonical_schema)
 
 

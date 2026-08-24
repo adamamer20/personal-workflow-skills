@@ -92,10 +92,10 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
 
         crash_output = repository.parent / "h3-crash-worker.json"
         _run_worker(repository, "crash", crash_output)
-        durable_payload = strict_json_loads(crash_output.read_text())
+        durable_payload = strict_json_loads(crash_output.read_bytes())
         resume_output = repository.parent / "h3-resume-worker.json"
         _run_worker(repository, "resume", resume_output)
-        terminal_payload = strict_json_loads(resume_output.read_text())
+        terminal_payload = strict_json_loads(resume_output.read_bytes())
 
         verifier = Controller(repository)
         lease = verifier.ledger.get_workspace_lease(workspace)

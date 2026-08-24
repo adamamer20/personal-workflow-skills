@@ -312,6 +312,25 @@ class CodexSdkAdapterTests(unittest.TestCase):
         with self.assertRaises(TerminalFailureAfterIdentity):
             _decode_schema_output('{"ok":"\ud800"}', SCHEMA)
 
+    def test_strict_decoder_requires_utf8_without_bom_or_ambiguous_encoding(self) -> None:
+        valid = '{"ok":"café"}'.encode()
+        self.assertEqual(strict_json_loads(valid), {"ok": "café"})
+        for payload in (
+            b"\xef\xbb\xbf{}",
+            b"\xff\xfe{}",
+            b"\xfe\xff{}",
+            b"\xff\xfe\x00\x00{}",
+            b"\x00\x00\xfe\xff{}",
+            b"\xc0\xaf{}",
+            b"\xff{}",
+        ):
+            with self.subTest(payload=payload), self.assertRaises(StrictJSONError):
+                strict_json_loads(payload)
+        with self.assertRaises(StrictJSONError):
+            strict_json_loads("\ufeff{}")
+        with self.assertRaises(TerminalFailureAfterIdentity):
+            _decode_schema_output('\ufeff{"ok":true}', SCHEMA)
+
 
 if __name__ == "__main__":
     unittest.main()
