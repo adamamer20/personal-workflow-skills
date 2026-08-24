@@ -909,53 +909,40 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   sole owner and will receive one final independent integrity verification
   before promotion; no automatic model ladder or user interruption follows from
   a failed check.
+- 2026-08-24: H2 repair `269a75b` closed the remaining schema-inventory,
+  durable-write, inode-continuity, transition-policy, root-export, and failed-
+  first-open findings on top of `a01596d`. Planning verification did not promote
+  it: the focused suite reproduced a concurrent-open authority read that could
+  observe a dispatch row and its causal event from different SQLite snapshots,
+  producing `CorruptSchemaError` during a four-process idempotent claim race.
+- 2026-08-24: follow-up `fc6d286` makes authority validation snapshot-consistent
+  and adds an explicit concurrent-open regression. Planning verification passed
+  the focused H2 suite ten consecutive times and full `make check` with 62
+  tests. H2 remains unintegrated pending one fresh independent Sol High review
+  of exact target `fc6d286` and full range `fab4cb6..fc6d286`.
 
 ## Next execution
 
-Milestone: H2-R3S — bounded repair on rejected Sol candidate `a01596d`.
+Milestone: H2-P4 — final independent H2 integrity promotion review.
 
-Dispatch status: delivered exactly once to existing Sol Medium execution task
-`01a03327-44bd-7240-9120-dc6949c5c349` on host `local`; do not poll, send a
-second repair message, create a replacement, or apply a model override.
+Dispatch status: queued exactly once as native project-worktree task
+`client-new-thread:4c9b3cfd-b708-46f7-82c6-3efb2787035f`; resolve its real
+thread identity without another create attempt. Review target is `fc6d286`.
 
-Resolved route: existing `model=gpt-5.6-sol`, `thinking=medium` execution owner;
-the MESSAGE operation resumes that task without native routing fields.
+Resolved route: `model=gpt-5.6-sol`, `thinking=high`, authorized for the final
+architecture/integrity promotion judgment.
 
-Routing authorization: ordinary repair returns to the same H2 executor under
-the canonical H2 promotion contract. There is no attempt-count terminal rule.
+Planning thread: `01a0335c-2fb5-74c0-987a-3d0fd9aaa462`; callback host is
+`local`. Plan path: `docs/reviews/peer-thread-workflow.md`.
 
-Planning thread: `01a032b0-8da1-7f20-bd7c-437be7538082`; callback host is
-`local`.
+Review scope: read-only exact commit/parent/path verification, full
+`fab4cb6..fc6d286` H2 review, repeated concurrent-open/claim stress, independent
+schema-object, hardlink/substitution, transition-policy, failed-open, causal-
+history, and immediate-reopen adversarial checks, plus `make check` and diff
+checks. No H3, SDK, network, credential, plugin/global, remote, or tracked-file
+mutation.
 
-Plan path: `docs/reviews/peer-thread-workflow.md`.
-
-Owned surfaces: continue from exact rejected target `a01596d`; modify only
-`src/codex_flow/domain.py`, `src/codex_flow/ledger.py`,
-`src/codex_flow/__init__.py`, and `tests/test_h2_ledger.py`; create one safe
-local repair commit on top of `a01596d` after inspecting the full H2 range.
-
-Protected surfaces: immutable candidates `6db6146`, `d32e190`, and `a01596d`;
-`artifacts.py`, H1 adapter/sentinel/evidence, canonical plan, root tooling and
-instructions, plugin and skill code, dirty primary checkout, global Codex state,
-remotes, downstream repositories, unrelated worktrees, and H3+ logic.
-
-Acceptance: implement every cycle-2 decision above and add stable regressions
-for extra trigger/view/index rejection, trigger-deleted write detection,
-pre-existing and mid-transaction hardlinks, valid-file substitution across
-reopen, transition-policy mutation/rebinding, exact H1 root exports, and safe
-failed-first-open cleanup. Preserve all previously green H2 matrix, causal
-history, migration, concurrency, rollback, sensitive-field, path, artifact,
-identifier, and API tests. Run focused H2 tests, `make check`,
-`git diff --check`, exact staged-path review, and full `fab4cb6..HEAD`
-self-review; finish with zero open P0/P1 and a clean worktree.
-
-Escalate only as `NEEDS_DECISION` for a genuinely underdetermined material
-contract or missing user authority; use `EXTERNAL_BLOCKED` for an unavailable
-Linux inode/link primitive or other external prerequisite, and `FAILED` only if
-the H2 outcome is not reasonably achievable under its accepted constraints.
-Local difficulty or a remaining reproducible finding requires diagnosis and
-continued repair, not user interruption. Do not start H3.
-
-Completion callback: return exactly one terminal `COMPLETION`, accurately
-labelled `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, or `FAILED` packet to planning thread
-`01a032b0-8da1-7f20-bd7c-437be7538082` on host `local`.
+Promotion requires zero open P0/P1. A concrete surviving defect returns to
+diagnosis and repair; it does not weaken acceptance or automatically stop the
+program. If green, integrate the four-commit H2 chain and begin H3 from the
+canonical branch.
