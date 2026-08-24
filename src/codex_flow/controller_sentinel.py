@@ -188,7 +188,7 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
                 "diff_stat": diff_stat,
             },
             "result_file": (workspace / "result.txt").read_text(),
-            "projection_exists_after_result": (
+            "projection_exists_after_terminal_return": (
                 repository / ".codex-flow" / "runs" / str(capsule.run_id) / "execution.json"
             ).is_file(),
         }
@@ -201,7 +201,7 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
                 evidence["dispatch_count"] == 1,
                 evidence["thread_identity_reused"],
                 evidence["protected_digest_unchanged"],
-                evidence["projection_exists_after_result"],
+                evidence["projection_exists_after_terminal_return"],
                 evidence["result_file"] == "controller sentinel passed\n",
                 evidence["native_profile"]["source_config_unchanged"],
                 evidence["native_profile"]["profile_unchanged"],

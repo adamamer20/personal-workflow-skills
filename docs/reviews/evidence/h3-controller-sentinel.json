@@ -342,7 +342,7 @@
     "validation": null,
     "workspace_path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository.worktrees/sdk-controller-sentinel"
   },
-  "projection_exists_after_result": true,
+  "projection_exists_after_terminal_return": true,
   "protected_digest_unchanged": true,
   "result_file": "controller sentinel passed\n",
   "status": "passed",

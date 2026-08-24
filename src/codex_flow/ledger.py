@@ -64,7 +64,7 @@ from .domain import (
     is_transition_allowed,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(6)
+CURRENT_SCHEMA_VERSION = SchemaVersion(7)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -72,6 +72,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(3),
         SchemaVersion(4),
         SchemaVersion(5),
+        SchemaVersion(6),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -239,7 +240,7 @@ _EXECUTION_INTEGRITY_V5_DDL = """CREATE TABLE execution_integrity (
     FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
 )"""
 _V5_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_V5_DDL}
-_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+_EXECUTION_INTEGRITY_V6_DDL = """CREATE TABLE execution_integrity (
     run_id TEXT NOT NULL,
     milestone_id TEXT NOT NULL,
     provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'legacy_sandbox_v4', 'legacy_profile_v5', 'controller_v3')),
@@ -263,7 +264,44 @@ _EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
            AND effective_permission_sha256 IS NOT NULL)),
     FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
 )"""
-_V6_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
+_V6_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_V6_DDL}
+_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'legacy_sandbox_v4', 'legacy_profile_v5', 'legacy_permission_v6', 'controller_v4')),
+    native_profile_sha256 TEXT CHECK(native_profile_sha256 IS NULL OR length(native_profile_sha256) = 64),
+    native_compatibility_sha256 TEXT CHECK(native_compatibility_sha256 IS NULL OR length(native_compatibility_sha256) = 64),
+    effective_permission_json TEXT CHECK(effective_permission_json IS NULL OR length(effective_permission_json) BETWEEN 1 AND 512),
+    effective_permission_sha256 TEXT CHECK(effective_permission_sha256 IS NULL OR length(effective_permission_sha256) = 64),
+    workspace_baseline_head_sha TEXT CHECK(workspace_baseline_head_sha IS NULL OR length(workspace_baseline_head_sha) = 40),
+    workspace_baseline_json TEXT,
+    workspace_baseline_sha256 TEXT CHECK(workspace_baseline_sha256 IS NULL OR length(workspace_baseline_sha256) = 64),
+    turn_started_at TEXT,
+    git_authority_before_sha256 TEXT CHECK(git_authority_before_sha256 IS NULL OR length(git_authority_before_sha256) = 64),
+    git_authority_after_sha256 TEXT CHECK(git_authority_after_sha256 IS NULL OR length(git_authority_after_sha256) = 64),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, milestone_id),
+    CHECK((provenance IN ('legacy_v3', 'legacy_sandbox_v4') AND native_profile_sha256 IS NULL
+           AND native_compatibility_sha256 IS NULL AND effective_permission_json IS NULL
+           AND effective_permission_sha256 IS NULL AND workspace_baseline_head_sha IS NULL
+           AND workspace_baseline_json IS NULL AND workspace_baseline_sha256 IS NULL)
+       OR (provenance = 'legacy_profile_v5' AND native_profile_sha256 IS NOT NULL
+           AND native_compatibility_sha256 IS NULL AND effective_permission_json IS NULL
+           AND effective_permission_sha256 IS NULL AND workspace_baseline_head_sha IS NULL
+           AND workspace_baseline_json IS NULL AND workspace_baseline_sha256 IS NULL)
+       OR (provenance = 'legacy_permission_v6' AND native_profile_sha256 IS NOT NULL
+           AND native_compatibility_sha256 IS NOT NULL AND effective_permission_json IS NOT NULL
+           AND effective_permission_sha256 IS NOT NULL AND workspace_baseline_head_sha IS NULL
+           AND workspace_baseline_json IS NULL AND workspace_baseline_sha256 IS NULL)
+       OR (provenance = 'controller_v4' AND native_profile_sha256 IS NOT NULL
+           AND native_compatibility_sha256 IS NOT NULL AND effective_permission_json IS NOT NULL
+           AND effective_permission_sha256 IS NOT NULL AND workspace_baseline_head_sha IS NOT NULL
+           AND workspace_baseline_json IS NOT NULL AND workspace_baseline_sha256 IS NOT NULL)),
+    CHECK(turn_started_at IS NULL OR length(turn_started_at) > 0),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_V7_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
 
 
 def _canonical_ddl(sql: str) -> str:
@@ -339,7 +377,8 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(3): "codex_flow_h3_v3",
     SchemaVersion(4): "codex_flow_h3_integrity_v4",
     SchemaVersion(5): "codex_flow_h3_native_profile_v5",
-    CURRENT_SCHEMA_VERSION: "codex_flow_h3_permission_authority_v6",
+    SchemaVersion(6): "codex_flow_h3_permission_authority_v6",
+    CURRENT_SCHEMA_VERSION: "codex_flow_h3_causal_workspace_v7",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -465,6 +504,54 @@ def _sha256(value: str, *, field_name: str) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return value
+
+
+def _git_sha(value: str, *, field_name: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise ValueError(f"{field_name} must be a lowercase 40-character Git SHA")
+    return value
+
+
+def _encode_workspace_baseline(entries: tuple[tuple[str, str], ...]) -> tuple[str, str]:
+    normalized: list[list[str]] = []
+    prior = ""
+    for path, signature in entries:
+        candidate = Path(path)
+        if (
+            not path
+            or path <= prior
+            or path == "."
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            or candidate.as_posix() != path
+        ):
+            raise ValueError("workspace baseline paths must be sorted unique repository-relative paths")
+        if signature != "missing" and re.fullmatch(r"(?:file|directory):[0-9a-f]{64}", signature) is None:
+            raise ValueError("workspace baseline signatures must be typed SHA-256 facts")
+        normalized.append([path, signature])
+        prior = path
+    encoded = _encode_json(normalized)
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _decode_workspace_baseline(raw: str, digest: str) -> tuple[tuple[str, str], ...]:
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SchemaError("workspace baseline is not valid JSON") from exc
+    if not isinstance(decoded, list) or any(
+        not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], str) or not isinstance(item[1], str)
+        for item in decoded
+    ):
+        raise SchemaError("workspace baseline must be a list of path/signature pairs")
+    entries = tuple((item[0], item[1]) for item in decoded)
+    try:
+        canonical, actual = _encode_workspace_baseline(entries)
+    except ValueError as exc:
+        raise SchemaError("workspace baseline contains invalid facts") from exc
+    if canonical != raw or actual != digest:
+        raise CorruptSchemaError("workspace baseline digest does not match its facts")
+    return entries
 
 
 def _reason(value: WorkflowReason | ReasonCode | str | BaseException | None) -> WorkflowReason | None:
@@ -789,7 +876,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V6_TABLE_DDL.values():
+                for statement in _V7_TABLE_DDL.values():
                     self._db().execute(statement)
                 self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -817,6 +904,7 @@ class Ledger:
             SchemaVersion(4): _V4_TABLE_DDL,
             SchemaVersion(5): _V5_TABLE_DDL,
             SchemaVersion(6): _V6_TABLE_DDL,
+            SchemaVersion(7): _V7_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -918,6 +1006,10 @@ class Ledger:
                 "native_compatibility_sha256": ("TEXT", 0, 0),
                 "effective_permission_json": ("TEXT", 0, 0),
                 "effective_permission_sha256": ("TEXT", 0, 0),
+                "workspace_baseline_head_sha": ("TEXT", 0, 0),
+                "workspace_baseline_json": ("TEXT", 0, 0),
+                "workspace_baseline_sha256": ("TEXT", 0, 0),
+                "turn_started_at": ("TEXT", 0, 0),
                 "git_authority_before_sha256": ("TEXT", 0, 0),
                 "git_authority_after_sha256": ("TEXT", 0, 0),
                 "created_at": ("TEXT", 1, 0),
@@ -943,6 +1035,11 @@ class Ledger:
             expected["execution_integrity"].pop("native_compatibility_sha256")
             expected["execution_integrity"].pop("effective_permission_json")
             expected["execution_integrity"].pop("effective_permission_sha256")
+        if version < SchemaVersion(7) and "execution_integrity" in expected:
+            expected["execution_integrity"].pop("workspace_baseline_head_sha")
+            expected["execution_integrity"].pop("workspace_baseline_json")
+            expected["execution_integrity"].pop("workspace_baseline_sha256")
+            expected["execution_integrity"].pop("turn_started_at")
         for table, expected_columns in expected.items():
             rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
@@ -1024,6 +1121,10 @@ class Ledger:
     def _validate_rows(self) -> None:
         has_h3 = any(item[1] == "executions" for item in _schema_inventory(self._db()))
         has_integrity = any(item[1] == "execution_integrity" for item in _schema_inventory(self._db()))
+        has_causal_workspace = has_integrity and any(
+            str(row[1]) == "turn_started_at"
+            for row in self._db().execute("PRAGMA table_info(execution_integrity)").fetchall()
+        )
         orphan_queries = [
             "SELECT COUNT(*) FROM milestones m LEFT JOIN runs r ON r.run_id = m.run_id WHERE r.run_id IS NULL",
             "SELECT COUNT(*) FROM dispatches d LEFT JOIN milestones m ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id WHERE m.run_id IS NULL",
@@ -1165,6 +1266,7 @@ class Ledger:
                         not in {
                             ControllerCheckpoint.CAPSULE_PLANNED,
                             ControllerCheckpoint.WORKSPACE_LEASED,
+                            ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE,
                             ControllerCheckpoint.THREAD_STARTING,
                         }
                         or execution.thread_id
@@ -1220,6 +1322,22 @@ class Ledger:
                     sequences = tuple(int(item[0]) for item in event_rows)
                     if sequences != tuple(range(len(sequences))):
                         raise CorruptSchemaError("SDK lifecycle sequence is not contiguous")
+                if has_causal_workspace and (str(execution.run_id), str(execution.milestone_id)) in integrity_keys:
+                    integrity = self.get_execution_integrity(execution.run_id, execution.milestone_id)
+                    if integrity.provenance == "controller_v4" and (
+                        integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None
+                    ):
+                        raise CorruptSchemaError("controller execution lacks its workspace baseline authority")
+                    if execution.turn_id is not None and integrity.turn_started_at is None:
+                        raise CorruptSchemaError("durable SDK turn lacks causal turn-start authority")
+                    if (
+                        execution.turn_id is None
+                        and integrity.turn_started_at is not None
+                        and (execution.turn_output != _TURN_STARTING_MARKER)
+                    ):
+                        raise CorruptSchemaError("turn-start authority lacks its active external-call marker")
+                    if execution.turn_output == _TURN_STARTING_MARKER and integrity.turn_started_at is None:
+                        raise CorruptSchemaError("turn-start marker lacks durable causal authority")
             if has_integrity:
                 for row in (
                     self._db().execute("SELECT * FROM execution_integrity ORDER BY run_id, milestone_id").fetchall()
@@ -1232,6 +1350,9 @@ class Ledger:
                         raise CorruptSchemaError("Git authority after-state lacks its pre-turn authority")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(6):
+            self._migrate_v6_to_v7()
+            return
         if version == SchemaVersion(5):
             self._migrate_v5_to_v6()
             return
@@ -1358,7 +1479,7 @@ class Ledger:
         self._validate_rows()
         with self._transaction(validate_authority=False):
             self._db().execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v5")
-            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(_EXECUTION_INTEGRITY_V6_DDL)
             self._db().execute(
                 "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
                 "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
@@ -1369,6 +1490,39 @@ class Ledger:
                 "FROM execution_integrity_v5"
             )
             self._db().execute("DROP TABLE execution_integrity_v5")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(int(SchemaVersion(6))),),
+            )
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(6)],),
+            )
+            self._fault("after_migration")
+        self._migrate_v6_to_v7()
+
+    def _migrate_v6_to_v7(self) -> None:
+        self._validate_schema_metadata(SchemaVersion(6))
+        self._validate_shape(SchemaVersion(6))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._db().execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v6")
+            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(
+                "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
+                "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
+                "workspace_baseline_head_sha, workspace_baseline_json, workspace_baseline_sha256, "
+                "turn_started_at, git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
+                "SELECT i.run_id, i.milestone_id, CASE WHEN i.provenance = 'controller_v3' "
+                "THEN 'legacy_permission_v6' ELSE i.provenance END, i.native_profile_sha256, "
+                "i.native_compatibility_sha256, i.effective_permission_json, i.effective_permission_sha256, "
+                "NULL, NULL, NULL, CASE WHEN x.turn_id IS NOT NULL OR x.turn_output_json = "
+                '\'{"__controller_checkpoint":"turn_starting"}\' THEN x.updated_at ELSE NULL END, '
+                "i.git_authority_before_sha256, i.git_authority_after_sha256, i.created_at, i.updated_at "
+                "FROM execution_integrity_v6 i JOIN executions x "
+                "ON x.run_id = i.run_id AND x.milestone_id = i.milestone_id"
+            )
+            self._db().execute("DROP TABLE execution_integrity_v6")
             self._db().execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(int(CURRENT_SCHEMA_VERSION)),),
@@ -1849,6 +2003,8 @@ class Ledger:
         native_profile_sha256: str,
         native_compatibility_sha256: str,
         effective_permission: NativePermissionAuthority,
+        workspace_baseline_head_sha: str,
+        workspace_baseline: tuple[tuple[str, str], ...],
     ) -> ExecutionIntegrityRecord:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
@@ -1856,14 +2012,16 @@ class Ledger:
         compatibility = _sha256(native_compatibility_sha256, field_name="native compatibility digest")
         permission_json = _encode_json(effective_permission.facts)
         permission_sha256 = hashlib.sha256(permission_json.encode("utf-8")).hexdigest()
+        baseline_head = _git_sha(workspace_baseline_head_sha, field_name="workspace baseline HEAD")
+        baseline_json, baseline_sha256 = _encode_workspace_baseline(workspace_baseline)
         now = utc_now()
         with self._transaction():
             execution = self.get_execution(run, milestone)
             self._reject_terminal_execution(execution)
-            if (
-                execution.status is not ExecutionStatus.PLANNED
-                or execution.checkpoint is not ControllerCheckpoint.WORKSPACE_LEASED
-            ):
+            if execution.status is not ExecutionStatus.PLANNED or execution.checkpoint not in {
+                ControllerCheckpoint.WORKSPACE_LEASED,
+                ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE,
+            }:
                 raise StaleWriter("native profile binding requires a planned leased execution")
             existing = (
                 self._db()
@@ -1879,15 +2037,39 @@ class Ledger:
                     record.native_profile_sha256 != profile
                     or record.native_compatibility_sha256 != compatibility
                     or record.effective_permission != effective_permission
+                    or record.workspace_baseline_head_sha != baseline_head
+                    or record.workspace_baseline != workspace_baseline
                 ):
                     raise StaleWriter("execution is already bound to a different native profile")
                 return record
             self._db().execute(
                 "INSERT INTO execution_integrity(run_id, milestone_id, provenance, native_profile_sha256, "
                 "native_compatibility_sha256, effective_permission_json, effective_permission_sha256, "
-                "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
-                "VALUES (?, ?, 'controller_v3', ?, ?, ?, ?, NULL, NULL, ?, ?)",
-                (str(run), str(milestone), profile, compatibility, permission_json, permission_sha256, now, now),
+                "workspace_baseline_head_sha, workspace_baseline_json, workspace_baseline_sha256, "
+                "turn_started_at, git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
+                "VALUES (?, ?, 'controller_v4', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)",
+                (
+                    str(run),
+                    str(milestone),
+                    profile,
+                    compatibility,
+                    permission_json,
+                    permission_sha256,
+                    baseline_head,
+                    baseline_json,
+                    baseline_sha256,
+                    now,
+                    now,
+                ),
+            )
+            self._db().execute(
+                "UPDATE executions SET checkpoint = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (
+                    ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE.value,
+                    now,
+                    str(run),
+                    str(milestone),
+                ),
             )
             return self.get_execution_integrity(run, milestone)
 
@@ -1912,7 +2094,7 @@ class Ledger:
             if execution.status is not ExecutionStatus.THREAD_STARTED or execution.thread_id is None:
                 raise StaleWriter("native profile resume rebind requires a durable active SDK thread")
             current = self.get_execution_integrity(run, milestone)
-            if current.provenance != "controller_v3" or current.effective_permission is None:
+            if current.provenance != "controller_v4" or current.effective_permission is None:
                 raise NativeCompatibilityConflict("execution lacks resumable native compatibility authority")
             if current.native_compatibility_sha256 != compatibility:
                 raise NativeCompatibilityConflict("native provider/routing/discovery compatibility changed")
@@ -2137,7 +2319,10 @@ class Ledger:
                     .execute("SELECT * FROM workspace_leases WHERE workspace_path = ?", (str(capsule.workspace_path),))
                     .fetchone()
                 )
-            if execution.status is ExecutionStatus.PLANNED:
+            if (
+                execution.status is ExecutionStatus.PLANNED
+                and execution.checkpoint is ControllerCheckpoint.CAPSULE_PLANNED
+            ):
                 self._db().execute(
                     "UPDATE executions SET checkpoint = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
                     (
@@ -2216,8 +2401,8 @@ class Ledger:
                 raise StaleWriter("SDK thread start requires a planned execution")
             if current.checkpoint is ControllerCheckpoint.THREAD_STARTING:
                 return current
-            if current.checkpoint is not ControllerCheckpoint.WORKSPACE_LEASED:
-                raise StaleWriter("SDK thread start requires a durable workspace lease")
+            if current.checkpoint is not ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE:
+                raise StaleWriter("SDK thread start requires a durable per-milestone workspace baseline")
             self._db().execute(
                 "UPDATE executions SET checkpoint = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
                 (
@@ -2263,9 +2448,17 @@ class Ledger:
                 return current
             if current.turn_output == _TURN_STARTING_MARKER:
                 return current
+            integrity = self.get_execution_integrity(run, milestone)
+            if integrity.workspace_baseline is None:
+                raise StaleWriter("turn start requires a durable per-milestone workspace baseline")
             self._db().execute(
                 "UPDATE executions SET turn_output_json = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
                 (_encode_json(_TURN_STARTING_MARKER), now, str(run), str(milestone)),
+            )
+            self._db().execute(
+                "UPDATE execution_integrity SET turn_started_at = COALESCE(turn_started_at, ?), updated_at = ? "
+                "WHERE run_id = ? AND milestone_id = ?",
+                (now, now, str(run), str(milestone)),
             )
             return self.get_execution(run, milestone)
 
@@ -2285,10 +2478,27 @@ class Ledger:
                 raise StaleWriter("turn observation requires a durable active SDK thread")
             if current.thread_id != observation.thread_id:
                 raise StaleWriter("turn observation belongs to a different SDK thread")
+            integrity = self.get_execution_integrity(run, milestone)
             if current.turn_id is not None:
                 if current.turn_id != observation.turn_id:
                     raise StaleWriter("execution already owns a different SDK turn")
+                if integrity.turn_started_at is None:
+                    raise CorruptSchemaError("durable SDK turn lacks causal turn-start authority")
+                durable_events = tuple(
+                    LifecycleEvent(int(row["sequence"]), str(row["method"]), row["event_turn_id"])
+                    for row in self._db()
+                    .execute(
+                        "SELECT sequence, method, event_turn_id FROM sdk_lifecycle_events "
+                        "WHERE run_id = ? AND milestone_id = ? AND turn_id = ? ORDER BY sequence",
+                        (str(run), str(milestone), current.turn_id),
+                    )
+                    .fetchall()
+                )
+                if current.turn_output != (observation.structured_output or {}) or durable_events != observation.events:
+                    raise StaleWriter("execution already owns different durable SDK turn facts")
                 return current
+            if integrity.turn_started_at is None or current.turn_output != _TURN_STARTING_MARKER:
+                raise StaleWriter("turn observation requires prior durable turn-start authority")
             for event in observation.events:
                 self._db().execute(
                     "INSERT INTO sdk_lifecycle_events(run_id, milestone_id, turn_id, sequence, method, event_turn_id) "
@@ -2473,6 +2683,25 @@ class Ledger:
         if row is None:
             raise RecordNotFound(f"workspace lease {workspace_path} does not exist")
         return self._workspace_lease_from_row(row)
+
+    def completed_workspace_predecessors(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        workspace_path: Path,
+    ) -> tuple[ExecutionRecord, ...]:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        rows = (
+            self._db()
+            .execute(
+                "SELECT * FROM executions WHERE run_id = ? AND workspace_path = ? AND milestone_id != ? "
+                "AND status = ? ORDER BY created_at, milestone_id",
+                (str(run), str(workspace_path), str(milestone), ExecutionStatus.COMPLETED.value),
+            )
+            .fetchall()
+        )
+        return tuple(self._execution_from_row(row) for row in rows)
 
     def sdk_lifecycle_events(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> tuple[LifecycleEvent, ...]:
         run = _run_id(run_id)
@@ -2753,6 +2982,15 @@ class Ledger:
             actual_digest = hashlib.sha256(_encode_json(effective_permission.facts).encode("utf-8")).hexdigest()
             if permission_digest != actual_digest:
                 raise CorruptSchemaError("effective native permission digest does not match its facts")
+        baseline_head = row["workspace_baseline_head_sha"] if "workspace_baseline_head_sha" in row.keys() else None
+        baseline_raw = row["workspace_baseline_json"] if "workspace_baseline_json" in row.keys() else None
+        baseline_digest = row["workspace_baseline_sha256"] if "workspace_baseline_sha256" in row.keys() else None
+        baseline = None
+        if any(value is not None for value in (baseline_head, baseline_raw, baseline_digest)):
+            if any(value is None for value in (baseline_head, baseline_raw, baseline_digest)):
+                raise CorruptSchemaError("workspace baseline fact is incomplete")
+            baseline = _decode_workspace_baseline(str(baseline_raw), str(baseline_digest))
+        turn_started_at = row["turn_started_at"] if "turn_started_at" in row.keys() else None
         return ExecutionIntegrityRecord(
             RunId(row["run_id"]),
             MilestoneId(row["milestone_id"]),
@@ -2769,6 +3007,14 @@ class Ledger:
                 if permission_digest is not None
                 else None
             ),
+            (_git_sha(str(baseline_head), field_name="workspace baseline HEAD") if baseline_head is not None else None),
+            baseline,
+            (
+                _sha256(str(baseline_digest), field_name="workspace baseline digest")
+                if baseline_digest is not None
+                else None
+            ),
+            str(turn_started_at) if turn_started_at is not None else None,
             (
                 _sha256(str(row["git_authority_before_sha256"]), field_name="Git authority before digest")
                 if row["git_authority_before_sha256"] is not None

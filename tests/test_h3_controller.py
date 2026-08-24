@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -51,6 +52,7 @@ from codex_flow.ledger import (
     _V2_TABLE_DDL,
     _V4_TABLE_DDL,
     _V5_TABLE_DDL,
+    _V6_TABLE_DDL,
     CURRENT_SCHEMA_VERSION,
     CorruptSchemaError,
     Ledger,
@@ -640,6 +642,132 @@ def test_managed_worktree_is_semantic_and_reused_across_milestones() -> None:
         controller.close()
 
 
+def test_disjoint_sequential_milestones_reuse_baseline_and_recover_before_external_start() -> None:
+    class NamedOutputAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            self.service["turns"] += 1
+            assert self.config.cwd is not None
+            target = str(self.service["target"])
+            (self.config.cwd / target).write_text(f"{target}\n")
+            return TurnObservation(
+                thread,
+                f"turn-{target}",
+                "completed",
+                json.dumps({"status": "done"}),
+                {"status": "done"},
+                (),
+            )
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, _branch = _repository(repository)
+        workspace = repository.parent / "repo.worktrees" / "sequential"
+        service: dict[str, Any] = {**_service(), "target": "first.txt"}
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: NamedOutputAdapter(config, service),
+        )
+        first = replace(
+            _capsule(
+                repository,
+                workspace,
+                base,
+                "agent/sequential",
+                run="sequential-run",
+                milestone="one",
+                mode=WorkspaceMode.MANAGED_WORKTREE,
+                lane="sequential",
+            ),
+            mutable_paths=("first.txt",),
+        )
+        controller.plan(first)
+        assert controller.start("sequential-run", "one").status is ExecutionStatus.COMPLETED
+
+        second = replace(first, milestone_id=MilestoneId("two"), mutable_paths=("second.txt",))
+        controller.plan(second)
+        controller.close()
+
+        intruder = workspace / "intruder.txt"
+        intruder.write_text("not a prior accepted output\n")
+        preflight = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: NamedOutputAdapter(config, service),
+        )
+        with pytest.raises(ControllerError, match="outside mutable paths"):
+            preflight.start("sequential-run", "two")
+        assert preflight.ledger.current_state("sequential-run", "two").value == "PLANNED"
+        assert preflight.status("sequential-run", "two").checkpoint is ControllerCheckpoint.CAPSULE_PLANNED
+        preflight.close()
+        intruder.unlink()
+
+        def fail_after_baseline(stage: str) -> None:
+            if stage == "after_workspace_baseline":
+                raise RuntimeError("pre-external preflight stop")
+
+        stopped = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: NamedOutputAdapter(config, service),
+            fault_injector=fail_after_baseline,
+        )
+        with pytest.raises(RuntimeError, match="pre-external preflight stop"):
+            stopped.start("sequential-run", "two")
+        durable = stopped.status("sequential-run", "two")
+        assert durable.status is ExecutionStatus.PLANNED
+        assert durable.checkpoint is ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE
+        assert stopped.ledger.current_state("sequential-run", "two").value == "PLANNED"
+        stopped.close()
+
+        service["target"] = "second.txt"
+        recovered = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: NamedOutputAdapter(config, service),
+        )
+        terminal = recovered.start("sequential-run", "two")
+        assert terminal.status is ExecutionStatus.COMPLETED
+        assert (workspace / "first.txt").read_text() == "first.txt\n"
+        assert (workspace / "second.txt").read_text() == "second.txt\n"
+        assert recovered.ledger.get_workspace_lease(workspace).base_sha == base
+        recovered.close()
+
+
+@pytest.mark.parametrize("mode", (WorkspaceMode.MANAGED_WORKTREE, WorkspaceMode.EXISTING_WORKTREE))
+def test_distinct_worktree_codex_flow_write_is_not_exempt_from_mutation_scope(mode: WorkspaceMode) -> None:
+    class WorkspaceStateAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            (self.config.cwd / ".codex-flow").mkdir()
+            (self.config.cwd / ".codex-flow" / "executor.txt").write_text("not authoritative\n")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, _branch = _repository(repository)
+        lane = "managed-state" if mode is WorkspaceMode.MANAGED_WORKTREE else "existing-state"
+        workspace = repository.parent / "repo.worktrees" / lane
+        if mode is WorkspaceMode.EXISTING_WORKTREE:
+            workspace.parent.mkdir()
+            _git(repository, "worktree", "add", "-b", f"agent/{lane}", str(workspace), base)
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: WorkspaceStateAdapter(config, _service()),
+        )
+        controller.plan(
+            _capsule(
+                repository,
+                workspace,
+                base,
+                f"agent/{lane}",
+                mode=mode,
+                lane=lane,
+            )
+        )
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        controller.close()
+
+
 def test_existing_worktree_is_reused_without_controller_git_creation() -> None:
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
@@ -735,8 +863,8 @@ def test_nonterminal_controller_fact_mutators_preserve_contractual_idempotency()
         lease = controller.ledger.acquire_workspace_lease(capsule)
         assert controller.ledger.acquire_workspace_lease(capsule) == lease
         authority = NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
-        profile = controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority)
-        assert controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority) == profile
+        profile = controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority, base, ())
+        assert controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority, base, ()) == profile
         controller.ledger.claim_dispatch("run", "m1", "executor", 1)
         thread_starting = controller.ledger.record_thread_starting("run", "m1")
         assert controller.ledger.record_thread_starting("run", "m1") == thread_starting
@@ -757,8 +885,49 @@ def test_nonterminal_controller_fact_mutators_preserve_contractual_idempotency()
         )
         turn = controller.ledger.record_turn("run", "m1", observation)
         assert controller.ledger.record_turn("run", "m1", observation) == turn
-        assert planned.status is ExecutionStatus.PLANNED
+        conflicting = replace(observation, structured_output={"status": "different"})
+        with pytest.raises(StaleWriter, match="different durable SDK turn facts"):
+            controller.ledger.record_turn("run", "m1", conflicting)
         controller.close()
+        reopened = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        assert reopened.ledger.record_turn("run", "m1", observation) == turn
+        with pytest.raises(StaleWriter, match="different durable SDK turn facts"):
+            reopened.ledger.record_turn("run", "m1", conflicting)
+        assert planned.status is ExecutionStatus.PLANNED
+        reopened.close()
+
+
+def test_turn_observation_requires_durable_turn_start_before_first_write() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        capsule = _capsule(repository, repository, base, branch)
+        controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        controller.plan(capsule)
+        controller.ledger.acquire_workspace_lease(capsule)
+        authority = NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
+        controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority, base, ())
+        controller.ledger.claim_dispatch("run", "m1", "executor", 1)
+        controller.ledger.record_thread_starting("run", "m1")
+        thread = ThreadIdentity("thread-causal")
+        controller.ledger.record_thread_identity("run", "m1", thread)
+        observation = TurnObservation(
+            thread,
+            "turn-causal",
+            "completed",
+            json.dumps({"status": "done"}),
+            {"status": "done"},
+            (),
+        )
+        with pytest.raises(StaleWriter, match="prior durable turn-start authority"):
+            controller.ledger.record_turn("run", "m1", observation)
+        assert controller.ledger.sdk_lifecycle_events("run", "m1") == ()
+        controller.close()
+
+        reopened = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        with pytest.raises(StaleWriter, match="prior durable turn-start authority"):
+            reopened.ledger.record_turn("run", "m1", observation)
+        reopened.close()
 
 
 @pytest.mark.parametrize(
@@ -858,7 +1027,15 @@ def test_terminal_execution_rejects_every_public_controller_fact_mutator_after_r
 
         def mutate(current: Controller, mutator_name: str) -> None:
             if mutator_name == "record_native_profile":
-                current.ledger.record_native_profile("run", "m1", profile_sha256, compatibility_sha256, authority)
+                current.ledger.record_native_profile(
+                    "run",
+                    "m1",
+                    profile_sha256,
+                    compatibility_sha256,
+                    authority,
+                    integrity.workspace_baseline_head_sha if integrity is not None else base,
+                    integrity.workspace_baseline if integrity is not None and integrity.workspace_baseline else (),
+                )
             elif mutator_name == "rebind_native_profile_for_resume":
                 current.ledger.rebind_native_profile_for_resume(
                     "run", "m1", profile_sha256, compatibility_sha256, authority
@@ -1377,7 +1554,7 @@ def test_v2_ledger_migrates_forward_to_canonical_h3_schema() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_permission_authority_v6"
+        assert ledger.schema_identity == "codex_flow_h3_causal_workspace_v7"
         assert "checkpoint" in ledger.schema_columns("executions")
         ledger.close()
 
@@ -1400,7 +1577,7 @@ def test_v4_sandbox_authority_schema_migrates_to_truthful_native_profile_authori
         connection.close()
 
         ledger = Ledger(path)
-        assert ledger.schema_identity == "codex_flow_h3_permission_authority_v6"
+        assert ledger.schema_identity == "codex_flow_h3_causal_workspace_v7"
         assert "native_profile_sha256" in ledger.schema_columns("execution_integrity")
         assert "sandbox_policy_sha256" not in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -1425,9 +1602,140 @@ def test_v5_native_profile_schema_migrates_to_permission_authority_v6() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_permission_authority_v6"
+        assert ledger.schema_identity == "codex_flow_h3_causal_workspace_v7"
         assert "native_compatibility_sha256" in ledger.schema_columns("execution_integrity")
         assert "effective_permission_json" in ledger.schema_columns("execution_integrity")
+        ledger.close()
+
+
+def test_v6_permission_schema_migrates_to_causal_workspace_v7() -> None:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "workflow.db"
+        connection = sqlite3.connect(path)
+        for ddl in _V6_TABLE_DDL.values():
+            connection.execute(ddl)
+        connection.executemany(
+            "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+            (
+                ("schema_version", "6"),
+                ("migration_marker", "complete"),
+                ("schema_identity", "codex_flow_h3_permission_authority_v6"),
+            ),
+        )
+        timestamp = "2026-08-24T00:00:00.000000Z"
+        workspace = str(Path(directory) / "repo")
+        permission = NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
+        permission_json = json.dumps(permission.facts, sort_keys=True, separators=(",", ":"))
+        permission_sha256 = hashlib.sha256(permission_json.encode()).hexdigest()
+        connection.execute("INSERT INTO runs VALUES (?, ?, NULL, '{}')", ("run", timestamp))
+        connection.execute(
+            "INSERT INTO milestones VALUES (?, ?, 'COMPLETED', ?, ?, '{}')",
+            ("run", "m1", timestamp, timestamp),
+        )
+        connection.execute(
+            "INSERT INTO dispatches VALUES (?, ?, ?, ?, ?, ?)",
+            ("run/m1/executor/1", "run", "m1", "executor", 1, timestamp),
+        )
+        connection.executemany(
+            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)",
+            (
+                (
+                    "run/m1/1",
+                    "run",
+                    "m1",
+                    1,
+                    "PLANNED",
+                    "STARTING",
+                    "dispatch_claimed",
+                    "dispatch_claimed",
+                    "run/m1/executor/1",
+                    timestamp,
+                ),
+                (
+                    "run/m1/2",
+                    "run",
+                    "m1",
+                    2,
+                    "STARTING",
+                    "RUNNING",
+                    "state_transition",
+                    None,
+                    None,
+                    timestamp,
+                ),
+                (
+                    "run/m1/3",
+                    "run",
+                    "m1",
+                    3,
+                    "RUNNING",
+                    "COMPLETED",
+                    "state_transition",
+                    "terminal_outcome",
+                    None,
+                    timestamp,
+                ),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO workspace_leases VALUES (?, ?, 'current_checkout', ?, ?, ?, ?, ?)",
+            (workspace, workspace, "main", "a" * 40, "lane", "run", timestamp),
+        )
+        connection.execute(
+            "INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'result_durable', ?, ?, ?, ?, ?, "
+            "0, ?, ?, 0, 0.1, ?, ?, ?, ?)",
+            (
+                "run",
+                "m1",
+                f"{workspace}/capsule.json",
+                "b" * 64,
+                workspace,
+                "gpt-test",
+                "medium",
+                "thread",
+                "turn",
+                '{"status":"done"}',
+                '{"status":"done"}',
+                '["true"]',
+                "c" * 64,
+                "d" * 64,
+                "e" * 64,
+                "e" * 64,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO sdk_lifecycle_events VALUES (?, ?, ?, 0, ?, ?)",
+            ("run", "m1", "turn", "turn/completed", "turn"),
+        )
+        connection.execute(
+            "INSERT INTO execution_integrity VALUES (?, ?, 'controller_v3', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "run",
+                "m1",
+                "f" * 64,
+                "1" * 64,
+                permission_json,
+                permission_sha256,
+                "2" * 64,
+                "2" * 64,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        ledger = Ledger(path)
+        assert ledger.schema_version == CURRENT_SCHEMA_VERSION
+        assert ledger.schema_identity == "codex_flow_h3_causal_workspace_v7"
+        columns = ledger.schema_columns("execution_integrity")
+        assert "workspace_baseline_sha256" in columns
+        assert "turn_started_at" in columns
+        integrity = ledger.get_execution_integrity("run", "m1")
+        assert integrity.provenance == "legacy_permission_v6"
+        assert integrity.turn_started_at == timestamp
         ledger.close()
 
 

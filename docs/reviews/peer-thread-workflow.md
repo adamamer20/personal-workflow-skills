@@ -670,10 +670,10 @@ Acceptance modes: `objective`, `architecture`.
    projected or persisted.
 9. `inherit_native` supplies no SDK approval or sandbox override while current
    native authority equals the execution's durable authority. A `read_only`
-   capsule supplies only the stricter read-only sandbox override. Schema v6
-   stores immutable native compatibility identity separately from sanitized
-   effective permission facts and digest. Before resume, their typed meet is
-   committed atomically; an SDK override is supplied only when required to
+   capsule supplies only the stricter read-only sandbox override. Schema v7
+   retains schema v6's immutable native compatibility identity separately from
+   sanitized effective permission facts and digest. Before resume, their typed
+   meet is committed atomically; an SDK override is supplied only when required to
    retain a prior stricter sandbox/approval authority. The lattice has no
    broadening value and fails closed if monotonic restriction cannot be
    established.
@@ -723,7 +723,9 @@ Acceptance modes: `objective`, `architecture`.
 
 Promote only when the real disposable sentinel survives the injected post-
 identity crash and finishes through `codex-flow resume` with no duplicate thread
-or worktree and with the result durable before projections. H4 follows.
+or worktree and a durable terminal result. Deterministic boundary fault injection,
+not the retained real sentinel alone, proves result-before-projection ordering.
+H4 follows.
 
 Successor: H4.
 
@@ -737,10 +739,11 @@ inherits the same native Codex permission authority and automatically follows
 later native restrictions. The bounded Git-authority snapshot remains required
 for HEAD/branch, refs, reflogs, index, repository/worktree configuration, and
 stable operation metadata, but it is evidence/contract enforcement rather than
-an OS sandbox claim. Schema v6 replaces the obsolete single profile binding
-with immutable compatibility identity plus sanitized monotonic effective
-permission facts/digest while retaining
-Git-authority before/after evidence. The single corrected real SDK run reached
+an OS sandbox claim. Schema v7 adds durable per-milestone workspace baselines
+and causal turn-start authority on top of schema v6, which replaces the obsolete
+single profile binding with immutable compatibility identity plus sanitized
+monotonic effective permission facts/digest while retaining Git-authority
+before/after evidence. The single corrected real SDK run reached
 the first SDK turn and injected post-turn crash boundary, then fresh-process
 resume failed because the native runtime had legitimately added private config
 state and reprojection treated that private change as source drift. The
@@ -1053,7 +1056,9 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   slice: versioned capsules, SQLite v3 execution facts, program/lane-owned
   current/existing/managed worktree leases, workspace-write SDK execution,
   durable external-call and identity checkpoints, fresh-client resume,
-  explicit validation, result-before-projection ordering, and
+  explicit validation, with result-before-projection ordering proved by the
+  deterministic boundary fault injection rather than inferred from the real
+  sentinel, and
   `plan/start/resume/status/cancel`. The real disposable sentinel passed with
   one dispatch, one semantic managed worktree, one thread id, 43 ordered SDK
   events, an injected post-turn process boundary, successful fresh-client

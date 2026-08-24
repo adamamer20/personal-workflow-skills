@@ -552,6 +552,7 @@ class ExecutionStatus(str, Enum):
 class ControllerCheckpoint(str, Enum):
     CAPSULE_PLANNED = "capsule_planned"
     WORKSPACE_LEASED = "workspace_leased"
+    WORKSPACE_BASELINE_DURABLE = "workspace_baseline_durable"
     THREAD_STARTING = "thread_starting"
     THREAD_IDENTITY_DURABLE = "thread_identity_durable"
     TURN_DURABLE = "turn_durable"
@@ -754,6 +755,10 @@ class ExecutionIntegrityRecord:
     native_compatibility_sha256: str | None
     effective_permission: NativePermissionAuthority | None
     effective_permission_sha256: str | None
+    workspace_baseline_head_sha: str | None
+    workspace_baseline: tuple[tuple[str, str], ...] | None
+    workspace_baseline_sha256: str | None
+    turn_started_at: str | None
     git_authority_before_sha256: str | None
     git_authority_after_sha256: str | None
     created_at: str

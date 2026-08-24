@@ -627,8 +627,8 @@ class Controller:
             effective_permission,
         )
 
-    def _committed_workspace_paths(self, capsule: ExecutionCapsule) -> frozenset[str]:
-        """Return every path touched by every commit after the capsule base.
+    def _committed_workspace_paths(self, capsule: ExecutionCapsule, baseline_head: str) -> frozenset[str]:
+        """Return every path touched by every commit after the milestone baseline.
 
         Comparing only the final tree to ``base_sha`` misses an out-of-scope
         commit that is subsequently reverted.  The commit walk is therefore a
@@ -640,7 +640,7 @@ class Controller:
             "rev-list",
             "--reverse",
             "--ancestry-path",
-            f"{capsule.base_sha}..HEAD",
+            f"{baseline_head}..HEAD",
         )
         paths: set[str] = set()
         for raw_commit in commits.splitlines():
@@ -651,11 +651,14 @@ class Controller:
                 options = (*options[:-1], "-m", options[-1])
             changed = self._git_output_bytes(capsule.workspace_path, "diff-tree", *options, commit)
             paths.update(os.fsdecode(item) for item in changed.split(b"\0") if item)
-        final_tree = self._git_output_bytes(capsule.workspace_path, "diff", "--name-only", "-z", capsule.base_sha, "--")
-        paths.update(os.fsdecode(item) for item in final_tree.split(b"\0") if item)
         return frozenset(paths)
 
-    def _assert_workspace_history(self, capsule: ExecutionCapsule) -> None:
+    def _assert_workspace_history(
+        self,
+        capsule: ExecutionCapsule,
+        baseline_head: str,
+        mutable_paths: tuple[str, ...] | None = None,
+    ) -> None:
         branch = self._git_output(capsule.workspace_path, "symbolic-ref", "--quiet", "--short", "HEAD")
         if branch != capsule.branch:
             raise ControllerError("workspace branch changed during execution")
@@ -667,14 +670,23 @@ class Controller:
         )
         if ancestor.returncode != 0:
             raise ControllerError("workspace history no longer descends from the capsule base")
-        paths = self._committed_workspace_paths(capsule)
-        outside = sorted(path for path in paths if not self._path_is_owned(path, capsule.mutable_paths))
+        baseline_ancestor = subprocess.run(
+            ("git", "merge-base", "--is-ancestor", baseline_head, "HEAD"),
+            cwd=capsule.workspace_path,
+            capture_output=True,
+            check=False,
+        )
+        if baseline_ancestor.returncode != 0:
+            raise ControllerError("workspace history no longer descends from the milestone baseline")
+        paths = self._committed_workspace_paths(capsule, baseline_head)
+        owned_roots = capsule.mutable_paths if mutable_paths is None else mutable_paths
+        outside = sorted(path for path in paths if not self._path_is_owned(path, owned_roots))
         if outside:
             raise ControllerError("committed workspace changes outside mutable paths: " + ", ".join(outside))
 
-    def _workspace_changes(self, workspace: Path) -> frozenset[str]:
+    def _workspace_changes(self, workspace: Path, revision: str = "HEAD") -> frozenset[str]:
         tracked = subprocess.run(
-            ("git", "diff", "--name-only", "-z", "HEAD"),
+            ("git", "diff", "--name-only", "-z", revision, "--"),
             cwd=workspace,
             capture_output=True,
             check=False,
@@ -703,11 +715,57 @@ class Controller:
             if path
         )
 
-    @staticmethod
-    def _is_controller_path(path: str) -> bool:
+    def _is_controller_path(self, workspace: Path, path: str) -> bool:
+        if workspace.resolve() != self.state_root:
+            return False
         candidate = Path(path)
         internal = Path(".codex-flow")
         return candidate == internal or internal in candidate.parents
+
+    @staticmethod
+    def _path_signature(path: Path) -> str:
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            return "missing"
+        if stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise ControllerError(f"workspace baseline contains a multiply-linked file: {path}")
+            return f"file:{_digest_bytes(path.read_bytes())}"
+        if stat.S_ISDIR(metadata.st_mode):
+            entries: list[str] = []
+            for current, directories, files in os.walk(path, followlinks=False):
+                directories.sort()
+                files.sort()
+                for name in (*directories, *files):
+                    child = Path(current) / name
+                    item = os.lstat(child)
+                    if stat.S_ISLNK(item.st_mode):
+                        raise ControllerError(f"workspace baseline contains a symlink: {child}")
+                    relative = child.relative_to(path).as_posix()
+                    if stat.S_ISDIR(item.st_mode):
+                        entries.append(f"d:{relative}")
+                    elif stat.S_ISREG(item.st_mode):
+                        if item.st_nlink != 1:
+                            raise ControllerError(f"workspace baseline contains a multiply-linked file: {child}")
+                        entries.append(f"f:{relative}:{_digest_bytes(child.read_bytes())}")
+                    else:
+                        raise ControllerError(f"workspace baseline contains an unsupported object: {child}")
+            return f"directory:{_digest_bytes(chr(10).join(entries).encode())}"
+        raise ControllerError(f"workspace baseline contains an unsupported object: {path}")
+
+    def _workspace_baseline_snapshot(
+        self, capsule: ExecutionCapsule, baseline_head: str
+    ) -> tuple[tuple[str, str], ...]:
+        changes = self._workspace_changes(capsule.workspace_path, baseline_head)
+        workspace_device = os.stat(capsule.workspace_path).st_dev
+        facts: list[tuple[str, str]] = []
+        for relative in sorted(changes):
+            if self._is_controller_path(capsule.workspace_path, relative):
+                continue
+            self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
+            facts.append((relative, self._path_signature(capsule.workspace_path / relative)))
+        return tuple(facts)
 
     @staticmethod
     def _assert_safe_tree(root: Path, workspace_device: int) -> None:
@@ -789,19 +847,28 @@ class Controller:
         candidate = Path(path)
         return any(candidate == Path(root) or Path(root) in candidate.parents for root in roots)
 
-    def _assert_mutation_scope(self, capsule: ExecutionCapsule) -> None:
-        changes = self._workspace_changes(capsule.workspace_path)
+    def _assert_mutation_scope(
+        self,
+        capsule: ExecutionCapsule,
+        baseline_head: str,
+        baseline: tuple[tuple[str, str], ...],
+        mutable_paths: tuple[str, ...] | None = None,
+    ) -> None:
+        current = dict(self._workspace_baseline_snapshot(capsule, baseline_head))
+        prior = dict(baseline)
+        changes = frozenset(path for path in current.keys() | prior.keys() if current.get(path) != prior.get(path))
         workspace_device = os.stat(capsule.workspace_path).st_dev
         for relative in capsule.mutable_paths:
             self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
             self._assert_safe_tree(capsule.workspace_path / relative, workspace_device)
         for relative in changes:
-            if not self._is_controller_path(relative):
+            if not self._is_controller_path(capsule.workspace_path, relative):
                 self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
+        owned_roots = capsule.mutable_paths if mutable_paths is None else mutable_paths
         outside = sorted(
             path
             for path in changes
-            if not self._is_controller_path(path) and not self._path_is_owned(path, capsule.mutable_paths)
+            if not self._is_controller_path(capsule.workspace_path, path) and not self._path_is_owned(path, owned_roots)
         )
         if outside:
             raise ControllerError(f"workspace contains changes outside mutable paths: {', '.join(outside)}")
@@ -822,14 +889,33 @@ class Controller:
         if record.checkpoint is ControllerCheckpoint.THREAD_STARTING:
             self.ledger.record_pre_identity_uncertainty(record.run_id, record.milestone_id)
             raise UncertainPreIdentity("prior SDK start crossed the durable external-call boundary")
-        self.ledger.claim_dispatch(capsule.run_id, capsule.milestone_id, "executor", 1)
         self._worktrees.select(capsule)
         self._assert_protected_clean(capsule)
-        self._assert_workspace_history(capsule)
-        self._assert_mutation_scope(capsule)
+        if record.checkpoint is ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE:
+            integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
+            if integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None:
+                raise ControllerError("durable per-milestone workspace baseline is incomplete")
+            baseline_head = integrity.workspace_baseline_head_sha
+            baseline = integrity.workspace_baseline
+        else:
+            prior_roots = {
+                mutable
+                for predecessor in self.ledger.completed_workspace_predecessors(
+                    capsule.run_id, capsule.milestone_id, capsule.workspace_path
+                )
+                for mutable in self._load_durable_capsule(predecessor).mutable_paths
+            }
+            trusted_roots = tuple(sorted((*prior_roots, *capsule.mutable_paths)))
+            self._assert_workspace_history(capsule, capsule.base_sha, trusted_roots)
+            self._assert_mutation_scope(capsule, capsule.base_sha, (), trusted_roots)
+            self.ledger.acquire_workspace_lease(capsule)
+            baseline_head = self._git_output(capsule.workspace_path, "rev-parse", "HEAD")
+            baseline = self._workspace_baseline_snapshot(capsule, baseline_head)
         current_digest = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
         if current_digest != record.protected_before_sha256:
             raise ControllerError("protected paths changed between plan and start")
+        self._assert_workspace_history(capsule, baseline_head)
+        self._assert_mutation_scope(capsule, baseline_head, baseline)
         self.ledger.acquire_workspace_lease(capsule)
         native_runtime, native_profile_sha256, compatibility_sha256, effective_permission = self._native_runtime(
             capsule
@@ -840,7 +926,10 @@ class Controller:
             native_profile_sha256,
             compatibility_sha256,
             effective_permission,
+            baseline_head,
+            baseline,
         )
+        self._fault("after_workspace_baseline")
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
@@ -853,8 +942,9 @@ class Controller:
             )
         )
         try:
+            self.ledger.claim_dispatch(capsule.run_id, capsule.milestone_id, "executor", 1)
+            self.ledger.record_thread_starting(capsule.run_id, capsule.milestone_id)
             try:
-                self.ledger.record_thread_starting(capsule.run_id, capsule.milestone_id)
                 self._fault("before_sdk_thread_start")
                 identity = adapter.start_thread()
             except Exception as exc:
@@ -888,7 +978,10 @@ class Controller:
         capsule = self._load_durable_capsule(record)
         self._worktrees.select(capsule)
         self._assert_protected_clean(capsule)
-        self._assert_workspace_history(capsule)
+        integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
+        if integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None:
+            raise ControllerError("execution lacks a durable per-milestone workspace baseline")
+        self._assert_workspace_history(capsule, integrity.workspace_baseline_head_sha)
         self.ledger.acquire_workspace_lease(capsule)
         native_runtime, native_profile_sha256, compatibility_sha256, candidate_permission = self._native_runtime(
             capsule
@@ -995,8 +1088,14 @@ class Controller:
                 result = {"status": "failed", "reason": "sdk_terminal_outcome_failed"}
         mutation_scope_valid = True
         try:
-            self._assert_workspace_history(capsule)
-            self._assert_mutation_scope(capsule)
+            if integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None:
+                raise ControllerError("execution lacks a durable per-milestone workspace baseline")
+            self._assert_workspace_history(capsule, integrity.workspace_baseline_head_sha)
+            self._assert_mutation_scope(
+                capsule,
+                integrity.workspace_baseline_head_sha,
+                integrity.workspace_baseline,
+            )
         except ControllerError as exc:
             mutation_scope_valid = False
             scope_error = str(exc)
