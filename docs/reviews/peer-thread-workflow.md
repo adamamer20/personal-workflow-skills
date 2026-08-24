@@ -590,7 +590,9 @@ installed-plugin and downstream-pin migration.
 Milestone: H2R2 — independently re-review full H2 range
 `fab4cb6..d32e190` for promotion.
 
-Dispatch status: not yet dispatched.
+Dispatch status: queued once as
+`client-new-thread:69be0578-6717-4b1a-841c-ce16f19ab425` on native host
+`local`; no retry or readiness polling is authorized.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
