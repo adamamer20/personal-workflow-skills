@@ -442,10 +442,51 @@ conflicting-generation process races; cover alternate sensitive keys/values and
 H1 exception details; cover counterfeit constraintless schemas, reopen symlink
 swaps, and ancestor-swap projection attacks.
 
-Repair candidate: `d32e190` on parent `6db6146`; full H2 review range is
-`fab4cb6..d32e190`. Executor and planning-owner reruns of `make check` are green
-with 46 tests. The repair remains unpromoted pending fresh independent re-review
-of the full range and every stable finding.
+Rejected repair candidate: `d32e190` on parent `6db6146`; full H2 review range
+is `fab4cb6..d32e190`. Executor, planning-owner, and independent-review reruns
+of `make check` are green with 46 tests, but the second independent review found
+five P1 integrity escapes and two P2 boundary defects. This commit is evidence
+only and must not be integrated or promoted.
+
+Stable closure from the second review: `H2-INT-001`, `H2-SEC-001`, and
+`H2-SEC-003` are closed on the tested Linux path; the speculative aliases and
+wrappers from `H2-API-001` are removed. `H2-SCHEMA-001` and `H2-SEC-002` remain
+open, and the review added `H2-INT-002`, `H2-INT-003`, `H2-API-002`,
+`H2-API-003`, and `H2-API-004`.
+
+Required continuation decisions:
+
+- Make the transition contract immutable to callers and keep Ledger behavior
+  bound to that canonical immutable representation. No exported mutable mapping
+  may change terminal immutability or any allowed edge at runtime.
+- Reject non-string identifiers before SQL. Constructors validate the supplied
+  type and value; they never stringify arbitrary objects.
+- Validate event-kind/dispatch relationships before mutation. A dispatch-claim
+  event requires its matching durable dispatch, and normal state-transition
+  events cannot carry a dispatch id. Every successful public write must leave a
+  ledger that immediately closes and reopens successfully.
+- Remove public mutable access to the raw SQLite connection. The connection is
+  private; tests and diagnostics use only narrow typed/read-only queries.
+- Verify the canonical owned schema structurally from exact SQLite metadata and
+  PRAGMAs or a recomputed canonical fingerprint, not SQL substring matching.
+  Fresh and migrated v2 databases must converge on the same owned DDL identity.
+- Replay every milestone history on open: sequences are contiguous, every
+  `from_state` equals the replay state, every edge is allowed, dispatch-claim
+  events correspond exactly to dispatch rows, and the final replay state equals
+  `milestones.current_state`. Reject orphaned, duplicate, discontinuous, or
+  otherwise non-causal authority before use.
+- Pin the database inode before SQLite connects and anchor its parent directory
+  with no-follow file descriptors. Validate file identity with `fstat` and use
+  the pinned descriptor path for SQLite so a hardlink substitution between path
+  validation and connect cannot redirect writes. Exercise journal, locking,
+  close, failed-open cleanup, and reopen behavior on the supported Linux runtime.
+- Use direct `os.O_DIRECTORY` access on the supported Linux runtime; do not use
+  an indirect fallback for this security-critical interface.
+
+The Luna implementation/review loop has now completed two unsuccessful cycles
+for the same schema/path-integrity finding classes. The repository circuit
+breaker therefore prohibits another Luna repair and routes one fresh bounded
+continuation to Sol Medium without weakening H2 acceptance or opening H3.
 
 ### Successor milestone
 
@@ -584,47 +625,63 @@ installed-plugin and downstream-pin migration.
   exclusion, counterfeit-schema rejection, reopen symlink rejection, and an
   ancestor-swap projection regression. Planning reran `make check` successfully
   with 46 tests. Promotion remains withheld for fresh full-range re-review.
+- 2026-08-24: the second independent Luna review rejected `d32e190` with
+  P0=0/P1=5/P2=2 despite a green `make check`. It confirmed closure of explicit
+  run/milestone identity, arbitrary durable text exclusion, anchored artifact
+  writes on Linux, and speculative API aliases. It reproduced counterfeit
+  schema and non-causal-history acceptance, a pre-connect hardlink substitution
+  that redirects SQLite writes, caller mutation of the exported transition
+  table, invalid event/dispatch combinations that make committed databases
+  unreopenable, and public raw-connection mutation; it also found indirect
+  `O_DIRECTORY` access and non-string identifier coercion. The two-cycle Luna
+  circuit breaker is reached. H2 remains unintegrated, H3 remains blocked, and
+  one fresh Sol Medium continuation owns only the bounded repair below.
 
 ## Next execution
 
-Milestone: H2R2 — independently re-review full H2 range
-`fab4cb6..d32e190` for promotion.
+Milestone: H2-R2S — repair the rejected H2 ledger candidate under the repeated-
+failure circuit breaker.
 
-Dispatch status: queued once as
-`client-new-thread:69be0578-6717-4b1a-841c-ce16f19ab425` on native host
-`local`; no retry or readiness polling is authorized.
+Dispatch status: pending one fresh native peer creation; do not reuse or message
+the exhausted Luna executor and do not retry an uncertain creation.
 
-Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
+Resolved route: `model=gpt-5.6-sol`, `thinking=medium`.
 
-Routing authorization: applicable user-owned `AGENTS.md` substantial-milestone
-policy in this task. The native schema advertised the exact pair and accepted
-both fields in the queued creation request.
+Routing authorization: applicable user-owned root `AGENTS.md` circuit breaker
+for a Luna implementation/review loop after two unsuccessful repair cycles.
 
-Planning thread: current task; exact callback thread/host route must be supplied
-by the native creator when available.
+Planning thread: `01a032b0-8da1-7f20-bd7c-437be7538082`; callback host is
+`local`.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`.
 
-Owned surfaces: read-only inspection and validation of exact target `d32e190`,
-its repair `6db6146..d32e190`, and full H2 range `fab4cb6..d32e190`; no source,
-test, plan, artifact, Git-history, or external-state mutation.
+Owned surfaces: start from exact rejected target `d32e190`; modify only
+`src/codex_flow/domain.py`, `src/codex_flow/ledger.py`,
+`src/codex_flow/artifacts.py`, `src/codex_flow/__init__.py`, and
+`tests/test_h2_ledger.py`; create one safe local repair commit on top of
+`d32e190` after inspecting the full H2 range `fab4cb6..d32e190`.
 
-Protected surfaces: every repository path and candidate commit; H1
-adapter/sentinel/evidence, root tooling/instructions, plugin and skill code,
-dirty primary checkout, global Codex state, remotes, downstream repositories,
-unrelated worktrees, and H3+ execution/controller logic.
+Protected surfaces: immutable candidates `6db6146` and `d32e190`; H1
+adapter/sentinel/evidence, canonical plan, root tooling/instructions, plugin and
+skill code, dirty primary checkout, global Codex state, remotes, downstream
+repositories, unrelated worktrees, and H3+ execution/controller logic.
 
-Acceptance: independently reproduce or refute closure of every stable finding;
-review the full H2 design beyond supplied tests; verify all 121 ledger edges,
-real v1 migration/rollback, event atomicity, process races, durable-field safety,
-owned-schema verification, reopen/path race safety, anchored projections, and
-minimal public API; enforce `AGENTS.md` direct-interface rules; report
-`ACCEPTED` only with zero P0/P1 and no material scope deviation.
+Acceptance: implement every required continuation decision above and add focused
+regressions for counterfeit comment-only constraints, non-causal/discontinuous
+history, database hardlink substitution before connect, caller attempts to
+mutate transition policy, invalid event/dispatch combinations, absence of raw
+mutable connection access, direct `O_DIRECTORY`, and non-string identifiers.
+Preserve the existing exhaustive 121-edge, migration rollback, event atomicity,
+process-race, sensitive-field, reopen-symlink, and anchored-projection coverage.
+Run focused H2 tests, `make check`, `git diff --check`, exact staged-path review,
+and a complete self-review of `fab4cb6..HEAD`; finish with zero open P0/P1.
 
-Escalate only for: any surviving or new reproducible P0/P1, material H2 plan or
-repository-instruction deviation, changed review target, inability to inspect
-the exact full range, or a required external side effect. Return findings; do
-not repair them in the review task.
+Escalate only for: inability to safely pin SQLite identity while preserving
+required locking/journal/reopen behavior, a needed public/persisted contract
+change outside the frozen decisions, a finding requiring a protected path or
+external side effect, or an unresolved P0/P1 after ordinary repair. Do not
+weaken schema, path, state-machine, or reopen gates and do not start H3.
 
-Completion callback: return exactly one terminal `COMPLETION`, `BLOCKED`, or
-`FAILED` packet to the planning task using the exact native callback route.
+Completion callback: return exactly one terminal `COMPLETION`, accurately
+labelled `BLOCKED`, or `FAILED` packet to planning thread
+`01a032b0-8da1-7f20-bd7c-437be7538082` on host `local`.
