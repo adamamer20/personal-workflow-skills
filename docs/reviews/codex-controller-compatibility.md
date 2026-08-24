@@ -74,18 +74,22 @@ enablement/required flags, tool filters, bearer reference, environment,
 environment-reference, and HTTP-header fields retain their native semantics;
 all other fields fail closed. Concatenated, camel-case, case, separator,
 nested, or colliding aliases of `http_headers` and `env_http_headers` are
-rejected before projection. Literal MCP HTTP headers become
-`env_http_headers` references backed only by the SDK child's ephemeral
-environment; sensitive MCP stdio environment entries become `env_vars`
-references. Authorization, proxy authorization, cookies, arbitrary header
-values, API keys/tokens/passwords/client secrets, case variants, and nested
-header shapes cannot reach the ledger, artifacts, evidence, errors, or private
-runtime files. Conflicting environment semantics fail closed. Existing native
-references such as provider `env_key`, MCP `bearer_token_env_var`, and
-`env_http_headers` remain references.
+rejected before projection. Literal MCP HTTP headers and every literal MCP
+stdio environment entry, regardless of its name, become
+`env_http_headers`/`env_vars` references backed only by the SDK child's
+ephemeral environment. Duplicate, case/separator-normalized, or cross-source
+stdio environment names fail closed before projection; no source silently
+overrides another. Authorization, proxy authorization, cookies, arbitrary
+header values, API keys/tokens/passwords/client secrets, arbitrary environment
+values, case variants, and nested header shapes cannot reach the ledger,
+artifacts, evidence, errors, or private runtime files. Conflicting environment
+semantics fail closed. Existing native references such as provider `env_key`,
+MCP `bearer_token_env_var`, and `env_http_headers` remain references.
 
 Execution output schemas use one strict recursive predicate at capsule
-construction/deserialization and again after the SDK response. The root and
+construction/deserialization and again after the SDK response. Capsules
+recursively detach and freeze the schema tree, and `plan` repeats validation
+and canonicalization before any durable write. The root and
 every nested object must explicitly declare `properties`, list every property
 exactly once in `required`, and set `additionalProperties = false`; arrays must
 declare one explicit item schema; scalars accept only their type. Unsupported
@@ -93,7 +97,11 @@ keywords, optional or duplicate requirements, undeclared/missing output, and
 open or itemless containers fail closed. Schema/output depth is limited to 32,
 each object to 128 properties, a schema/output to 1,024 total properties, each
 array to 1,024 items, property names to 256 UTF-8 bytes, and structured output
-to 1 MiB.
+to 1 MiB. SDK structured output uses one strict JSON decoder that rejects
+non-standard numeric constants, non-finite exponents, duplicate object keys at
+every depth, and unpaired Unicode surrogates. All controller JSON
+serialization rejects non-finite values defensively before SQLite or artifact
+writes.
 
 ## Native runtime/profile/private-state matrix
 
@@ -104,7 +112,7 @@ to 1 MiB.
 | Model, effort, cwd/workspace | Controller capsule | Explicit SDK thread/turn inputs; they do not alter inherited permission authority |
 | Approval and sandbox | Native Codex by default | Schema-v6 effective authority is rebound before resume; optional `read_only` and previously inherited restrictions can only be retained or tightened |
 | Session/database/log state | Controller-private `CODEX_HOME` | New runtime home per run/milestone; projected config contains references only; global config remains source-only |
-| Provider/MCP authentication | Environment references | Provider `env_key`, MCP bearer/header references, and structurally converted literal header or sensitive stdio values reach only the SDK child environment; raw values are never persisted |
+| Provider/MCP authentication | Environment references | Provider `env_key`, MCP bearer/header references, and structurally converted literal header or every stdio environment value reach only the SDK child environment; raw values are never persisted |
 | Worktree/Git controls | Controller ownership/evidence | Canonical physical leases, schema-v8 baselines/terminal snapshots, bounded topology facts, and Git authority remain ownership/evidence controls, not an OS containment claim |
 
 ## Persisted-empty-thread boundary

@@ -262,7 +262,7 @@ def run_real_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str, Any]:
 def write_evidence(path: Path, evidence: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     temporary.replace(path)
 
 

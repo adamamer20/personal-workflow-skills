@@ -19,6 +19,7 @@ from .domain import (
     RunId,
     ValidationSpec,
     WorkspaceMode,
+    strict_json_loads,
 )
 from .native_profile import NativeProfileProjection
 
@@ -91,10 +92,10 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
 
         crash_output = repository.parent / "h3-crash-worker.json"
         _run_worker(repository, "crash", crash_output)
-        durable_payload = json.loads(crash_output.read_text())
+        durable_payload = strict_json_loads(crash_output.read_text())
         resume_output = repository.parent / "h3-resume-worker.json"
         _run_worker(repository, "resume", resume_output)
-        terminal_payload = json.loads(resume_output.read_text())
+        terminal_payload = strict_json_loads(resume_output.read_text())
 
         verifier = Controller(repository)
         lease = verifier.ledger.get_workspace_lease(workspace)
@@ -221,7 +222,7 @@ def run_controller_sentinel(*, model: str, effort: ReasoningEffort) -> dict[str,
 
 def write_controller_evidence(path: Path, evidence: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
 def _run_worker(repository: Path, phase: str, output: Path) -> None:
@@ -272,12 +273,13 @@ def _worker_main(phase: str, repository: Path, output: Path) -> None:
                         "record": execution_json(record),
                     },
                     sort_keys=True,
+                    allow_nan=False,
                 )
                 + "\n"
             )
         elif phase == "resume":
             record = controller.resume("h3-sentinel", "edit")
-            output.write_text(json.dumps(execution_json(record), sort_keys=True) + "\n")
+            output.write_text(json.dumps(execution_json(record), sort_keys=True, allow_nan=False) + "\n")
         else:
             raise ValueError(f"unknown worker phase: {phase}")
     finally:

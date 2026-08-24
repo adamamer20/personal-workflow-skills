@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1818,6 +1819,64 @@ def test_capsule_accepts_valid_strict_nested_object_and_array_schema() -> None:
         assert capsule.output_schema == schema
 
 
+def test_capsule_detaches_nested_schema_aliases_and_keeps_digest_stable() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["nested", "items"],
+            "additionalProperties": False,
+        }
+        capsule = replace(_capsule(repository, repository, base, branch), output_schema=schema)
+        before = json.dumps(capsule_json(capsule), ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+        # Mutating the caller-owned source tree cannot alter the capsule.
+        schema["properties"]["nested"]["properties"]["name"]["type"] = "boolean"
+        schema["properties"]["items"]["items"] = {"type": "boolean"}
+        schema["required"].append("later")
+        assert json.dumps(capsule_json(capsule), ensure_ascii=False, sort_keys=True, allow_nan=False) == before
+
+        with pytest.raises(TypeError):
+            capsule.output_schema["properties"] = {}  # type: ignore[index]
+        with pytest.raises(TypeError):
+            capsule.output_schema["properties"]["nested"]["properties"]["name"] = {}  # type: ignore[index]
+        with pytest.raises((TypeError, AttributeError)):
+            capsule.output_schema["required"].append("later")  # type: ignore[attr-defined]
+
+
+def test_plan_revalidates_counterfeit_schema_before_any_ledger_write() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        capsule = _capsule(repository, repository, base, branch)
+        before = controller.ledger.path.read_bytes()
+        object.__setattr__(
+            capsule,
+            "output_schema",
+            {"type": "object", "properties": {}, "required": [], "additionalProperties": True},
+        )
+        with pytest.raises(ValueError):
+            controller.plan(capsule)
+        assert controller.ledger.path.read_bytes() == before
+        with pytest.raises(RecordNotFound):
+            controller.ledger.get_execution("run", "m1")
+        controller.close()
+
+
 def test_cancel_is_idempotent_and_keeps_workspace() -> None:
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
@@ -2660,10 +2719,17 @@ VISIBLE_SETTING = "retained"
             "X-Custom",
         }
         stdio = projected["mcp_servers"]["stdio"]
-        assert stdio["env"] == {"VISIBLE_SETTING": "retained"}
-        assert set(stdio["env_vars"]) == {"API_KEY", "ACCESS_TOKEN", "PASSWORD", "CLIENT_SECRET"}
+        assert "env" not in stdio
+        assert set(stdio["env_vars"]) == {
+            "API_KEY",
+            "ACCESS_TOKEN",
+            "PASSWORD",
+            "CLIENT_SECRET",
+            "VISIBLE_SETTING",
+        }
         ephemeral = dict(profile.ephemeral_environment)
         assert set(secrets.values()).issubset(ephemeral.values())
+        assert ephemeral["VISIBLE_SETTING"] == "retained"
 
         runtime = NativeRuntimeConfig(root / "runtime-home", profile)
         runtime.prepare()
@@ -2826,6 +2892,167 @@ serviceKey = "{secrets[6]}"
                 payload = path.read_bytes()
                 for secret in secrets:
                     assert secret.encode() not in payload
+
+
+def test_native_profile_projects_every_literal_stdio_environment_value_process_only() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        home = root / "native-home"
+        _test_native_profile(home)
+        values = {
+            "GITHUB_PAT": "github-pat-arbitrary",
+            "CI_JOB_JWT": "ci-jwt-arbitrary",
+            "DATABASE_URL": "postgres://user:pass@example.invalid/db",
+            "INNOCUOUS_SETTING": "ordinary-value",
+            "MixedCase": "case-value",
+            "EMPTY_VALUE": "",
+        }
+        config = home / "config.toml"
+        entries = "\n".join(f'{key} = "{value}"' for key, value in values.items())
+        config.write_text(
+            config.read_text()
+            + f"""\n[mcp_servers.arbitrary_stdio]
+command = "sh"
+
+[mcp_servers.arbitrary_stdio.env]
+{entries}
+"""
+        )
+        config.chmod(0o600)
+        profile = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        projected = tomllib.loads(profile.projected_toml)["mcp_servers"]["arbitrary_stdio"]
+        assert "env" not in projected
+        assert set(projected["env_vars"]) == set(values)
+        ephemeral = dict(profile.ephemeral_environment)
+        assert {key: ephemeral[key] for key in values} == values
+
+        runtime = NativeRuntimeConfig(root / "runtime-home", profile)
+        runtime.prepare()
+        assert {key: runtime.environment[key] for key in values} == values
+        for path in runtime.runtime_home.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                payload = path.read_bytes()
+                for value in values.values():
+                    if value:
+                        assert value.encode() not in payload
+
+        captured: dict[str, object] = {}
+
+        class Client:
+            def thread_start(self, **_kwargs: object) -> SimpleNamespace:
+                return SimpleNamespace(id="arbitrary-env-thread")
+
+            def close(self) -> None:
+                return None
+
+        class Sdk:
+            Sandbox = SimpleNamespace(read_only="read-only", workspace_write="workspace-write", full_access="full")
+            ApprovalMode = SimpleNamespace(deny_all="deny-all")
+            ReasoningEffort = SimpleNamespace(medium="medium")
+            SkillInput = None
+            version = "test"
+
+            @staticmethod
+            def CodexConfig(**kwargs: object) -> object:
+                captured.update(kwargs)
+                return kwargs
+
+            @staticmethod
+            def Codex(*, config: object) -> Client:
+                assert isinstance(config, dict)
+                return Client()
+
+        adapter = CodexSdkAdapter(
+            CodexSdkConfig(
+                "gpt-test",
+                ReasoningEffort.MEDIUM,
+                sandbox=None,
+                cwd=root,
+                native_runtime=runtime,
+                permission_mode=NativePermissionMode.INHERIT_NATIVE,
+                effective_permission=profile.effective_authority(NativePermissionMode.INHERIT_NATIVE),
+            ),
+            sdk=Sdk(),
+        )
+        adapter.start_thread()
+        assert captured["env"] == {"CODEX_HOME": str(runtime.runtime_home), **values}
+        adapter.close()
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    (
+        """
+[mcp_servers.bad]
+command = "sh"
+env_vars = ["GITHUB_PAT"]
+
+[mcp_servers.bad.env]
+GITHUB_PAT = "literal"
+""",
+        """
+[mcp_servers.bad]
+command = "sh"
+
+[mcp_servers.bad.env]
+GITHUB_PAT = "one"
+github_pat = "two"
+""",
+        """
+[mcp_servers.bad]
+command = "sh"
+env_vars = ["A_B", "AB"]
+""",
+        """
+[mcp_servers.first]
+command = "sh"
+env_vars = ["SHARED"]
+
+[mcp_servers.second]
+command = "sh"
+env_vars = ["shared"]
+""",
+    ),
+)
+def test_native_profile_rejects_duplicate_or_aliased_stdio_environment_names(fragment: str) -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        config.write_text(config.read_text() + fragment)
+        config.chmod(0o600)
+        with pytest.raises(NativeProfileError, match="unique and unambiguous"):
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    (
+        """
+[mcp_servers.bad]
+command = "sh"
+
+[mcp_servers.bad.env]
+bad-name = "invalid-key"
+""",
+        """
+[mcp_servers.bad]
+command = "sh"
+env_vars = ["BAD-NAME"]
+""",
+        '\n[mcp_servers.bad]\ncommand = "sh"\n\n[mcp_servers.bad.env]\nTOO_BIG = "' + "x" * 16385 + '"\n',
+    ),
+)
+def test_native_profile_rejects_invalid_stdio_environment_entries_without_echoing_values(fragment: str) -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        config.write_text(config.read_text() + fragment)
+        config.chmod(0o600)
+        with pytest.raises(NativeProfileError) as captured:
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert "x" * 128 not in str(captured.value)
 
 
 def test_runtime_home_rejects_symlinks_without_mutating_their_targets() -> None:

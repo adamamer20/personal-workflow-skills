@@ -303,16 +303,22 @@ class NativeProfileProjection:
                 "total_file_bytes": mount.identity.total_file_bytes,
                 "max_depth": mount.identity.max_depth,
                 "ancestor_sha256": hashlib.sha256(
-                    json.dumps(mount.identity.ancestor_identities, separators=(",", ":")).encode("ascii")
+                    json.dumps(mount.identity.ancestor_identities, separators=(",", ":"), allow_nan=False).encode(
+                        "ascii"
+                    )
                 ).hexdigest(),
             }
             for mount in mounts
         ]
         compatibility_digest = hashlib.sha256(
-            json.dumps(compatibility_facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            json.dumps(
+                compatibility_facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+            ).encode("utf-8")
         ).hexdigest()
         profile_digest = hashlib.sha256(
-            json.dumps(facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            json.dumps(facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode(
+                "utf-8"
+            )
         ).hexdigest()
         result = cls(
             home,
@@ -448,8 +454,8 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
     """Project secret-bearing native values onto process-bound environment references.
 
     The private ``config.toml`` is durable runtime state, so it may contain
-    only references. Literal MCP HTTP headers and secret-bearing stdio
-    environment values stay in memory long enough to launch the SDK child.
+    only references. Literal MCP HTTP headers and every stdio environment
+    value stay in memory long enough to launch the SDK child.
     """
 
     projected = {key: _clone_native_value(value) for key, value in data.items() if key != "mcp_servers"}
@@ -459,6 +465,15 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
     projected_servers: dict[str, object] = {}
     projected["mcp_servers"] = projected_servers
     ephemeral: dict[str, str] = {}
+    environment_names: dict[str, tuple[str, str, str]] = {}
+
+    def register_environment_name(server_name: str, name: str, source: str) -> None:
+        normalized = _normalized_environment_name(name)
+        prior = environment_names.get(normalized)
+        if prior is not None:
+            raise NativeProfileError("native MCP environment names must be unique and unambiguous")
+        environment_names[normalized] = (server_name, source, name)
+
     protected_environment = {"CODEX_HOME"}
     selected_provider = data.get("model_provider")
     provider_tables = data.get("model_providers")
@@ -498,6 +513,8 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
                 raise NativeProfileError("native MCP string fields must be bounded non-empty strings")
             if key == "bearer_token_env_var" and _RUNTIME_ENV_KEY.fullmatch(cast(str, value)) is None:
                 raise NativeProfileError("native MCP bearer token reference must name an environment key")
+            if key == "bearer_token_env_var":
+                register_environment_name(server_name, cast(str, value), "bearer_token_env_var")
             projected_server[key] = value
         for key in sorted(_MCP_STRING_LIST_FIELDS - {"env_vars"}):
             if key not in raw_server:
@@ -535,6 +552,7 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
                 raise NativeProfileError("native MCP header references must contain bounded string entries")
             if _RUNTIME_ENV_KEY.fullmatch(environment_key) is None:
                 raise NativeProfileError("native MCP header references must name environment keys")
+            register_environment_name(server_name, environment_key, "env_http_headers")
             projected_headers[cast(str, header_name)] = environment_key
         if isinstance(literal_headers, dict) and len(literal_headers) > _MAX_MCP_COLLECTION_ENTRIES:
             raise NativeProfileError("native MCP HTTP headers exceed the entry limit")
@@ -551,6 +569,7 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
             ):
                 raise NativeProfileError("native MCP HTTP headers must be bounded non-empty strings")
             reference = _ephemeral_reference("HTTP", server_name, header_name)
+            register_environment_name(server_name, reference, "literal_http_header")
             prior = projected_headers.get(header_name)
             if prior is not None and prior != reference:
                 raise NativeProfileError("native MCP header has conflicting literal and environment sources")
@@ -562,22 +581,27 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
             projected_server["env_http_headers"] = {}
 
         literal_environment = raw_server.get("env")
-        if literal_environment is not None:
-            if not isinstance(literal_environment, dict):
-                raise NativeProfileError("native MCP env must be a table")
-            retained_environment: dict[str, object] = {}
-            if len(literal_environment) > _MAX_MCP_COLLECTION_ENTRIES:
-                raise NativeProfileError("native MCP environment exceeds the entry limit")
-            environment_references = raw_server.get("env_vars", [])
-            if not isinstance(environment_references, list) or any(
-                not isinstance(item, str) or _RUNTIME_ENV_KEY.fullmatch(item) is None for item in environment_references
-            ):
+        if literal_environment is not None and not isinstance(literal_environment, dict):
+            raise NativeProfileError("native MCP env must be a table")
+        if isinstance(literal_environment, dict) and len(literal_environment) > _MAX_MCP_COLLECTION_ENTRIES:
+            raise NativeProfileError("native MCP environment exceeds the entry limit")
+
+        raw_environment_references = raw_server.get("env_vars", [])
+        if not isinstance(raw_environment_references, list):
+            raise NativeProfileError("native MCP env_vars must contain environment key references")
+        if len(raw_environment_references) > _MAX_MCP_COLLECTION_ENTRIES:
+            raise NativeProfileError("native MCP env_vars exceed the entry limit")
+        references: list[str] = []
+        for environment_key in raw_environment_references:
+            if not isinstance(environment_key, str) or _RUNTIME_ENV_KEY.fullmatch(environment_key) is None:
                 raise NativeProfileError("native MCP env_vars must contain environment key references")
-            if len(environment_references) > _MAX_MCP_COLLECTION_ENTRIES or len(set(environment_references)) != len(
-                environment_references
-            ):
-                raise NativeProfileError("native MCP env_vars must contain bounded unique references")
-            references = set(environment_references)
+            register_environment_name(server_name, environment_key, "env_vars")
+            references.append(environment_key)
+
+        if isinstance(literal_environment, dict):
+            # Every literal is treated as sensitive.  The projected TOML gets
+            # only an env_vars reference; the value is retained solely in the
+            # SDK child environment for this process.
             for key, raw_value in sorted(literal_environment.items()):
                 if (
                     not isinstance(key, str)
@@ -587,17 +611,13 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
                     or "\x00" in raw_value
                 ):
                     raise NativeProfileError("native MCP environment values must be bounded string entries")
-                if _is_sensitive_key(key):
-                    references.add(key)
-                    _record_ephemeral(ephemeral, key, raw_value, protected=protected_environment)
-                else:
-                    retained_environment[key] = raw_value
-            if retained_environment:
-                projected_server["env"] = retained_environment
-            if references:
-                projected_server["env_vars"] = sorted(references)
+                register_environment_name(server_name, key, "env")
+                _record_ephemeral(ephemeral, key, raw_value, protected=protected_environment)
+                references.append(key)
+        if references:
+            projected_server["env_vars"] = sorted(references)
         elif "env_vars" in raw_server:
-            projected_server["env_vars"] = _mcp_string_list(raw_server["env_vars"], environment_keys=True)
+            projected_server["env_vars"] = []
     return projected, tuple(sorted(ephemeral.items()))
 
 
@@ -611,6 +631,12 @@ def _clone_native_value(value: object) -> object:
 
 def _collapsed_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _normalized_environment_name(value: str) -> str:
+    """Normalize environment aliases before any projection or persistence."""
+
+    return _collapsed_key(value)
 
 
 def _header_container_kind(value: str) -> str | None:
@@ -1184,7 +1210,7 @@ def _hash_discovery_record(
     for value in (
         kind,
         relative,
-        json.dumps(_stable_metadata(metadata), separators=(",", ":")).encode("ascii"),
+        json.dumps(_stable_metadata(metadata), separators=(",", ":"), allow_nan=False).encode("ascii"),
         payload,
     ):
         digest.update(len(value).to_bytes(8, "big"))
@@ -1356,14 +1382,14 @@ def _toml_value(value: object, *, path: str) -> TomlValue:
 
 
 def _key(value: str) -> str:
-    return value if _BARE_KEY.fullmatch(value) else json.dumps(value, ensure_ascii=False)
+    return value if _BARE_KEY.fullmatch(value) else json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
 def _scalar(value: TomlValue) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False, allow_nan=False)
     if isinstance(value, int | float):
         return repr(value)
     if isinstance(value, list) and all(not isinstance(item, dict | list) for item in value):

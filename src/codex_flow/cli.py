@@ -30,7 +30,7 @@ def _controller(state_root: Path) -> Controller:
 def _emit(record: ExecutionRecord, *, as_json: bool) -> None:
     payload = execution_json(record)
     if as_json:
-        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False))
     else:
         typer.echo(
             f"{payload['run_id']}/{payload['milestone_id']} "

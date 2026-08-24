@@ -14,9 +14,11 @@ from codex_flow.domain import (
     ReasoningEffort,
     Sandbox,
     SkillInput,
+    StrictJSONError,
     TerminalFailureAfterIdentity,
     TransportFailureBeforeIdentity,
     UnsupportedCapability,
+    strict_json_loads,
 )
 
 SCHEMA = {
@@ -286,6 +288,29 @@ class CodexSdkAdapterTests(unittest.TestCase):
         for schema in invalid:
             with self.subTest(schema=schema), self.assertRaises(TerminalFailureAfterIdentity):
                 _decode_schema_output("{}", schema)
+
+    def test_strict_decoder_rejects_constants_and_large_nonfinite_exponents(self) -> None:
+        for payload in ('{"ok":NaN}', '{"ok":Infinity}', '{"ok":-Infinity}', '{"ok":1e999}'):
+            with self.subTest(payload=payload), self.assertRaises(StrictJSONError):
+                strict_json_loads(payload)
+
+    def test_strict_decoder_rejects_duplicate_keys_at_every_nesting_depth(self) -> None:
+        for payload in (
+            '{"ok":true,"ok":false}',
+            '{"outer":{"ok":true,"ok":false}}',
+            '{"items":[{"ok":true,"ok":false}]}',
+        ):
+            with self.subTest(payload=payload), self.assertRaises(TerminalFailureAfterIdentity):
+                _decode_schema_output(payload, SCHEMA)
+
+    def test_strict_decoder_accepts_finite_unicode_and_bounded_large_exponent(self) -> None:
+        payload = '{"ok":true,"\u03bb":1e308}'
+        decoded = strict_json_loads(payload)
+        self.assertEqual(decoded, {"ok": True, "λ": 1e308})
+        with self.assertRaises(StrictJSONError):
+            strict_json_loads('{"ok":"\\ud800"}')
+        with self.assertRaises(TerminalFailureAfterIdentity):
+            _decode_schema_output('{"ok":"\ud800"}', SCHEMA)
 
 
 if __name__ == "__main__":

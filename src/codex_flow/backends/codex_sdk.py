@@ -9,7 +9,6 @@ direct app-server fallback.
 from __future__ import annotations
 
 import importlib
-import json
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -41,6 +40,8 @@ from ..domain import (
     TransportFailureBeforeIdentity,
     TurnObservation,
     UnsupportedCapability,
+    strict_json_loads,
+    thaw_json,
     validate_output_schema,
 )
 from ..native_profile import NativeProfileProjection
@@ -293,7 +294,7 @@ def _validate_decoded_schema(
     if expected == "object":
         properties = schema["properties"]
         required = schema["required"]
-        if not isinstance(properties, Mapping) or not isinstance(required, list):
+        if not isinstance(properties, Mapping) or not isinstance(required, list | tuple):
             raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed object schema")
         if len(value) > MAX_OUTPUT_OBJECT_PROPERTIES:
             raise TerminalFailureAfterIdentity("schema-bounded turn output exceeds the object property limit")
@@ -344,11 +345,15 @@ def _decode_schema_output(response: str | None, schema: Schema | None) -> JsonOb
         raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed output schema") from exc
     if not isinstance(response, str):
         raise TerminalFailureAfterIdentity("schema-bounded turn did not return a text response")
-    if len(response.encode("utf-8")) > MAX_STRUCTURED_OUTPUT_BYTES:
+    try:
+        response_bytes = response.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise TerminalFailureAfterIdentity("schema-bounded turn returned invalid JSON") from exc
+    if len(response_bytes) > MAX_STRUCTURED_OUTPUT_BYTES:
         raise TerminalFailureAfterIdentity("schema-bounded turn output exceeds the byte limit")
     try:
-        decoded = json.loads(response)
-    except (json.JSONDecodeError, RecursionError) as exc:
+        decoded = strict_json_loads(response)
+    except ValueError as exc:
         raise TerminalFailureAfterIdentity("schema-bounded turn returned invalid JSON") from exc
     if not isinstance(decoded, dict):
         raise TerminalFailureAfterIdentity("schema-bounded turn returned a non-object JSON value")
@@ -536,7 +541,7 @@ class CodexSdkAdapter:
                 cwd=str(self.config.cwd) if self.config.cwd is not None else None,
                 effort=_wire_effort(self._sdk, self.config.reasoning_effort),
                 model=self.config.model,
-                output_schema=dict(output_schema) if output_schema is not None else None,
+                output_schema=thaw_json(output_schema) if output_schema is not None else None,
                 **self._permission_kwargs(),
             )
             turn_id = _turn_id(raw_turn)

@@ -666,9 +666,9 @@ Acceptance modes: `objective`, `architecture`.
    model catalog, MCP, skill, plugin, memory, project, hook, shell-environment,
    and permission semantics are preserved; model/effort/cwd remain capsule
    inputs. Mutable sessions/databases/logs use a private `CODEX_HOME`. Provider
-   authentication remains environment-reference based. Literal sensitive MCP
-   headers and stdio environment entries are converted to process-only
-   references; no raw secret value is projected or persisted.
+   authentication remains environment-reference based. Literal MCP headers and
+   every stdio environment entry are converted to process-only references; no
+   raw value is projected or persisted.
 9. `inherit_native` supplies no SDK approval or sandbox override while current
    native authority equals the execution's durable authority. A `read_only`
    capsule supplies only the stricter read-only sandbox override. Schema v8
@@ -1249,6 +1249,20 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   unchanged. Full-H3 self-review found zero open P0/P1. H4 remains blocked
   pending fresh independent objective and architecture promotion review of
   this exact repaired candidate.
+- 2026-08-25: repair closes H3-ARCH-006C, H3-ARCH-007A, and H3-ARCH-007B.
+  Every literal MCP stdio environment value, including arbitrary names such as
+  `GITHUB_PAT`, `CI_JOB_JWT`, `DATABASE_URL`, and innocuous settings, is now a
+  process-only `env_vars` reference; duplicate, case/separator-normalized, and
+  cross-source names fail closed before projection. The strict structured-output
+  decoder rejects non-standard constants, non-finite exponents, duplicate keys,
+  and unpaired Unicode surrogates, while all JSON serializers reject non-finite
+  values. `ExecutionCapsule` recursively detaches/freezes schemas and `plan`
+  revalidates/canonicalizes before any ledger write. Adversarial environment,
+  decoder, durability, mutation, digest, and close/reopen coverage is included;
+  the retained real sentinel was not rerun because the SDK/provider/model,
+  permission, and resume transport route remain unchanged. H3 remains blocked
+  pending fresh independent objective and architecture promotion review of the
+  exact repair candidate; H4 remains blocked.
 
 ## Next execution
 

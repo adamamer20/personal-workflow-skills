@@ -101,12 +101,13 @@ def _event_json(record: EventRecord) -> dict[str, Any]:
 
 
 def _canonical_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
 
 
 def _canonical_jsonl(values: tuple[dict[str, Any], ...]) -> str:
     return "".join(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n" for value in values
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+        for value in values
     )
 
 

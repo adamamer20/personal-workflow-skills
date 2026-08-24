@@ -7,6 +7,7 @@ Codex process or importing the SDK in its domain code.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -20,6 +21,113 @@ JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | dict[str, "JsonValue"] | list["JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]
 Schema: TypeAlias = Mapping[str, JsonValue]
+
+
+class StrictJSONError(ValueError):
+    """A JSON payload is not an unambiguous RFC-style JSON value."""
+
+
+class _FrozenList(tuple[object, ...]):
+    """Immutable JSON array retaining ordinary list equality semantics."""
+
+    __hash__ = tuple.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, list | tuple):
+            return tuple(self) == tuple(other)
+        return NotImplemented
+
+
+def _strict_json_constant(value: str) -> object:
+    # ``parse_constant`` is called for all three non-standard tokens.  Do not
+    # include the provider token in the exception: provider content must never
+    # become durable error text.
+    raise StrictJSONError("JSON contains a non-standard numeric constant")
+
+
+def _strict_json_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise StrictJSONError("JSON contains a non-finite number")
+    return result
+
+
+def _strict_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StrictJSONError("JSON contains duplicate object keys")
+        result[key] = value
+    return result
+
+
+def _validate_interoperable_json(value: object) -> None:
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise StrictJSONError("JSON contains an unpaired Unicode surrogate")
+        return
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            _validate_interoperable_json(key)
+            _validate_interoperable_json(child)
+        return
+    if isinstance(value, list | tuple):
+        for child in value:
+            _validate_interoperable_json(child)
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise StrictJSONError("JSON contains a non-finite number")
+
+
+def strict_json_loads(value: str | bytes | bytearray) -> object:
+    """Decode only unambiguous, finite JSON values.
+
+    The decoder rejects NaN/Infinity, oversized exponents that become
+    non-finite, and duplicate keys recursively at every object depth.
+    """
+
+    try:
+        decoded = json.loads(
+            value,
+            object_pairs_hook=_strict_json_pairs,
+            parse_constant=_strict_json_constant,
+            parse_float=_strict_json_float,
+        )
+        _validate_interoperable_json(decoded)
+        return decoded
+    except StrictJSONError:
+        raise
+    except (json.JSONDecodeError, RecursionError, UnicodeDecodeError, ValueError) as exc:
+        raise StrictJSONError("JSON is not valid interoperable data") from exc
+
+
+def freeze_json(value: object) -> object:
+    """Detach JSON-compatible mappings/lists into immutable owned values."""
+
+    if isinstance(value, Mapping):
+        frozen: dict[str, object] = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError("JSON object keys must be strings")
+            frozen[key] = freeze_json(child)
+        return MappingProxyType(frozen)
+    if isinstance(value, list | tuple):
+        return _FrozenList(freeze_json(child) for child in value)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("JSON values must contain only finite numbers")
+    if value is None or isinstance(value, str | int | bool | float):
+        return value
+    raise ValueError("JSON values must use supported scalar, mapping, and list types")
+
+
+def thaw_json(value: object) -> object:
+    """Return a detached mutable JSON tree suitable for SDK/JSON APIs."""
+
+    if isinstance(value, Mapping):
+        return {str(key): thaw_json(child) for key, child in value.items()}
+    if isinstance(value, list | tuple):
+        return [thaw_json(child) for child in value]
+    return value
 
 
 class Sandbox(str, Enum):
@@ -623,7 +731,7 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
             properties_seen += len(properties)
             if properties_seen > MAX_OUTPUT_SCHEMA_PROPERTIES:
                 raise ValueError("output schema exceeds the total property limit")
-            if not isinstance(required, list):
+            if not isinstance(required, list | tuple):
                 raise ValueError("object schema required must be an array")
             if any(not isinstance(name, str) for name in required) or len(set(required)) != len(required):
                 raise ValueError("object schema required must contain unique strings")
@@ -651,7 +759,10 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
         if set(node) != {"type"}:
             raise ValueError(f"{schema_type} schemas may contain only type")
 
-    validate_node(schema, depth=1, root=True)
+    try:
+        validate_node(schema, depth=1, root=True)
+    except (KeyError, TypeError, RecursionError) as exc:
+        raise ValueError("output schema is not a valid JSON schema mapping") from exc
 
 
 def _relative_paths(values: tuple[str, ...], *, label: str) -> None:
@@ -718,7 +829,47 @@ class ExecutionCapsule:
                     raise ValueError("mutable and protected paths must not overlap")
         if not self.model.strip() or not self.prompt.strip():
             raise ValueError("model and prompt must be explicit")
-        validate_output_schema(self.output_schema)
+        try:
+            validate_output_schema(self.output_schema)
+            # A frozen dataclass alone is not sufficient here: callers can
+            # retain and mutate nested dict/list aliases after construction.
+            # Own the entire schema tree before it can reach a digest, SDK,
+            # ledger, or artifact.
+            canonical_schema = freeze_json(self.output_schema)
+        except (TypeError, RecursionError) as exc:
+            raise ValueError("execution output schema is not a valid JSON object") from exc
+        if not isinstance(canonical_schema, Mapping):  # pragma: no cover - predicate already enforces object root
+            raise ValueError("execution output schema must be an object")
+        object.__setattr__(self, "output_schema", canonical_schema)
+
+
+def canonicalize_execution_capsule(capsule: ExecutionCapsule) -> ExecutionCapsule:
+    """Revalidate and detach a capsule at every public durability boundary."""
+
+    if not isinstance(capsule, ExecutionCapsule):
+        raise ValueError("execution plan requires an ExecutionCapsule")
+    # Reconstruct every field rather than trusting frozen-instance internals:
+    # a caller with access to ``object.__setattr__`` or a custom mapping must
+    # not bypass the public validation boundary before any SQLite write.
+    return ExecutionCapsule(
+        capsule.capsule_version,
+        capsule.run_id,
+        capsule.milestone_id,
+        capsule.repository_root,
+        capsule.workspace_mode,
+        capsule.workspace_path,
+        capsule.branch,
+        capsule.base_sha,
+        capsule.lane,
+        tuple(capsule.mutable_paths),
+        tuple(capsule.protected_paths),
+        capsule.validation,
+        capsule.model,
+        capsule.reasoning_effort,
+        capsule.prompt,
+        capsule.output_schema,
+        capsule.permission_mode,
+    )
 
 
 @dataclass(frozen=True, slots=True)

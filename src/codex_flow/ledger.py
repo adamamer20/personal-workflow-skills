@@ -62,6 +62,7 @@ from .domain import (
     WorkspaceMode,
     coerce_state,
     is_transition_allowed,
+    strict_json_loads,
 )
 
 CURRENT_SCHEMA_VERSION = SchemaVersion(8)
@@ -530,15 +531,15 @@ def _decode_object(raw: str | None, *, field_name: str) -> JsonObject:
 
 
 def _encode_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _decode_json_object(raw: str | None, *, field_name: str) -> JsonObject | None:
     if raw is None:
         return None
     try:
-        decoded = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        decoded = strict_json_loads(raw)
+    except ValueError as exc:
         raise SchemaError(f"{field_name} is not valid JSON") from exc
     if not isinstance(decoded, dict):
         raise SchemaError(f"{field_name} must be a JSON object")
@@ -581,8 +582,8 @@ def _encode_workspace_baseline(entries: tuple[tuple[str, str], ...]) -> tuple[st
 
 def _decode_workspace_baseline(raw: str, digest: str) -> tuple[tuple[str, str], ...]:
     try:
-        decoded = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        decoded = strict_json_loads(raw)
+    except ValueError as exc:
         raise SchemaError("workspace baseline is not valid JSON") from exc
     if not isinstance(decoded, list) or any(
         not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], str) or not isinstance(item[1], str)
@@ -3113,8 +3114,8 @@ class Ledger:
         argv_raw = row["validation_argv_json"]
         if argv_raw is not None:
             try:
-                argv_decoded = json.loads(str(argv_raw))
-            except json.JSONDecodeError as exc:
+                argv_decoded = strict_json_loads(str(argv_raw))
+            except ValueError as exc:
                 raise SchemaError("validation argv is not valid JSON") from exc
             error_code: ValidationFailureCode | None = None
             if isinstance(argv_decoded, dict):

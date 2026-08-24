@@ -38,6 +38,9 @@ from .domain import (
     ValidationSpec,
     WorkflowState,
     WorkspaceMode,
+    canonicalize_execution_capsule,
+    strict_json_loads,
+    thaw_json,
 )
 from .ledger import Ledger, NativeCompatibilityConflict, NativePermissionConflict
 from .native_profile import NativeDiscoveryCompatibilityError, NativeProfileProjection
@@ -96,7 +99,9 @@ def _adapter_factory(config: CodexSdkConfig) -> Adapter:
 
 
 def _canonical_json(value: object) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    ).encode()
 
 
 def _digest_bytes(value: bytes) -> str:
@@ -239,6 +244,7 @@ def git_authority_snapshot(workspace: Path) -> GitAuthoritySnapshot:
 
 
 def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
+    capsule = canonicalize_execution_capsule(capsule)
     return {
         "capsule_version": capsule.capsule_version,
         "run_id": str(capsule.run_id),
@@ -258,7 +264,7 @@ def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
         "model": capsule.model,
         "reasoning_effort": capsule.reasoning_effort.value,
         "prompt": capsule.prompt,
-        "output_schema": capsule.output_schema,
+        "output_schema": thaw_json(capsule.output_schema),
         "permission_mode": capsule.permission_mode.value,
     }
 
@@ -352,8 +358,8 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
 def load_capsule(path: Path) -> tuple[ExecutionCapsule, str]:
     raw = path.read_bytes()
     try:
-        decoded = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        decoded = strict_json_loads(raw)
+    except ValueError as exc:
         raise ControllerError(f"capsule is not valid JSON: {path}") from exc
     if not isinstance(decoded, dict):
         raise ControllerError("capsule root must be an object")
@@ -517,6 +523,10 @@ class Controller:
             return self._plan(capsule)
 
     def _plan(self, capsule: ExecutionCapsule) -> ExecutionRecord:
+        # This is the public durability boundary.  Validate and detach before
+        # worktree/ledger operations so a counterfeit or caller-mutated capsule
+        # cannot create even an empty run or milestone row.
+        capsule = canonicalize_execution_capsule(capsule)
         self._worktrees.validate_plan(capsule)
         # The ledger and capsule are repository-owned.  A controller rooted at
         # another checkout/state directory must not be able to claim the same
