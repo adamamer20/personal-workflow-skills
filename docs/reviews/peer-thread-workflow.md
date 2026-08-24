@@ -442,6 +442,11 @@ conflicting-generation process races; cover alternate sensitive keys/values and
 H1 exception details; cover counterfeit constraintless schemas, reopen symlink
 swaps, and ancestor-swap projection attacks.
 
+Repair candidate: `d32e190` on parent `6db6146`; full H2 review range is
+`fab4cb6..d32e190`. Executor and planning-owner reruns of `make check` are green
+with 46 tests. The repair remains unpromoted pending fresh independent re-review
+of the full range and every stable finding.
+
 ### Successor milestone
 
 H3 — add controller-owned worktrees and SDK execution.
@@ -572,16 +577,20 @@ installed-plugin and downstream-pin migration.
   single-owner races, stale-writer exclusion, rollback behavior, genuine-v1
   migration feasibility, and absence of external side effects. Repair cycle 1
   returns to the same executor under the decisions above.
+- 2026-08-24: H2-R1 repair `d32e190` returned on top of immutable candidate
+  `6db6146`, changing the same five H2 paths. It claims all six stable findings
+  closed and adds real-ledger 121-pair coverage, constrained-v1 migration and
+  rollback, post-event rollback, conflicting-generation races, sensitive-text
+  exclusion, counterfeit-schema rejection, reopen symlink rejection, and an
+  ancestor-swap projection regression. Planning reran `make check` successfully
+  with 46 tests. Promotion remains withheld for fresh full-range re-review.
 
 ## Next execution
 
-Milestone: H2-R1 — repair the six stable H2 review findings and expand the
-missing regression coverage.
+Milestone: H2R2 — independently re-review full H2 range
+`fab4cb6..d32e190` for promotion.
 
-Dispatch status: existing H2 executor
-`threadId=01a032dc-bb34-7fa3-81e5-5102a2020bab`, `hostId=local`; repair message
-sent once; no replacement, duplicate repair owner, or routine polling is
-authorized.
+Dispatch status: not yet dispatched.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
@@ -594,25 +603,26 @@ by the native creator when available.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`.
 
-Owned surfaces: the exact H2 five-path surface from `6db6146`, focused tests,
-and one repair commit; no plan or AGENTS edit.
+Owned surfaces: read-only inspection and validation of exact target `d32e190`,
+its repair `6db6146..d32e190`, and full H2 range `fab4cb6..d32e190`; no source,
+test, plan, artifact, Git-history, or external-state mutation.
 
-Protected surfaces: H1 adapter/sentinel/evidence, root tooling/instructions,
-plugin and skill code, dirty primary checkout, global Codex state, remotes,
-downstream repositories, unrelated worktrees, and H3+ execution/controller
-logic. Rejected commit `6db6146` remains immutable evidence.
+Protected surfaces: every repository path and candidate commit; H1
+adapter/sentinel/evidence, root tooling/instructions, plugin and skill code,
+dirty primary checkout, global Codex state, remotes, downstream repositories,
+unrelated worktrees, and H3+ execution/controller logic.
 
-Acceptance: all six stable finding IDs are closed with focused regressions; all
-121 state pairs execute through Ledger; real v1 migration and rollback,
-after-event rollback, same/conflicting process races, explicit durable-field
-safety, counterfeit-schema rejection, reopen symlink rejection, and anchored
-ancestor-swap-safe projections pass; `make check` is green; zero self-review
-P0/P1; fresh re-review remains required.
+Acceptance: independently reproduce or refute closure of every stable finding;
+review the full H2 design beyond supplied tests; verify all 121 ledger edges,
+real v1 migration/rollback, event atomicity, process races, durable-field safety,
+owned-schema verification, reopen/path race safety, anchored projections, and
+minimal public API; enforce `AGENTS.md` direct-interface rules; report
+`ACCEPTED` only with zero P0/P1 and no material scope deviation.
 
-Escalate only for: a required H2 state/schema/public-contract change beyond the
-decisions above, inability to make SQLite or filesystem operations fail closed,
-a security/data-integrity risk that survives ordinary repair, changed protected
-surfaces, or a required external side effect.
+Escalate only for: any surviving or new reproducible P0/P1, material H2 plan or
+repository-instruction deviation, changed review target, inability to inspect
+the exact full range, or a required external side effect. Return findings; do
+not repair them in the review task.
 
 Completion callback: return exactly one terminal `COMPLETION`, `BLOCKED`, or
 `FAILED` packet to the planning task using the exact native callback route.
