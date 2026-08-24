@@ -395,12 +395,15 @@ creating a worktree, or depending on messages.
 ### Promotion gate and review requirement
 
 The implementation candidate passes every acceptance check with zero self-review
-P0/P1, then receives one fresh independent Luna XHigh read-only review of the
-exact commit. H2 promotes only with zero open P0/P1 on ledger correctness,
-concurrency, transactions, migration safety, path safety, and scope adherence.
-Ordinary repair returns to the same H2 executor and is re-reviewed. A fresh
-implementation context is reserved for explicit context rollover or the
-configured repeated-failure circuit breaker.
+P0/P1, then receives one fresh independent read-only review of the exact commit.
+The initial candidate and ordinary repair use Luna XHigh review; after the
+repeated-failure circuit breaker routes implementation to Sol Medium, its
+promotion review uses a fresh Sol High critical integrity context. H2 promotes
+only with zero open P0/P1 on ledger correctness, concurrency, transactions,
+migration safety, path safety, and scope adherence. Ordinary repair returns to
+the same H2 executor and is re-reviewed. A fresh implementation context is
+reserved for explicit context rollover or the configured repeated-failure
+circuit breaker.
 
 ### Current candidate
 
@@ -487,6 +490,15 @@ The Luna implementation/review loop has now completed two unsuccessful cycles
 for the same schema/path-integrity finding classes. The repository circuit
 breaker therefore prohibits another Luna repair and routes one fresh bounded
 continuation to Sol Medium without weakening H2 acceptance or opening H3.
+
+Sol continuation candidate: `a01596d` on parent `d32e190`; full H2 review range
+is `fab4cb6..a01596d`. It changes only `domain.py`, `ledger.py`, `artifacts.py`,
+and focused H2 tests. The executor and planning owner both ran `make check`
+successfully with 53 tests; focused H2 has 24 passing tests, diff checks are
+clean, and the executor worktree is clean. The candidate claims all five P1 and
+two P2 findings closed while retaining persisted v2 identity
+`codex_flow_h2_v2`. It remains unpromoted pending the fresh independent Sol High
+critical integrity review below.
 
 ### Successor milestone
 
@@ -635,57 +647,64 @@ installed-plugin and downstream-pin migration.
   unreopenable, and public raw-connection mutation; it also found indirect
   `O_DIRECTORY` access and non-string identifier coercion. The two-cycle Luna
   circuit breaker is reached. H2 remains unintegrated, H3 remains blocked, and
-  one fresh Sol Medium continuation owns only the bounded repair below.
+  one fresh Sol Medium continuation was selected for the bounded repair.
+- 2026-08-24: Sol Medium continuation `a01596d` returned on exact parent
+  `d32e190`, changing four authorized H2 paths. It reports immutable transition
+  policy, strict identifier types, pre-mutation event/dispatch validation,
+  private SQLite access, canonical DDL identity, full causal replay, and a
+  parent-anchored pinned-inode Linux connection through `/proc/self/fd`.
+  Planning verified the parent and path scope and reran `make check`
+  successfully with 53 tests in the clean executor worktree. H2 remains
+  unintegrated and H3 remains blocked pending one fresh independent Sol High
+  review of the exact repair and full H2 range.
 
 ## Next execution
 
-Milestone: H2-R2S — repair the rejected H2 ledger candidate under the repeated-
-failure circuit breaker.
+Milestone: H2-P3 — independently review Sol repair `a01596d` and the full H2
+range `fab4cb6..a01596d` for promotion.
 
-Dispatch status: queued once as
-`client-new-thread:b22403db-eab8-4fec-95d8-7fe2ac98a4cc` on native host
-`local`; do not reuse or message the exhausted Luna executor, poll readiness, or
-retry creation.
+Dispatch status: pending one fresh native peer creation; do not reuse either
+implementation owner or either earlier reviewer and do not retry an uncertain
+creation.
 
-Resolved route: `model=gpt-5.6-sol`, `thinking=medium`.
+Resolved route: `model=gpt-5.6-sol`, `thinking=high`.
 
-Routing authorization: applicable user-owned root `AGENTS.md` circuit breaker
-for a Luna implementation/review loop after two unsuccessful repair cycles. The
-native schema advertised the exact pair and accepted both fields in the queued
-creation request.
+Routing authorization: applicable user-owned root `AGENTS.md` policy for a
+critical architecture/security review after repeated ledger integrity failures.
 
 Planning thread: `01a032b0-8da1-7f20-bd7c-437be7538082`; callback host is
 `local`.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`.
 
-Owned surfaces: start from exact rejected target `d32e190`; modify only
-`src/codex_flow/domain.py`, `src/codex_flow/ledger.py`,
-`src/codex_flow/artifacts.py`, `src/codex_flow/__init__.py`, and
-`tests/test_h2_ledger.py`; create one safe local repair commit on top of
-`d32e190` after inspecting the full H2 range `fab4cb6..d32e190`.
+Owned surfaces: read-only inspection and validation of exact target `a01596d`,
+its repair range `d32e190..a01596d`, and full H2 range
+`fab4cb6..a01596d`; no source, test, plan, artifact, Git-history, or external-
+state mutation.
 
-Protected surfaces: immutable candidates `6db6146` and `d32e190`; H1
+Protected surfaces: every repository path and candidate commit; H1
 adapter/sentinel/evidence, canonical plan, root tooling/instructions, plugin and
 skill code, dirty primary checkout, global Codex state, remotes, downstream
 repositories, unrelated worktrees, and H3+ execution/controller logic.
 
-Acceptance: implement every required continuation decision above and add focused
-regressions for counterfeit comment-only constraints, non-causal/discontinuous
-history, database hardlink substitution before connect, caller attempts to
-mutate transition policy, invalid event/dispatch combinations, absence of raw
-mutable connection access, direct `O_DIRECTORY`, and non-string identifiers.
-Preserve the existing exhaustive 121-edge, migration rollback, event atomicity,
-process-race, sensitive-field, reopen-symlink, and anchored-projection coverage.
-Run focused H2 tests, `make check`, `git diff --check`, exact staged-path review,
-and a complete self-review of `fab4cb6..HEAD`; finish with zero open P0/P1.
+Acceptance: independently reproduce or refute closure of every stable and new
+finding across both rejected candidates and the Sol repair. Review beyond the
+repository tests. Verify canonical DDL structurally cannot be counterfeited,
+migrated and fresh v2 converge, every state/event/dispatch history is causal,
+transition policy is immutable, identifiers reject non-strings, public APIs
+cannot bypass atomic state ownership, and every successful write is reopenable.
+Adversarially test path, symlink, hardlink, inode-substitution, journal/locking,
+cleanup, close, and reopen behavior for the pinned `/proc/self/fd` SQLite path,
+plus anchored artifact projection. Recheck all 121 ledger edges, migration
+rollback, process races, fault rollback, durable-field exclusion, minimal API,
+direct-interface rules, exact diff scope, `make check`, and `git diff --check`.
+Return `ACCEPTED` only with zero open P0/P1 and no material scope deviation.
 
-Escalate only for: inability to safely pin SQLite identity while preserving
-required locking/journal/reopen behavior, a needed public/persisted contract
-change outside the frozen decisions, a finding requiring a protected path or
-external side effect, or an unresolved P0/P1 after ordinary repair. Do not
-weaken schema, path, state-machine, or reopen gates and do not start H3.
+Escalate only for: any surviving or new reproducible P0/P1, a material H2 plan
+or repository-instruction deviation, changed review target, inability to inspect
+the exact full range, or a required external side effect. Return findings and a
+stable reproduction; do not repair, integrate, or start H3 in the review task.
 
-Completion callback: return exactly one terminal `COMPLETION`, accurately
+Completion callback: return exactly one terminal `REVIEW_RESULT`, accurately
 labelled `BLOCKED`, or `FAILED` packet to planning thread
 `01a032b0-8da1-7f20-bd7c-437be7538082` on host `local`.
