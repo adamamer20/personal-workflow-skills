@@ -712,9 +712,9 @@ Successor: H4.
 
 ### Completion evidence
 
-Status: deterministic native-permission/profile correction complete, but the
-real promotion gate is blocked after its single authorized run failed before
-terminal evidence; H4 remains blocked.
+Status: H3 implementation, deterministic validation, and the corrected real
+promotion sentinel are complete; H4 remains blocked pending independent
+objective and architecture promotion review of the exact candidate.
 The user superseded the mandatory Bubblewrap containment contract: H3 now
 inherits the same native Codex permission authority and automatically follows
 later native restrictions. The bounded Git-authority snapshot remains required
@@ -727,10 +727,14 @@ the first SDK turn and injected post-turn crash boundary, then fresh-process
 resume failed because the native runtime had legitimately added private config
 state and reprojection treated that private change as source drift. The
 launcher now atomically restores the validated projection for each fresh SDK
-process, with a regression covering runtime-added private config. No second
-real run was performed. Retained v3 evidence labels provider/profile terminal
-proof, Git parity, and global-config parity `not_proven`; external-write denial
-is not an H3 gate.
+process, with a regression covering runtime-added private config. The user then
+authorized one new run for exact commit `04e0f889678770bfecd7da3c0a8cbd03344f123f`.
+That single Python-SDK/bundled-app-server sentinel passed through `codex-lb`
+with inherited native `danger-full-access`/`never` authority, one dispatch and
+thread identity, injected post-turn crash, fresh-process resume, an allowed
+workspace edit, equal Git-authority digests, and unchanged source Codex config
+bytes. Retained evidence records the sanitized provider/profile/permission
+facts and digests without secrets. External-write denial is not an H3 gate.
 
 ## Milestone H4 — Add decisions, review, repair, and limits
 
@@ -1058,6 +1062,15 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   now restores the validated projection atomically between SDK processes and
   keeps mutable sessions private. The run was not repeated; corrected terminal
   provider/profile, Git-parity, and global-config evidence remain open.
+- 2026-08-24: the user authorized exactly one new corrected sentinel for exact
+  commit `04e0f889678770bfecd7da3c0a8cbd03344f123f`. It passed on the actual
+  Python SDK/bundled app-server route using `gpt-5.6-luna`/`medium` and the
+  active `codex-lb` profile. Evidence records inherited native
+  `danger-full-access`/`never`, one dispatch and identity reused across the
+  injected fresh-process resume, the validated workspace edit, unchanged Git
+  authority, unchanged global Codex config bytes, and sanitized profile and
+  provider digests. H3 has zero self-reviewed P0/P1; H4 remains blocked pending
+  independent objective and architecture promotion review.
 
 ## Next execution
 
@@ -1073,14 +1086,14 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: implementation and deterministic repair are green in the
-existing semantic workspace. The consumed real run did not produce corrected
-terminal evidence, so H3 cannot be promoted.
+Dispatch status: implementation, deterministic repair, and the one authorized
+real sentinel are green in the existing semantic workspace. The exact H3
+candidate is ready for independent promotion review.
 
-Next action: the planning owner must decide whether to authorize one new real
-H3 sentinel run of the repaired exact commit with unchanged
-`gpt-5.6-luna`/`medium`. Promotion still requires the actual Python SDK route
-through `codex-lb`, sanitized native permission/profile parity, the allowed
-workspace edit and durable resume, unchanged Git authority, unchanged global
-Codex config bytes, and an independent review with zero open P0/P1. External-
-write denial is not an H3 gate. H4 remains blocked.
+Next action: independently review the exact H3 candidate for objective and
+architecture promotion with zero open P0/P1. The retained real evidence proves
+the actual Python SDK route through `codex-lb`, sanitized native
+permission/profile parity, the allowed workspace edit and durable resume,
+unchanged Git authority, and unchanged global Codex config bytes. External-
+write denial is not an H3 gate. H4 remains blocked until that review promotes
+H3.

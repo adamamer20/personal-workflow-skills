@@ -1,69 +1,12 @@
 {
-  "baseline_evidence_status": "passed_before_h3_integrity_repair",
-  "evidence_version": "h3-controller-sentinel/v3",
-  "promotion_status": "blocked_after_consumed_native_profile_rerun",
-  "native_permission_profile_rerun": {
-    "actual_python_sdk_route": true,
-    "effort": "medium",
-    "failure_phase": "fresh_process_resume",
-    "global_config_unchanged": "not_proven_by_completed_sentinel",
-    "git_authority_parity": "not_proven_by_completed_sentinel",
-    "model": "gpt-5.6-luna",
-    "observed_partial_outcome": "the first SDK process completed its turn and reached the injected post-turn crash boundary; the fresh resume process stopped before terminal evidence",
-    "outcome": "failed_before_terminal_evidence",
-    "provider_profile_terminal_proof": "not_proven",
-    "reason_code": "private_runtime_config_reprojection_conflict",
-    "repair_after_attempt": "fresh SDK processes now atomically restore the validated projected config while retaining private session state; deterministic regression is green",
-    "rerun_performed_after_repair": false,
-    "status": "failed"
-  },
-  "integrity_repair_rerun": {
-    "actual_python_sdk_route": true,
-    "contract_status": "superseded_by_native_permission_inheritance_requirement",
-    "deterministic_policy_probe": {
-      "allowed_workspace_write": "proven",
-      "controller_state_write": "denied",
-      "external_direct_write": "denied",
-      "external_hardlink_creation": "denied",
-      "external_symlink_write": "denied",
-      "git_config_write": "denied",
-      "protected_path_write": "denied",
-      "status": "passed"
-    },
-    "git_authority_regressions": {
-      "branch_change": "detected",
-      "commit_then_hard_reset": "detected",
-      "config_change": "detected",
-      "index_change": "detected",
-      "ref_and_reflog_surface": "captured",
-      "status": "passed"
-    },
-    "live_attempts": [
-      {
-        "outcome": "invalidated_before_promotion",
-        "reason": "runtime trace showed the stable turn preset re-added TMPDIR and slash-tmp write roots; the synthetic tmp mount was removed"
-      },
-      {
-        "outcome": "transport_failure",
-        "reason": "private /run hid the systemd-resolved target used by /etc/resolv.conf; the launcher was repaired to preserve read-only host /run"
-      },
-      {
-        "outcome": "external_blocked",
-        "reason_code": "usage_limit_exceeded",
-        "smallest_actionable_prerequisite": "restore Codex account credits or wait for the reported usage reset, then rerun the opt-in H3 sentinel without changing model or transport"
-      }
-    ],
-    "negative_external_write_on_final_live_route": "not_proven",
-    "status": "external_blocked"
-  },
   "crash_boundary": "after_turn",
   "crash_injected_after_identity": true,
   "dispatch_count": 1,
   "durable_after_crash": {
-    "capsule_path": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository/.codex-flow/capsules/h3-sentinel/edit.json",
-    "capsule_sha256": "0eb713e2117203b20dbea270749603c18a17afee7ce55c34801b1bd53b932124",
+    "capsule_path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository/.codex-flow/capsules/h3-sentinel/edit.json",
+    "capsule_sha256": "7fd1d17a5a67987c9f21e0ca23b14dc507e56ff0067ee79b077670cbc21ef3c3",
     "checkpoint": "turn_durable",
-    "created_at": "2026-08-24T14:12:05.034310Z",
+    "created_at": "2026-08-24T16:13:26.531798Z",
     "milestone_id": "edit",
     "model": "gpt-5.6-luna",
     "protected_after_sha256": null,
@@ -72,13 +15,31 @@
     "result": null,
     "run_id": "h3-sentinel",
     "status": "thread_started",
-    "thread_id": "01a0341d-3996-7c61-bcd5-f0ad50809b32",
-    "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5",
-    "updated_at": "2026-08-24T14:12:22.301146Z",
+    "thread_id": "01a0348c-5494-71e2-b59f-9fbd47229489",
+    "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d",
+    "updated_at": "2026-08-24T16:16:24.792427Z",
     "validation": null,
-    "workspace_path": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository.worktrees/sdk-controller-sentinel"
+    "workspace_path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository.worktrees/sdk-controller-sentinel"
   },
   "fresh_process_crash_recovery": true,
+  "git_authority": {
+    "after_sha256": "e72cc185e0562ead769d6fc7d43608a6fbe937adc3c825b95563c8151bae2069",
+    "before_sha256": "e72cc185e0562ead769d6fc7d43608a6fbe937adc3c825b95563c8151bae2069",
+    "equal": true,
+    "verified_after": {
+      "branch": "agent/sdk-controller-sentinel",
+      "git_common_dir": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository/.git",
+      "git_dir": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository/.git/worktrees/sdk-controller-sentinel",
+      "head_oid": "882c0e1e411c238f6d1c1454425af56ac270af13",
+      "index_path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository/.git/worktrees/sdk-controller-sentinel/index",
+      "refs_sha256": "4bdaadfc6cd4cb1cdba20ced68ea7d969fc2d63e6c4b5f0f04260f7d833c8020",
+      "schema": "codex-flow/git-authority/v1",
+      "stable_byte_count": 1242,
+      "stable_file_count": 9,
+      "stable_metadata_sha256": "0d2057a19ff59594973a1931c3354823ff8dde8acd6b8e3c26f7b596c3299898"
+    },
+    "verified_after_sha256": "e72cc185e0562ead769d6fc7d43608a6fbe937adc3c825b95563c8151bae2069"
+  },
   "git_facts": {
     "branch_after": "agent/sdk-controller-sentinel",
     "branch_before": "agent/sdk-controller-sentinel",
@@ -90,234 +51,283 @@
     "commit_count_from_base": 0,
     "commit_created": false,
     "diff_stat": "",
-    "head_after": "e082f41a2c950e29b08ba982b646737d2b8126cd",
-    "head_before": "e082f41a2c950e29b08ba982b646737d2b8126cd"
+    "head_after": "882c0e1e411c238f6d1c1454425af56ac270af13",
+    "head_before": "882c0e1e411c238f6d1c1454425af56ac270af13"
   },
   "git_status": [
     "?? result.txt"
   ],
+  "native_profile": {
+    "allowed_workspace_write_completed": true,
+    "effective_permissions": {
+      "approval_policy": "never",
+      "mode": "inherit_native",
+      "monotonic": true,
+      "native_sandbox_mode": "danger-full-access",
+      "sandbox_mode": "danger-full-access"
+    },
+    "integrity_provenance": "controller_v2",
+    "profile_unchanged": true,
+    "provider_route_completed": true,
+    "sanitized_effective": {
+      "controller_overrides": [
+        "cwd",
+        "model",
+        "reasoning_effort",
+        "workspace"
+      ],
+      "discovery_surfaces": [
+        "memories",
+        "plugins",
+        "skills"
+      ],
+      "model_catalog_sha256": "c1a440370d54c874fa44cb18fa8cb404a0bc617fdae167064ebc1a0361fa029a",
+      "permissions": {
+        "approval_policy": "never",
+        "sandbox_mode": "danger-full-access",
+        "source": "native_config"
+      },
+      "private_mutable_state": true,
+      "profile_sha256": "969fdf6ea7e938a33feed3757107ed9c816d9bd5cd7758ce5a5744f516d7359c",
+      "projected_config_sha256": "5b67188d109bacfdaeb40e86485341164928de38b0e96bd2554e3a24775f7659",
+      "provider": {
+        "base_url": "http://127.0.0.1:2455/backend-api/codex",
+        "env_key": "CODEX_LB_API_KEY",
+        "id": "codex-lb",
+        "name": "openai",
+        "requires_openai_auth": true,
+        "supports_websockets": true,
+        "wire_api": "responses"
+      },
+      "schema": "codex-flow/native-profile/v1"
+    },
+    "sha256": "b49c35d3094289e26ac6c0d79573ef17b81307097e624f2414c89e110ced2d01",
+    "source_config_after_sha256": "b9ae0d2e29b65d6ec428a8476f048859d2e0e210773102dd3f1d7d5152aea5a6",
+    "source_config_before_sha256": "b9ae0d2e29b65d6ec428a8476f048859d2e0e210773102dd3f1d7d5152aea5a6",
+    "source_config_unchanged": true
+  },
   "ordered_lifecycle_events": [
     {
       "method": "turn/started",
       "sequence": 0,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "hook/started",
       "sequence": 1,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "hook/completed",
       "sequence": 2,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 3,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 4,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 5,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 6,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 7,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 8,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "thread/tokenUsage/updated",
       "sequence": 9,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 10,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 11,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 12,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 13,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "turn/diff/updated",
       "sequence": 14,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "thread/tokenUsage/updated",
       "sequence": 15,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "turn/diff/updated",
       "sequence": 16,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 17,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 18,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 19,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 20,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "thread/tokenUsage/updated",
       "sequence": 21,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "turn/diff/updated",
       "sequence": 22,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 23,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 24,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/started",
       "sequence": 25,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 26,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 27,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 28,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 29,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 30,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 31,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 32,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 33,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 34,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 35,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/agentMessage/delta",
       "sequence": 36,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "item/completed",
       "sequence": 37,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "thread/tokenUsage/updated",
       "sequence": 38,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "turn/diff/updated",
       "sequence": 39,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "hook/started",
       "sequence": 40,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "hook/completed",
       "sequence": 41,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     },
     {
       "method": "turn/completed",
       "sequence": 42,
-      "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5"
+      "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d"
     }
   ],
   "planned": {
-    "capsule_path": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository/.codex-flow/capsules/h3-sentinel/edit.json",
-    "capsule_sha256": "0eb713e2117203b20dbea270749603c18a17afee7ce55c34801b1bd53b932124",
+    "capsule_path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository/.codex-flow/capsules/h3-sentinel/edit.json",
+    "capsule_sha256": "7fd1d17a5a67987c9f21e0ca23b14dc507e56ff0067ee79b077670cbc21ef3c3",
     "checkpoint": "capsule_planned",
-    "created_at": "2026-08-24T14:12:05.034310Z",
+    "created_at": "2026-08-24T16:13:26.531798Z",
     "milestone_id": "edit",
     "model": "gpt-5.6-luna",
     "protected_after_sha256": null,
@@ -328,19 +338,19 @@
     "status": "planned",
     "thread_id": null,
     "turn_id": null,
-    "updated_at": "2026-08-24T14:12:05.034310Z",
+    "updated_at": "2026-08-24T16:13:26.531798Z",
     "validation": null,
-    "workspace_path": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository.worktrees/sdk-controller-sentinel"
+    "workspace_path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository.worktrees/sdk-controller-sentinel"
   },
   "projection_exists_after_result": true,
   "protected_digest_unchanged": true,
   "result_file": "controller sentinel passed\n",
-  "status": "failed",
+  "status": "passed",
   "terminal": {
-    "capsule_path": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository/.codex-flow/capsules/h3-sentinel/edit.json",
-    "capsule_sha256": "0eb713e2117203b20dbea270749603c18a17afee7ce55c34801b1bd53b932124",
+    "capsule_path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository/.codex-flow/capsules/h3-sentinel/edit.json",
+    "capsule_sha256": "7fd1d17a5a67987c9f21e0ca23b14dc507e56ff0067ee79b077670cbc21ef3c3",
     "checkpoint": "result_durable",
-    "created_at": "2026-08-24T14:12:05.034310Z",
+    "created_at": "2026-08-24T16:13:26.531798Z",
     "milestone_id": "edit",
     "model": "gpt-5.6-luna",
     "protected_after_sha256": "4f6733594b89edc8ddd477b4ff1a0fd961bdfdad5caf062e07322717f54f27a2",
@@ -352,32 +362,32 @@
     },
     "run_id": "h3-sentinel",
     "status": "completed",
-    "thread_id": "01a0341d-3996-7c61-bcd5-f0ad50809b32",
-    "turn_id": "01a0341d-3a1b-71c0-a847-374886d8a0e5",
-    "updated_at": "2026-08-24T14:12:23.063828Z",
+    "thread_id": "01a0348c-5494-71e2-b59f-9fbd47229489",
+    "turn_id": "01a0348c-54d8-72b0-8a08-08a07b6a764d",
+    "updated_at": "2026-08-24T16:16:25.372902Z",
     "validation": {
       "argv": [
         "python3",
         "-c",
         "from pathlib import Path; assert Path('result.txt').read_text() == 'controller sentinel passed\\n'; assert Path('protected.txt').read_text() == 'must remain unchanged\\n'"
       ],
-      "duration_seconds": 0.01841219305060804,
+      "duration_seconds": 0.018816347001120448,
       "error_code": null,
       "exit_code": 0,
       "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "timed_out": false
     },
-    "workspace_path": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository.worktrees/sdk-controller-sentinel"
+    "workspace_path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository.worktrees/sdk-controller-sentinel"
   },
   "thread_identity_reused": true,
   "workspace_lease": {
-    "base_sha": "e082f41a2c950e29b08ba982b646737d2b8126cd",
+    "base_sha": "882c0e1e411c238f6d1c1454425af56ac270af13",
     "branch": "agent/sdk-controller-sentinel",
     "lane": "sdk-controller-sentinel",
     "mode": "managed_worktree",
     "owner_run_id": "h3-sentinel",
-    "path": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository.worktrees/sdk-controller-sentinel",
-    "repository_root": "/tmp/codex-flow-h3-sentinel-e5t2gv_x/repository"
+    "path": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository.worktrees/sdk-controller-sentinel",
+    "repository_root": "/tmp/codex-flow-h3-sentinel-qinyyy2r/repository"
   }
 }
