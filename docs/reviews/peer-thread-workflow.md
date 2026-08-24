@@ -37,6 +37,12 @@ than the workflow source of truth.
 - The user selected the Python SDK as the primary v1 transport. CLI commands may
   be used as acceptance or diagnostic oracles, but there will not be a second
   CLI-backed production controller.
+- H1 is integrated on the canonical branch as `1c04bf7`. The retained real
+  sentinel proves stable `openai-codex==0.147.0` local start, addressable thread
+  identity, explicit model and reasoning effort, two schema-bounded turns, 45
+  ordered lifecycle events, same-thread resume, and read-only sandbox isolation.
+  Review, Desktop, idle wake, remote host, and permission profile are truthfully
+  `not_exposed`; structured skill input is `not_run`.
 
 ## Proposed design
 
@@ -280,20 +286,124 @@ CLI or direct app-server transport.
 Self-review the adapter boundary and sentinel side effects. H2 follows only
 after H1 promotion.
 
+### Completion evidence
+
+Status: complete and integrated as `1c04bf7`.
+
+Evidence: `make check` passed with 29 tests, existing 10-skill validation,
+Ruff, compilation, pre-commit, and clean diff checks. Real evidence is retained
+at `docs/reviews/evidence/h1-sdk-sentinel.json`; the disposable repository and
+controller worktree were unchanged by both read-only turns, and the sentinel's
+owned thread was archived after proof.
+
 ## Milestone H2 — Implement the durable ledger and state machine
 
-Outcome: SQLite migrations, typed ids/states/reasons, atomic artifact
-projections, idempotent dispatch claims, causal events, and crash-recovery
-transitions are complete without starting Codex or creating worktrees.
+### Outcome
 
-Acceptance: exhaustive transition-table tests, concurrent duplicate-claim test,
-transaction rollback tests, artifact-rebuild consistency, corrupt/unsupported
-schema failure, and zero external side effects.
+The controller has one typed, versioned SQLite ledger and deterministic state
+machine that can claim logical ownership, record causally ordered transitions,
+survive process restart, and rebuild readable artifacts without starting Codex,
+creating a worktree, or depending on messages.
 
-Promotion gate: the ledger alone proves one logical owner per dispatch and
-truthful separation of transport, execution, review, and terminal outcomes.
+### Mutable ownership
 
-Successor: H3.
+- `src/codex_flow/domain.py` for H2 ids, enums, and typed records;
+- new `src/codex_flow/ledger.py` and `src/codex_flow/artifacts.py`;
+- a narrow internal schema/migration module only if it keeps SQL ownership
+  clearer than embedding versioned SQL in `ledger.py`;
+- focused H2 tests under `tests/`;
+- compatibility documentation only for H2 ledger/storage contracts when needed.
+
+### Protected surfaces
+
+- the H1 SDK adapter, sentinel, retained evidence, CLI behavior, dependency
+  versions, root tooling, and repository instructions;
+- existing plugin hooks, workflow/audit skills, manifests, validators, and
+  marketplace behavior;
+- worktree creation, SDK execution orchestration, routing configuration,
+  decisions/review/repair, notifications, and model-facing skill migration;
+- the canonical plan, dirty primary checkout, global Codex state, remotes,
+  downstream repositories, and unrelated worktrees.
+
+### Dependencies
+
+- H1 commit `1c04bf7` and its real sentinel are integrated and green.
+- Use Python's standard `sqlite3`; H2 has no need for an ORM, SQLModel,
+  PostgreSQL, network dependency, or SDK call.
+
+### Implementation boundary
+
+1. Define validated value types for run, milestone, role, generation, dispatch,
+   event, and schema version. Empty or malformed ids fail before SQL.
+2. Implement the exact state set `PLANNED`, `STARTING`, `RUNNING`,
+   `NEEDS_DECISION`, `COMPLETED`, `REVIEWING`, `REPAIR_REQUIRED`, `ACCEPTED`,
+   `BLOCKED`, `FAILED`, and `CANCELLED`, with one explicit allowed-transition
+   table. Terminal states have no outgoing transition.
+3. Create one versioned SQLite schema owning runs, milestones, dispatch claims,
+   current state, and append-only events. Use foreign keys, uniqueness and check
+   constraints, parameterized SQL, UTC timestamps, explicit transactions,
+   bounded busy timeout, and a migration marker. Reject newer/unknown schemas;
+   migrate older owned schemas transactionally.
+4. Claim dispatch identity
+   `<run-id>/<milestone-id>/<role>/<generation>` in the same transaction that
+   records its initial event. Repeating the same logical claim is idempotent and
+   returns the established record; conflicting ownership fails without mutation.
+5. Perform every state change and its next monotonically ordered event in one
+   transaction. Validate expected predecessor so stale writers cannot advance a
+   milestone. Roll back both current state and event on any failure.
+6. Represent pre-identity transport failure, post-identity execution failure,
+   review rejection, and terminal outcomes as distinct typed reasons; none may
+   silently consume or increment another category's attempt.
+7. Write atomic JSON/JSONL projections under `.codex-flow/runs/<run-id>/` from a
+   committed ledger snapshot. Projections are rebuildable and non-authoritative;
+   partial replacement or projection failure cannot change SQLite state.
+8. Add explicit open/close/reopen behavior and recovery queries for non-terminal
+   dispatches. H2 must not decide whether to retry, resume, replace, or contact a
+   model; it exposes facts for H3.
+
+### Acceptance criteria
+
+- The complete allowed and forbidden transition matrix is exhaustively tested,
+  including terminal immutability and stale expected-state rejection.
+- Multiple processes or connections racing for the same dispatch identity
+  establish exactly one record; the loser receives the existing idempotent
+  result or a typed conflict, never a second owner.
+- Fault injection proves transaction rollback leaves neither a state-only nor
+  event-only write and preserves monotonically ordered event sequence.
+- Close/reopen tests recover identical current state, dispatch identity,
+  ordered history, and non-terminal recovery facts.
+- Schema tests cover first creation, same-version reopen, transactional supported
+  migration, corrupt metadata, foreign-key enforcement, and newer/unsupported
+  version rejection.
+- Artifact tests rebuild byte-stable canonical JSON/JSONL from the ledger,
+  replace files atomically, and prove write/projection failure cannot mutate the
+  ledger or become workflow authority.
+- Security/safety tests cover parameterized values containing SQL metacharacters,
+  repository-local path validation, symlink/path-escape rejection, and no secret,
+  prompt body, or raw SDK response persistence in generic ledger fields.
+- H2 tests make no SDK call, create no Codex task or Git worktree, and require no
+  network, credentials, global config, plugin hook, or external service.
+
+### Validation
+
+- `make check`
+- focused H2 tests with a temporary filesystem and multiple SQLite connections
+- `git diff --check` and complete staged-diff self-review
+- protected-path diff proving H1 adapter/sentinel/evidence and plugin surfaces
+  are unchanged
+
+### Promotion gate and review requirement
+
+The implementation candidate passes every acceptance check with zero self-review
+P0/P1, then receives one fresh independent Luna XHigh read-only review of the
+exact commit. H2 promotes only with zero open P0/P1 on ledger correctness,
+concurrency, transactions, migration safety, path safety, and scope adherence.
+Any repair returns to a fresh bounded implementation context under the existing
+H2 contract and is re-reviewed.
+
+### Successor milestone
+
+H3 — add controller-owned worktrees and SDK execution.
 
 ## Milestone H3 — Add controller-owned worktrees and execution
 
@@ -375,11 +485,10 @@ installed-plugin and downstream-pin migration.
 
 ## Open findings
 
-- The stable Python SDK's exact resume, streaming event, reasoning-effort,
-  structured-output, review, and structured-skill-input surface is not yet
-  proven locally.
-- Desktop automatic sidebar visibility and remote-host support are compatibility
-  gates, not assumptions.
+- Review, Desktop automatic sidebar visibility, idle wake, remote-host support,
+  and permission-profile survival are not exposed by the H1 stable SDK surface;
+  structured skill input exists but remains unexercised. These are optional or
+  later compatibility gates, not inferred capabilities.
 - The supplied audit's underlying archive is not stored in this repository;
   its findings motivate the design but do not substitute for H1 captured
   evidence.
@@ -403,14 +512,17 @@ installed-plugin and downstream-pin migration.
   reusable root toolchain and Python engineering rules, with explicit exclusion
   of SprintAct product/service/database policy and preservation of SQLite as the
   controller ledger.
+- 2026-08-24: H1 commit `7f41eaa` returned green and was integrated as
+  `1c04bf7`. Verified retained evidence for two real schema-bounded turns on one
+  resumed thread, explicit Luna/medium routing, 45 ordered events, unchanged
+  read-only repositories, truthful optional-capability labels, and a clean
+  executor worktree. Selected H2 as the next executable milestone.
 
 ## Next execution
 
-Milestone: H1 — prove the stable Python SDK contract.
+Milestone: H2 — implement the durable ledger and state machine.
 
-Dispatch status: queued once as
-`client-new-thread:c028534a-299e-4b44-b35e-86a9b7d75401` on native host
-`local`; no retry or readiness polling is authorized.
+Dispatch status: not yet dispatched.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
@@ -423,21 +535,22 @@ by the native creator when available.
 
 Plan path: `docs/reviews/peer-thread-workflow.md`.
 
-Owned surfaces: H1 mutable ownership only.
+Owned surfaces: H2 mutable ownership only.
 
-Protected surfaces: existing plugin/hook/skill code, dirty primary checkout,
-global Codex state, remotes, downstream repositories, and H2+ controller logic.
+Protected surfaces: H1 adapter/sentinel/evidence, root tooling/instructions,
+plugin and skill code, dirty primary checkout, global Codex state, remotes,
+downstream repositories, and H3+ execution/controller logic.
 
-Acceptance: reproducible stable SDK install; typed verified adapter; real
-read-only start, schema-bounded turn, explicit model/reasoning, event capture,
-and same-thread resume; adapted root `AGENTS.md` plus `uv`/Ruff/pytest/
-pre-commit/Make tooling; capability matrix truthful; decisive validators green;
-zero open P0/P1.
+Acceptance: exact typed state machine; versioned constrained SQLite schema;
+transactional idempotent dispatch claims and events; concurrent single-owner
+proof; rollback and reopen recovery; atomic rebuildable projections; path and
+SQL safety; no external side effects; `make check`; zero open P0/P1 followed by
+fresh independent review.
 
-Escalate only for: a required stable-SDK capability gap; SDK/runtime
-authentication failure after safe diagnostics; unavoidable global-state or
-existing-task mutation; a needed architecture/contract change; or a P0/P1
-finding that cannot be repaired within H1.
+Escalate only for: a required schema/state contract change; evidence that
+SQLite cannot provide the specified local durability/concurrency semantics; a
+security or data-integrity risk; unavoidable dependency or external-state
+mutation; or a P0/P1 finding that cannot be repaired within H2.
 
 Completion callback: return exactly one terminal `COMPLETION`, `BLOCKED`, or
 `FAILED` packet to the planning task using the exact native callback route.

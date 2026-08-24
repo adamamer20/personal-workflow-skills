@@ -42,27 +42,37 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-sentinel \
   paths, hosts, or URLs, and never mutate global Codex configuration,
   authentication, hooks, remotes, or unrelated tasks.
 
-## H1 ownership and boundaries
+## Program ownership and boundaries
 
-H1 owns the minimal typed package, the `openai-codex` adapter, hermetic adapter
-tests, the opt-in compatibility sentinel, compatibility documentation, and
-repository tooling. The adapter is the only production Codex transport:
-there is no CLI backend and no direct app-server fallback.
+The single active program plan is
+`docs/reviews/peer-thread-workflow.md`. Read its current milestone, mutable
+ownership, protected surfaces, acceptance, and promotion gate before changing
+code. The planning task owns architecture, scope changes, milestone ordering,
+the plan, and this instruction file. Each execution task owns exactly one
+decision-ready milestone and may not expand into a later milestone.
+
+The `openai-codex` adapter is the only production Codex transport. There is no
+CLI backend and no direct app-server fallback. SQLite is the single durable
+workflow ledger. Give the SDK adapter, ledger/schema, worktree manager,
+controller state machine, routing configuration, and model-facing contracts one
+implementation owner at a time; do not add alternate scaffolding or duplicate
+production paths.
 
 Existing plugin hooks, workflow/audit skills, manifests, validators, the
-canonical plan, the protected primary checkout, and H2+ ledger/controller/
-worktree logic are protected. Do not create parallel production paths or
-silently substitute models, reasoning effort, transports, or permissions.
+protected primary checkout, remotes, global Codex state, downstream
+repositories, and later milestones remain protected unless the canonical plan
+explicitly assigns them to the current owner. Do not silently substitute
+models, reasoning effort, transports, permissions, or acceptance gates.
 
 ## Safety and review
 
 - Do not use `eval` or `exec`.
-- Make side effects explicit and bounded. The real sentinel must use a
+- Make side effects explicit and bounded. Any real SDK sentinel must use a
   disposable Git repository and `Sandbox.read_only`, then compare before/after
   bytes. Archive only the sentinel thread it created after proof.
 - Tests, manifests, counts, and status metadata support evidence; they do not
   replace a real observable outcome. A missing SDK capability is a truthful
   `BLOCKED` result with the smallest decision-ready gap.
 - Before committing, inspect the exact staged paths, run `git diff --check`,
-  and self-review the complete H1 diff. Do not push, merge, rebase, stash, or
+  and self-review the complete milestone diff. Do not push, merge, rebase, stash, or
   discard changes without separate authorization.
