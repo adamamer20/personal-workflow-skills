@@ -1,4 +1,45 @@
 {
+  "baseline_evidence_status": "passed_before_h3_integrity_repair",
+  "evidence_version": "h3-controller-sentinel/v2",
+  "promotion_status": "external_blocked",
+  "integrity_repair_rerun": {
+    "actual_python_sdk_route": true,
+    "deterministic_policy_probe": {
+      "allowed_workspace_write": "proven",
+      "controller_state_write": "denied",
+      "external_direct_write": "denied",
+      "external_hardlink_creation": "denied",
+      "external_symlink_write": "denied",
+      "git_config_write": "denied",
+      "protected_path_write": "denied",
+      "status": "passed"
+    },
+    "git_authority_regressions": {
+      "branch_change": "detected",
+      "commit_then_hard_reset": "detected",
+      "config_change": "detected",
+      "index_change": "detected",
+      "ref_and_reflog_surface": "captured",
+      "status": "passed"
+    },
+    "live_attempts": [
+      {
+        "outcome": "invalidated_before_promotion",
+        "reason": "runtime trace showed the stable turn preset re-added TMPDIR and slash-tmp write roots; the synthetic tmp mount was removed"
+      },
+      {
+        "outcome": "transport_failure",
+        "reason": "private /run hid the systemd-resolved target used by /etc/resolv.conf; the launcher was repaired to preserve read-only host /run"
+      },
+      {
+        "outcome": "external_blocked",
+        "reason_code": "usage_limit_exceeded",
+        "smallest_actionable_prerequisite": "restore Codex account credits or wait for the reported usage reset, then rerun the opt-in H3 sentinel without changing model or transport"
+      }
+    ],
+    "negative_external_write_on_final_live_route": "not_proven",
+    "status": "external_blocked"
+  },
   "crash_boundary": "after_turn",
   "crash_injected_after_identity": true,
   "dispatch_count": 1,

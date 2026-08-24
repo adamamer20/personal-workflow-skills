@@ -29,6 +29,7 @@ from .domain import (
     EventRecord,
     EventSequence,
     ExecutionCapsule,
+    ExecutionIntegrityRecord,
     ExecutionRecord,
     ExecutionStatus,
     Generation,
@@ -62,8 +63,8 @@ from .domain import (
     is_transition_allowed,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(3)
-SUPPORTED_SCHEMA_VERSIONS = frozenset({SchemaVersion(1), SchemaVersion(2), CURRENT_SCHEMA_VERSION})
+CURRENT_SCHEMA_VERSION = SchemaVersion(4)
+SUPPORTED_SCHEMA_VERSIONS = frozenset({SchemaVersion(1), SchemaVersion(2), SchemaVersion(3), CURRENT_SCHEMA_VERSION})
 _STATES_SQL = ", ".join(f"'{state.value}'" for state in WorkflowState)
 _REASON_CODES_SQL = ", ".join(f"'{reason.value}'" for reason in ReasonCode)
 _EVENT_TYPES = frozenset({"dispatch_claimed", "state_transition"})
@@ -191,6 +192,21 @@ _V3_TABLE_DDL = {
     "executions": _EXECUTIONS_DDL,
     "sdk_lifecycle_events": _SDK_EVENTS_DDL,
 }
+_EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    provenance TEXT NOT NULL CHECK(provenance IN ('legacy_v3', 'controller_v1')),
+    sandbox_policy_sha256 TEXT CHECK(sandbox_policy_sha256 IS NULL OR length(sandbox_policy_sha256) = 64),
+    git_authority_before_sha256 TEXT CHECK(git_authority_before_sha256 IS NULL OR length(git_authority_before_sha256) = 64),
+    git_authority_after_sha256 TEXT CHECK(git_authority_after_sha256 IS NULL OR length(git_authority_after_sha256) = 64),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, milestone_id),
+    CHECK((provenance = 'legacy_v3' AND sandbox_policy_sha256 IS NULL AND git_authority_before_sha256 IS NULL AND git_authority_after_sha256 IS NULL)
+       OR (provenance = 'controller_v1' AND sandbox_policy_sha256 IS NOT NULL)),
+    FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_V4_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
 
 
 def _canonical_ddl(sql: str) -> str:
@@ -263,7 +279,8 @@ def _schema_inventory(connection: sqlite3.Connection, *, temporary: bool = False
 _SCHEMA_IDENTITIES = {
     SchemaVersion(1): "codex_flow_h2_v1",
     SchemaVersion(2): "codex_flow_h2_v2",
-    CURRENT_SCHEMA_VERSION: "codex_flow_h3_v3",
+    SchemaVersion(3): "codex_flow_h3_v3",
+    CURRENT_SCHEMA_VERSION: "codex_flow_h3_integrity_v4",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -617,11 +634,12 @@ class Ledger:
             "workspace_leases",
             "executions",
             "sdk_lifecycle_events",
+            "execution_integrity",
         ],
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V3_TABLE_DDL:
+        if table not in _V4_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -704,7 +722,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V3_TABLE_DDL.values():
+                for statement in _V4_TABLE_DDL.values():
                     self._db().execute(statement)
                 self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -729,6 +747,7 @@ class Ledger:
             SchemaVersion(1): _V1_TABLE_DDL,
             SchemaVersion(2): _V2_TABLE_DDL,
             SchemaVersion(3): _V3_TABLE_DDL,
+            SchemaVersion(4): _V4_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -822,6 +841,16 @@ class Ledger:
                 "method": ("TEXT", 1, 0),
                 "event_turn_id": ("TEXT", 0, 0),
             },
+            "execution_integrity": {
+                "run_id": ("TEXT", 1, 1),
+                "milestone_id": ("TEXT", 1, 2),
+                "provenance": ("TEXT", 1, 0),
+                "sandbox_policy_sha256": ("TEXT", 0, 0),
+                "git_authority_before_sha256": ("TEXT", 0, 0),
+                "git_authority_after_sha256": ("TEXT", 0, 0),
+                "created_at": ("TEXT", 1, 0),
+                "updated_at": ("TEXT", 1, 0),
+            },
         }
         if version == SchemaVersion(1):
             expected["runs"].pop("closed_at")
@@ -829,6 +858,8 @@ class Ledger:
             expected.pop("workspace_leases")
             expected.pop("executions")
             expected.pop("sdk_lifecycle_events")
+        if version < SchemaVersion(4):
+            expected.pop("execution_integrity")
         for table, expected_columns in expected.items():
             rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
@@ -873,6 +904,14 @@ class Ledger:
                     ("executions", "milestone_id", "milestone_id", "CASCADE"),
                 ),
             )
+        if version >= SchemaVersion(4):
+            self._require_foreign_keys(
+                "execution_integrity",
+                (
+                    ("executions", "run_id", "run_id", "CASCADE"),
+                    ("executions", "milestone_id", "milestone_id", "CASCADE"),
+                ),
+            )
         foreign_keys = self._db().execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
@@ -901,6 +940,7 @@ class Ledger:
 
     def _validate_rows(self) -> None:
         has_h3 = any(item[1] == "executions" for item in _schema_inventory(self._db()))
+        has_integrity = any(item[1] == "execution_integrity" for item in _schema_inventory(self._db()))
         orphan_queries = [
             "SELECT COUNT(*) FROM milestones m LEFT JOIN runs r ON r.run_id = m.run_id WHERE r.run_id IS NULL",
             "SELECT COUNT(*) FROM dispatches d LEFT JOIN milestones m ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id WHERE m.run_id IS NULL",
@@ -914,6 +954,11 @@ class Ledger:
                     "SELECT COUNT(*) FROM executions x LEFT JOIN milestones m ON m.run_id = x.run_id AND m.milestone_id = x.milestone_id WHERE m.run_id IS NULL",
                     "SELECT COUNT(*) FROM sdk_lifecycle_events s LEFT JOIN executions x ON x.run_id = s.run_id AND x.milestone_id = s.milestone_id WHERE x.run_id IS NULL",
                 )
+            )
+        if has_integrity:
+            orphan_queries.append(
+                "SELECT COUNT(*) FROM execution_integrity i LEFT JOIN executions x "
+                "ON x.run_id = i.run_id AND x.milestone_id = i.milestone_id WHERE x.run_id IS NULL"
             )
         if any(int(self._db().execute(query).fetchone()[0]) for query in orphan_queries):
             raise CorruptSchemaError("workflow ledger contains orphan rows")
@@ -1002,9 +1047,23 @@ class Ledger:
         if has_h3:
             lease_rows = self._db().execute("SELECT * FROM workspace_leases ORDER BY workspace_path").fetchall()
             leases = {str(row["workspace_path"]): self._workspace_lease_from_row(row) for row in lease_rows}
+            integrity_keys = (
+                {
+                    (str(row["run_id"]), str(row["milestone_id"]))
+                    for row in self._db().execute("SELECT run_id, milestone_id FROM execution_integrity").fetchall()
+                }
+                if has_integrity
+                else set()
+            )
             execution_rows = self._db().execute("SELECT * FROM executions ORDER BY run_id, milestone_id").fetchall()
             for row in execution_rows:
                 execution = self._execution_from_row(row)
+                if (
+                    has_integrity
+                    and execution.status not in {ExecutionStatus.PLANNED, ExecutionStatus.CANCELLED}
+                    and (str(execution.run_id), str(execution.milestone_id)) not in integrity_keys
+                ):
+                    raise CorruptSchemaError("non-planned execution lacks its integrity authority row")
                 milestone_state = _row_state(
                     self._db()
                     .execute(
@@ -1078,8 +1137,21 @@ class Ledger:
                     sequences = tuple(int(item[0]) for item in event_rows)
                     if sequences != tuple(range(len(sequences))):
                         raise CorruptSchemaError("SDK lifecycle sequence is not contiguous")
+            if has_integrity:
+                for row in (
+                    self._db().execute("SELECT * FROM execution_integrity ORDER BY run_id, milestone_id").fetchall()
+                ):
+                    integrity = self._execution_integrity_from_row(row)
+                    if (
+                        integrity.git_authority_after_sha256 is not None
+                        and integrity.git_authority_before_sha256 is None
+                    ):
+                        raise CorruptSchemaError("Git authority after-state lacks its pre-turn authority")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(3):
+            self._migrate_v3_to_v4()
+            return
         if version == SchemaVersion(2):
             self._migrate_v2_to_v3()
             return
@@ -1130,6 +1202,30 @@ class Ledger:
         with self._transaction(validate_authority=False):
             for table in ("workspace_leases", "executions", "sdk_lifecycle_events"):
                 self._db().execute(_V3_TABLE_DDL[table])
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(int(SchemaVersion(3))),),
+            )
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(3)],),
+            )
+            self._fault("after_migration")
+        self._migrate_v3_to_v4()
+
+    def _migrate_v3_to_v4(self) -> None:
+        self._validate_schema_metadata(SchemaVersion(3))
+        self._validate_shape(SchemaVersion(3))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._db().execute(_EXECUTION_INTEGRITY_DDL)
+            self._db().execute(
+                "INSERT INTO execution_integrity(run_id, milestone_id, provenance, sandbox_policy_sha256, "
+                "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
+                "SELECT run_id, milestone_id, 'legacy_v3', NULL, NULL, NULL, created_at, updated_at "
+                "FROM executions WHERE status != ?",
+                (ExecutionStatus.PLANNED.value,),
+            )
             self._db().execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(int(CURRENT_SCHEMA_VERSION)),),
@@ -1598,6 +1694,77 @@ class Ledger:
     # H3 controller facts
     # ------------------------------------------------------------------
 
+    def record_sandbox_policy(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        sandbox_policy_sha256: str,
+    ) -> ExecutionIntegrityRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        policy = _sha256(sandbox_policy_sha256, field_name="sandbox policy digest")
+        now = utc_now()
+        with self._transaction():
+            self.get_execution(run, milestone)
+            existing = (
+                self._db()
+                .execute(
+                    "SELECT * FROM execution_integrity WHERE run_id = ? AND milestone_id = ?",
+                    (str(run), str(milestone)),
+                )
+                .fetchone()
+            )
+            if existing is not None:
+                record = self._execution_integrity_from_row(existing)
+                if record.sandbox_policy_sha256 != policy:
+                    raise StaleWriter("execution is already bound to a different sandbox policy")
+                return record
+            self._db().execute(
+                "INSERT INTO execution_integrity(run_id, milestone_id, provenance, sandbox_policy_sha256, "
+                "git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
+                "VALUES (?, ?, 'controller_v1', ?, NULL, NULL, ?, ?)",
+                (str(run), str(milestone), policy, now, now),
+            )
+            return self.get_execution_integrity(run, milestone)
+
+    def record_git_authority_before(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        git_authority_before_sha256: str,
+    ) -> ExecutionIntegrityRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        authority = _sha256(git_authority_before_sha256, field_name="Git authority digest")
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution_integrity(run, milestone)
+            if current.git_authority_before_sha256 is not None:
+                if current.git_authority_before_sha256 != authority:
+                    raise StaleWriter("execution Git authority changed before its SDK turn")
+                return current
+            self._db().execute(
+                "UPDATE execution_integrity SET git_authority_before_sha256 = ?, updated_at = ? "
+                "WHERE run_id = ? AND milestone_id = ?",
+                (authority, now, str(run), str(milestone)),
+            )
+            return self.get_execution_integrity(run, milestone)
+
+    def get_execution_integrity(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionIntegrityRecord:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        row = (
+            self._db()
+            .execute(
+                "SELECT * FROM execution_integrity WHERE run_id = ? AND milestone_id = ?",
+                (str(run), str(milestone)),
+            )
+            .fetchone()
+        )
+        if row is None:
+            raise KeyError(f"unknown execution integrity: {run}/{milestone}")
+        return self._execution_integrity_from_row(row)
+
     def plan_execution(
         self,
         capsule: ExecutionCapsule,
@@ -1938,10 +2105,12 @@ class Ledger:
         result: JsonObject,
         validation: ValidationObservation,
         protected_after_sha256: str,
+        git_authority_after_sha256: str,
     ) -> ExecutionRecord:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
         after_digest = _sha256(protected_after_sha256, field_name="protected-path digest")
+        git_after = _sha256(git_authority_after_sha256, field_name="Git authority digest")
         now = utc_now()
         outcome_status = result.get("status") if isinstance(result, Mapping) else None
         outcome_failed = isinstance(outcome_status, str) and outcome_status.strip().lower() in {
@@ -1962,6 +2131,9 @@ class Ledger:
                 return current
             if current.status is not ExecutionStatus.THREAD_STARTED or current.turn_id is None:
                 raise StaleWriter("terminal result requires a durable SDK turn")
+            integrity = self.get_execution_integrity(run, milestone)
+            if integrity.git_authority_before_sha256 is None:
+                raise StaleWriter("terminal result requires a durable pre-turn Git authority snapshot")
             workflow = self.get_milestone(run, milestone)
             if workflow.state is not WorkflowState.RUNNING:
                 raise StaleWriter("terminal result requires a RUNNING workflow state")
@@ -1992,6 +2164,11 @@ class Ledger:
                     str(run),
                     str(milestone),
                 ),
+            )
+            self._db().execute(
+                "UPDATE execution_integrity SET git_authority_after_sha256 = ?, updated_at = ? "
+                "WHERE run_id = ? AND milestone_id = ?",
+                (git_after, now, str(run), str(milestone)),
             )
             target = WorkflowState.COMPLETED if terminal is ExecutionStatus.COMPLETED else WorkflowState.FAILED
             self._db().execute(
@@ -2336,6 +2513,31 @@ class Ledger:
             (
                 _sha256(str(row["protected_after_sha256"]), field_name="protected after digest")
                 if row["protected_after_sha256"] is not None
+                else None
+            ),
+            str(row["created_at"]),
+            str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _execution_integrity_from_row(row: sqlite3.Row) -> ExecutionIntegrityRecord:
+        return ExecutionIntegrityRecord(
+            RunId(row["run_id"]),
+            MilestoneId(row["milestone_id"]),
+            str(row["provenance"]),
+            (
+                _sha256(str(row["sandbox_policy_sha256"]), field_name="sandbox policy digest")
+                if row["sandbox_policy_sha256"] is not None
+                else None
+            ),
+            (
+                _sha256(str(row["git_authority_before_sha256"]), field_name="Git authority before digest")
+                if row["git_authority_before_sha256"] is not None
+                else None
+            ),
+            (
+                _sha256(str(row["git_authority_after_sha256"]), field_name="Git authority after digest")
+                if row["git_authority_after_sha256"] is not None
                 else None
             ),
             str(row["created_at"]),

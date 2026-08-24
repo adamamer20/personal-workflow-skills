@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -68,6 +70,7 @@ class _SdkClient(Protocol):
 
 class _SdkSurface(Protocol):
     Codex: Callable[[], _SdkClient]
+    CodexConfig: Callable[..., object]
     Sandbox: Any
     ApprovalMode: Any
     SkillInput: Callable[..., object] | None
@@ -84,6 +87,7 @@ class CodexSdkConfig:
     sandbox: Sandbox = Sandbox.READ_ONLY
     cwd: Path | None = None
     ephemeral: bool = False
+    sandbox_policy: SdkSandboxPolicy | None = None
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -92,6 +96,152 @@ class CodexSdkConfig:
             raise ValueError("controller SDK execution supports read-only or workspace-write sandboxing")
         if self.cwd is not None and not self.cwd.is_dir():
             raise ValueError(f"SDK working directory does not exist: {self.cwd}")
+        if self.sandbox is Sandbox.WORKSPACE_WRITE and self.sandbox_policy is None:
+            raise ValueError("workspace-write SDK execution requires a sealed sandbox policy")
+        if self.sandbox_policy is not None and self.cwd != self.sandbox_policy.workspace:
+            raise ValueError("SDK cwd must equal the sealed sandbox workspace")
+
+
+def _sandbox_config() -> JsonObject:
+    return {
+        "sandbox_workspace_write": {
+            "writable_roots": [],
+            "exclude_tmpdir_env_var": True,
+            "exclude_slash_tmp": True,
+        }
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class SdkSandboxPolicy:
+    """Exact Linux boundary for the production SDK child runtime.
+
+    The app-server needs private transport state, which is mounted at a
+    synthetic path outside the leased workspace; the nested Codex
+    workspace-write sandbox denies executor tools access to it. Temporary
+    storage is deliberately the leased workspace. Bubblewrap makes the host filesystem
+    read-only, re-opens only the leased workspace for writes, and then overlays
+    protected/controller/Git-authority paths read-only.
+    """
+
+    workspace: Path
+    read_only_paths: tuple[Path, ...]
+    runtime_home: Path
+    auth_source: Path
+    bubblewrap: Path = Path("/usr/bin/bwrap")
+
+    def __post_init__(self) -> None:
+        workspace = self.workspace.resolve()
+        if not self.workspace.is_absolute() or workspace != self.workspace or not workspace.is_dir():
+            raise ValueError("sandbox workspace must be an existing physical absolute directory")
+        for path in (*self.read_only_paths, self.runtime_home, self.auth_source, self.bubblewrap):
+            if not path.is_absolute():
+                raise ValueError("sandbox policy paths must be absolute")
+        normalized = tuple(sorted(set(self.read_only_paths), key=os.fspath))
+        if normalized != self.read_only_paths:
+            raise ValueError("sandbox read-only paths must be unique and sorted")
+        if any(not path.exists() for path in self.read_only_paths):
+            raise ValueError("sandbox read-only paths must exist before SDK execution")
+        if not self.runtime_mount.is_dir():
+            raise ValueError("per-user runtime mountpoint is unavailable")
+
+    @property
+    def runtime_mount(self) -> Path:
+        return Path("/run/user") / str(os.getuid())
+
+    @property
+    def thread_config(self) -> JsonObject:
+        return _sandbox_config()
+
+    def prepare(self) -> None:
+        """Create private runtime state without mutating global Codex state."""
+
+        self.runtime_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        runtime_metadata = os.lstat(self.runtime_home)
+        if not stat.S_ISDIR(runtime_metadata.st_mode):
+            raise ValueError("private SDK runtime home is not a real directory")
+        self.runtime_home.chmod(0o700)
+        metadata = os.lstat(self.auth_source)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("global Codex authentication source is not a single-link regular file")
+
+    def wrap_command(self, command: tuple[str, ...]) -> tuple[str, ...]:
+        """Place one child command inside the exact production mount boundary."""
+
+        launcher_metadata = os.stat(self.bubblewrap, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(launcher_metadata.st_mode)
+            or launcher_metadata.st_uid != 0
+            or launcher_metadata.st_mode & 0o022
+            or not command
+            or not Path(command[0]).is_file()
+        ):
+            raise ValueError("sandbox launcher and pinned Codex runtime must be regular files")
+        arguments: list[str] = [
+            os.fspath(self.bubblewrap),
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-all",
+            "--share-net",
+            "--cap-drop",
+            "ALL",
+            "--ro-bind",
+            "/",
+            "/",
+            "--bind",
+            os.fspath(self.runtime_home),
+            os.fspath(self.runtime_mount),
+            "--ro-bind",
+            os.fspath(self.auth_source),
+            os.fspath(self.runtime_mount / "auth.json"),
+            "--bind",
+            os.fspath(self.workspace),
+            os.fspath(self.workspace),
+        ]
+        for path in self.read_only_paths:
+            arguments.extend(("--ro-bind", os.fspath(path), os.fspath(path)))
+        arguments.extend(
+            (
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--chdir",
+                os.fspath(self.workspace),
+                *command,
+            )
+        )
+        return tuple(arguments)
+
+    def launch_args(self, runtime: Path) -> tuple[str, ...]:
+        """Return the sole production app-server invocation."""
+
+        return self.wrap_command(
+            (
+                os.fspath(runtime),
+                "--config",
+                "sandbox_workspace_write.writable_roots=[]",
+                "--config",
+                "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+                "--config",
+                "sandbox_workspace_write.exclude_slash_tmp=true",
+                "app-server",
+                "--listen",
+                "stdio://",
+            )
+        )
+
+    @property
+    def environment(self) -> dict[str, str]:
+        return {
+            "CODEX_HOME": os.fspath(self.runtime_mount),
+            "HOME": os.fspath(self.runtime_mount),
+            # The stable runtime currently re-adds TMPDIR to its writable
+            # roots when a turn supplies the workspace-write preset. Point it
+            # at the leased workspace so that behavior cannot create a second
+            # host write root.
+            "TMPDIR": os.fspath(self.workspace),
+        }
 
 
 def _load_sdk() -> _SdkSurface:
@@ -106,6 +256,7 @@ def _load_sdk() -> _SdkSurface:
         _SdkSurface,
         SimpleNamespace(
             Codex=package.Codex,
+            CodexConfig=package.CodexConfig,
             Sandbox=package.Sandbox,
             ApprovalMode=package.ApprovalMode,
             SkillInput=package.SkillInput,
@@ -291,9 +442,30 @@ class CodexSdkAdapter:
     ) -> None:
         self.config = config
         self._sdk = cast(_SdkSurface, sdk or _load_sdk())
-        self._client_factory = client_factory or (lambda: self._sdk.Codex())
+        self._client_factory = client_factory or self._production_client
         self._client: _SdkClient | None = None
         self._threads: dict[str, _SdkThread] = {}
+
+    def _production_client(self) -> _SdkClient:
+        policy = self.config.sandbox_policy
+        if policy is None:
+            return self._sdk.Codex()
+        try:
+            runtime_package = importlib.import_module("codex_cli_bin")
+            runtime = Path(runtime_package.bundled_codex_path()).resolve()
+            policy.prepare()
+            sdk_config = self._sdk.CodexConfig(
+                launch_args_override=policy.launch_args(runtime),
+                cwd=os.fspath(policy.workspace),
+                env=policy.environment,
+            )
+            return self._sdk.Codex(config=sdk_config)
+        except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+            raise UnsupportedCapability("installed SDK cannot establish the sealed workspace boundary") from exc
+
+    def _thread_config(self) -> JsonObject | None:
+        policy = self.config.sandbox_policy
+        return policy.thread_config if policy is not None else None
 
     @property
     def sdk_version(self) -> str:
@@ -344,6 +516,7 @@ class CodexSdkAdapter:
                 model=self.config.model,
                 sandbox=_wire_sandbox(self._sdk, self.config.sandbox),
                 ephemeral=self.config.ephemeral,
+                config=self._thread_config(),
             )
             identity = _identity(raw_thread)
         except UnsupportedCapability:
@@ -369,6 +542,7 @@ class CodexSdkAdapter:
                 cwd=str(self.config.cwd) if self.config.cwd is not None else None,
                 model=self.config.model,
                 sandbox=_wire_sandbox(self._sdk, self.config.sandbox),
+                config=self._thread_config(),
             )
             resumed = _identity(raw_thread)
         except UnsupportedCapability:

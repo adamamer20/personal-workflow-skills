@@ -12,11 +12,12 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
 from .artifacts import write_owned_artifact
-from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig
+from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, SdkSandboxPolicy
 from .domain import (
     ControllerCheckpoint,
     ExecutionCapsule,
@@ -83,6 +84,141 @@ def _canonical_json(value: object) -> bytes:
 
 def _digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+_GIT_AUTHORITY_MAX_FILES = 4096
+_GIT_AUTHORITY_MAX_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class GitAuthoritySnapshot:
+    """Bounded digest of the stable Git authority surface for one worktree."""
+
+    details: JsonObject
+    sha256: str
+
+
+def _bounded_command(workspace: Path, arguments: tuple[str, ...]) -> bytes:
+    try:
+        result = subprocess.run(
+            arguments,
+            cwd=workspace,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ControllerError("unable to inspect bounded Git authority") from exc
+    if result.returncode != 0 or len(result.stdout) > _GIT_AUTHORITY_MAX_BYTES:
+        raise ControllerError("bounded Git authority command failed or exceeded its byte limit")
+    return result.stdout
+
+
+def _stable_git_tree_digest(paths: tuple[Path, ...]) -> tuple[str, int, int]:
+    """Hash selected stable metadata, excluding volatile lock files."""
+
+    digest = hashlib.sha256()
+    files = 0
+    total_bytes = 0
+    entries: list[tuple[str, Path]] = []
+    for root in paths:
+        if not root.exists():
+            entries.append((os.fspath(root), root))
+        elif root.is_dir():
+            if stat.S_ISLNK(os.lstat(root).st_mode):
+                raise ControllerError("Git authority root is an indirect path")
+            for current, directories, names in os.walk(root, followlinks=False):
+                for name in directories:
+                    metadata = os.lstat(Path(current) / name)
+                    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                        raise ControllerError("Git authority directory tree contains an indirect path")
+                directories[:] = sorted(name for name in directories if not name.endswith(".lock"))
+                for name in sorted(item for item in names if not item.endswith(".lock")):
+                    path = Path(current) / name
+                    entries.append((os.fspath(path), path))
+        else:
+            entries.append((os.fspath(root), root))
+    for label, path in sorted(entries):
+        digest.update(label.encode())
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            digest.update(b"\0missing\0")
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ControllerError(f"Git authority path is not a regular file: {path}")
+        files += 1
+        total_bytes += metadata.st_size
+        if files > _GIT_AUTHORITY_MAX_FILES or total_bytes > _GIT_AUTHORITY_MAX_BYTES:
+            raise ControllerError("stable Git authority surface exceeds its bounded snapshot limits")
+        digest.update(path.read_bytes())
+    return digest.hexdigest(), files, total_bytes
+
+
+def git_authority_snapshot(workspace: Path) -> GitAuthoritySnapshot:
+    """Capture refs, reflogs, index, configuration, and worktree operation state."""
+
+    def git_path(name: str) -> Path:
+        output = _bounded_command(
+            workspace,
+            ("git", "rev-parse", "--path-format=absolute", "--git-path", name),
+        )
+        return Path(os.fsdecode(output).strip()).resolve()
+
+    git_dir = Path(
+        os.fsdecode(
+            _bounded_command(workspace, ("git", "rev-parse", "--path-format=absolute", "--absolute-git-dir"))
+        ).strip()
+    ).resolve()
+    common_dir = Path(
+        os.fsdecode(
+            _bounded_command(workspace, ("git", "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        ).strip()
+    ).resolve()
+    head_oid = os.fsdecode(_bounded_command(workspace, ("git", "rev-parse", "--verify", "HEAD"))).strip()
+    branch = os.fsdecode(_bounded_command(workspace, ("git", "symbolic-ref", "--quiet", "--short", "HEAD"))).strip()
+    refs = _bounded_command(
+        workspace,
+        ("git", "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)"),
+    )
+    selected = tuple(
+        dict.fromkeys(
+            (
+                common_dir / "config",
+                common_dir / "config.worktree",
+                common_dir / "packed-refs",
+                common_dir / "shallow",
+                common_dir / "refs",
+                common_dir / "logs" / "refs",
+                git_dir / "HEAD",
+                git_dir / "ORIG_HEAD",
+                git_dir / "MERGE_HEAD",
+                git_dir / "CHERRY_PICK_HEAD",
+                git_dir / "REVERT_HEAD",
+                git_dir / "BISECT_HEAD",
+                git_dir / "index",
+                git_dir / "config.worktree",
+                git_dir / "logs" / "HEAD",
+                git_dir / "rebase-apply",
+                git_dir / "rebase-merge",
+                git_dir / "sequencer",
+            )
+        )
+    )
+    metadata_sha256, file_count, byte_count = _stable_git_tree_digest(selected)
+    details: JsonObject = {
+        "schema": "codex-flow/git-authority/v1",
+        "head_oid": head_oid,
+        "branch": branch,
+        "refs_sha256": _digest_bytes(refs),
+        "stable_metadata_sha256": metadata_sha256,
+        "stable_file_count": file_count,
+        "stable_byte_count": byte_count,
+        "git_dir": os.fspath(git_dir),
+        "git_common_dir": os.fspath(common_dir),
+        "index_path": os.fspath(git_path("index")),
+    }
+    return GitAuthoritySnapshot(details, _digest_bytes(_canonical_json(details)))
 
 
 def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
@@ -304,7 +440,7 @@ class Controller:
         self,
         state_root: Path,
         *,
-        adapter_factory: AdapterFactory = _adapter_factory,
+        _trusted_test_adapter_factory: AdapterFactory | None = None,
         worktrees: WorktreeManager | None = None,
         fault_injector: ControllerFaultInjector | None = None,
     ) -> None:
@@ -319,7 +455,9 @@ class Controller:
         self.state_root = bound_root
         self.state_dir = self.state_root / ".codex-flow"
         self.ledger = Ledger(self.state_dir / "workflow.db")
-        self._adapter_factory = adapter_factory
+        # In-process adapter injection is a trusted hermetic-test seam. The
+        # production constructor always resolves the sealed SDK child route.
+        self._adapter_factory = _trusted_test_adapter_factory or _adapter_factory
         self._worktrees = worktrees or WorktreeManager()
         self._fault_injector = fault_injector
         self._local_lock = threading.Lock()
@@ -432,6 +570,52 @@ class Controller:
         if result.returncode != 0:
             raise ControllerError(f"unable to inspect Git workspace: {' '.join(arguments)}")
         return result.stdout
+
+    def _sandbox_policy(self, capsule: ExecutionCapsule) -> tuple[SdkSandboxPolicy, str]:
+        git_dir = Path(
+            self._git_output(capsule.workspace_path, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
+        ).resolve()
+        common_dir = Path(
+            self._git_output(capsule.workspace_path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        ).resolve()
+        dot_git = capsule.workspace_path / ".git"
+        protected = tuple(capsule.workspace_path / path for path in capsule.protected_paths)
+        workspace_device = os.stat(capsule.workspace_path).st_dev
+        for path in protected:
+            self._assert_safe_tree(path, workspace_device)
+        read_only = tuple(
+            sorted(
+                {
+                    self.state_dir.resolve(),
+                    git_dir,
+                    common_dir,
+                    *(path.resolve() for path in protected),
+                    *((dot_git.resolve(),) if dot_git.exists() else ()),
+                },
+                key=os.fspath,
+            )
+        )
+        runtime_root = self.state_dir / "sdk-runtime" / str(capsule.run_id) / str(capsule.milestone_id)
+        global_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
+        policy = SdkSandboxPolicy(
+            capsule.workspace_path,
+            read_only,
+            runtime_root / "home",
+            global_home / "auth.json",
+        )
+        facts: JsonObject = {
+            "schema": "codex-flow/sdk-sandbox-policy/v1",
+            "workspace": os.fspath(policy.workspace),
+            "host_root": "read_only",
+            "read_only_paths": [os.fspath(path) for path in policy.read_only_paths],
+            "runtime_home_source": os.fspath(policy.runtime_home),
+            "runtime_home_mount": os.fspath(policy.runtime_mount),
+            "runtime_tmp": os.fspath(policy.workspace),
+            "auth_source": os.fspath(policy.auth_source),
+            "thread_config": policy.thread_config,
+            "launcher": os.fspath(policy.bubblewrap),
+        }
+        return policy, _digest_bytes(_canonical_json(facts))
 
     def _committed_workspace_paths(self, capsule: ExecutionCapsule) -> frozenset[str]:
         """Return every path touched by every commit after the capsule base.
@@ -572,6 +756,8 @@ class Controller:
             raise ControllerError("controller state root is not a real directory")
         snapshot: dict[str, str] = {}
         for current, directories, files in os.walk(internal, followlinks=False):
+            if Path(current) == internal:
+                directories[:] = [name for name in directories if name != "sdk-runtime"]
             for name in sorted((*directories, *files)):
                 path = Path(current) / name
                 relative = str(path.relative_to(root))
@@ -635,12 +821,15 @@ class Controller:
         if current_digest != record.protected_before_sha256:
             raise ControllerError("protected paths changed between plan and start")
         self.ledger.acquire_workspace_lease(capsule)
+        sandbox_policy, sandbox_policy_sha256 = self._sandbox_policy(capsule)
+        self.ledger.record_sandbox_policy(capsule.run_id, capsule.milestone_id, sandbox_policy_sha256)
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
                 capsule.reasoning_effort,
                 sandbox=Sandbox.WORKSPACE_WRITE,
                 cwd=capsule.workspace_path,
+                sandbox_policy=sandbox_policy,
             )
         )
         try:
@@ -681,12 +870,15 @@ class Controller:
         self._assert_protected_clean(capsule)
         self._assert_workspace_history(capsule)
         self.ledger.acquire_workspace_lease(capsule)
+        sandbox_policy, sandbox_policy_sha256 = self._sandbox_policy(capsule)
+        self.ledger.record_sandbox_policy(capsule.run_id, capsule.milestone_id, sandbox_policy_sha256)
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
                 capsule.reasoning_effort,
                 sandbox=Sandbox.WORKSPACE_WRITE,
                 cwd=capsule.workspace_path,
+                sandbox_policy=sandbox_policy,
             )
         )
         try:
@@ -705,7 +897,14 @@ class Controller:
         if record.turn_id is None and record.turn_output == {"__controller_checkpoint": "turn_starting"}:
             raise UncertainTurn("SDK turn crossed the external-call boundary without a durable response")
         controller_state_error = ""
+        integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
         if record.turn_id is None:
+            git_before = git_authority_snapshot(capsule.workspace_path)
+            integrity = self.ledger.record_git_authority_before(
+                capsule.run_id,
+                capsule.milestone_id,
+                git_before.sha256,
+            )
             self.ledger.record_turn_starting(capsule.run_id, capsule.milestone_id)
             controller_state_before = self._controller_tree_snapshot(self.state_root)
             self._fault("before_sdk_turn")
@@ -729,6 +928,17 @@ class Controller:
             # never persist the platform exception text.
             protected_after = record.protected_before_sha256
             protected_digest_error = True
+        git_authority_error = False
+        try:
+            git_after = git_authority_snapshot(capsule.workspace_path)
+        except Exception:
+            git_after_sha256 = integrity.git_authority_before_sha256 or ("0" * 64)
+            git_authority_error = True
+        else:
+            git_after_sha256 = git_after.sha256
+        git_authority_changed = (
+            integrity.git_authority_before_sha256 is None or git_after_sha256 != integrity.git_authority_before_sha256
+        )
         result: JsonObject = turn_output
         if validation.error_code is ValidationFailureCode.EXECUTABLE_UNAVAILABLE:
             result = {"status": "failed", "reason": "validation_executable_unavailable"}
@@ -769,10 +979,21 @@ class Controller:
                 ValidationFailureCode.INTEGRITY_FAILURE,
             )
             result = {"status": "failed", "reason": "protected_paths_integrity_failure"}
-        elif protected_after != record.protected_before_sha256 or not mutation_scope_valid or controller_state_error:
+        elif (
+            protected_after != record.protected_before_sha256
+            or not mutation_scope_valid
+            or controller_state_error
+            or git_authority_error
+            or git_authority_changed
+        ):
             failure_code = (
                 ValidationFailureCode.INTEGRITY_FAILURE
-                if controller_state_error or protected_after != record.protected_before_sha256
+                if (
+                    controller_state_error
+                    or protected_after != record.protected_before_sha256
+                    or git_authority_error
+                    or git_authority_changed
+                )
                 else validation.error_code
             )
             validation = ValidationObservation(
@@ -784,36 +1005,36 @@ class Controller:
                 validation.duration_seconds,
                 failure_code,
             )
-            result = {
-                "status": "failed",
-                "reason": (
-                    "protected_paths_changed"
-                    if protected_after != record.protected_before_sha256
-                    else "controller_state_mutated"
-                    if controller_state_error
-                    else (
-                        "workspace_integrity_failure"
-                        if scope_error == "workspace_integrity_failure"
-                        else (
-                            "branch_or_history_changed"
-                            if scope_error.startswith(
-                                (
-                                    "workspace branch",
-                                    "workspace history",
-                                    "unable to inspect Git workspace: symbolic-ref",
-                                )
-                            )
-                            else "mutation_outside_owned_paths"
+            if protected_after != record.protected_before_sha256:
+                integrity_reason = "protected_paths_changed"
+            elif controller_state_error:
+                integrity_reason = "controller_state_mutated"
+            elif not mutation_scope_valid:
+                integrity_reason = (
+                    "workspace_integrity_failure"
+                    if scope_error == "workspace_integrity_failure"
+                    else "branch_or_history_changed"
+                    if scope_error.startswith(
+                        (
+                            "workspace branch",
+                            "workspace history",
+                            "unable to inspect Git workspace: symbolic-ref",
                         )
                     )
-                ),
-            }
+                    else "mutation_outside_owned_paths"
+                )
+            elif git_authority_error:
+                integrity_reason = "git_authority_integrity_failure"
+            else:
+                integrity_reason = "git_authority_changed"
+            result = {"status": "failed", "reason": integrity_reason}
         terminal = self.ledger.record_terminal_execution(
             capsule.run_id,
             capsule.milestone_id,
             result=result,
             validation=validation,
             protected_after_sha256=protected_after,
+            git_authority_after_sha256=git_after_sha256,
         )
         self._fault("before_projection")
         self._project_execution(terminal)
@@ -841,6 +1062,10 @@ class Controller:
 
     def _project_execution(self, record: ExecutionRecord) -> None:
         target = self.state_dir / "runs" / str(record.run_id) / "execution.json"
+        try:
+            integrity = self.ledger.get_execution_integrity(record.run_id, record.milestone_id)
+        except KeyError:
+            integrity = None
         payload = {
             "run_id": str(record.run_id),
             "milestone_id": str(record.milestone_id),
@@ -850,6 +1075,10 @@ class Controller:
             "thread_id": record.thread_id.id if record.thread_id else None,
             "turn_id": record.turn_id,
             "result": record.result,
+            "integrity_provenance": integrity.provenance if integrity else None,
+            "sandbox_policy_sha256": integrity.sandbox_policy_sha256 if integrity else None,
+            "git_authority_before_sha256": integrity.git_authority_before_sha256 if integrity else None,
+            "git_authority_after_sha256": integrity.git_authority_after_sha256 if integrity else None,
             "validation": (
                 {
                     "argv": list(record.validation.argv),

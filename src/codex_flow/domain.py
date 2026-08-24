@@ -680,3 +680,15 @@ class ExecutionRecord:
     protected_after_sha256: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionIntegrityRecord:
+    run_id: RunId
+    milestone_id: MilestoneId
+    provenance: str
+    sandbox_policy_sha256: str | None
+    git_authority_before_sha256: str | None
+    git_authority_after_sha256: str | None
+    created_at: str
+    updated_at: str

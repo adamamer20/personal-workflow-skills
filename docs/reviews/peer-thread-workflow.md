@@ -683,21 +683,32 @@ Successor: H4.
 
 ### Completion evidence
 
-Status: complete for the SDK-first controller lane. The H3 repair closes the
-trusted same-UID review boundary for ignored and committed mutation scope,
-repository-bound ledgers, physical worktree toplevels, single nonterminal
-workspace ownership, durable uncertain-turn recovery, atomic identity/terminal/
-cancellation transitions, base-SHA protected baselines, strict capsule JSON,
-typed validation launch failures, and structured terminal outcomes.
+Status: deterministic integrity repair complete; promotion is externally
+blocked and H4 remains blocked. The repair seals the production Python SDK
+child route inside a controller-owned Bubblewrap mount boundary, keeps the
+leased workspace as the only executor-writable host root, overlays protected,
+controller-state, and Git-dir paths read-only, and makes in-process adapter
+injection an explicitly trusted hermetic-test seam rather than a production
+containment claim. A bounded durable Git-authority snapshot now covers HEAD and
+branch identity, refs, reflogs, index, repository/worktree configuration, and
+selected stable operation metadata with explicit file/byte limits. Schema v4
+persists the sandbox-policy digest and Git-authority before/after digests across
+the post-turn crash boundary.
 
-`make check` passed with 104 tests, Ruff, the cross-project validator,
-compilation, and pre-commit; `git diff --check` is clean. The final opt-in real
-sentinel is retained at `docs/reviews/evidence/h3-controller-sentinel.json` and
-records a fresh-process crash worker, fresh-process resume worker, one dispatch,
-one reused SDK identity/workspace, 43 ordered SDK lifecycle events, durable
-result before projection, explicit before/after HEAD and branch, commit counts
-and created-commit fact, changed path `result.txt`, diff facts, and protected-
-path digest parity. No external provider or release gate remains open for H3.
+Focused H2/H3/SDK tests pass 86/86 and `make check` passes 109 tests, Ruff, the
+cross-project validator, compilation, and pre-commit. Hermetic regressions deny
+direct, symlink, and hardlink repository-external writes while allowing the
+leased-workspace edit; they also deny protected, controller-state, and
+`.git/config` writes and detect commit-then-hard-reset, branch, config, index,
+and committed-history mutations. The retained evidence at
+`docs/reviews/evidence/h3-controller-sentinel.json` preserves the prior live
+baseline and truthfully marks the integrity rerun `external_blocked`: after two
+launcher defects were diagnosed and repaired, the final actual-SDK attempt
+failed before an executor turn with `usage_limit_exceeded`. The repaired live
+route therefore has no fabricated negative-write proof. The smallest remaining
+prerequisite is restored Codex account credit (or the reported usage reset),
+followed by one unchanged-model opt-in H3 sentinel rerun and inspection of its
+explicit denied external-write plus Git-authority before/after evidence.
 
 ## Milestone H4 — Add decisions, review, repair, and limits
 
@@ -997,6 +1008,19 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   `thread_resume`, unchanged protected paths, and a durable terminal result.
   Hermetic tests and repository gates are green; H3 promotion remains pending
   independent objective and architecture review of the exact candidate.
+- 2026-08-24: the second Luna review cycle reopened two P1 mutation-containment
+  classes: repository-external writes were invisible to Git-only audits, and
+  commit-then-reset plus Git-dir configuration mutations could erase their
+  final-tree evidence. A fresh Sol Medium continuation sealed the production
+  SDK child with a bounded OS mount policy, added durable schema-v4 sandbox and
+  Git-authority facts, and passed 86 focused tests plus the 109-test aggregate
+  gate. The first live repair attempt exposed an unintended writable synthetic
+  tmp root and the second exposed a DNS break caused by hiding `/run`; both
+  launcher defects were repaired and regression-covered. The final actual-SDK
+  attempt reached the provider but returned `usage_limit_exceeded` before the
+  executor turn. H3 promotion and H4 remain blocked on one unchanged-model live
+  sentinel rerun after credit/reset; no denied-write evidence is inferred from
+  the deterministic probe or the absence of an external file change.
 
 ## Next execution
 
@@ -1012,14 +1036,15 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: implementation complete in the existing semantic program
-workspace; independent promotion review is next. Review uses the saved project
-in `local` mode and inspects this exact worktree by absolute path, without
-allocating another Git worktree or mutating the candidate.
+Dispatch status: integrity repair implementation and deterministic validation
+are complete in the existing semantic program workspace. Promotion is
+externally blocked by the local Codex account usage limit. Reuse this exact
+workspace; do not allocate another worktree or change model/transport.
 
-Owned scope, protected surfaces, contracts, acceptance, and promotion gates are
-the H3 section above. Implement `WorktreeManager` with current/existing/managed
-modes and sibling semantic roots, extend the sole SDK adapter and H2 ledger,
-Review the full `6a2ac17..HEAD` H3 range, rerun the focused and repository gates,
-and verify the retained real sentinel. Promote only with zero open P0/P1; H4
-remains blocked until then.
+Next action: after credit is restored or the reported reset occurs, rerun the
+opt-in real H3 sentinel with `gpt-5.6-luna`/`medium` and no code/config changes.
+Promote only if it uses the actual Python SDK route, explicitly records the
+denied bounded external-write attempt, completes the allowed workspace edit,
+and retains matching Git-authority before/after evidence. Then perform the
+remaining exact-range promotion decision with zero open P0/P1. H4 remains
+blocked until those gates close.
