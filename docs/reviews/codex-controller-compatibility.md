@@ -86,10 +86,23 @@ artifacts, evidence, errors, or private runtime files. Conflicting environment
 semantics fail closed. Existing native references such as provider `env_key`,
 MCP `bearer_token_env_var`, and `env_http_headers` remain references.
 
+`CODEX_HOME` is the one controller-reserved stdio collision with a supported
+source-bound meaning. When a literal MCP environment entry uses that name, the
+projection replaces only the reference with a deterministic
+`CODEX_FLOW_MCP_COLLISION_<digest>` alias and retains the value only in the
+ephemeral child environment. The pinned app-server has no environment-alias
+map, so the projected stdio command uses a fixed `/bin/sh` argv shim to export
+the alias back to `CODEX_HOME` immediately before `exec`; the SDK/app-server
+process continues to receive the controller-private `CODEX_HOME`. Provider-key
+collisions and cross-source/cross-server duplicates still fail closed. The
+active three-server `codex-lb` profile and the pinned runtime config diagnostic
+exercise this path without a provider turn.
+
 Execution output schemas use one strict recursive predicate at capsule
-construction/deserialization and again after the SDK response. Capsules
-recursively detach and freeze the schema tree, and `plan` repeats validation
-and canonicalization before any durable write. The root and
+construction/deserialization and again after the SDK response. Capsules take
+one caller-controlled Mapping/Sequence snapshot into owned immutable JSON data
+before validating that snapshot, and `plan` independently repeats
+canonicalization/validation before any durable write. The root and
 every nested object must explicitly declare `properties`, list every property
 exactly once in `required`, and set `additionalProperties = false`; arrays must
 declare one explicit item schema; scalars accept only their type. Unsupported
@@ -97,7 +110,8 @@ keywords, optional or duplicate requirements, undeclared/missing output, and
 open or itemless containers fail closed. Schema/output depth is limited to 32,
 each object to 128 properties, a schema/output to 1,024 total properties, each
 array to 1,024 items, property names to 256 UTF-8 bytes, and structured output
-to 1 MiB. SDK structured output uses one strict JSON decoder that rejects
+to 1 MiB. SDK structured output uses one strict JSON decoder that first decodes
+bytes as strict UTF-8 without a BOM, then rejects
 non-standard numeric constants, non-finite exponents, duplicate object keys at
 every depth, and unpaired Unicode surrogates. All controller JSON
 serialization rejects non-finite values defensively before SQLite or artifact

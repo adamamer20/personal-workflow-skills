@@ -1249,20 +1249,22 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   unchanged. Full-H3 self-review found zero open P0/P1. H4 remains blocked
   pending fresh independent objective and architecture promotion review of
   this exact repaired candidate.
-- 2026-08-25: repair closes H3-ARCH-006C, H3-ARCH-007A, and H3-ARCH-007B.
-  Every literal MCP stdio environment value, including arbitrary names such as
-  `GITHUB_PAT`, `CI_JOB_JWT`, `DATABASE_URL`, and innocuous settings, is now a
-  process-only `env_vars` reference; duplicate, case/separator-normalized, and
-  cross-source names fail closed before projection. The strict structured-output
-  decoder rejects non-standard constants, non-finite exponents, duplicate keys,
-  and unpaired Unicode surrogates, while all JSON serializers reject non-finite
-  values. `ExecutionCapsule` recursively detaches/freezes schemas and `plan`
-  revalidates/canonicalizes before any ledger write. Adversarial environment,
+- 2026-08-25: implementation `ca151fe` repairs the H3-ARCH-006C, H3-ARCH-007A,
+  and H3-ARCH-007B candidate gaps on top of repair parent `3efa338`. Literal
+  stdio `CODEX_HOME` is now a deterministic process-only collision alias with
+  a fixed argv shim that restores the source-bound name only in the MCP child;
+  the SDK/app-server keeps its private runtime home and provider/cross-source
+  conflicts remain typed and fail closed. The strict decoder explicitly
+  decodes byte inputs as UTF-8 without BOM before parsing, and all capsule,
+  result, event, projection, and adapter JSON paths use that canonical loader.
+  Capsules detach each caller Mapping/Sequence once into owned immutable data
+  before validation, and `plan` independently canonicalizes before durable
+  writes. Adversarial environment, pinned-runtime parser, child-delivery,
   decoder, durability, mutation, digest, and close/reopen coverage is included;
   the retained real sentinel was not rerun because the SDK/provider/model,
   permission, and resume transport route remain unchanged. H3 remains blocked
-  pending fresh independent objective and architecture promotion review of the
-  exact repair candidate; H4 remains blocked.
+  pending fresh independent objective and architecture promotion review; H4
+  remains blocked.
 
 ## Next execution
 
@@ -1278,14 +1280,15 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: the H3-ARCH-006C, H3-ARCH-007A, and H3-ARCH-007B repairs are
-implemented in `40644dc` on top of the prior H3 architecture repairs;
-deterministic gates and the retained authorized real sentinel are green in the
-existing semantic workspace. The repaired H3 candidate is ready for fresh
-independent promotion review.
+Dispatch status: H3 implementation commit `ca151fe` closes H3-ARCH-006C,
+H3-ARCH-007A, and H3-ARCH-007B on repair parent `3efa338`; this plan and the
+compatibility contract are updated in subsequent documentation commits.
+Deterministic gates and the retained authorized real sentinel are green in the
+existing semantic workspace. The repaired H3 implementation candidate is ready
+for fresh independent promotion review.
 
-Next action: independently review exact post-repair H3 HEAD `40644dc` for
-objective and architecture promotion with zero open P0/P1. The retained real evidence
+Next action: independently review exact repaired implementation HEAD `ca151fe`
+for objective and architecture promotion with zero open P0/P1. The retained real evidence
 proves the actual Python SDK route through `codex-lb`, sanitized native
 permission/profile parity, the allowed workspace edit and durable resume,
 unchanged Git authority, and unchanged global Codex config bytes. External-
