@@ -31,6 +31,7 @@ from codex_flow.ledger import (
     _SCHEMA_IDENTITY,
     _STATES_SQL,
     _V2_TABLE_DDL,
+    CURRENT_SCHEMA_VERSION,
     CorruptSchemaError,
     DispatchConflict,
     InvalidTransition,
@@ -171,12 +172,12 @@ class LedgerTests(unittest.TestCase):
             with TemporaryDirectory() as directory:
                 ledger = self.make_ledger(directory)
                 ledger.claim_dispatch("run-1", "m-1", "executor", 1)
-                ledger.transition("run-1", "m-1", WorkflowState.RUNNING)
-                ledger.transition("run-1", "m-1", WorkflowState.COMPLETED)
-                ledger.transition("run-1", "m-1", WorkflowState.REVIEWING)
-                ledger.transition("run-1", "m-1", WorkflowState.ACCEPTED)
+                ledger.transition("run-1", "m-1", WorkflowState.RUNNING, expected_state=WorkflowState.STARTING)
+                ledger.transition("run-1", "m-1", WorkflowState.COMPLETED, expected_state=WorkflowState.RUNNING)
+                ledger.transition("run-1", "m-1", WorkflowState.REVIEWING, expected_state=WorkflowState.COMPLETED)
+                ledger.transition("run-1", "m-1", WorkflowState.ACCEPTED, expected_state=WorkflowState.REVIEWING)
                 with self.assertRaises(InvalidTransition):
-                    ledger.transition("run-1", "m-1", WorkflowState.RUNNING)
+                    ledger.transition("run-1", "m-1", WorkflowState.RUNNING, expected_state=WorkflowState.ACCEPTED)
         finally:
             domain_module.ALLOWED_TRANSITIONS = original
         self.assertFalse(hasattr(domain_module, "StateMachine"))
@@ -258,7 +259,11 @@ class LedgerTests(unittest.TestCase):
                 for target in WorkflowState:
                     run_id = f"pair-{pair_index}"
                     prepare(ledger, run_id, source)
-                    if target in ALLOWED_TRANSITIONS[source]:
+                    if source is WorkflowState.PLANNED and target is WorkflowState.STARTING:
+                        claim = ledger.claim_dispatch(run_id, "m", "executor", 1)
+                        self.assertEqual(claim.run_id, run_id)
+                        self.assertEqual(ledger.current_state(run_id, "m"), target)
+                    elif target in ALLOWED_TRANSITIONS[source]:
                         ledger.transition(run_id, "m", target, expected_state=source)
                     else:
                         with self.assertRaises(InvalidTransition):
@@ -351,6 +356,56 @@ class LedgerTests(unittest.TestCase):
                 self.assertEqual(ledger.snapshot("r"), before)
             ledger.reopen()
             self.assertEqual(ledger.snapshot("r"), before)
+
+    def test_transition_requires_explicit_stale_writer_token(self) -> None:
+        with TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "workflow.db")
+            ledger.create_run("r")
+            ledger.create_milestone("r", "m")
+            before = ledger.snapshot("r")
+            with self.assertRaises(TypeError):
+                ledger.transition("r", "m", WorkflowState.BLOCKED)  # type: ignore[call-arg]
+            with self.assertRaises(ValueError):
+                ledger.transition(
+                    "r",
+                    "m",
+                    WorkflowState.BLOCKED,
+                    expected_state=None,  # type: ignore[arg-type]
+                )
+            self.assertEqual(ledger.snapshot("r"), before)
+
+    def test_starting_and_execution_history_require_dispatch_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            ledger = Ledger(path)
+            ledger.create_run("r")
+            ledger.create_milestone("r", "m")
+            before = ledger.snapshot("r")
+            with self.assertRaisesRegex(InvalidTransition, "claim_dispatch"):
+                ledger.transition("r", "m", WorkflowState.STARTING, expected_state=WorkflowState.PLANNED)
+            self.assertEqual(ledger.snapshot("r"), before)
+            ledger.close()
+
+            connection = sqlite3.connect(path)
+            transitions = (
+                (1, "PLANNED", "STARTING"),
+                (2, "STARTING", "RUNNING"),
+                (3, "RUNNING", "COMPLETED"),
+                (4, "COMPLETED", "REVIEWING"),
+                (5, "REVIEWING", "ACCEPTED"),
+            )
+            connection.executemany(
+                "INSERT INTO events(event_id, run_id, milestone_id, sequence, from_state, to_state, "
+                "event_type, occurred_at) VALUES ('r/m/' || ?, 'r', 'm', ?, ?, ?, 'state_transition', 't')",
+                ((sequence, sequence, source, target) for sequence, source, target in transitions),
+            )
+            connection.execute(
+                "UPDATE milestones SET current_state = 'ACCEPTED' WHERE run_id = 'r' AND milestone_id = 'm'"
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(CorruptSchemaError, "requires a dispatch claim"):
+                Ledger(path)
 
     def test_reopen_rejects_database_and_ancestor_symlink_swaps(self) -> None:
         with TemporaryDirectory() as directory:
@@ -651,6 +706,63 @@ class LedgerTests(unittest.TestCase):
             with self.assertRaises(RecordNotFound):
                 ledger.get_run("ghost")
             self.assertEqual(ledger.create_run("good").run_id, "good")
+
+    def test_temporary_metadata_trigger_rolls_back_and_reopens(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            armed = False
+            ledger: Ledger
+
+            def add_trigger(stage: str) -> None:
+                if stage == "after_authority_validation" and armed:
+                    ledger._db().execute(
+                        "CREATE TEMP TRIGGER corrupt_version AFTER INSERT ON runs "
+                        "BEGIN UPDATE schema_meta SET value = '999' WHERE key = 'schema_version'; END"
+                    )
+
+            ledger = Ledger(path, fault_injector=add_trigger)
+            armed = True
+            with self.assertRaises(CorruptSchemaError):
+                ledger.create_run("ghost")
+            armed = False
+            self.assertEqual(ledger.schema_version, CURRENT_SCHEMA_VERSION)
+            self.assertEqual(
+                ledger._db()
+                .execute("SELECT COUNT(*) FROM sqlite_temp_master WHERE substr(name, 1, 7) != 'sqlite_'")
+                .fetchone()[0],
+                0,
+            )
+            ledger.reopen()
+            self.assertEqual(ledger.schema_version, CURRENT_SCHEMA_VERSION)
+            with self.assertRaises(RecordNotFound):
+                ledger.get_run("ghost")
+            self.assertEqual(ledger.create_run("safe").run_id, "safe")
+
+    def test_temporary_schema_object_alone_rolls_back_write(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            armed = False
+            ledger: Ledger
+
+            def add_view(stage: str) -> None:
+                if stage == "after_authority_validation" and armed:
+                    ledger._db().execute("CREATE TEMP VIEW extra AS SELECT run_id FROM runs")
+
+            ledger = Ledger(path, fault_injector=add_view)
+            armed = True
+            with self.assertRaisesRegex(CorruptSchemaError, "temporary schema objects"):
+                ledger.create_run("ghost")
+            armed = False
+            with self.assertRaises(RecordNotFound):
+                ledger.get_run("ghost")
+            self.assertEqual(
+                ledger._db()
+                .execute("SELECT COUNT(*) FROM sqlite_temp_master WHERE substr(name, 1, 7) != 'sqlite_'")
+                .fetchone()[0],
+                0,
+            )
+            ledger.reopen()
+            self.assertEqual(ledger.create_run("safe").run_id, "safe")
 
     def test_trigger_added_after_open_blocks_the_next_mutator(self) -> None:
         with TemporaryDirectory() as directory:

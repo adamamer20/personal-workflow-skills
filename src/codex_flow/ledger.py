@@ -166,10 +166,15 @@ def _inventory_fingerprint(inventory: tuple[SchemaObject, ...]) -> str:
     return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
 
 
-def _schema_inventory(connection: sqlite3.Connection) -> tuple[SchemaObject, ...]:
-    rows = connection.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE substr(name, 1, 7) != 'sqlite_' ORDER BY type, name"
-    ).fetchall()
+def _schema_inventory(connection: sqlite3.Connection, *, temporary: bool = False) -> tuple[SchemaObject, ...]:
+    statement = (
+        "SELECT type, name, tbl_name, sql FROM sqlite_temp_master "
+        "WHERE substr(name, 1, 7) != 'sqlite_' ORDER BY type, name"
+        if temporary
+        else "SELECT type, name, tbl_name, sql FROM sqlite_master "
+        "WHERE substr(name, 1, 7) != 'sqlite_' ORDER BY type, name"
+    )
+    rows = connection.execute(statement).fetchall()
     return tuple(
         (
             str(row[0]),
@@ -553,28 +558,37 @@ class Ledger:
             raise UnsupportedSchemaVersion(f"ledger schema {version} is newer than supported {CURRENT_SCHEMA_VERSION}")
         if version not in SUPPORTED_SCHEMA_VERSIONS:
             raise UnsupportedSchemaVersion(f"ledger schema {version} is unsupported")
-        metadata_keys = {
-            str(row[0]) for row in connection.execute("SELECT key FROM schema_meta ORDER BY key").fetchall()
-        }
-        if metadata_keys != {"schema_version", "migration_marker", "schema_identity"}:
-            raise CorruptSchemaError("schema metadata keys are not the owned v2 contract")
-        identity = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()
-        if identity is None or identity[0] != _SCHEMA_IDENTITIES[version]:
-            raise CorruptSchemaError("schema identity does not match its version")
-        marker = connection.execute("SELECT value FROM schema_meta WHERE key = 'migration_marker'").fetchone()
-        if marker is None and version == CURRENT_SCHEMA_VERSION:
-            raise CorruptSchemaError("migration marker is missing")
-        expected_markers = {"complete"} if version == CURRENT_SCHEMA_VERSION else {"complete", f"v{int(version)}"}
-        if marker is not None and marker[0] not in expected_markers:
-            raise CorruptSchemaError("invalid migration marker")
+        self._validate_schema_metadata(version)
         if version < CURRENT_SCHEMA_VERSION:
             self._migrate(version)
         with self._read_transaction():
+            self._validate_schema_metadata(CURRENT_SCHEMA_VERSION)
             self._validate_shape(CURRENT_SCHEMA_VERSION)
             try:
                 self._validate_rows()
             except ValueError as exc:
                 raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
+
+    def _validate_schema_metadata(self, expected_version: SchemaVersion) -> None:
+        version = self.schema_version
+        if version != expected_version:
+            raise CorruptSchemaError(
+                f"schema version changed during validation: expected {expected_version}, found {version}"
+            )
+        metadata_keys = {
+            str(row[0]) for row in self._db().execute("SELECT key FROM schema_meta ORDER BY key").fetchall()
+        }
+        if metadata_keys != {"schema_version", "migration_marker", "schema_identity"}:
+            raise CorruptSchemaError("schema metadata keys are not the owned v2 contract")
+        identity = self._db().execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()
+        if identity is None or identity[0] != _SCHEMA_IDENTITIES[version]:
+            raise CorruptSchemaError("schema identity does not match its version")
+        marker = self._db().execute("SELECT value FROM schema_meta WHERE key = 'migration_marker'").fetchone()
+        if marker is None and version == CURRENT_SCHEMA_VERSION:
+            raise CorruptSchemaError("migration marker is missing")
+        expected_markers = {"complete"} if version == CURRENT_SCHEMA_VERSION else {"complete", f"v{int(version)}"}
+        if marker is not None and marker[0] not in expected_markers:
+            raise CorruptSchemaError("invalid migration marker")
 
     def _create_schema(self) -> None:
         try:
@@ -598,6 +612,8 @@ class Ledger:
             self._ensure_schema()
 
     def _validate_shape(self, version: SchemaVersion) -> None:
+        if _schema_inventory(self._db(), temporary=True):
+            raise CorruptSchemaError("ledger connection has unexpected temporary schema objects")
         definitions = _V1_TABLE_DDL if version == SchemaVersion(1) else _V2_TABLE_DDL
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -774,6 +790,8 @@ class Ledger:
                 event.reason is not None and event.reason.code is ReasonCode.DISPATCH_CLAIMED
             ):
                 raise CorruptSchemaError("normal state transition carries dispatch authority")
+            elif event.from_state is WorkflowState.PLANNED and event.to_state is WorkflowState.STARTING:
+                raise CorruptSchemaError("PLANNED -> STARTING requires a dispatch claim event")
         if any(count != 1 for count in claim_counts.values()):
             raise CorruptSchemaError("every dispatch row must have exactly one matching claim event")
         for row in milestone_rows:
@@ -838,6 +856,7 @@ class Ledger:
         try:
             self._validate_live_identity()
             if validate_authority:
+                self._validate_schema_metadata(CURRENT_SCHEMA_VERSION)
                 self._validate_shape(CURRENT_SCHEMA_VERSION)
                 self._validate_rows()
                 self._fault("after_authority_validation")
@@ -845,6 +864,7 @@ class Ledger:
             self._fault("before_commit")
             self._validate_live_identity()
             if validate_authority:
+                self._validate_schema_metadata(CURRENT_SCHEMA_VERSION)
                 self._validate_shape(CURRENT_SCHEMA_VERSION)
                 self._validate_rows()
         except BaseException:
@@ -1128,7 +1148,7 @@ class Ledger:
         milestone_id: MilestoneId | str,
         to_state: WorkflowState | str,
         *,
-        expected_state: WorkflowState | str | None = None,
+        expected_state: WorkflowState | str,
         reason: WorkflowReason | ReasonCode | str | BaseException | None = None,
         event_type: str | None = None,
         data: Mapping[str, object] | None = None,
@@ -1143,7 +1163,7 @@ class Ledger:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
         target = coerce_state(to_state)
-        expected_value = coerce_state(expected_state) if expected_state is not None else None
+        expected_value = coerce_state(expected_state)
         normalized_reason = _reason(reason)
         if data is not None:
             _empty_object(data, field_name="event data")
@@ -1155,10 +1175,12 @@ class Ledger:
             raise ValueError("dispatch_claimed reason is reserved for claim_dispatch")
         with self._transaction():
             current = self.get_milestone(run, milestone)
-            if expected_value is not None and current.state is not expected_value:
+            if current.state is not expected_value:
                 raise StaleWriter(
                     f"stale milestone writer: expected {expected_value.value}, current is {current.state.value}"
                 )
+            if current.state is WorkflowState.PLANNED and target is WorkflowState.STARTING:
+                raise InvalidTransition("PLANNED -> STARTING is reserved for claim_dispatch")
             if not is_transition_allowed(current.state, target):
                 raise InvalidTransition(f"{current.state.value} -> {target.value} is not allowed")
             now = utc_now()
