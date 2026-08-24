@@ -716,9 +716,9 @@ installed-plugin and downstream-pin migration.
 
 Milestone: H2-R3S — bounded repair cycle 2 on rejected Sol candidate `a01596d`.
 
-Dispatch status: pending exactly one MESSAGE to the existing Sol Medium
-execution task `01a03327-44bd-7240-9120-dc6949c5c349` on host `local`; do not
-create a replacement or apply a model override.
+Dispatch status: delivered exactly once to existing Sol Medium execution task
+`01a03327-44bd-7240-9120-dc6949c5c349` on host `local`; do not poll, send a
+second repair message, create a replacement, or apply a model override.
 
 Resolved route: existing `model=gpt-5.6-sol`, `thinking=medium` execution owner;
 the MESSAGE operation resumes that task without native routing fields.
