@@ -19,6 +19,11 @@ from types import SimpleNamespace
 from typing import Any, Protocol, cast
 
 from ..domain import (
+    MAX_OUTPUT_ARRAY_ITEMS,
+    MAX_OUTPUT_OBJECT_PROPERTIES,
+    MAX_OUTPUT_SCHEMA_DEPTH,
+    MAX_OUTPUT_SCHEMA_PROPERTIES,
+    MAX_STRUCTURED_OUTPUT_BYTES,
     Capability,
     CapabilityObservation,
     CapabilityStatus,
@@ -270,15 +275,31 @@ def _type_matches(value: Any, expected: str) -> bool:
     }.get(expected, True)
 
 
-def _validate_decoded_schema(value: Any, schema: Mapping[str, Any], *, path: str = "output") -> None:
+def _validate_decoded_schema(
+    value: Any,
+    schema: Mapping[str, Any],
+    *,
+    path: str = "output",
+    depth: int = 1,
+    property_budget: list[int] | None = None,
+) -> None:
+    if depth > MAX_OUTPUT_SCHEMA_DEPTH:
+        raise TerminalFailureAfterIdentity("schema-bounded turn output exceeds the depth limit")
+    if property_budget is None:
+        property_budget = [MAX_OUTPUT_SCHEMA_PROPERTIES]
     expected = schema["type"]
     if not isinstance(expected, str) or not _type_matches(value, expected):
         raise TerminalFailureAfterIdentity(f"schema-bounded turn field {path!r} has the wrong JSON type")
     if expected == "object":
-        properties = schema.get("properties", {})
-        required = schema.get("required", [])
+        properties = schema["properties"]
+        required = schema["required"]
         if not isinstance(properties, Mapping) or not isinstance(required, list):
             raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed object schema")
+        if len(value) > MAX_OUTPUT_OBJECT_PROPERTIES:
+            raise TerminalFailureAfterIdentity("schema-bounded turn output exceeds the object property limit")
+        property_budget[0] -= len(value)
+        if property_budget[0] < 0:
+            raise TerminalFailureAfterIdentity("schema-bounded turn output exceeds the total property limit")
         missing = [name for name in required if name not in value]
         if missing:
             raise TerminalFailureAfterIdentity(f"schema-bounded turn omitted required fields: {', '.join(missing)}")
@@ -286,19 +307,32 @@ def _validate_decoded_schema(value: Any, schema: Mapping[str, Any], *, path: str
             if key in value:
                 if not isinstance(property_schema, Mapping):
                     raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed property schema")
-                _validate_decoded_schema(value[key], property_schema, path=f"{path}.{key}")
-        if schema.get("additionalProperties", True) is False:
-            unexpected = sorted(set(value) - set(properties))
-            if unexpected:
-                raise TerminalFailureAfterIdentity(
-                    f"schema-bounded turn emitted unexpected fields: {', '.join(unexpected)}"
+                _validate_decoded_schema(
+                    value[key],
+                    property_schema,
+                    path=f"{path}.{key}",
+                    depth=depth + 1,
+                    property_budget=property_budget,
                 )
-    elif expected == "array" and "items" in schema:
+        unexpected = sorted(set(value) - set(properties))
+        if unexpected:
+            raise TerminalFailureAfterIdentity(
+                f"schema-bounded turn emitted unexpected fields: {', '.join(unexpected)}"
+            )
+    elif expected == "array":
+        if len(value) > MAX_OUTPUT_ARRAY_ITEMS:
+            raise TerminalFailureAfterIdentity("schema-bounded turn output exceeds the array item limit")
         items = schema["items"]
         if not isinstance(items, Mapping):
             raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed array schema")
         for index, item in enumerate(value):
-            _validate_decoded_schema(item, items, path=f"{path}[{index}]")
+            _validate_decoded_schema(
+                item,
+                items,
+                path=f"{path}[{index}]",
+                depth=depth + 1,
+                property_budget=property_budget,
+            )
 
 
 def _decode_schema_output(response: str | None, schema: Schema | None) -> JsonObject | None:
@@ -310,9 +344,11 @@ def _decode_schema_output(response: str | None, schema: Schema | None) -> JsonOb
         raise TerminalFailureAfterIdentity("schema-bounded turn used a malformed output schema") from exc
     if not isinstance(response, str):
         raise TerminalFailureAfterIdentity("schema-bounded turn did not return a text response")
+    if len(response.encode("utf-8")) > MAX_STRUCTURED_OUTPUT_BYTES:
+        raise TerminalFailureAfterIdentity("schema-bounded turn output exceeds the byte limit")
     try:
         decoded = json.loads(response)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise TerminalFailureAfterIdentity("schema-bounded turn returned invalid JSON") from exc
     if not isinstance(decoded, dict):
         raise TerminalFailureAfterIdentity("schema-bounded turn returned a non-object JSON value")

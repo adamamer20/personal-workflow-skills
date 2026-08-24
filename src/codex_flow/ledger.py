@@ -1392,6 +1392,8 @@ class Ledger:
                         integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None
                     ):
                         raise CorruptSchemaError("controller execution lacks its workspace baseline authority")
+                    if integrity.provenance == "controller_v5" and integrity.git_authority_before_sha256 is None:
+                        raise CorruptSchemaError("controller execution lacks its pre-external Git authority")
                     if (
                         execution.status is ExecutionStatus.COMPLETED
                         and integrity.provenance == "controller_v5"
@@ -2113,6 +2115,7 @@ class Ledger:
         effective_permission: NativePermissionAuthority,
         workspace_baseline_head_sha: str,
         workspace_baseline: tuple[tuple[str, str], ...],
+        git_authority_before_sha256: str,
     ) -> ExecutionIntegrityRecord:
         run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
@@ -2122,6 +2125,7 @@ class Ledger:
         permission_sha256 = hashlib.sha256(permission_json.encode("utf-8")).hexdigest()
         baseline_head = _git_sha(workspace_baseline_head_sha, field_name="workspace baseline HEAD")
         baseline_json, baseline_sha256 = _encode_workspace_baseline(workspace_baseline)
+        git_authority = _sha256(git_authority_before_sha256, field_name="Git authority digest")
         now = utc_now()
         with self._transaction():
             execution = self.get_execution(run, milestone)
@@ -2147,6 +2151,7 @@ class Ledger:
                     or record.effective_permission != effective_permission
                     or record.workspace_baseline_head_sha != baseline_head
                     or record.workspace_baseline != workspace_baseline
+                    or record.git_authority_before_sha256 != git_authority
                 ):
                     raise StaleWriter("execution is already bound to a different native profile")
                 return record
@@ -2156,7 +2161,7 @@ class Ledger:
                 "workspace_baseline_head_sha, workspace_baseline_json, workspace_baseline_sha256, "
                 "workspace_terminal_head_sha, workspace_terminal_json, workspace_terminal_sha256, "
                 "turn_started_at, git_authority_before_sha256, git_authority_after_sha256, created_at, updated_at) "
-                "VALUES (?, ?, 'controller_v5', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)",
+                "VALUES (?, ?, 'controller_v5', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, NULL, ?, ?)",
                 (
                     str(run),
                     str(milestone),
@@ -2167,6 +2172,7 @@ class Ledger:
                     baseline_head,
                     baseline_json,
                     baseline_sha256,
+                    git_authority,
                     now,
                     now,
                 ),
@@ -2342,33 +2348,6 @@ class Ledger:
             self._reject_terminal_execution(execution)
             if execution.workspace_path != capsule.workspace_path:
                 raise WorkspaceLeaseConflict("durable execution selected a different workspace")
-            active_statuses = tuple(
-                status.value
-                for status in ExecutionStatus
-                if status
-                not in {
-                    ExecutionStatus.COMPLETED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }
-            )
-            placeholders = ", ".join("?" for _ in active_statuses)
-            active_owner = (
-                self._db()
-                .execute(
-                    "SELECT x.run_id, x.milestone_id, x.status FROM executions x "
-                    "JOIN workspace_leases l ON l.workspace_path = x.workspace_path "
-                    f"WHERE x.workspace_path = ? AND x.status IN ({placeholders}) "
-                    "AND NOT (x.run_id = ? AND x.milestone_id = ?)",
-                    (str(capsule.workspace_path), *active_statuses, str(capsule.run_id), str(capsule.milestone_id)),
-                )
-                .fetchone()
-            )
-            if active_owner is not None:
-                raise WorkspaceLeaseConflict(
-                    "workspace already has a nonterminal execution owner "
-                    f"{active_owner['run_id']}/{active_owner['milestone_id']}"
-                )
             owner = (
                 self._db()
                 .execute(
@@ -2386,6 +2365,12 @@ class Ledger:
                 .fetchone()
             )
             if owner is not None or path_owner is not None:
+                if (
+                    owner is not None
+                    and path_owner is not None
+                    and owner["workspace_path"] != path_owner["workspace_path"]
+                ):
+                    raise WorkspaceLeaseConflict("run lane and workspace are leased by different owners")
                 candidate = owner or path_owner
                 lease = self._workspace_lease_from_row(candidate)
                 expected = (
@@ -2408,6 +2393,39 @@ class Ledger:
                 )
                 if actual != expected:
                     raise WorkspaceLeaseConflict("workspace is already leased under different facts")
+                active_statuses = tuple(
+                    status.value
+                    for status in ExecutionStatus
+                    if status
+                    not in {
+                        ExecutionStatus.COMPLETED,
+                        ExecutionStatus.FAILED,
+                        ExecutionStatus.CANCELLED,
+                    }
+                )
+                placeholders = ", ".join("?" for _ in active_statuses)
+                active_owner = (
+                    self._db()
+                    .execute(
+                        "SELECT run_id, milestone_id, status FROM executions "
+                        f"WHERE workspace_path = ? AND status IN ({placeholders}) "
+                        "AND checkpoint != ? AND NOT (run_id = ? AND milestone_id = ?) "
+                        "ORDER BY created_at, run_id, milestone_id LIMIT 1",
+                        (
+                            str(capsule.workspace_path),
+                            *active_statuses,
+                            ControllerCheckpoint.CAPSULE_PLANNED.value,
+                            str(capsule.run_id),
+                            str(capsule.milestone_id),
+                        ),
+                    )
+                    .fetchone()
+                )
+                if active_owner is not None:
+                    raise WorkspaceLeaseConflict(
+                        "workspace already has a nonterminal execution owner "
+                        f"{active_owner['run_id']}/{active_owner['milestone_id']}"
+                    )
             else:
                 self._db().execute(
                     "INSERT INTO workspace_leases(workspace_path, repository_root, mode, branch, base_sha, lane, "
@@ -2542,6 +2560,29 @@ class Ledger:
             )
             return self.get_execution(run, milestone)
 
+    def _reject_thread_start_authorization(
+        self, run_id: RunId | str, milestone_id: MilestoneId | str
+    ) -> ExecutionRecord:
+        """Restore the last safe checkpoint when pre-call authorization rejects."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            self._reject_terminal_execution(current)
+            if (
+                current.status is not ExecutionStatus.PLANNED
+                or current.checkpoint is not ControllerCheckpoint.THREAD_STARTING
+                or current.thread_id is not None
+            ):
+                raise StaleWriter("thread-start authorization rejection requires the uncalled external boundary")
+            self._db().execute(
+                "UPDATE executions SET checkpoint = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE.value, now, str(run), str(milestone)),
+            )
+            return self.get_execution(run, milestone)
+
     def record_turn_starting(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
         """Durably mark the SDK turn boundary before making an external call."""
 
@@ -2568,6 +2609,35 @@ class Ledger:
                 "UPDATE execution_integrity SET turn_started_at = COALESCE(turn_started_at, ?), updated_at = ? "
                 "WHERE run_id = ? AND milestone_id = ?",
                 (now, now, str(run), str(milestone)),
+            )
+            return self.get_execution(run, milestone)
+
+    def _reject_turn_authorization(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
+        """Clear the causal marker only when authorization proves no turn was called."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        now = utc_now()
+        with self._transaction():
+            current = self.get_execution(run, milestone)
+            self._reject_terminal_execution(current)
+            integrity = self.get_execution_integrity(run, milestone)
+            if (
+                current.status is not ExecutionStatus.THREAD_STARTED
+                or current.thread_id is None
+                or current.turn_id is not None
+                or current.turn_output != _TURN_STARTING_MARKER
+                or integrity.turn_started_at is None
+            ):
+                raise StaleWriter("turn authorization rejection requires the uncalled external boundary")
+            self._db().execute(
+                "UPDATE executions SET turn_output_json = NULL, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (now, str(run), str(milestone)),
+            )
+            self._db().execute(
+                "UPDATE execution_integrity SET turn_started_at = NULL, updated_at = ? "
+                "WHERE run_id = ? AND milestone_id = ?",
+                (now, str(run), str(milestone)),
             )
             return self.get_execution(run, milestone)
 

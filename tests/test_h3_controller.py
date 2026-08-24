@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import sqlite3
 import stat
@@ -189,6 +190,25 @@ def _nested_discovery_file(home: Path, surface: str, *, content: str = "alpha") 
     return source
 
 
+def _tamper_pre_external_authority(repository: Path, base: str, kind: str) -> None:
+    if kind == "git_config":
+        _git(repository, "config", "codex-flow.drift", "changed")
+    elif kind == "index":
+        _git(repository, "update-index", "--assume-unchanged", "source.txt")
+    elif kind == "ref":
+        _git(repository, "update-ref", "refs/codex-flow/drift", base)
+    elif kind == "history":
+        _git(repository, "commit", "--allow-empty", "-qm", "authority drift")
+    elif kind == "out_of_scope_file":
+        (repository / "unexpected.txt").write_text("drift\n")
+    elif kind == "empty_directory":
+        (repository / "unexpected-empty").mkdir()
+    elif kind == "allowed_path":
+        (repository / "result.txt").write_text("drift\n")
+    else:  # pragma: no cover - table contract
+        raise AssertionError(f"unknown tamper kind: {kind}")
+
+
 class FakeAdapter:
     def __init__(self, config: CodexSdkConfig, service: dict[str, Any]) -> None:
         self.config = config
@@ -228,6 +248,29 @@ def _factory(service: dict[str, Any]):
 
 def _service() -> dict[str, int]:
     return {"starts": 0, "resumes": 0, "turns": 0, "closes": 0}
+
+
+def _process_start_contender(
+    repository: str,
+    run_id: str,
+    milestone_id: str,
+    delay: float,
+    gate: Any,
+    results: Any,
+) -> None:
+    service = _service()
+    controller = Controller(Path(repository), _trusted_test_adapter_factory=_factory(service))
+    try:
+        gate.wait(10)
+        time.sleep(delay)
+        record = controller.start(run_id, milestone_id)
+        results.put(("completed", str(record.run_id), service))
+    except WorkspaceLeaseConflict:
+        results.put(("conflict", run_id, service))
+    except Exception as exc:  # pragma: no cover - diagnostic for process-test failures
+        results.put(("error", type(exc).__name__, str(exc), service))
+    finally:
+        controller.close()
 
 
 def test_current_checkout_start_persists_result_before_projection() -> None:
@@ -730,6 +773,114 @@ def test_validation_timeout_is_a_durable_failed_result() -> None:
         controller.close()
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    ("git_config", "index", "ref", "history", "out_of_scope_file", "empty_directory", "allowed_path"),
+)
+def test_restart_from_durable_baseline_rejects_exact_authority_drift_before_adapter(tamper: str) -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        service = _service()
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, service)
+
+        def crash(stage: str) -> None:
+            if stage == "after_workspace_baseline":
+                raise RuntimeError("baseline crash")
+
+        first = Controller(repository, _trusted_test_adapter_factory=factory, fault_injector=crash)
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="baseline crash"):
+            first.start("run", "m1")
+        durable = first.status("run", "m1")
+        integrity = first.ledger.get_execution_integrity("run", "m1")
+        assert durable.checkpoint is ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE
+        assert integrity.git_authority_before_sha256 is not None
+        assert adapter_creations == 0
+        first.close()
+
+        _tamper_pre_external_authority(repository, base, tamper)
+        reopened = Controller(repository, _trusted_test_adapter_factory=factory)
+        with pytest.raises(ControllerError):
+            reopened.start("run", "m1")
+        assert adapter_creations == 0
+        assert reopened.status("run", "m1").checkpoint is ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE
+        assert service == {"starts": 0, "resumes": 0, "turns": 0, "closes": 0}
+        reopened.close()
+
+
+@pytest.mark.parametrize("tamper", ("git_config", "out_of_scope_file", "empty_directory", "allowed_path"))
+def test_same_process_pre_external_authorization_is_race_aware_and_fail_closed(tamper: str) -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, _service())
+
+        def mutate_after_baseline(stage: str) -> None:
+            if stage == "after_workspace_baseline":
+                _tamper_pre_external_authority(repository, base, tamper)
+
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            fault_injector=mutate_after_baseline,
+        )
+        controller.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(ControllerError):
+            controller.start("run", "m1")
+        assert adapter_creations == 0
+        assert controller.status("run", "m1").checkpoint is ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE
+        controller.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("git_config", "index", "ref", "history", "out_of_scope_file", "empty_directory", "allowed_path"),
+)
+def test_fresh_resume_rejects_exact_authority_drift_before_adapter_creation(tamper: str) -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("identity crash")
+
+        first = Controller(repository, _trusted_test_adapter_factory=_factory(service), fault_injector=crash)
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="identity crash"):
+            first.start("run", "m1")
+        assert first.status("run", "m1").status is ExecutionStatus.THREAD_STARTED
+        first.close()
+
+        _tamper_pre_external_authority(repository, base, tamper)
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, service)
+
+        reopened = Controller(repository, _trusted_test_adapter_factory=factory)
+        with pytest.raises(ControllerError):
+            reopened.resume("run", "m1")
+        assert adapter_creations == 0
+        assert service == {"starts": 1, "resumes": 0, "turns": 0, "closes": 1}
+        assert reopened.status("run", "m1").status is ExecutionStatus.THREAD_STARTED
+        reopened.close()
+
+
 def test_sdk_change_outside_mutable_paths_fails_closed() -> None:
     class EscapingAdapter(FakeAdapter):
         def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
@@ -866,6 +1017,163 @@ def test_canonical_execution_reopens_through_symlink_alias_without_second_thread
         assert service["starts"] == 1
         assert service["resumes"] == 1
         assert len(reopened.ledger.snapshot("run").dispatches) == 1
+        reopened.close()
+
+
+@pytest.mark.parametrize("round_index", range(8))
+def test_two_preplanned_alias_contenders_have_one_atomic_lease_winner(round_index: int) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        alias = root / "repo-alias"
+        alias.symlink_to(repository, target_is_directory=True)
+        services = (_service(), _service())
+        controllers = (
+            Controller(repository, _trusted_test_adapter_factory=_factory(services[0])),
+            Controller(alias, _trusted_test_adapter_factory=_factory(services[1])),
+        )
+        capsules = (
+            _capsule(repository, repository, base, branch, run="owner-one", milestone="one", lane="lane-one"),
+            _capsule(alias, alias, base, branch, run="owner-two", milestone="two", lane="lane-two"),
+        )
+        controllers[0].plan(capsules[0])
+        controllers[1].plan(capsules[1])
+        barrier = threading.Barrier(2)
+
+        def start(index: int) -> Any:
+            barrier.wait()
+            try:
+                return controllers[index].start(capsules[index].run_id, capsules[index].milestone_id)
+            except Exception as exc:
+                return exc
+
+        order = (0, 1) if round_index % 2 == 0 else (1, 0)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(start, index) for index in order]
+            outcomes = [future.result(timeout=15) for future in futures]
+        records = [outcome for outcome in outcomes if not isinstance(outcome, Exception)]
+        conflicts = [outcome for outcome in outcomes if isinstance(outcome, WorkspaceLeaseConflict)]
+        assert len(records) == 1 and records[0].status is ExecutionStatus.COMPLETED
+        assert len(conflicts) == 1
+        assert sum(service["starts"] for service in services) == 1
+        assert sum(service["turns"] for service in services) == 1
+        lease = controllers[0].ledger.get_workspace_lease(repository)
+        assert lease.owner_run_id == records[0].run_id
+        loser = capsules[0] if records[0].run_id == capsules[1].run_id else capsules[1]
+        assert (
+            controllers[0].status(loser.run_id, loser.milestone_id).checkpoint is ControllerCheckpoint.CAPSULE_PLANNED
+        )
+        for controller in controllers:
+            controller.close()
+        reopened = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        assert reopened.status(records[0].run_id, records[0].milestone_id).status is ExecutionStatus.COMPLETED
+        assert reopened.ledger.get_workspace_lease(repository).owner_run_id == records[0].run_id
+        reopened.close()
+
+
+@pytest.mark.parametrize("round_index", range(4))
+def test_two_preplanned_alias_contenders_have_one_process_level_lease_winner(round_index: int) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        alias = root / "repo-alias"
+        alias.symlink_to(repository, target_is_directory=True)
+        planner = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        capsules = (
+            _capsule(repository, repository, base, branch, run="process-one", milestone="one", lane="process-one"),
+            _capsule(alias, alias, base, branch, run="process-two", milestone="two", lane="process-two"),
+        )
+        for capsule in capsules:
+            planner.plan(capsule)
+        planner.close()
+
+        context = multiprocessing.get_context("fork")
+        gate = context.Event()
+        results = context.Queue()
+        delays = (0.0, 0.05) if round_index % 2 == 0 else (0.05, 0.0)
+        processes = [
+            context.Process(
+                target=_process_start_contender,
+                args=(
+                    os.fspath(repository if index == 0 else alias),
+                    str(capsule.run_id),
+                    str(capsule.milestone_id),
+                    delays[index],
+                    gate,
+                    results,
+                ),
+            )
+            for index, capsule in enumerate(capsules)
+        ]
+        try:
+            for process in processes:
+                process.start()
+            gate.set()
+            for process in processes:
+                process.join(20)
+            assert all(not process.is_alive() and process.exitcode == 0 for process in processes)
+            outcomes = [results.get(timeout=2) for _ in processes]
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(5)
+            results.close()
+        assert sorted(outcome[0] for outcome in outcomes) == ["completed", "conflict"]
+        assert sum(outcome[-1]["starts"] for outcome in outcomes) == 1
+        assert sum(outcome[-1]["turns"] for outcome in outcomes) == 1
+        completed_run = next(outcome[1] for outcome in outcomes if outcome[0] == "completed")
+        loser_capsule = capsules[0] if completed_run == str(capsules[1].run_id) else capsules[1]
+        reopened = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        assert reopened.ledger.get_workspace_lease(repository).owner_run_id == RunId(completed_run)
+        assert (
+            reopened.status(loser_capsule.run_id, loser_capsule.milestone_id).checkpoint
+            is ControllerCheckpoint.CAPSULE_PLANNED
+        )
+        reopened.close()
+
+
+def test_atomic_lease_winner_survives_identity_crash_and_loser_cannot_strand_it() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        alias = root / "repo-alias"
+        alias.symlink_to(repository, target_is_directory=True)
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("identity crash")
+
+        winner = Controller(repository, _trusted_test_adapter_factory=_factory(service), fault_injector=crash)
+        loser_creations = 0
+
+        def loser_factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal loser_creations
+            loser_creations += 1
+            return FakeAdapter(config, service)
+
+        loser = Controller(alias, _trusted_test_adapter_factory=loser_factory)
+        winner_capsule = _capsule(repository, repository, base, branch, run="winner", milestone="one", lane="winner")
+        loser_capsule = _capsule(alias, alias, base, branch, run="loser", milestone="two", lane="loser")
+        winner.plan(winner_capsule)
+        loser.plan(loser_capsule)
+        with pytest.raises(RuntimeError, match="identity crash"):
+            winner.start("winner", "one")
+        with pytest.raises(WorkspaceLeaseConflict):
+            loser.start("loser", "two")
+        assert loser_creations == 0
+        assert winner.status("winner", "one").status is ExecutionStatus.THREAD_STARTED
+        winner.close()
+        loser.close()
+
+        reopened = Controller(repository, _trusted_test_adapter_factory=_factory(service))
+        assert reopened.resume("winner", "one").status is ExecutionStatus.COMPLETED
+        assert service == {"starts": 1, "resumes": 1, "turns": 1, "closes": 2}
+        assert reopened.ledger.get_workspace_lease(repository).owner_run_id == RunId("winner")
         reopened.close()
 
 
@@ -1142,6 +1450,68 @@ def test_fresh_successor_rejects_predecessor_terminal_empty_directory_tampering(
         successor.close()
 
 
+@pytest.mark.parametrize("boundary", ("after_workspace_baseline", "after_thread_identity"))
+def test_reopened_successor_revalidates_predecessor_root_before_every_external_boundary(boundary: str) -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        service = _service()
+        first = Controller(repository, _trusted_test_adapter_factory=_factory(service))
+        first.plan(
+            _capsule(
+                repository,
+                repository,
+                base,
+                branch,
+                run="predecessor-run",
+                milestone="one",
+                lane="predecessor-lane",
+            )
+        )
+        assert first.start("predecessor-run", "one").status is ExecutionStatus.COMPLETED
+        first.close()
+
+        def crash(stage: str) -> None:
+            if stage == boundary:
+                raise RuntimeError("successor crash")
+
+        successor = Controller(repository, _trusted_test_adapter_factory=_factory(service), fault_injector=crash)
+        successor.plan(
+            _capsule(
+                repository,
+                repository,
+                base,
+                branch,
+                run="predecessor-run",
+                milestone="two",
+                lane="predecessor-lane",
+            )
+        )
+        with pytest.raises(RuntimeError, match="successor crash"):
+            successor.start("predecessor-run", "two")
+        checkpoint = successor.status("predecessor-run", "two")
+        assert checkpoint.checkpoint in {
+            ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE,
+            ControllerCheckpoint.THREAD_IDENTITY_DURABLE,
+        }
+        successor.close()
+
+        (repository / "result.txt").write_text("tampered predecessor root\n")
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, service)
+
+        reopened = Controller(repository, _trusted_test_adapter_factory=factory)
+        operation = reopened.start if boundary == "after_workspace_baseline" else reopened.resume
+        with pytest.raises(ControllerError, match=r"predecessor|baseline"):
+            operation("predecessor-run", "two")
+        assert adapter_creations == 0
+        reopened.close()
+
+
 @pytest.mark.parametrize("mode", (WorkspaceMode.MANAGED_WORKTREE, WorkspaceMode.EXISTING_WORKTREE))
 def test_distinct_worktree_codex_flow_write_is_not_exempt_from_mutation_scope(mode: WorkspaceMode) -> None:
     class WorkspaceStateAdapter(FakeAdapter):
@@ -1375,6 +1745,79 @@ def test_capsule_rejects_path_overlap_and_nonsemantic_managed_path() -> None:
         controller.close()
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "properties": {}, "required": []},
+        {"type": "object", "properties": {}, "required": [], "additionalProperties": True},
+        {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": [],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok", "ok"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {"items": {"type": "array"}},
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "nested": {"type": "object", "properties": {}, "required": []},
+            },
+            "required": ["nested"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+            "description": "unsupported",
+        },
+    ],
+)
+def test_capsule_rejects_open_optional_or_ambiguous_output_schema_before_planning(schema: dict[str, Any]) -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        with pytest.raises(ValueError):
+            replace(_capsule(repository, repository, base, branch), output_schema=schema)
+        assert not (repository / ".codex-flow").exists()
+
+
+def test_capsule_accepts_valid_strict_nested_object_and_array_schema() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}, "ok": {"type": "boolean"}},
+                        "required": ["name", "ok"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+        capsule = replace(_capsule(repository, repository, base, branch), output_schema=schema)
+        assert capsule.output_schema == schema
+
+
 def test_cancel_is_idempotent_and_keeps_workspace() -> None:
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
@@ -1409,8 +1852,13 @@ def test_nonterminal_controller_fact_mutators_preserve_contractual_idempotency()
         lease = controller.ledger.acquire_workspace_lease(capsule)
         assert controller.ledger.acquire_workspace_lease(capsule) == lease
         authority = NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
-        profile = controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority, base, ())
-        assert controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority, base, ()) == profile
+        profile = controller.ledger.record_native_profile(
+            "run", "m1", "0" * 64, "1" * 64, authority, base, (), "2" * 64
+        )
+        assert (
+            controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority, base, (), "2" * 64)
+            == profile
+        )
         controller.ledger.claim_dispatch("run", "m1", "executor", 1)
         thread_starting = controller.ledger.record_thread_starting("run", "m1")
         assert controller.ledger.record_thread_starting("run", "m1") == thread_starting
@@ -1452,7 +1900,7 @@ def test_turn_observation_requires_durable_turn_start_before_first_write() -> No
         controller.plan(capsule)
         controller.ledger.acquire_workspace_lease(capsule)
         authority = NativePermissionAuthority(NativePermissionMode.INHERIT_NATIVE, "read-only", "never")
-        controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority, base, ())
+        controller.ledger.record_native_profile("run", "m1", "0" * 64, "1" * 64, authority, base, (), "2" * 64)
         controller.ledger.claim_dispatch("run", "m1", "executor", 1)
         controller.ledger.record_thread_starting("run", "m1")
         thread = ThreadIdentity("thread-causal")
@@ -1581,6 +2029,7 @@ def test_terminal_execution_rejects_every_public_controller_fact_mutator_after_r
                     authority,
                     integrity.workspace_baseline_head_sha if integrity is not None else base,
                     integrity.workspace_baseline if integrity is not None and integrity.workspace_baseline else (),
+                    git_before_sha256,
                 )
             elif mutator_name == "rebind_native_profile_for_resume":
                 current.ledger.rebind_native_profile_for_resume(
@@ -2228,7 +2677,16 @@ VISIBLE_SETTING = "retained"
 
 @pytest.mark.parametrize(
     "header_key",
-    ("HTTP_HEADERS", "Http_Headers", "http-Headers"),
+    (
+        "HTTP_HEADERS",
+        "Http_Headers",
+        "http-Headers",
+        "httpHeaders",
+        "HTTPHEADERS",
+        "EnvHttpHeaders",
+        "ENVHTTPHEADERS",
+        "env-http-headers",
+    ),
 )
 def test_native_profile_rejects_noncanonical_header_shapes_without_echoing_values(header_key: str) -> None:
     with TemporaryDirectory() as directory:
@@ -2237,6 +2695,29 @@ def test_native_profile_rejects_noncanonical_header_shapes_without_echoing_value
         config = home / "config.toml"
         secret = "case-variant-header-secret"
         config.write_text(config.read_text() + f'\n[mcp_servers.bad]\n{header_key} = {{ "X-Custom" = "{secret}" }}\n')
+        config.chmod(0o600)
+        with pytest.raises(NativeProfileError) as captured:
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert secret not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    (
+        '[mcp_servers.bad.options.httpHeaders]\nAuthorization = "{secret}"\n',
+        '[mcp_servers.bad.transport.EnvHttpHeaders]\nAuthorization = "{secret}"\n',
+        '[mcp_servers.bad]\nheaders = {{ Authorization = "{secret}" }}\n',
+        '[mcp_servers.bad]\nauthentication = {{ authToken = "{secret}" }}\n',
+        '[mcp_servers.bad]\nhttp_headers = {{ Authorization = "canonical" }}\nhttpHeaders = {{ Cookie = "{secret}" }}\n',
+    ),
+)
+def test_native_profile_closed_mcp_schema_rejects_nested_unknown_and_collision_shapes(fragment: str) -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        config = home / "config.toml"
+        secret = "closed-schema-variant-secret"
+        config.write_text(config.read_text() + "\n" + fragment.format(secret=secret))
         config.chmod(0o600)
         with pytest.raises(NativeProfileError) as captured:
             NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
@@ -2288,7 +2769,15 @@ def test_controller_route_keeps_native_secret_values_out_of_every_repository_own
         home = root / "native-home"
         _test_native_profile(home)
         config = home / "config.toml"
-        secrets = ("controller-header-secret", "controller-token-secret")
+        secrets = (
+            "controller-header-secret",
+            "controller-token-secret",
+            "controller-api-key-secret",
+            "controller-client-secret",
+            "controller-password-secret",
+            "controller-private-key-secret",
+            "controller-generic-key-secret",
+        )
         config.write_text(
             config.read_text()
             + f'''
@@ -2302,6 +2791,11 @@ args = ["-c", "exit 0"]
 
 [mcp_servers.stdio.env]
 API_TOKEN = "{secrets[1]}"
+apiKey = "{secrets[2]}"
+clientSecret = "{secrets[3]}"
+PassWord = "{secrets[4]}"
+privateKey = "{secrets[5]}"
+serviceKey = "{secrets[6]}"
 '''
         )
         config.chmod(0o600)
@@ -3103,13 +3597,11 @@ def test_executor_mutation_of_controller_state_is_terminal_failure() -> None:
 def test_protected_digest_failure_is_durable_terminal_integrity_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     import codex_flow.controller as controller_module
 
-    calls = 0
+    service = _service()
     original_digest = controller_module.protected_paths_digest
 
     def fail_digest(*_args: Any, **_kwargs: Any) -> str:
-        nonlocal calls
-        calls += 1
-        if calls > 1:
+        if service["turns"]:
             raise OSError("secret digest failure")
         return original_digest(*_args, **_kwargs)
 
@@ -3117,7 +3609,7 @@ def test_protected_digest_failure_is_durable_terminal_integrity_failure(monkeypa
     with TemporaryDirectory() as directory:
         repository = Path(directory) / "repo"
         base, branch = _repository(repository)
-        controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        controller = Controller(repository, _trusted_test_adapter_factory=_factory(service))
         controller.plan(_capsule(repository, repository, base, branch))
         terminal = controller.start("run", "m1")
         assert terminal.status is ExecutionStatus.FAILED

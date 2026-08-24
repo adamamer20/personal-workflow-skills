@@ -583,50 +583,75 @@ class ValidationSpec:
 
 _SCHEMA_TYPES = frozenset({"object", "array", "string", "boolean", "number", "integer", "null"})
 _SCHEMA_KEYS = frozenset({"type", "properties", "required", "additionalProperties", "items"})
+MAX_OUTPUT_SCHEMA_DEPTH = 32
+MAX_OUTPUT_SCHEMA_PROPERTIES = 1_024
+MAX_OUTPUT_OBJECT_PROPERTIES = 128
+MAX_OUTPUT_PROPERTY_NAME_BYTES = 256
+MAX_OUTPUT_ARRAY_ITEMS = 1_024
+MAX_STRUCTURED_OUTPUT_BYTES = 1_048_576
 
 
-def validate_output_schema(schema: Mapping[str, object], *, root: bool = True) -> None:
-    """Validate the deliberately small recursive schema subset we send to the SDK."""
+def validate_output_schema(schema: Mapping[str, object]) -> None:
+    """Validate the one closed recursive schema contract accepted at every boundary."""
 
-    if not isinstance(schema, Mapping):
-        raise ValueError("output schema nodes must be objects")
-    unknown = set(schema) - _SCHEMA_KEYS
-    if unknown:
-        raise ValueError(f"output schema contains unsupported keys: {sorted(map(str, unknown))!r}")
-    schema_type = schema.get("type")
-    if not isinstance(schema_type, str) or schema_type not in _SCHEMA_TYPES:
-        raise ValueError("output schema type must be one of the supported JSON types")
-    if root and schema_type != "object":
-        raise ValueError("execution output schema must require an object")
+    properties_seen = 0
 
-    if schema_type == "object":
-        properties = schema.get("properties", {})
-        if not isinstance(properties, Mapping):
-            raise ValueError("object schema properties must be an object")
-        for name, child in properties.items():
-            if not isinstance(name, str):
-                raise ValueError("object schema property names must be strings")
-            validate_output_schema(child, root=False)
-        required = schema.get("required", [])
-        if not isinstance(required, list):
-            raise ValueError("object schema required must be an array")
-        if any(not isinstance(name, str) for name in required) or len(set(required)) != len(required):
-            raise ValueError("object schema required must contain unique strings")
-        if any(name not in properties for name in required):
-            raise ValueError("object schema required fields must be declared in properties")
-        additional = schema.get("additionalProperties", True)
-        if not isinstance(additional, bool):
-            raise ValueError("object schema additionalProperties must be a boolean")
-    elif schema_type == "array":
-        if "items" in schema:
-            validate_output_schema(schema["items"], root=False)
-        for key in ("properties", "required", "additionalProperties"):
-            if key in schema:
-                raise ValueError(f"array schema cannot contain {key}")
-    else:
-        for key in ("properties", "required", "additionalProperties", "items"):
-            if key in schema:
-                raise ValueError(f"{schema_type} schema cannot contain {key}")
+    def validate_node(node: object, *, depth: int, root: bool) -> None:
+        nonlocal properties_seen
+        if not isinstance(node, Mapping):
+            raise ValueError("output schema nodes must be objects")
+        if depth > MAX_OUTPUT_SCHEMA_DEPTH:
+            raise ValueError("output schema exceeds the depth limit")
+        unknown = set(node) - _SCHEMA_KEYS
+        if unknown:
+            raise ValueError(f"output schema contains unsupported keys: {sorted(map(str, unknown))!r}")
+        schema_type = node.get("type")
+        if not isinstance(schema_type, str) or schema_type not in _SCHEMA_TYPES:
+            raise ValueError("output schema type must be one of the supported JSON types")
+        if root and schema_type != "object":
+            raise ValueError("execution output schema must require an object")
+
+        if schema_type == "object":
+            if set(node) != {"type", "properties", "required", "additionalProperties"}:
+                raise ValueError("object schemas must declare properties, required, and additionalProperties")
+            properties = node["properties"]
+            required = node["required"]
+            if not isinstance(properties, Mapping):
+                raise ValueError("object schema properties must be an object")
+            if len(properties) > MAX_OUTPUT_OBJECT_PROPERTIES:
+                raise ValueError("object schema exceeds the per-object property limit")
+            properties_seen += len(properties)
+            if properties_seen > MAX_OUTPUT_SCHEMA_PROPERTIES:
+                raise ValueError("output schema exceeds the total property limit")
+            if not isinstance(required, list):
+                raise ValueError("object schema required must be an array")
+            if any(not isinstance(name, str) for name in required) or len(set(required)) != len(required):
+                raise ValueError("object schema required must contain unique strings")
+            if set(required) != set(properties):
+                raise ValueError("object schema must require every declared property exactly once")
+            if node["additionalProperties"] is not False:
+                raise ValueError("object schema additionalProperties must be explicitly false")
+            for name, child in properties.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or len(name.encode("utf-8")) > MAX_OUTPUT_PROPERTY_NAME_BYTES
+                    or "\x00" in name
+                ):
+                    raise ValueError("object schema property names must be bounded non-empty strings")
+                validate_node(child, depth=depth + 1, root=False)
+            return
+
+        if schema_type == "array":
+            if set(node) != {"type", "items"}:
+                raise ValueError("array schemas must contain exactly type and an explicit item schema")
+            validate_node(node["items"], depth=depth + 1, root=False)
+            return
+
+        if set(node) != {"type"}:
+            raise ValueError(f"{schema_type} schemas may contain only type")
+
+    validate_node(schema, depth=1, root=True)
 
 
 def _relative_paths(values: tuple[str, ...], *, label: str) -> None:

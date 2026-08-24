@@ -236,6 +236,57 @@ class CodexSdkAdapterTests(unittest.TestCase):
         with self.assertRaises(TerminalFailureAfterIdentity):
             _decode_schema_output(json.dumps({"payload": {}}), malformed)
 
+    def test_strict_nested_object_and_array_output_is_validated_recursively(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}, "ok": {"type": "boolean"}},
+                        "required": ["name", "ok"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+        self.assertEqual(
+            _decode_schema_output(json.dumps({"items": [{"name": "one", "ok": True}]}), schema),
+            {"items": [{"name": "one", "ok": True}]},
+        )
+        with self.assertRaises(TerminalFailureAfterIdentity):
+            _decode_schema_output(json.dumps({"items": [{"name": "one"}]}), schema)
+        with self.assertRaises(TerminalFailureAfterIdentity):
+            _decode_schema_output(json.dumps({"items": [{"name": "one", "ok": True, "extra": 1}]}), schema)
+
+    def test_missing_schema_bounded_output_is_rejected(self) -> None:
+        with self.assertRaises(TerminalFailureAfterIdentity):
+            _decode_schema_output(None, SCHEMA)
+
+    def test_sdk_post_validation_rejects_open_or_ambiguous_schemas(self) -> None:
+        invalid = (
+            {"type": "object", "properties": {}, "required": []},
+            {"type": "object", "properties": {}, "required": [], "additionalProperties": True},
+            {
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": [],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"items": {"type": "array"}},
+                "required": ["items"],
+                "additionalProperties": False,
+            },
+        )
+        for schema in invalid:
+            with self.subTest(schema=schema), self.assertRaises(TerminalFailureAfterIdentity):
+                _decode_schema_output("{}", schema)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1038,6 +1038,83 @@ class Controller:
         if outside:
             raise ControllerError(f"workspace contains changes outside mutable paths: {', '.join(outside)}")
 
+    def _stable_workspace_authority(
+        self,
+        capsule: ExecutionCapsule,
+        baseline_head: str,
+    ) -> tuple[tuple[tuple[str, str], ...], str, str]:
+        """Capture one bounded workspace authority twice and reject scan races."""
+
+        captures: list[tuple[tuple[tuple[str, str], ...], str, str]] = []
+        for _ in range(2):
+            self._worktrees.select(capsule)
+            self._assert_protected_clean(capsule)
+            if self._git_output(capsule.workspace_path, "rev-parse", "HEAD") != baseline_head:
+                raise ControllerError("workspace HEAD changed from its durable baseline before external call")
+            self._assert_workspace_history(capsule, baseline_head)
+            git_before = git_authority_snapshot(capsule.workspace_path).sha256
+            baseline = self._workspace_baseline_snapshot(capsule, baseline_head)
+            protected = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+            git_after = git_authority_snapshot(capsule.workspace_path).sha256
+            if git_before != git_after:
+                raise ControllerError("Git authority changed during pre-external authorization")
+            captures.append((baseline, git_after, protected))
+        if captures[0] != captures[1]:
+            raise ControllerError("workspace changed during pre-external authorization")
+        return captures[0]
+
+    def _authorize_external_call(self, capsule: ExecutionCapsule, record: ExecutionRecord) -> None:
+        """Exactly revalidate every durable authority immediately before an external boundary."""
+
+        current = self.ledger.get_execution(record.run_id, record.milestone_id)
+        if current.workspace_path != capsule.workspace_path:
+            raise ControllerError("durable execution workspace changed before external call")
+        lease = self.ledger.get_workspace_lease(capsule.workspace_path)
+        if (
+            lease.workspace_path,
+            lease.repository_root,
+            lease.mode,
+            lease.branch,
+            lease.base_sha,
+            lease.lane,
+            lease.owner_run_id,
+        ) != (
+            capsule.workspace_path,
+            capsule.repository_root,
+            capsule.workspace_mode,
+            capsule.branch,
+            capsule.base_sha,
+            capsule.lane,
+            capsule.run_id,
+        ):
+            raise ControllerError("durable workspace lease authority changed before external call")
+        integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
+        if (
+            integrity.workspace_baseline_head_sha is None
+            or integrity.workspace_baseline is None
+            or integrity.git_authority_before_sha256 is None
+        ):
+            raise ControllerError("durable pre-external workspace authority is incomplete")
+        predecessors = self.ledger.completed_workspace_predecessors(
+            capsule.run_id,
+            capsule.milestone_id,
+            capsule.workspace_path,
+        )
+        self._assert_predecessor_terminal_authority(capsule, predecessors)
+        baseline, git_authority, protected = self._stable_workspace_authority(
+            capsule,
+            integrity.workspace_baseline_head_sha,
+        )
+        self._assert_predecessor_terminal_authority(capsule, predecessors)
+        if baseline != integrity.workspace_baseline:
+            raise ControllerError(
+                "workspace content or topology changed from its durable baseline before external call"
+            )
+        if git_authority != integrity.git_authority_before_sha256:
+            raise ControllerError("Git authority changed from its durable baseline before external call")
+        if protected != current.protected_before_sha256:
+            raise ControllerError("protected paths changed from their durable baseline before external call")
+
     def start(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
         with self._mutation_lock():
             return self._start(run_id, milestone_id)
@@ -1062,6 +1139,10 @@ class Controller:
                 raise ControllerError("durable per-milestone workspace baseline is incomplete")
             baseline_head = integrity.workspace_baseline_head_sha
             baseline = integrity.workspace_baseline
+            self._authorize_external_call(capsule, record)
+            baseline_git_authority = integrity.git_authority_before_sha256
+            if baseline_git_authority is None:
+                raise ControllerError("durable pre-external Git authority is incomplete")
         else:
             predecessors = self.ledger.completed_workspace_predecessors(
                 capsule.run_id, capsule.milestone_id, capsule.workspace_path
@@ -1077,7 +1158,7 @@ class Controller:
             self._assert_mutation_scope(capsule, capsule.base_sha, (), trusted_roots)
             self.ledger.acquire_workspace_lease(capsule)
             baseline_head = self._git_output(capsule.workspace_path, "rev-parse", "HEAD")
-            baseline = self._workspace_baseline_snapshot(capsule, baseline_head)
+            baseline, baseline_git_authority, _ = self._stable_workspace_authority(capsule, baseline_head)
         current_digest = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
         if current_digest != record.protected_before_sha256:
             raise ControllerError("protected paths changed between plan and start")
@@ -1095,10 +1176,12 @@ class Controller:
             effective_permission,
             baseline_head,
             baseline,
+            baseline_git_authority,
         )
         self._fault("after_workspace_baseline")
         if native_runtime is not None:
             native_runtime.native_profile.verify_sources()
+        self._authorize_external_call(capsule, record)
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
@@ -1115,6 +1198,19 @@ class Controller:
             self.ledger.record_thread_starting(capsule.run_id, capsule.milestone_id)
             try:
                 self._fault("before_sdk_thread_start")
+            except Exception as exc:
+                self.ledger.record_pre_identity_uncertainty(capsule.run_id, capsule.milestone_id)
+                raise UncertainPreIdentity(
+                    "SDK start failed before durable identity; automatic retry is forbidden"
+                ) from exc
+            try:
+                if native_runtime is not None:
+                    native_runtime.native_profile.verify_sources()
+                self._authorize_external_call(capsule, record)
+            except Exception:
+                self.ledger._reject_thread_start_authorization(capsule.run_id, capsule.milestone_id)
+                raise
+            try:
                 identity = adapter.start_thread()
             except Exception as exc:
                 self.ledger.record_pre_identity_uncertainty(capsule.run_id, capsule.milestone_id)
@@ -1150,8 +1246,6 @@ class Controller:
         integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
         if integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None:
             raise ControllerError("execution lacks a durable per-milestone workspace baseline")
-        self._assert_workspace_history(capsule, integrity.workspace_baseline_head_sha)
-        self.ledger.acquire_workspace_lease(capsule)
         try:
             native_runtime, native_profile_sha256, compatibility_sha256, candidate_permission = self._native_runtime(
                 capsule
@@ -1177,6 +1271,16 @@ class Controller:
                 native_runtime.native_profile.verify_sources()
             except NativeDiscoveryCompatibilityError as exc:
                 raise UnsafeResumeCompatibilityChange(str(exc)) from exc
+        if record.turn_id is not None:
+            return self._execute_turn_and_finish(capsule, record, None)
+        if record.turn_output == {"__controller_checkpoint": "turn_starting"}:
+            raise UncertainTurn("SDK turn crossed the external-call boundary without a durable response")
+        if native_runtime is not None:
+            try:
+                native_runtime.native_profile.verify_sources()
+            except NativeDiscoveryCompatibilityError as exc:
+                raise UnsafeResumeCompatibilityChange(str(exc)) from exc
+        self._authorize_external_call(capsule, record)
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
@@ -1189,6 +1293,12 @@ class Controller:
             )
         )
         try:
+            if native_runtime is not None:
+                try:
+                    native_runtime.native_profile.verify_sources()
+                except NativeDiscoveryCompatibilityError as exc:
+                    raise UnsafeResumeCompatibilityChange(str(exc)) from exc
+            self._authorize_external_call(capsule, record)
             resumed = adapter.resume_thread(record.thread_id)
             if resumed != record.thread_id:
                 raise ControllerError("SDK resume changed durable thread identity")
@@ -1197,7 +1307,7 @@ class Controller:
             adapter.close()
 
     def _execute_turn_and_finish(
-        self, capsule: ExecutionCapsule, record: ExecutionRecord, adapter: Adapter
+        self, capsule: ExecutionCapsule, record: ExecutionRecord, adapter: Adapter | None
     ) -> ExecutionRecord:
         if record.thread_id is None:
             raise ControllerError("cannot execute without a durable SDK identity")
@@ -1206,6 +1316,9 @@ class Controller:
         controller_state_error = ""
         integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
         if record.turn_id is None:
+            if adapter is None:
+                raise ControllerError("cannot execute an SDK turn without an adapter")
+            self._authorize_external_call(capsule, record)
             git_before = git_authority_snapshot(capsule.workspace_path)
             integrity = self.ledger.record_git_authority_before(
                 capsule.run_id,
@@ -1215,6 +1328,11 @@ class Controller:
             self.ledger.record_turn_starting(capsule.run_id, capsule.milestone_id)
             controller_state_before = self._controller_tree_snapshot(self.state_root)
             self._fault("before_sdk_turn")
+            try:
+                self._authorize_external_call(capsule, record)
+            except Exception:
+                self.ledger._reject_turn_authorization(capsule.run_id, capsule.milestone_id)
+                raise
             observation = adapter.run_turn(record.thread_id, capsule.prompt, output_schema=capsule.output_schema)
             try:
                 if controller_state_before != self._controller_tree_snapshot(self.state_root):

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -80,6 +81,30 @@ _PROVIDER_KEYS = frozenset(
         "wire_api",
     }
 )
+_MCP_SERVER_KEYS = frozenset(
+    {
+        "args",
+        "bearer_token_env_var",
+        "command",
+        "cwd",
+        "disabled_tools",
+        "enabled",
+        "enabled_tools",
+        "env",
+        "env_http_headers",
+        "env_vars",
+        "http_headers",
+        "required",
+        "startup_timeout_sec",
+        "tool_timeout_sec",
+        "url",
+    }
+)
+_MCP_STRING_FIELDS = frozenset({"bearer_token_env_var", "command", "cwd", "url"})
+_MCP_STRING_LIST_FIELDS = frozenset({"args", "disabled_tools", "enabled_tools", "env_vars"})
+_MCP_BOOLEAN_FIELDS = frozenset({"enabled", "required"})
+_MCP_TIMEOUT_FIELDS = frozenset({"startup_timeout_sec", "tool_timeout_sec"})
+_MAX_MCP_COLLECTION_ENTRIES = 4_096
 _DISCOVERY_DIRECTORIES = ("memories", "plugins", "skills")
 
 TomlValue: TypeAlias = str | int | float | bool | list["TomlValue"] | dict[str, "TomlValue"]
@@ -427,10 +452,12 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
     environment values stay in memory long enough to launch the SDK child.
     """
 
-    projected = {key: _clone_native_value(value) for key, value in data.items()}
-    mcp_servers = projected.get("mcp_servers")
+    projected = {key: _clone_native_value(value) for key, value in data.items() if key != "mcp_servers"}
+    mcp_servers = data.get("mcp_servers")
     if not isinstance(mcp_servers, dict):
         raise NativeProfileError("native profile field 'mcp_servers' must be a table")
+    projected_servers: dict[str, object] = {}
+    projected["mcp_servers"] = projected_servers
     ephemeral: dict[str, str] = {}
     protected_environment = {"CODEX_HOME"}
     selected_provider = data.get("model_provider")
@@ -440,22 +467,77 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
         if isinstance(selected_table, dict) and isinstance(selected_table.get("env_key"), str):
             protected_environment.add(cast(str, selected_table["env_key"]))
     for server_name, raw_server in sorted(mcp_servers.items()):
-        if not isinstance(server_name, str) or not isinstance(raw_server, dict):
+        if (
+            not isinstance(server_name, str)
+            or not server_name
+            or len(server_name.encode("utf-8")) > 256
+            or "\x00" in server_name
+            or not isinstance(raw_server, dict)
+        ):
             raise NativeProfileError("native MCP server definitions must be named tables")
+        if len(raw_server) > len(_MCP_SERVER_KEYS):
+            raise NativeProfileError("native MCP server has an unsupported field shape")
         for key in raw_server:
-            if _semantic_key(key) in {"http_headers", "env_http_headers"} and key not in {
-                "http_headers",
-                "env_http_headers",
-            }:
+            if not isinstance(key, str):
+                raise NativeProfileError("native MCP server field names must be strings")
+            header_kind = _header_container_kind(key)
+            if header_kind is not None and key != header_kind:
                 raise NativeProfileError("native MCP header tables must use their canonical key spelling")
+            if key not in _MCP_SERVER_KEYS:
+                if _contains_header_container(raw_server[key]):
+                    raise NativeProfileError("native profile contains an unsupported header field")
+                raise NativeProfileError("native MCP server contains an unsupported field")
 
-        literal_headers = raw_server.pop("http_headers", None)
+        projected_server: dict[str, object] = {}
+        projected_servers[server_name] = projected_server
+        for key in sorted(_MCP_STRING_FIELDS):
+            if key not in raw_server:
+                continue
+            value = raw_server[key]
+            if not _is_bounded_string(value):
+                raise NativeProfileError("native MCP string fields must be bounded non-empty strings")
+            if key == "bearer_token_env_var" and _RUNTIME_ENV_KEY.fullmatch(cast(str, value)) is None:
+                raise NativeProfileError("native MCP bearer token reference must name an environment key")
+            projected_server[key] = value
+        for key in sorted(_MCP_STRING_LIST_FIELDS - {"env_vars"}):
+            if key not in raw_server:
+                continue
+            projected_server[key] = _mcp_string_list(raw_server[key])
+        for key in sorted(_MCP_BOOLEAN_FIELDS):
+            if key in raw_server:
+                value = raw_server[key]
+                if not isinstance(value, bool):
+                    raise NativeProfileError("native MCP boolean fields must be booleans")
+                projected_server[key] = value
+        for key in sorted(_MCP_TIMEOUT_FIELDS):
+            if key in raw_server:
+                value = raw_server[key]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int | float)
+                    or not math.isfinite(value)
+                    or value <= 0
+                ):
+                    raise NativeProfileError("native MCP timeout fields must be finite positive numbers")
+                projected_server[key] = value
+
+        literal_headers = raw_server.get("http_headers")
         reference_headers = raw_server.get("env_http_headers", {})
         if literal_headers is not None and not isinstance(literal_headers, dict):
             raise NativeProfileError("native MCP http_headers must be a table")
         if not isinstance(reference_headers, dict):
             raise NativeProfileError("native MCP env_http_headers must be a table")
-        projected_headers: dict[str, object] = dict(reference_headers)
+        projected_headers: dict[str, object] = {}
+        if len(reference_headers) > _MAX_MCP_COLLECTION_ENTRIES:
+            raise NativeProfileError("native MCP header references exceed the entry limit")
+        for header_name, environment_key in sorted(reference_headers.items()):
+            if not _is_bounded_string(header_name) or not isinstance(environment_key, str):
+                raise NativeProfileError("native MCP header references must contain bounded string entries")
+            if _RUNTIME_ENV_KEY.fullmatch(environment_key) is None:
+                raise NativeProfileError("native MCP header references must name environment keys")
+            projected_headers[cast(str, header_name)] = environment_key
+        if isinstance(literal_headers, dict) and len(literal_headers) > _MAX_MCP_COLLECTION_ENTRIES:
+            raise NativeProfileError("native MCP HTTP headers exceed the entry limit")
         for header_name, raw_value in sorted((literal_headers or {}).items()):
             if (
                 not isinstance(header_name, str)
@@ -475,20 +557,26 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
             projected_headers[header_name] = reference
             _record_ephemeral(ephemeral, reference, raw_value, protected=protected_environment)
         if projected_headers:
-            raw_server["env_http_headers"] = projected_headers
+            projected_server["env_http_headers"] = projected_headers
         elif "env_http_headers" in raw_server:
-            raw_server["env_http_headers"] = {}
+            projected_server["env_http_headers"] = {}
 
         literal_environment = raw_server.get("env")
         if literal_environment is not None:
             if not isinstance(literal_environment, dict):
                 raise NativeProfileError("native MCP env must be a table")
             retained_environment: dict[str, object] = {}
+            if len(literal_environment) > _MAX_MCP_COLLECTION_ENTRIES:
+                raise NativeProfileError("native MCP environment exceeds the entry limit")
             environment_references = raw_server.get("env_vars", [])
             if not isinstance(environment_references, list) or any(
                 not isinstance(item, str) or _RUNTIME_ENV_KEY.fullmatch(item) is None for item in environment_references
             ):
                 raise NativeProfileError("native MCP env_vars must contain environment key references")
+            if len(environment_references) > _MAX_MCP_COLLECTION_ENTRIES or len(set(environment_references)) != len(
+                environment_references
+            ):
+                raise NativeProfileError("native MCP env_vars must contain bounded unique references")
             references = set(environment_references)
             for key, raw_value in sorted(literal_environment.items()):
                 if (
@@ -499,17 +587,17 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
                     or "\x00" in raw_value
                 ):
                     raise NativeProfileError("native MCP environment values must be bounded string entries")
-                if _SENSITIVE_KEY.search(key):
+                if _is_sensitive_key(key):
                     references.add(key)
                     _record_ephemeral(ephemeral, key, raw_value, protected=protected_environment)
                 else:
                     retained_environment[key] = raw_value
             if retained_environment:
-                raw_server["env"] = retained_environment
-            else:
-                raw_server.pop("env", None)
+                projected_server["env"] = retained_environment
             if references:
-                raw_server["env_vars"] = sorted(references)
+                projected_server["env_vars"] = sorted(references)
+        elif "env_vars" in raw_server:
+            projected_server["env_vars"] = _mcp_string_list(raw_server["env_vars"], environment_keys=True)
     return projected, tuple(sorted(ephemeral.items()))
 
 
@@ -521,8 +609,74 @@ def _clone_native_value(value: object) -> object:
     return value
 
 
-def _semantic_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+def _collapsed_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _header_container_kind(value: str) -> str | None:
+    collapsed = _collapsed_key(value)
+    if collapsed == "httpheaders":
+        return "http_headers"
+    if collapsed == "envhttpheaders":
+        return "env_http_headers"
+    return None
+
+
+def _contains_header_container(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            isinstance(key, str) and (_header_container_kind(key) is not None or _contains_header_container(child))
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_header_container(child) for child in value)
+    return False
+
+
+def _is_sensitive_key(value: str) -> bool:
+    collapsed = _collapsed_key(value)
+    word_tokens = tuple(
+        token
+        for token in re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value).casefold().replace("-", "_").split("_")
+        if token
+    )
+    return bool(
+        _SENSITIVE_KEY.search(value)
+        or any(
+            marker in collapsed
+            for marker in (
+                "authorization",
+                "bearer",
+                "clientsecret",
+                "cookie",
+                "credential",
+                "password",
+                "privatekey",
+                "secret",
+                "token",
+            )
+        )
+        or collapsed.endswith("apikey")
+        or (word_tokens and word_tokens[-1] == "key")
+    )
+
+
+def _is_bounded_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and len(value) <= 16_384 and "\x00" not in value
+
+
+def _mcp_string_list(value: object, *, environment_keys: bool = False) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or len(value) > _MAX_MCP_COLLECTION_ENTRIES
+        or any(not _is_bounded_string(item) for item in value)
+    ):
+        raise NativeProfileError("native MCP list fields must contain bounded strings")
+    result = cast(list[str], _clone_native_value(value))
+    if environment_keys:
+        if any(_RUNTIME_ENV_KEY.fullmatch(item) is None for item in result) or len(set(result)) != len(result):
+            raise NativeProfileError("native MCP env_vars must contain bounded unique environment key references")
+    return result
 
 
 def _ephemeral_reference(kind: str, server_name: str, field_name: str) -> str:
@@ -702,11 +856,11 @@ def _reject_secret_fields(value: object, *, path: str = "") -> None:
                 "env_key",
                 "requires_openai_auth",
             }
-            if _semantic_key(key) in {"http_headers", "env_http_headers"} and not (
+            if _header_container_kind(key) is not None and not (
                 key == "env_http_headers" and path.startswith("mcp_servers.") and path.count(".") == 1
             ):
                 raise NativeProfileError(f"native profile contains an unsupported header field: {child_path}")
-            if _SENSITIVE_KEY.search(key) and not allowed_reference:
+            if _is_sensitive_key(key) and not allowed_reference:
                 raise NativeProfileError(f"native profile contains a secret-bearing field: {child_path}")
             _reject_secret_fields(child, path=child_path)
     elif isinstance(value, list):
