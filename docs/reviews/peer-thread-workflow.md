@@ -1282,7 +1282,7 @@ Execution workspace:
 
 Dispatch status: H3 implementation commit `ca151fe` closes H3-ARCH-006C,
 H3-ARCH-007A, and H3-ARCH-007B on repair parent `3efa338`; this plan and the
-compatibility contract are updated in subsequent documentation commits.
+compatibility contract are updated in documentation commit `a63542a`.
 Deterministic gates and the retained authorized real sentinel are green in the
 existing semantic workspace. The repaired H3 implementation candidate is ready
 for fresh independent promotion review.
@@ -1293,4 +1293,5 @@ proves the actual Python SDK route through `codex-lb`, sanitized native
 permission/profile parity, the allowed workspace edit and durable resume,
 unchanged Git authority, and unchanged global Codex config bytes. External-
 write denial is not an H3 gate. H4 remains blocked until that review promotes
-H3.
+H3. The current branch may include documentation-only commits after the
+implementation HEAD; they do not change the H3 implementation candidate.
