@@ -8,7 +8,9 @@ from multiprocessing import Process, Queue
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import codex_flow
 import codex_flow.artifacts as artifacts_module
+import codex_flow.domain as domain_module
 import codex_flow.ledger as ledger_module
 from codex_flow.artifacts import ArtifactError, ArtifactProjector, UnsafeArtifactPath, rebuild_projections
 from codex_flow.domain import (
@@ -32,6 +34,7 @@ from codex_flow.ledger import (
     DispatchConflict,
     InvalidTransition,
     Ledger,
+    RecordNotFound,
     SchemaError,
     StaleWriter,
     UnsupportedSchemaVersion,
@@ -119,6 +122,15 @@ def _make_v1_fixture(path: Path) -> None:
     connection.close()
 
 
+def _noninternal_inventory(path: Path) -> list[tuple[str, str, str, str | None]]:
+    connection = sqlite3.connect(path)
+    rows = connection.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE substr(name, 1, 7) != 'sqlite_' ORDER BY type, name"
+    ).fetchall()
+    connection.close()
+    return rows
+
+
 class LedgerTests(unittest.TestCase):
     def make_ledger(self, directory: str) -> Ledger:
         ledger = Ledger(Path(directory) / ".codex-flow" / "workflow.db")
@@ -150,6 +162,43 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             ALLOWED_TRANSITIONS[WorkflowState.PLANNED] = frozenset()  # type: ignore[index]
         self.assertIn(WorkflowState.STARTING, ALLOWED_TRANSITIONS[WorkflowState.PLANNED])
+        original = domain_module.ALLOWED_TRANSITIONS
+        try:
+            domain_module.ALLOWED_TRANSITIONS = {  # type: ignore[assignment]
+                state: frozenset(WorkflowState) for state in WorkflowState
+            }
+            with TemporaryDirectory() as directory:
+                ledger = self.make_ledger(directory)
+                ledger.claim_dispatch("run-1", "m-1", "executor", 1)
+                ledger.transition("run-1", "m-1", WorkflowState.RUNNING)
+                ledger.transition("run-1", "m-1", WorkflowState.COMPLETED)
+                ledger.transition("run-1", "m-1", WorkflowState.REVIEWING)
+                ledger.transition("run-1", "m-1", WorkflowState.ACCEPTED)
+                with self.assertRaises(InvalidTransition):
+                    ledger.transition("run-1", "m-1", WorkflowState.RUNNING)
+        finally:
+            domain_module.ALLOWED_TRANSITIONS = original
+        self.assertFalse(hasattr(domain_module, "StateMachine"))
+
+    def test_root_exports_match_exact_h1_baseline(self) -> None:
+        self.assertEqual(
+            codex_flow.__all__,
+            [
+                "Capability",
+                "CapabilityObservation",
+                "CapabilityStatus",
+                "CodexFlowError",
+                "ReasoningEffort",
+                "Sandbox",
+                "Schema",
+                "SkillInput",
+                "TerminalFailureAfterIdentity",
+                "ThreadIdentity",
+                "TransportFailureBeforeIdentity",
+                "TurnObservation",
+            ],
+        )
+        self.assertFalse(hasattr(codex_flow, "Ledger"))
 
     def test_matrix_and_terminal_immutability_are_explicit(self) -> None:
         self.assertEqual(
@@ -333,40 +382,112 @@ class LedgerTests(unittest.TestCase):
             with self.assertRaises(SchemaError):
                 ledger.reopen()
 
-    def test_database_hardlink_substitution_cannot_redirect_writes(self) -> None:
+    def test_database_hardlinks_and_reopen_substitution_are_rejected(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "workflow.db"
-            original = root / "workflow-original.db"
-            attacker = root / "attacker.db"
-            Ledger(path).close()
-            attacker_ledger = Ledger(attacker)
-            attacker_ledger.create_run("attacker")
-            attacker_ledger.close()
-            swapped = False
-
-            def swap(stage: str) -> None:
-                nonlocal swapped
-                if stage == "before_connect" and not swapped:
-                    swapped = True
-                    path.rename(original)
-                    os.link(attacker, path)
-
-            ledger = Ledger(path, fault_injector=swap)
-            ledger.create_run("pinned")
-            self.assertEqual(ledger.get_run("pinned").run_id, "pinned")
+            exported = root / "exported.db"
+            ledger = Ledger(path)
+            ledger.create_run("original")
             ledger.close()
-            original_connection = sqlite3.connect(original)
-            self.assertEqual(original_connection.execute("SELECT run_id FROM runs").fetchall(), [("pinned",)])
-            original_connection.close()
-            attacker_connection = sqlite3.connect(attacker)
-            self.assertEqual(attacker_connection.execute("SELECT run_id FROM runs").fetchall(), [("attacker",)])
-            attacker_connection.close()
-            self.assertFalse(any(root.glob("*-journal")))
-            path.unlink()
-            original.rename(path)
-            reopened = Ledger(path)
-            self.assertEqual(reopened.get_run("pinned").run_id, "pinned")
+            os.link(path, exported)
+            with self.assertRaises(SchemaError):
+                ledger.reopen()
+            with self.assertRaises(SchemaError):
+                Ledger(path)
+            exported.unlink()
+            ledger.reopen()
+            self.assertEqual(ledger.get_run("original").run_id, "original")
+
+            ledger.close()
+            missing_original = root / "workflow-missing.db"
+            path.rename(missing_original)
+            with self.assertRaises(SchemaError):
+                ledger.reopen()
+            self.assertFalse(path.exists())
+            missing_original.rename(path)
+            ledger.reopen()
+
+            replacement = root / "replacement.db"
+            replacement_ledger = Ledger(replacement)
+            replacement_ledger.create_run("replacement")
+            replacement_ledger.close()
+            ledger.close()
+            original = root / "workflow-original.db"
+            path.rename(original)
+            replacement.rename(path)
+            with self.assertRaises(SchemaError):
+                ledger.reopen()
+            self.assertEqual(Ledger(path).get_run("replacement").run_id, "replacement")
+
+    def test_mid_transaction_hardlink_rolls_back(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "workflow.db"
+            exported = root / "exported.db"
+            armed = False
+
+            def export_before_commit(stage: str) -> None:
+                nonlocal armed
+                if stage == "before_commit" and armed:
+                    armed = False
+                    os.link(path, exported)
+
+            ledger = Ledger(path, fault_injector=export_before_commit)
+            armed = True
+            with self.assertRaises(SchemaError):
+                ledger.create_run("escaped")
+            exported.unlink()
+            with self.assertRaises(RecordNotFound):
+                ledger.get_run("escaped")
+            ledger.reopen()
+            ledger.create_run("safe")
+            self.assertEqual(ledger.get_run("safe").run_id, "safe")
+
+    def test_failed_first_open_cleans_only_its_empty_inode(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+
+            def fail_before_connect(stage: str) -> None:
+                if stage == "before_connect":
+                    raise RuntimeError(stage)
+
+            with self.assertRaisesRegex(RuntimeError, "before_connect"):
+                Ledger(path, fault_injector=fail_before_connect)
+            self.assertFalse(path.exists())
+
+            path.touch()
+            with self.assertRaisesRegex(RuntimeError, "before_connect"):
+                Ledger(path, fault_injector=fail_before_connect)
+            self.assertTrue(path.exists())
+
+    def test_failed_first_open_never_deletes_a_substitution(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "workflow.db"
+            created = root / "created.db"
+
+            def substitute(stage: str) -> None:
+                if stage == "before_connect":
+                    path.rename(created)
+                    path.write_bytes(b"replacement")
+
+            with self.assertRaises(SchemaError):
+                Ledger(path, fault_injector=substitute)
+            self.assertTrue(created.exists())
+            self.assertEqual(path.read_bytes(), b"replacement")
+
+    def test_failed_initial_schema_transaction_removes_uncommitted_inode(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+
+            def fail_commit(stage: str) -> None:
+                if stage == "before_commit":
+                    raise RuntimeError(stage)
+
+            with self.assertRaisesRegex(RuntimeError, "before_commit"):
+                Ledger(path, fault_injector=fail_commit)
+            self.assertFalse(path.exists())
 
     def test_reason_categories_do_not_collapse(self) -> None:
         self.assertEqual(PreIdentityTransportFailure().code, ReasonCode.TRANSPORT_FAILURE)
@@ -438,6 +559,7 @@ class LedgerTests(unittest.TestCase):
             fresh = Ledger(Path(directory) / "fresh.db")
             self.assertEqual(migrated_identity, fresh.schema_identity)
             fresh.close()
+            self.assertEqual(_noninternal_inventory(path), _noninternal_inventory(Path(directory) / "fresh.db"))
             connection = sqlite3.connect(path)
             connection.execute("UPDATE schema_meta SET value = '999' WHERE key = 'schema_version'")
             connection.commit()
@@ -485,6 +607,65 @@ class LedgerTests(unittest.TestCase):
             connection.close()
             with self.assertRaises(CorruptSchemaError):
                 Ledger(path)
+
+    def test_extra_sqlite_master_objects_are_rejected(self) -> None:
+        extras = {
+            "trigger": (
+                "CREATE TRIGGER extra AFTER INSERT ON runs BEGIN DELETE FROM runs WHERE run_id = NEW.run_id; END"
+            ),
+            "view": "CREATE VIEW extra AS SELECT run_id FROM runs",
+            "index": "CREATE INDEX extra ON runs(created_at)",
+            "sqlite-lookalike": "CREATE INDEX sqliteXextra ON runs(created_at)",
+        }
+        for object_type, statement in extras.items():
+            with self.subTest(object_type=object_type), TemporaryDirectory() as directory:
+                path = Path(directory) / "workflow.db"
+                ledger = Ledger(path)
+                ledger.close()
+                connection = sqlite3.connect(path)
+                connection.execute(statement)
+                connection.commit()
+                connection.close()
+                with self.assertRaises(CorruptSchemaError):
+                    ledger.reopen()
+
+    def test_trigger_deleted_write_is_detected_before_success(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            armed = False
+            ledger: Ledger
+
+            def add_trigger(stage: str) -> None:
+                if stage == "after_authority_validation" and armed:
+                    ledger._db().execute(
+                        "CREATE TEMP TRIGGER erase_run AFTER INSERT ON runs "
+                        "BEGIN DELETE FROM runs WHERE run_id = NEW.run_id; END"
+                    )
+
+            ledger = Ledger(path, fault_injector=add_trigger)
+            armed = True
+            with self.assertRaisesRegex(CorruptSchemaError, "did not leave its durable row"):
+                ledger.create_run("ghost")
+            armed = False
+            with self.assertRaises(RecordNotFound):
+                ledger.get_run("ghost")
+            self.assertEqual(ledger.create_run("good").run_id, "good")
+
+    def test_trigger_added_after_open_blocks_the_next_mutator(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            ledger = Ledger(path)
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "CREATE TRIGGER erase_run AFTER INSERT ON runs BEGIN DELETE FROM runs WHERE run_id = NEW.run_id; END"
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(CorruptSchemaError, "sqlite_master inventory"):
+                ledger.create_run("ghost")
+            connection = sqlite3.connect(path)
+            self.assertEqual(connection.execute("SELECT run_id FROM runs").fetchall(), [])
+            connection.close()
 
     def test_reopen_rejects_discontinuous_and_noncausal_histories(self) -> None:
         for corruption in ("discontinuous", "noncausal"):

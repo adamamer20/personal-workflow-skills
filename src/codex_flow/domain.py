@@ -296,48 +296,6 @@ TERMINAL_STATES: frozenset[WorkflowState] = frozenset(
 )
 
 
-_ALLOWED_TRANSITIONS = {
-    WorkflowState.PLANNED: frozenset(
-        {WorkflowState.STARTING, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED}
-    ),
-    WorkflowState.STARTING: frozenset(
-        {WorkflowState.RUNNING, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED}
-    ),
-    WorkflowState.RUNNING: frozenset(
-        {
-            WorkflowState.NEEDS_DECISION,
-            WorkflowState.COMPLETED,
-            WorkflowState.BLOCKED,
-            WorkflowState.FAILED,
-            WorkflowState.CANCELLED,
-        }
-    ),
-    WorkflowState.NEEDS_DECISION: frozenset(
-        {WorkflowState.RUNNING, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED}
-    ),
-    WorkflowState.COMPLETED: frozenset(
-        {WorkflowState.REVIEWING, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED}
-    ),
-    WorkflowState.REVIEWING: frozenset(
-        {
-            WorkflowState.REPAIR_REQUIRED,
-            WorkflowState.ACCEPTED,
-            WorkflowState.BLOCKED,
-            WorkflowState.FAILED,
-            WorkflowState.CANCELLED,
-        }
-    ),
-    WorkflowState.REPAIR_REQUIRED: frozenset(
-        {WorkflowState.RUNNING, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED}
-    ),
-    WorkflowState.ACCEPTED: frozenset(),
-    WorkflowState.BLOCKED: frozenset(),
-    WorkflowState.FAILED: frozenset(),
-    WorkflowState.CANCELLED: frozenset(),
-}
-ALLOWED_TRANSITIONS: Mapping[WorkflowState, frozenset[WorkflowState]] = MappingProxyType(_ALLOWED_TRANSITIONS)
-
-
 def coerce_state(value: WorkflowState | str) -> WorkflowState:
     if isinstance(value, WorkflowState):
         return value
@@ -347,19 +305,60 @@ def coerce_state(value: WorkflowState | str) -> WorkflowState:
         raise ValueError(f"unknown workflow state: {value!r}") from exc
 
 
-class StateMachine:
-    """Pure view of the deterministic state/transition contract."""
+def is_transition_allowed(from_state: WorkflowState | str, to_state: WorkflowState | str) -> bool:
+    """Return the single canonical H2 transition-policy decision."""
 
-    states = frozenset(WorkflowState)
-    terminal_states = TERMINAL_STATES
-    transitions = ALLOWED_TRANSITIONS
+    source = coerce_state(from_state)
+    target = coerce_state(to_state)
+    match source:
+        case WorkflowState.PLANNED:
+            return target in {
+                WorkflowState.STARTING,
+                WorkflowState.BLOCKED,
+                WorkflowState.FAILED,
+                WorkflowState.CANCELLED,
+            }
+        case WorkflowState.STARTING | WorkflowState.NEEDS_DECISION | WorkflowState.REPAIR_REQUIRED:
+            return target in {
+                WorkflowState.RUNNING,
+                WorkflowState.BLOCKED,
+                WorkflowState.FAILED,
+                WorkflowState.CANCELLED,
+            }
+        case WorkflowState.RUNNING:
+            return target in {
+                WorkflowState.NEEDS_DECISION,
+                WorkflowState.COMPLETED,
+                WorkflowState.BLOCKED,
+                WorkflowState.FAILED,
+                WorkflowState.CANCELLED,
+            }
+        case WorkflowState.COMPLETED:
+            return target in {
+                WorkflowState.REVIEWING,
+                WorkflowState.BLOCKED,
+                WorkflowState.FAILED,
+                WorkflowState.CANCELLED,
+            }
+        case WorkflowState.REVIEWING:
+            return target in {
+                WorkflowState.REPAIR_REQUIRED,
+                WorkflowState.ACCEPTED,
+                WorkflowState.BLOCKED,
+                WorkflowState.FAILED,
+                WorkflowState.CANCELLED,
+            }
+        case WorkflowState.ACCEPTED | WorkflowState.BLOCKED | WorkflowState.FAILED | WorkflowState.CANCELLED:
+            return False
+    raise AssertionError(f"unhandled workflow state: {source!r}")
 
-    @classmethod
-    def validate(cls, from_state: WorkflowState | str, to_state: WorkflowState | str) -> None:
-        source = coerce_state(from_state)
-        target = coerce_state(to_state)
-        if target not in cls.transitions[source]:
-            raise ValueError(f"{source.value} -> {target.value} is not allowed")
+
+ALLOWED_TRANSITIONS: Mapping[WorkflowState, frozenset[WorkflowState]] = MappingProxyType(
+    {
+        source: frozenset(target for target in WorkflowState if is_transition_allowed(source, target))
+        for source in WorkflowState
+    }
+)
 
 
 class ReasonCode(str, Enum):
