@@ -580,7 +580,8 @@ missing regression coverage.
 
 Dispatch status: existing H2 executor
 `threadId=01a032dc-bb34-7fa3-81e5-5102a2020bab`, `hostId=local`; repair message
-not yet sent.
+sent once; no replacement, duplicate repair owner, or routine polling is
+authorized.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
