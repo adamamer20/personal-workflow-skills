@@ -1,4 +1,4 @@
 interface:
   display_name: "Plan Work"
   short_description: "Turn substantial work into executable milestones"
-  default_prompt: "Use $plan-work to make this program decision-ready and hand the first executable milestone to a fresh peer execution thread when execution is requested."
+  default_prompt: "Use $plan-work to make this program decision-ready, select its execution workspace, and hand the first executable milestone to a fresh peer thread when execution is requested."

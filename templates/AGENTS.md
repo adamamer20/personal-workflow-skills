@@ -65,6 +65,19 @@
 - One milestone normally uses one fresh execution context. Program ownership
   may persist across milestones; task context does not. Use parallel peers only
   for genuinely independent milestones with disjoint mutable surfaces.
+- A fresh Codex thread or model does not imply a fresh Git worktree. The
+  execution workspace belongs to the program/lane and is reused for sequential
+  milestones, context rollover, repair, recovery, model changes, and read-only
+  review while mutable ownership remains singular. Create another worktree only
+  for concurrent mutable ownership, protection of pre-existing user changes, or
+  an explicitly isolated experiment.
+- Managed worktrees for `<parent>/<repo>` live under sibling root
+  `<parent>/<repo>.worktrees/` and use a semantic `<program-slug>` or
+  `<program-slug>-<lane-slug>` directory with matching `agent/<slug>` branch.
+  Never name them from a thread/client id or model. The plan chooses
+  `current_checkout`, `existing_worktree`, or `managed_worktree`; handoff does
+  not invent topology or replace an unavailable exact workspace with a
+  runtime-generated worktree.
 - Keep small localized tasks and questions on the direct single-owner path.
 - Repository `AGENTS.md` files own project-specific plan paths, gates, and
   exceptions.

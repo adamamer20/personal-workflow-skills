@@ -83,12 +83,18 @@ Per-repository run state is stored under `.codex-flow/` and excluded from Git:
       review.json
       decision-request.json
       decision.json
-  worktrees/<run-id>/<milestone-id>/
 ```
 
 SQLite is authoritative. JSON and JSONL are atomic, readable projections for
 humans, model inputs, and recovery; they never determine state transitions by
 themselves.
+
+Execution workspaces are program/lane resources rather than task resources. For
+repository `<parent>/<repo>`, a managed workspace lives at
+`<parent>/<repo>.worktrees/<program-slug>` or
+`<parent>/<repo>.worktrees/<program-slug>-<lane-slug>` with matching
+`agent/<slug>` branch. Sequential milestones, context rollover, review, repair,
+recovery, and model changes reuse it while mutable ownership remains singular.
 
 The initial state machine is deliberately small:
 
@@ -147,8 +153,9 @@ unavailability or explicit context rollover.
 - Every state transition validates its allowed predecessor and appends a
   causally ordered event in the same transaction.
 - Worktrees are created and leased by the controller from an explicit repository
-  root and base commit. Models never choose project ids, branches, or worktree
-  paths.
+  root and base commit only when isolation is required. Models never choose
+  project ids, branches, or worktree paths. A fresh model thread does not create
+  a fresh worktree.
 - One milestone has one mutable executor lease. Review is read-only. Repairs
   resume the same executor and lease unless an explicit rollover transition is
   recorded.
@@ -572,10 +579,11 @@ H3 — add controller-owned worktrees and SDK execution.
 ### Outcome and acceptance modes
 
 `codex-flow plan`, `start`, `resume`, `status`, and `cancel` form the first
-agent-usable vertical slice. The controller creates and leases an isolated Git
-worktree from an explicit repository/base commit, starts or resumes exactly one
-SDK executor under `Sandbox.workspace_write`, runs explicit validation, and
-persists a typed terminal result before any projection or notification.
+agent-usable vertical slice. The controller validates and leases the selected
+current checkout or semantic managed Git worktree from an explicit
+repository/base commit, starts or resumes exactly one SDK executor under
+`Sandbox.workspace_write`, runs explicit validation, and persists a typed
+terminal result before any projection or notification.
 
 Acceptance modes: `objective`, `architecture`.
 
@@ -603,17 +611,21 @@ Acceptance modes: `objective`, `architecture`.
 
 ### Contracts and failure behavior
 
-1. A versioned `ExecutionCapsule` contains run/milestone identity, absolute
-   repository root, resolved full base SHA, normalized mutable/protected path
-   sets, explicit validation argv/timeout, executor model/effort, prompt input,
-   and a strict structured-output schema. Prompt bodies remain in owned capsule
-   artifacts, not generic ledger metadata/events.
+1. A versioned `ExecutionCapsule` contains run/milestone identity, workspace
+   mode (`current_checkout`, `existing_worktree`, or `managed_worktree`),
+   absolute repository/workspace roots, semantic program/lane slug, branch,
+   resolved full base SHA, normalized mutable/protected path sets, explicit
+   validation argv/timeout, executor model/effort, prompt input, and a strict
+   structured-output schema. Prompt bodies remain in owned capsule artifacts,
+   not generic ledger metadata/events.
 2. `WorktreeManager` uses argument-vector Git subprocesses, validates the
    repository and ancestors without symlinks, resolves the supplied base before
-   mutation, and creates only
-   `.codex-flow/worktrees/<run-id>/<milestone-id>` with a durable exclusive lease.
-   Repeated acquisition is idempotent for the same contract and conflicts on
-   any changed repository/base/path/owner fact.
+   mutation, and leases the selected workspace. When a new managed worktree is
+   explicitly required, it creates only sibling
+   `<repo-parent>/<repo-name>.worktrees/<program-or-lane-slug>` with matching
+   `agent/<slug>` branch. Same-contract acquisition is idempotent; sequential
+   milestones, rollover, review, repair, recovery, and model changes reuse it;
+   conflicts cover changed repository/base/path/branch/lane/owner facts.
 3. `plan` validates and durably records the capsule without external side
    effects. `start` claims the dispatch, creates/records the worktree, starts one
    SDK thread, persists its real identity immediately, executes the turn, runs
@@ -635,8 +647,9 @@ Acceptance modes: `objective`, `architecture`.
 
 ### Acceptance and validation
 
-- exhaustive hermetic tests cover capsule/path validation, worktree ownership,
-  same-contract idempotency, conflicting leases, dirty/protected path checks,
+- exhaustive hermetic tests cover capsule/path/semantic-slug validation,
+  current-checkout selection, sibling-root managed-worktree ownership, workspace
+  reuse, same-contract idempotency, conflicting parallel lanes, dirty/protected path checks,
   subprocess failure, stale writers, duplicate `start`, result-before-
   projection ordering, cancel idempotency, and every crash injection boundary;
 - fresh-process adapter tests prove resume initializes a new SDK client and
@@ -645,7 +658,8 @@ Acceptance modes: `objective`, `architecture`.
   milestone, injects a controller stop after durable SDK identity, resumes in a
   fresh process, runs validation, and reaches one terminal structured result;
 - retained evidence records one dispatch, one worktree lease/path, one SDK
-  thread identity, ordered turns/events, before/after protected-path hashes,
+  thread identity, a semantic program/lane workspace reused across resume,
+  ordered turns/events, before/after protected-path hashes,
   validation output digest, final Git diff/commit facts, and no duplicate owner;
 - `make check`, focused H3 tests, `git diff --check`, complete diff self-review,
   and zero open P0/P1.
@@ -920,29 +934,35 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   the focused H2 suite ten consecutive times and full `make check` with 62
   tests. H2 remains unintegrated pending one fresh independent Sol High review
   of exact target `fc6d286` and full range `fab4cb6..fc6d286`.
+- 2026-08-24: independent Sol High review denied `fc6d286` with
+  P0=0/P1=3/P2=0. It closed the prior main-schema, inode/hardlink, transition-
+  mutation, root-export, failed-open, and concurrent-open classes, but
+  reproduced same-connection TEMP schema/metadata mutation that returns success
+  then fails reopen, an authority-free `PLANNED` through `ACCEPTED` history, and
+  a public transition without an expected predecessor token. The same H2
+  workspace/executor owns the bounded repair; H3 remains blocked.
+- 2026-08-24: the user made workspace identity program/lane-owned. Fresh
+  threads, model changes, reviews, repairs, recovery, rollovers, and sequential
+  milestones reuse the same workspace while mutable ownership is singular.
+  Managed worktrees move to semantic sibling `<repo>.worktrees/<program[-lane]>`
+  paths; H3 and the workflow skills must enforce this before controller use.
 
 ## Next execution
 
-Milestone: H2-P4 — final independent H2 integrity promotion review.
+Milestone: H2-R5 — repair the three findings from independent review of
+`fc6d286`.
 
-Dispatch status: queued exactly once as native project-worktree task
-`client-new-thread:4c9b3cfd-b708-46f7-82c6-3efb2787035f`; resolve its real
-thread identity without another create attempt. Review target is `fc6d286`.
+Dispatch status: delivered exactly once to the existing H2 execution task
+`01a03327-44bd-7240-9120-dc6949c5c349` on host `local`. It reuses the same
+existing execution worktree; do not create or move to another workspace.
 
-Resolved route: `model=gpt-5.6-sol`, `thinking=high`, authorized for the final
-architecture/integrity promotion judgment.
+Owned scope: H2 domain/ledger/tests only. Require complete main and TEMP schema
+authority validation including schema metadata before commit, reserve dispatch
+acquisition and `PLANNED -> STARTING` to `claim_dispatch`, require explicit
+`expected_state` on every public transition, preserve all prior H2 closures,
+and prove immediate reopenability after every successful mutation.
 
-Planning thread: `01a0335c-2fb5-74c0-987a-3d0fd9aaa462`; callback host is
-`local`. Plan path: `docs/reviews/peer-thread-workflow.md`.
-
-Review scope: read-only exact commit/parent/path verification, full
-`fab4cb6..fc6d286` H2 review, repeated concurrent-open/claim stress, independent
-schema-object, hardlink/substitution, transition-policy, failed-open, causal-
-history, and immediate-reopen adversarial checks, plus `make check` and diff
-checks. No H3, SDK, network, credential, plugin/global, remote, or tracked-file
-mutation.
-
-Promotion requires zero open P0/P1. A concrete surviving defect returns to
-diagnosis and repair; it does not weaken acceptance or automatically stop the
-program. If green, integrate the four-commit H2 chain and begin H3 from the
-canonical branch.
+Validation: focused repeated H2 suite, `make check`, diff checks, full H2 self-
+review, clean local commit, then one fresh independent review. H3 remains
+blocked until zero open P0/P1. Local difficulty routes to continued diagnosis,
+not weaker acceptance or user interruption.

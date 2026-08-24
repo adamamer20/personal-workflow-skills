@@ -33,6 +33,21 @@ ordering, and program completion. Each fresh execution thread owns exactly one
 milestone under normal conditions and sends one material escalation or terminal
 outcome when needed.
 
+A fresh execution thread is a model-context boundary, not a Git-workspace
+boundary. The plan selects one execution workspace for the program or mutable
+lane and reuses it across sequential milestones, context rollover, repair,
+recovery, model changes, and read-only review. A new worktree is reserved for
+concurrent mutable ownership, protection of pre-existing user changes, or an
+explicitly isolated experiment.
+
+Managed worktrees for `<parent>/<repo>` live at
+`<parent>/<repo>.worktrees/<program-slug>` or, for a parallel lane,
+`<parent>/<repo>.worktrees/<program-slug>-<lane-slug>`, with a matching
+`agent/<slug>` branch. Thread ids, client ids, model names, and bare milestone
+numbers are not workspace identities. `plan-work` chooses the topology;
+`codex-thread-handoff` only launches into the exact selected workspace and fails
+closed when the native API cannot address it.
+
 Project-specific composition remains in each project's `AGENTS.md`. Repository
 instructions name the canonical plan path, gates, protected surfaces, and any
 exceptions.
@@ -155,6 +170,12 @@ Luna Max escalation is outside these template defaults and requires a separate
 explicit user authorization plus schema support.
 Subagents remain optional tactical helpers rather than the workflow foundation.
 The skills cannot change the model of a task that is already running.
+
+The handoff capsule also carries `current_checkout`, `existing_worktree`, or
+`managed_worktree` plus the exact repository/path and any branch/base/lane
+identity. Native project lookup must resolve that exact path. The handoff never
+defaults every Git task to a new worktree and never substitutes a runtime-
+generated directory when the selected existing workspace is unavailable.
 
 Execution capsules carry the exact planning callback `threadId` and a `hostId`
 only when native task tools returned it; environment ids are never substituted

@@ -141,6 +141,13 @@ Use this plan shape, omitting empty sections rather than filling placeholders:
 Outcome
 Acceptance modes: objective | visual | architecture
 Implementation and review authorities
+Execution workspace:
+  mode: current_checkout | existing_worktree | managed_worktree
+  repository: <absolute repository root>
+  path: <exact checkout/worktree path>
+  branch: <branch when applicable>
+  base_sha: <resolved full SHA when applicable>
+  lane: <semantic program/lane slug when managed>
 Mutable ownership
 Protected surfaces
 Dependencies
@@ -180,9 +187,24 @@ material ambiguity.
 
 Default to sequential execution: one milestone, one fresh peer execution
 thread, one mutable owner. Parallel peer threads are an exception for genuinely
-independent milestones with disjoint ownership and satisfied dependencies.
-Simultaneous code changes should use isolated worktrees unless the repository
-has another safe integration boundary.
+independent milestones with disjoint ownership and satisfied dependencies. A
+fresh thread or model context does not imply a fresh Git worktree: worktrees are
+owned by programs or mutable execution lanes, not models or task ids.
+
+Select the execution workspace before dispatch. Use the current checkout when
+it is safe and has one mutable owner. Reuse an existing program/lane worktree for
+sequential milestones, context rollover, review, repair, recovery, and model
+changes. Allocate a new worktree only for concurrent mutable ownership,
+protection of pre-existing user changes, or an explicitly isolated experiment.
+
+For repository `<parent>/<repo>`, every managed worktree lives under sibling
+root `<parent>/<repo>.worktrees/` and uses a semantic `<program-slug>` or
+`<program-slug>-<lane-slug>` directory with corresponding `agent/<slug>` branch.
+Do not derive its identity from a thread/client id, model, or bare milestone
+number. Record the exact workspace mode, repository, path, branch, base SHA, and
+lane in the capsule. If native task creation cannot address that exact selected
+workspace, leave dispatch unsupported; never substitute a runtime-generated
+worktree.
 
 ## Dispatch when execution was requested
 
@@ -190,8 +212,9 @@ If the request is planning-only, stop once the canonical plan is decision-ready.
 If implementation was requested:
 
 1. Select the first executable milestone, resolve its authorized exact native
-   pair, and finalize a compact execution capsule carrying the resolved exact
-   native pair as `model` and `thinking`, plus the authorization status.
+   pair and execution workspace, and finalize a compact execution capsule
+   carrying the resolved exact native pair as `model` and `thinking`, routing
+   authorization, and the exact workspace contract.
 2. Capability-check the native `create_thread` task tool and its advertised
    `model` and `thinking` fields. Create a fresh peer Codex task/thread when
    native creation is available; if a route is authorized, require that exact

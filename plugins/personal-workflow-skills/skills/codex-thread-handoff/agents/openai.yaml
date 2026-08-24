@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Thread Handoff"
   short_description: "Start, recover, or message peer tasks safely"
-  default_prompt: "Use $codex-thread-handoff to start, reconcile, recover, or message one peer Codex thread without retries, child agents, or routine polling."
+  default_prompt: "Use $codex-thread-handoff to start, reconcile, recover, or message one peer Codex thread in the plan-selected workspace without retries, child agents, or routine polling."

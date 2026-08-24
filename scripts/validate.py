@@ -253,6 +253,11 @@ def validate_plan_work_contract() -> None:
         "resume the same thread after an `interrupted` turn",
         "Never create a replacement merely because a server/client error",
         "RECOVER_START or RECOVER_THREAD",
+        "Execution workspace:",
+        "current_checkout | existing_worktree | managed_worktree",
+        "A fresh thread or model context does not imply a fresh Git worktree",
+        "<parent>/<repo>.worktrees/",
+        "If native task creation cannot address that exact selected workspace",
     )
     require_contract(plan_path, required_text)
 
@@ -284,6 +289,9 @@ def validate_execute_milestone_contract() -> None:
         "do not restart the milestone blindly",
         "inspect the existing worktree/diff, durable artifacts",
         "A `REPUBLISH_CALLBACK` message is narrower",
+        "The execution workspace is also capsule-owned",
+        "does not imply a fresh worktree",
+        "reusing the exact same execution workspace",
     )
     require_contract(execute_path, required_text)
 
@@ -328,6 +336,14 @@ def validate_thread_handoff_contract() -> None:
         "`REPUBLISH_CALLBACK` message",
         "`recovery_status: unsent`",
         "A replacement requires a separate explicit user decision",
+        "START does not choose workspace topology",
+        "A fresh thread or model context does not imply a fresh Git worktree",
+        "`current_checkout`",
+        "`existing_worktree`",
+        "`managed_worktree`",
+        "<repo-parent>/<repo-name>.worktrees/",
+        "report `workspace_status: unsupported` and leave START undispatched",
+        "Handoff never runs Git worktree creation",
     )
     require_contract(handoff_path, required_text)
 
@@ -373,6 +389,8 @@ def validate_native_routing_contract() -> None:
         "rejected-looking response is not proof that no task exists",
         "every terminal outcome",
         "Keep the planning thread unarchived and routable",
+        "Select the execution workspace before dispatch",
+        "Allocate a new worktree only for concurrent mutable ownership",
     )
     require_contract(WORKFLOW_PATHS["plan"], plan_required)
 
@@ -392,6 +410,9 @@ def validate_native_routing_contract() -> None:
         "exact callback host id",
         "Use `hostId` only when it came from",
         "callback_status: unsent",
+        "START does not choose workspace topology",
+        "selected project's real path must equal the capsule's exact execution path",
+        "environment.type=worktree",
     )
     require_contract(WORKFLOW_PATHS["handoff"], handoff_required)
 
@@ -416,6 +437,8 @@ def validate_native_routing_contract() -> None:
         "no default-model, alternate-model, or retry fallback",
         "task-creation contract, not capsule-only recommendation text",
         "native confirmation of the exact pair",
+        "The execution workspace is also capsule-owned",
+        "fresh thread, model change, review, repair, recovery, or context rollover does not imply a fresh worktree",
     )
     require_contract(WORKFLOW_PATHS["execute"], execute_required)
 
@@ -453,6 +476,9 @@ def validate_native_routing_contract() -> None:
         "last turn is `interrupted`",
         "same thread republishes the existing terminal packet",
         "cannot guarantee an automatic callback",
+        "A fresh execution thread is a model-context boundary, not a Git-workspace boundary",
+        "<parent>/<repo>.worktrees/<program-slug>",
+        "The handoff never defaults every Git task to a new worktree",
     )
     require_contract(README_PATH, readme_required)
 
@@ -497,6 +523,9 @@ def validate_global_agents_template() -> None:
         "resume the same thread after an `interrupted` turn",
         "user explicitly authorizes replacement",
         "One milestone normally uses one fresh execution context",
+        "A fresh Codex thread or model does not imply a fresh Git worktree",
+        "<parent>/<repo>.worktrees/",
+        "The plan chooses `current_checkout`, `existing_worktree`, or `managed_worktree`",
         "Before substantial execution",
         "open P0/P1 findings are zero",
         "Repository `AGENTS.md` files own project-specific plan paths",

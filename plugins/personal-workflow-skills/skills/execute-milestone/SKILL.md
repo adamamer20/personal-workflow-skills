@@ -36,6 +36,15 @@ Reject or escalate a capsule that is not decision-ready rather than inventing a
 material product or architecture decision. Reuse the canonical production path;
 do not build parallel scaffolding or a duplicate execution route.
 
+The execution workspace is also capsule-owned. A fresh thread, model change,
+review, repair, recovery, or context rollover does not imply a fresh worktree.
+Verify the exact selected `current_checkout`, `existing_worktree`, or
+`managed_worktree` path before mutation and keep using that program/lane
+workspace while mutable ownership is singular. Do not create, rename, move, or
+replace it merely because this is a fresh context. A new worktree requires
+concurrent mutable ownership, protection of pre-existing user changes, or an
+explicitly isolated experiment authorized by the plan.
+
 ## Model routing
 
 The planning and handoff creator resolve each implementation or review
@@ -153,10 +162,11 @@ unavailable telemetry.
 At a hard threshold, finish only the current bounded operation, reach the
 nearest safe green checkpoint, do not begin another substantial package, and
 create a compact continuation handoff. Continue only in a fresh peer execution
-thread after native creation is confirmed. Preserve logical ownership while
-changing context; never preserve an exhausted context merely to preserve
-ownership. One milestone normally equals one thread, but an unexpectedly large
-milestone may roll over this way.
+thread after native creation is confirmed, reusing the exact same execution
+workspace. Preserve logical and Git-workspace ownership while changing context;
+never preserve an exhausted context merely to preserve ownership. One milestone
+normally equals one thread, but an unexpectedly large milestone may roll over
+this way.
 
 If the native runtime cannot create a peer thread, send a terminal `ESCALATION`
 to the planning callback target, report the limitation, and stop at the safe

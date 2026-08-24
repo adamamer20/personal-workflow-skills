@@ -64,6 +64,29 @@ repositories, and later milestones remain protected unless the canonical plan
 explicitly assigns them to the current owner. Do not silently substitute
 models, reasoning effort, transports, permissions, or acceptance gates.
 
+## Execution workspace topology
+
+- A fresh Codex thread or model context does not imply a fresh Git worktree. A
+  worktree is an isolated mutable workspace owned by a program or execution
+  lane, not by Luna, Sol, a reviewer, or a thread id.
+- Reuse the same execution workspace across sequential milestones, context
+  rollover, repair, recovery, model changes, and read-only review while mutable
+  ownership remains singular. Allocate another worktree only for concurrent
+  mutable ownership, protection of pre-existing user changes, or an explicitly
+  isolated risky/alternative experiment.
+- Managed worktrees for repository `<parent>/<repo>` live only below sibling
+  root `<parent>/<repo>.worktrees/`. Name each workspace with a stable semantic
+  program slug, or `<program-slug>-<lane-slug>` for a parallel lane; never use a
+  task id, client id, model name, or milestone number as the primary identity.
+  Use the corresponding `agent/<program-or-lane-slug>` branch by default.
+- The canonical plan selects `current_checkout`, `existing_worktree`, or
+  `managed_worktree` before task creation and records the exact repository,
+  path, branch, base SHA, and lane when applicable. Handoff transports launch
+  threads; they do not invent Git topology or silently create another worktree.
+- When the native task API cannot address the selected existing workspace,
+  fail the handoff closed and preserve the workspace capsule. Never substitute
+  a runtime-generated worktree merely because a fresh thread was requested.
+
 ## Controller routing and recovery semantics
 
 - Model milestones with explicit `objective`, `visual`, and `architecture`

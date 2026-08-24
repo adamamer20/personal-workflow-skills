@@ -46,18 +46,44 @@ Capture:
 - bounded handoff prompt, including canonical evidence paths;
 - exact callback thread id and, when natively returned, exact callback host id
   for escalation or terminal outcome. Never derive a host id from a project,
-  environment, path, or stale capsule.
+  environment, path, or stale capsule; and
+- the plan-selected execution workspace: mode, absolute repository and path,
+  plus branch, full base SHA, and semantic lane when applicable.
+
+START does not choose workspace topology. A fresh thread or model context does
+not imply a fresh Git worktree. The workspace belongs to the program or mutable
+execution lane and is reused across sequential milestones, context rollover,
+review, repair, recovery, and model changes while ownership remains singular.
+Only the planning/controller or another explicit Git-workspace owner may select
+or create a managed worktree for concurrent mutable ownership, protection of
+pre-existing user changes, or an explicitly isolated experiment.
+
+The capsule selects exactly one mode:
+
+- `current_checkout`: launch against the exact saved project checkout with a
+  local environment;
+- `existing_worktree`: reuse the exact existing path and branch; or
+- `managed_worktree`: reuse the already-created semantic program/lane path
+  below sibling root `<repo-parent>/<repo-name>.worktrees/`.
+
+A managed directory uses `<program-slug>` or `<program-slug>-<lane-slug>` and a
+matching `agent/<slug>` branch. Never derive a workspace name from a thread id,
+client id, model, or bare milestone number. Handoff never runs Git worktree
+creation and never silently asks the runtime for a different worktree.
 
 For repository work, call `list_projects` immediately before creation, resolve
 the exact saved project, and inspect `isGitRepository`. Use only a project id
 returned by that current call; never reuse one from chat history, a plan, a
-previous turn, or an earlier tool result. Default to a new worktree when it is a
-Git repository and to the saved local project otherwise; honor an explicit
-request to use the saved project directly. Do not invent a project, branch, or
-starting state. For work without a repository, use a projectless target.
+previous turn, or an earlier tool result. The selected project's real path must
+equal the capsule's exact execution path. If no saved project or native schema
+can address that exact current checkout or existing managed worktree, report
+`workspace_status: unsupported` and leave START undispatched. Do not invent a
+project, branch, starting state, or runtime-generated worktree. For work without
+a repository, use a projectless target.
 
-Construct the call from the currently exposed `create_thread` schema. For a
-normal repository worktree, start from this minimal payload shape:
+Construct the call from the currently exposed `create_thread` schema. For an
+addressable selected repository workspace, start from this minimal payload
+shape:
 
 ```js
 {
@@ -66,15 +92,18 @@ normal repository worktree, start from this minimal payload shape:
   target: {
     type: "project",
     projectId: "<id from the current list_projects result>",
-    environment: { type: "worktree" }
+    environment: { type: "local" }
   }
 }
 ```
 
 At the top level pass only fields accepted by the current schema. In
 particular, `projectId` belongs only inside `target`; never duplicate it at the
-top level. Add a starting state only when authorized by the current request and
-supported by the schema. For an authorized, schema-supported route, also pass
+top level. Use `environment.type=worktree` only if a future native schema can
+bind the capsule's exact preselected sibling path; the current generic worktree
+mode is not a substitute. Add a starting state only when it describes the exact
+authorized workspace and is supported by the schema. For an authorized,
+schema-supported route, also pass
 `model=<resolved native id>` and `thinking=<resolved native value>`. For a
 `not_authorized` capsule, omit both fields. Use the compact capsule as the
 initial `prompt`. This operation creates a peer with no inherited chat history;
