@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codex-flow"
+version = "0.1.0"
+description = "Typed, SDK-first workflow transport boundary for Codex"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai-codex==0.147.0",
+  "typer>=0.16,<1",
+]
+
+[project.scripts]
+codex-flow = "codex_flow.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codex_flow"]
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+  "pre-commit>=3.6,<5",
+  "pytest>=8.0,<9",
+  "ruff>=0.12,<1",
+]
+
+[tool.pytest.ini_options]
+addopts = ["-ra", "--strict-config", "--strict-markers", "--import-mode=importlib"]
+testpaths = ["tests"]
+norecursedirs = [".git", ".venv", "__pycache__"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+extend-exclude = [".venv", "__pycache__", "scripts/validate.py", "tests/test_handoff_hooks.py"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "RUF"]
+ignore = ["E501", "UP017", "UP040", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["B018"]

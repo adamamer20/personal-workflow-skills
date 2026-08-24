@@ -1,0 +1,425 @@
+{
+  "capabilities": {
+    "desktop": {
+      "detail": "Desktop UI control is outside the SDK transport surface",
+      "status": "not_exposed"
+    },
+    "explicit_model": {
+      "detail": "model='gpt-5.6-luna' was passed to thread_start and both turns",
+      "status": "proven"
+    },
+    "explicit_reasoning_effort": {
+      "detail": "reasoning_effort='medium' was passed to both turns",
+      "status": "proven"
+    },
+    "idle_wake": {
+      "detail": "idle wake/queue control is outside the SDK transport surface",
+      "status": "not_exposed"
+    },
+    "lifecycle_events": {
+      "detail": "ordered turn notifications included a terminal turn/completed event per turn",
+      "status": "proven"
+    },
+    "local_start": {
+      "detail": "Codex() and thread_start returned a real thread identity",
+      "status": "proven"
+    },
+    "permission_profile": {
+      "detail": "permission-profile survival is not exposed by the high-level SDK",
+      "status": "not_exposed"
+    },
+    "remote_host": {
+      "detail": "remote host selection is outside the local SDK transport surface",
+      "status": "not_exposed"
+    },
+    "review": {
+      "detail": "stable Codex/Thread API has no high-level review operation",
+      "status": "not_exposed"
+    },
+    "same_thread_resume": {
+      "detail": "resume returned the original thread identity",
+      "status": "proven"
+    },
+    "sandbox_isolation": {
+      "detail": "disposable repository bytes were unchanged under Sandbox.read_only",
+      "status": "proven"
+    },
+    "schema_bounded_turn": {
+      "detail": "two turns returned JSON objects satisfying the required schema",
+      "status": "proven"
+    },
+    "structured_skill_input": {
+      "detail": "public SkillInput type is available but not exercised by the read-only sentinel",
+      "status": "not_run"
+    },
+    "thread_identity": {
+      "detail": "thread identity was non-empty and addressable",
+      "status": "proven"
+    }
+  },
+  "cleanup": {
+    "archived": true
+  },
+  "controller_repository": {
+    "git_status_after": " M .gitignore\n?? .pre-commit-config.yaml\n?? .python-version\n?? AGENTS.md\n?? Makefile\n?? docs/reviews/codex-sdk-compatibility.md\n?? docs/reviews/evidence/h1-sdk-sentinel.json\n?? pyproject.toml\n?? src/codex_flow/__init__.py\n?? src/codex_flow/backends/__init__.py\n?? src/codex_flow/backends/codex_sdk.py\n?? src/codex_flow/cli.py\n?? src/codex_flow/domain.py\n?? src/codex_flow/sentinel.py\n?? tests/test_codex_sdk_adapter.py\n?? uv.lock\n",
+    "git_status_before": " M .gitignore\n?? .pre-commit-config.yaml\n?? .python-version\n?? AGENTS.md\n?? Makefile\n?? docs/reviews/codex-sdk-compatibility.md\n?? docs/reviews/evidence/h1-sdk-sentinel.json\n?? pyproject.toml\n?? src/codex_flow/__init__.py\n?? src/codex_flow/backends/__init__.py\n?? src/codex_flow/backends/codex_sdk.py\n?? src/codex_flow/cli.py\n?? src/codex_flow/domain.py\n?? src/codex_flow/sentinel.py\n?? tests/test_codex_sdk_adapter.py\n?? uv.lock\n",
+    "path": "<controller-worktree>",
+    "unchanged": true
+  },
+  "events": [
+    {
+      "method": "turn/started",
+      "sequence": 0,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 0
+    },
+    {
+      "method": "hook/started",
+      "sequence": 1,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 1
+    },
+    {
+      "method": "hook/completed",
+      "sequence": 2,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 2
+    },
+    {
+      "method": "item/started",
+      "sequence": 3,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 3
+    },
+    {
+      "method": "item/completed",
+      "sequence": 4,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 4
+    },
+    {
+      "method": "item/started",
+      "sequence": 5,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 5
+    },
+    {
+      "method": "item/completed",
+      "sequence": 6,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 6
+    },
+    {
+      "method": "item/started",
+      "sequence": 7,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 7
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 8,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 8
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 9,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 9
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 10,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 10
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 11,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 11
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 12,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 12
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 13,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 13
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 14,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 14
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 15,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 15
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 16,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 16
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 17,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 17
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 18,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 18
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 19,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 19
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 20,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 20
+    },
+    {
+      "method": "item/completed",
+      "sequence": 21,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 21
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "sequence": 22,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 22
+    },
+    {
+      "method": "hook/started",
+      "sequence": 23,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 23
+    },
+    {
+      "method": "hook/completed",
+      "sequence": 24,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 24
+    },
+    {
+      "method": "turn/completed",
+      "sequence": 25,
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe",
+      "turn_sequence": 25
+    },
+    {
+      "method": "turn/started",
+      "sequence": 26,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 0
+    },
+    {
+      "method": "item/started",
+      "sequence": 27,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 1
+    },
+    {
+      "method": "item/completed",
+      "sequence": 28,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 2
+    },
+    {
+      "method": "item/started",
+      "sequence": 29,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 3
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 30,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 4
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 31,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 5
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 32,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 6
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 33,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 7
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 34,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 8
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 35,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 9
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 36,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 10
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 37,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 11
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 38,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 12
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "sequence": 39,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 13
+    },
+    {
+      "method": "item/completed",
+      "sequence": 40,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 14
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "sequence": 41,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 15
+    },
+    {
+      "method": "hook/started",
+      "sequence": 42,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 16
+    },
+    {
+      "method": "hook/completed",
+      "sequence": 43,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 17
+    },
+    {
+      "method": "turn/completed",
+      "sequence": 44,
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20",
+      "turn_sequence": 18
+    }
+  ],
+  "finished_at": "2026-08-24T08:13:17.653855+00:00",
+  "sandbox": {
+    "after_sha256": {
+      ".git/HEAD": "f6f2b945f6c411b02ba3da9c7ace88dcf71b6af65ba2e0d89aa82900042b5a10",
+      ".git/config": "cfe7ba1238c9a78be7535d7c63bcaf5a4d5011d46b07c9b45d3bbf7d6c312dfe",
+      ".git/description": "85ab6c163d43a17ea9cf7788308bca1466f1b0a8d1cc92e26e9bf63da4062aee",
+      ".git/hooks/applypatch-msg.sample": "0223497a0b8b033aa58a3a521b8629869386cf7ab0e2f101963d328aa62193f7",
+      ".git/hooks/commit-msg.sample": "1f74d5e9292979b573ebd59741d46cb93ff391acdd083d340b94370753d92437",
+      ".git/hooks/fsmonitor-watchman.sample": "e0549964e93897b519bd8e333c037e51fff0f88ba13e086a331592bf801fa1d0",
+      ".git/hooks/post-update.sample": "81765af2daef323061dcbc5e61fc16481cb74b3bac9ad8a174b186523586f6c5",
+      ".git/hooks/pre-applypatch.sample": "e15c5b469ea3e0a695bea6f2c82bcf8e62821074939ddd85b77e0007ff165475",
+      ".git/hooks/pre-commit.sample": "f9af7d95eb1231ecf2eba9770fedfa8d4797a12b02d7240e98d568201251244a",
+      ".git/hooks/pre-merge-commit.sample": "d3825a70337940ebbd0a5c072984e13245920cdf8898bd225c8d27a6dfc9cb53",
+      ".git/hooks/pre-push.sample": "ecce9c7e04d3f5dd9d8ada81753dd1d549a9634b26770042b58dda00217d086a",
+      ".git/hooks/pre-rebase.sample": "4febce867790052338076f4e66cc47efb14879d18097d1d61c8261859eaaa7b3",
+      ".git/hooks/pre-receive.sample": "a4c3d2b9c7bb3fd8d1441c31bd4ee71a595d66b44fcf49ddb310252320169989",
+      ".git/hooks/prepare-commit-msg.sample": "e9ddcaa4189fddd25ed97fc8c789eca7b6ca16390b2392ae3276f0c8e1aa4619",
+      ".git/hooks/push-to-checkout.sample": "a53d0741798b287c6dd7afa64aee473f305e65d3f49463bb9d7408ec3b12bf5f",
+      ".git/hooks/sendemail-validate.sample": "44ebfc923dc5466bc009602f0ecf067b9c65459abfe8868ddc49b78e6ced7a92",
+      ".git/hooks/update.sample": "8d5f2fa83e103cf08b57eaa67521df9194f45cbdbcb37da52ad586097a14d106",
+      ".git/info/exclude": "6671fe83b7a07c8932ee89164d1f2793b2318058eb8b98dc5c06ee0a5a3b0ec1",
+      "README.md": "e523ec3b964ca6932e0944a2a79532dc8c85c7db413946c04d5370710887a546"
+    },
+    "before_sha256": {
+      ".git/HEAD": "f6f2b945f6c411b02ba3da9c7ace88dcf71b6af65ba2e0d89aa82900042b5a10",
+      ".git/config": "cfe7ba1238c9a78be7535d7c63bcaf5a4d5011d46b07c9b45d3bbf7d6c312dfe",
+      ".git/description": "85ab6c163d43a17ea9cf7788308bca1466f1b0a8d1cc92e26e9bf63da4062aee",
+      ".git/hooks/applypatch-msg.sample": "0223497a0b8b033aa58a3a521b8629869386cf7ab0e2f101963d328aa62193f7",
+      ".git/hooks/commit-msg.sample": "1f74d5e9292979b573ebd59741d46cb93ff391acdd083d340b94370753d92437",
+      ".git/hooks/fsmonitor-watchman.sample": "e0549964e93897b519bd8e333c037e51fff0f88ba13e086a331592bf801fa1d0",
+      ".git/hooks/post-update.sample": "81765af2daef323061dcbc5e61fc16481cb74b3bac9ad8a174b186523586f6c5",
+      ".git/hooks/pre-applypatch.sample": "e15c5b469ea3e0a695bea6f2c82bcf8e62821074939ddd85b77e0007ff165475",
+      ".git/hooks/pre-commit.sample": "f9af7d95eb1231ecf2eba9770fedfa8d4797a12b02d7240e98d568201251244a",
+      ".git/hooks/pre-merge-commit.sample": "d3825a70337940ebbd0a5c072984e13245920cdf8898bd225c8d27a6dfc9cb53",
+      ".git/hooks/pre-push.sample": "ecce9c7e04d3f5dd9d8ada81753dd1d549a9634b26770042b58dda00217d086a",
+      ".git/hooks/pre-rebase.sample": "4febce867790052338076f4e66cc47efb14879d18097d1d61c8261859eaaa7b3",
+      ".git/hooks/pre-receive.sample": "a4c3d2b9c7bb3fd8d1441c31bd4ee71a595d66b44fcf49ddb310252320169989",
+      ".git/hooks/prepare-commit-msg.sample": "e9ddcaa4189fddd25ed97fc8c789eca7b6ca16390b2392ae3276f0c8e1aa4619",
+      ".git/hooks/push-to-checkout.sample": "a53d0741798b287c6dd7afa64aee473f305e65d3f49463bb9d7408ec3b12bf5f",
+      ".git/hooks/sendemail-validate.sample": "44ebfc923dc5466bc009602f0ecf067b9c65459abfe8868ddc49b78e6ced7a92",
+      ".git/hooks/update.sample": "8d5f2fa83e103cf08b57eaa67521df9194f45cbdbcb37da52ad586097a14d106",
+      ".git/info/exclude": "6671fe83b7a07c8932ee89164d1f2793b2318058eb8b98dc5c06ee0a5a3b0ec1",
+      "README.md": "e523ec3b964ca6932e0944a2a79532dc8c85c7db413946c04d5370710887a546"
+    },
+    "repository": "<disposable-temp-repository>",
+    "unchanged": true
+  },
+  "schema_version": "h1-sdk-sentinel/v1",
+  "sdk": {
+    "package": "openai-codex",
+    "runtime_version": "0.147.0 (Ubuntu 24.4.0; x86_64) dumb (codex_python_sdk; 0.147.0)",
+    "version": "0.147.0"
+  },
+  "started_at": "2026-08-24T08:13:09.168497+00:00",
+  "status": "passed",
+  "thread": {
+    "id": "01a032d4-9c3f-7f80-b6f7-df25a40bda04",
+    "resumed_id": "01a032d4-9c3f-7f80-b6f7-df25a40bda04",
+    "same_id": true
+  },
+  "turns": [
+    {
+      "error": null,
+      "final_response": "{\"ok\":false,\"answer\":\"Please provide the request.\"}",
+      "status": "completed",
+      "structured_output": {
+        "answer": "Please provide the request.",
+        "ok": false
+      },
+      "thread_id": "01a032d4-9c3f-7f80-b6f7-df25a40bda04",
+      "turn_id": "01a032d4-9cc0-7d53-bcdb-a44032fcc5fe"
+    },
+    {
+      "error": null,
+      "final_response": "{\"ok\":true,\"answer\":\"resume-ok\"}",
+      "status": "completed",
+      "structured_output": {
+        "answer": "resume-ok",
+        "ok": true
+      },
+      "thread_id": "01a032d4-9c3f-7f80-b6f7-df25a40bda04",
+      "turn_id": "01a032d4-b345-74b3-97d3-142f100dfa20"
+    }
+  ]
+}
