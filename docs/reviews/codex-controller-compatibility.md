@@ -25,6 +25,21 @@
   split compatibility/permission authority fails same-thread resume closed
   instead of guessing.
 
+Native-profile facts v2 recursively fingerprint each configured `skills`,
+`plugins`, and `memories` tree through no-follow directory descriptors. The
+identity covers relative path bytes, type and ownership metadata, file-content
+digests, internal symlink targets, discovery-root identity, and every absolute
+ancestor identity. External/dangling/cyclic symlinks, hard-linked regular
+files, special file types, substitutions, and scan races fail closed. Each
+surface is bounded to 100,000 entries, depth 64, 4,096 relative-path bytes,
+512 MiB per file, and 2 GiB total file bytes; exceeding a bound is an error,
+never truncation. Durable facts retain only the compatibility digest and
+sanitized bounded metadata, never discovery file contents or sensitive raw
+configuration. SQLite remains schema v7 because its existing opaque digest
+column represents the stronger identity without a persistence-shape change;
+an in-flight prior-algorithm fingerprint reopens as a typed compatibility
+failure before adapter construction.
+
 ## Native runtime/profile/private-state matrix
 
 | Surface | H3 authority | Persistence and proof |

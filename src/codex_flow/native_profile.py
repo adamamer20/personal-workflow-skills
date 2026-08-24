@@ -12,19 +12,26 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import stat
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import Protocol, TypeAlias, cast
 from urllib.parse import urlsplit
 
 from .domain import JsonObject, NativePermissionAuthority, NativePermissionMode
 
 _MAX_CONFIG_BYTES = 1_048_576
 _MAX_MODEL_CATALOG_BYTES = 8_388_608
+_MAX_DISCOVERY_ENTRIES = 100_000
+_MAX_DISCOVERY_DEPTH = 64
+_MAX_DISCOVERY_PATH_BYTES = 4_096
+_MAX_DISCOVERY_FILE_BYTES = 536_870_912
+_MAX_DISCOVERY_TOTAL_BYTES = 2_147_483_648
+_MAX_DISCOVERY_SYMLINK_BYTES = 4_096
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _SENSITIVE_KEY = re.compile(
@@ -80,6 +87,10 @@ class NativeProfileError(ValueError):
     """The native profile cannot be safely projected into the sealed child."""
 
 
+class NativeDiscoveryCompatibilityError(NativeProfileError):
+    """A native discovery snapshot cannot be captured or verified safely."""
+
+
 @dataclass(frozen=True, slots=True)
 class SourceIdentity:
     path: Path
@@ -93,10 +104,22 @@ class SourceIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoverySnapshot:
+    """Bounded recursive identity for one native discovery directory."""
+
+    root: SourceIdentity
+    ancestor_identities: tuple[tuple[int, int, int, int, int], ...]
+    sha256: str
+    entry_count: int
+    total_file_bytes: int
+    max_depth: int
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryMount:
     source: Path
     target_name: str
-    identity: SourceIdentity
+    identity: DiscoverySnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,7 +222,7 @@ class NativeProfileProjection:
             DiscoveryMount(
                 source=home / name,
                 target_name=name,
-                identity=_directory_identity(home / name, label=f"native {name} discovery surface"),
+                identity=_discovery_snapshot(home / name, label=f"native {name} discovery surface"),
             )
             for name in _DISCOVERY_DIRECTORIES
         )
@@ -208,7 +231,7 @@ class NativeProfileProjection:
         projected_toml = _render_toml(preserved)
         projected_digest = hashlib.sha256(projected_toml.encode("utf-8")).hexdigest()
         facts: JsonObject = {
-            "schema": "codex-flow/native-profile/v1",
+            "schema": "codex-flow/native-profile/v2",
             "provider": {
                 "id": provider_id,
                 "name": provider_name,
@@ -241,11 +264,18 @@ class NativeProfileProjection:
         compatibility_facts["discovery_identities"] = [
             {
                 "name": mount.target_name,
-                "device": mount.identity.device,
-                "inode": mount.identity.inode,
-                "mode": mount.identity.mode,
-                "links": mount.identity.links,
-                "modified_ns": mount.identity.modified_ns,
+                "device": mount.identity.root.device,
+                "inode": mount.identity.root.inode,
+                "mode": mount.identity.root.mode,
+                "links": mount.identity.root.links,
+                "modified_ns": mount.identity.root.modified_ns,
+                "recursive_sha256": mount.identity.sha256,
+                "entry_count": mount.identity.entry_count,
+                "total_file_bytes": mount.identity.total_file_bytes,
+                "max_depth": mount.identity.max_depth,
+                "ancestor_sha256": hashlib.sha256(
+                    json.dumps(mount.identity.ancestor_identities, separators=(",", ":")).encode("ascii")
+                ).hexdigest(),
             }
             for mount in mounts
         ]
@@ -280,7 +310,7 @@ class NativeProfileProjection:
     @property
     def sanitized_facts(self) -> JsonObject:
         return {
-            "schema": "codex-flow/native-profile/v1",
+            "schema": "codex-flow/native-profile/v2",
             "provider": {
                 "id": self.provider_id,
                 "name": self.provider_name,
@@ -323,10 +353,10 @@ class NativeProfileProjection:
             raise NativeProfileError("native profile source changed during launch")
         for mount in self.discovery_mounts:
             if (
-                _directory_identity(mount.source, label=f"native {mount.target_name} discovery surface")
+                _discovery_snapshot(mount.source, label=f"native {mount.target_name} discovery surface")
                 != mount.identity
             ):
-                raise NativeProfileError("native discovery surface changed during launch")
+                raise NativeDiscoveryCompatibilityError("native discovery surface changed during launch")
 
     def effective_authority(self, requested: NativePermissionMode) -> NativePermissionAuthority:
         """Return native permissions or a controller-requested monotonic restriction."""
@@ -379,6 +409,7 @@ class NativeProfileProjection:
                     if os.readlink(mount.target_name, dir_fd=descriptor) != os.fspath(mount.source):
                         raise NativeProfileError("private native discovery link changed")
             _verify_open_directory_path(runtime_home, descriptor)
+            self.verify_sources()
         finally:
             os.close(descriptor)
 
@@ -588,19 +619,333 @@ def _real_directory(path: Path, *, label: str) -> Path:
     return path
 
 
-def _directory_identity(path: Path, *, label: str) -> SourceIdentity:
-    real = _real_directory(path, label=label)
-    metadata = os.lstat(real)
-    return SourceIdentity(
-        real,
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_mode,
-        metadata.st_nlink,
-        metadata.st_size,
-        metadata.st_mtime_ns,
-        None,
+class _Digest(Protocol):
+    def update(self, value: bytes) -> None: ...
+
+    def digest(self) -> bytes: ...
+
+    def hexdigest(self) -> str: ...
+
+
+@dataclass(slots=True)
+class _DiscoveryScanState:
+    digest: _Digest
+    entries: dict[bytes, tuple[bytes, bytes | None]]
+    entry_count: int = 0
+    total_file_bytes: int = 0
+    max_depth: int = 0
+
+
+def _discovery_snapshot(path: Path, *, label: str) -> DiscoverySnapshot:
+    try:
+        return _capture_discovery_snapshot(path, label=label)
+    except NativeDiscoveryCompatibilityError:
+        raise
+    except NativeProfileError as exc:
+        raise NativeDiscoveryCompatibilityError(str(exc)) from exc
+    except OSError as exc:
+        raise NativeDiscoveryCompatibilityError(f"{label} cannot be captured safely") from exc
+
+
+def _capture_discovery_snapshot(path: Path, *, label: str) -> DiscoverySnapshot:
+    """Hash a discovery tree through no-follow directory descriptors.
+
+    The snapshot retains content digests and structural metadata, never file
+    content. Symlinks are fingerprinted as links and must resolve, through the
+    captured tree, to an entry below the discovery root.
+    """
+
+    descriptor, ancestors = _open_absolute_directory(path, label=label)
+    try:
+        root_before = os.fstat(descriptor)
+        if not stat.S_ISDIR(root_before.st_mode) or root_before.st_uid != os.getuid() or root_before.st_mode & 0o022:
+            raise NativeProfileError(f"{label} must be a controller-owned non-writable directory")
+        digest = hashlib.sha256()
+        entries: dict[bytes, tuple[bytes, bytes | None]] = {b"": (b"directory", None)}
+        state = _DiscoveryScanState(digest, entries)
+        _hash_discovery_record(digest, b"root", b"", root_before, b"")
+        _scan_discovery_directory(descriptor, (), 0, state, label=label)
+        _validate_discovery_symlinks(path, entries, label=label)
+        root_after = os.fstat(descriptor)
+        if _stable_metadata(root_before) != _stable_metadata(root_after):
+            raise NativeProfileError(f"{label} changed while it was scanned")
+        verification, current_ancestors = _open_absolute_directory(path, label=label)
+        try:
+            current_root = os.fstat(verification)
+        finally:
+            os.close(verification)
+        if ancestors != current_ancestors or _stable_metadata(root_after) != _stable_metadata(current_root):
+            raise NativeProfileError(f"{label} path changed while it was scanned")
+        root = SourceIdentity(
+            path,
+            root_after.st_dev,
+            root_after.st_ino,
+            root_after.st_mode,
+            root_after.st_nlink,
+            root_after.st_size,
+            root_after.st_mtime_ns,
+            None,
+        )
+        return DiscoverySnapshot(
+            root,
+            ancestors,
+            digest.hexdigest(),
+            state.entry_count,
+            state.total_file_bytes,
+            state.max_depth,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _open_absolute_directory(path: Path, *, label: str) -> tuple[int, tuple[tuple[int, int, int, int, int], ...]]:
+    if not path.is_absolute() or ".." in path.parts:
+        raise NativeProfileError(f"{label} must be an absolute normalized path")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
+    identities: list[tuple[int, int, int, int, int]] = []
+    try:
+        for part in path.parts[1:]:
+            try:
+                entry = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+                child = os.open(part, flags, dir_fd=descriptor)
+            except OSError as exc:
+                raise NativeProfileError(f"{label} contains an unsafe or unavailable ancestor") from exc
+            opened = os.fstat(child)
+            if not stat.S_ISDIR(entry.st_mode) or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino):
+                os.close(child)
+                raise NativeProfileError(f"{label} contains an unsafe or unavailable ancestor")
+            identities.append((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid))
+            os.close(descriptor)
+            descriptor = child
+        return descriptor, tuple(identities)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _scan_discovery_directory(
+    descriptor: int,
+    parent_parts: tuple[bytes, ...],
+    parent_depth: int,
+    state: _DiscoveryScanState,
+    *,
+    label: str,
+) -> None:
+    directory_before = os.fstat(descriptor)
+    try:
+        names = sorted(os.listdir(descriptor), key=os.fsencode)
+    except OSError as exc:
+        raise NativeProfileError(f"{label} cannot be enumerated safely") from exc
+    for name in names:
+        encoded_name = os.fsencode(name)
+        relative_parts = (*parent_parts, encoded_name)
+        relative = b"/".join(relative_parts)
+        depth = parent_depth + 1
+        state.entry_count += 1
+        state.max_depth = max(state.max_depth, depth)
+        if state.entry_count > _MAX_DISCOVERY_ENTRIES:
+            raise NativeProfileError(f"{label} exceeds the discovery entry limit")
+        if depth > _MAX_DISCOVERY_DEPTH:
+            raise NativeProfileError(f"{label} exceeds the discovery depth limit")
+        if len(relative) > _MAX_DISCOVERY_PATH_BYTES:
+            raise NativeProfileError(f"{label} contains an overlong relative path")
+        try:
+            before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        except OSError as exc:
+            raise NativeProfileError(f"{label} changed while it was enumerated") from exc
+        if before.st_uid != os.getuid():
+            raise NativeProfileError(f"{label} contains an entry not owned by the controller user")
+        if stat.S_ISDIR(before.st_mode):
+            child = _open_discovery_child(descriptor, name, before, label=label)
+            state.entries[relative] = (b"directory", None)
+            _hash_discovery_record(state.digest, b"directory", relative, before, b"")
+            try:
+                _scan_discovery_directory(child, relative_parts, depth, state, label=label)
+                after = os.fstat(child)
+            finally:
+                os.close(child)
+            _verify_discovery_entry(descriptor, name, before, after, label=label)
+        elif stat.S_ISREG(before.st_mode):
+            file_digest, after = _hash_discovery_file(descriptor, name, before, state, label=label)
+            state.entries[relative] = (b"regular", None)
+            _hash_discovery_record(state.digest, b"regular", relative, after, file_digest)
+            _verify_discovery_entry(descriptor, name, before, after, label=label)
+        elif stat.S_ISLNK(before.st_mode):
+            try:
+                target = os.fsencode(os.readlink(name, dir_fd=descriptor))
+                after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            except OSError as exc:
+                raise NativeProfileError(f"{label} symlink changed while it was read") from exc
+            if len(target) > _MAX_DISCOVERY_SYMLINK_BYTES:
+                raise NativeProfileError(f"{label} contains an overlong symlink target")
+            if _stable_metadata(before) != _stable_metadata(after):
+                raise NativeProfileError(f"{label} symlink changed while it was read")
+            state.entries[relative] = (b"symlink", target)
+            _hash_discovery_record(state.digest, b"symlink", relative, after, target)
+        else:
+            raise NativeProfileError(f"{label} contains an unsupported special file")
+    directory_after = os.fstat(descriptor)
+    if _stable_metadata(directory_before) != _stable_metadata(directory_after):
+        raise NativeProfileError(f"{label} changed while it was scanned")
+
+
+def _open_discovery_child(parent: int, name: str, expected: os.stat_result, *, label: str) -> int:
+    try:
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+    except OSError as exc:
+        raise NativeProfileError(f"{label} directory changed while it was opened") from exc
+    opened = os.fstat(child)
+    if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+        os.close(child)
+        raise NativeProfileError(f"{label} directory changed while it was opened")
+    return child
+
+
+def _hash_discovery_file(
+    parent: int,
+    name: str,
+    before: os.stat_result,
+    state: _DiscoveryScanState,
+    *,
+    label: str,
+) -> tuple[bytes, os.stat_result]:
+    if before.st_nlink != 1:
+        raise NativeProfileError(f"{label} contains a hard-linked regular file")
+    if before.st_size > _MAX_DISCOVERY_FILE_BYTES:
+        raise NativeProfileError(f"{label} contains a file above the per-file limit")
+    state.total_file_bytes += before.st_size
+    if state.total_file_bytes > _MAX_DISCOVERY_TOTAL_BYTES:
+        raise NativeProfileError(f"{label} exceeds the total file-byte limit")
+    try:
+        child = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+    except OSError as exc:
+        raise NativeProfileError(f"{label} file changed while it was opened") from exc
+    try:
+        opened = os.fstat(child)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise NativeProfileError(f"{label} file changed while it was opened")
+        digest = hashlib.sha256()
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(child, min(remaining, 1_048_576))
+            if not chunk:
+                raise NativeProfileError(f"{label} file changed while it was read")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(child, 1):
+            raise NativeProfileError(f"{label} file changed while it was read")
+        after = os.fstat(child)
+        if _stable_metadata(before) != _stable_metadata(after):
+            raise NativeProfileError(f"{label} file changed while it was read")
+        return digest.digest(), after
+    finally:
+        os.close(child)
+
+
+def _verify_discovery_entry(
+    parent: int,
+    name: str,
+    before: os.stat_result,
+    after: os.stat_result,
+    *,
+    label: str,
+) -> None:
+    try:
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except OSError as exc:
+        raise NativeProfileError(f"{label} entry changed while it was scanned") from exc
+    if _stable_metadata(before) != _stable_metadata(after) or _stable_metadata(after) != _stable_metadata(current):
+        raise NativeProfileError(f"{label} entry changed while it was scanned")
+
+
+def _stable_metadata(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
     )
+
+
+def _hash_discovery_record(
+    digest: _Digest,
+    kind: bytes,
+    relative: bytes,
+    metadata: os.stat_result,
+    payload: bytes,
+) -> None:
+    for value in (
+        kind,
+        relative,
+        json.dumps(_stable_metadata(metadata), separators=(",", ":")).encode("ascii"),
+        payload,
+    ):
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+
+
+def _validate_discovery_symlinks(
+    root: Path,
+    entries: Mapping[bytes, tuple[bytes, bytes | None]],
+    *,
+    label: str,
+) -> None:
+    root_bytes = os.fsencode(os.fspath(root))
+    for relative, (kind, target) in entries.items():
+        if kind != b"symlink" or target is None:
+            continue
+        pending = _symlink_target_parts(root_bytes, relative, target, label=label)
+        resolved: list[bytes] = []
+        hops = 0
+        while pending:
+            part = pending.pop(0)
+            candidate = b"/".join((*resolved, part))
+            entry = entries.get(candidate)
+            if entry is None:
+                raise NativeProfileError(f"{label} contains a dangling symlink")
+            entry_kind, entry_target = entry
+            if entry_kind == b"symlink":
+                hops += 1
+                if hops > _MAX_DISCOVERY_DEPTH or entry_target is None:
+                    raise NativeProfileError(f"{label} contains a cyclic or over-deep symlink")
+                pending = _symlink_target_parts(root_bytes, candidate, entry_target, label=label) + pending
+                resolved = []
+            else:
+                if pending and entry_kind != b"directory":
+                    raise NativeProfileError(f"{label} symlink traverses a non-directory entry")
+                resolved.append(part)
+
+
+def _symlink_target_parts(root: bytes, relative: bytes, target: bytes, *, label: str) -> list[bytes]:
+    if b"\x00" in target:
+        raise NativeProfileError(f"{label} contains an unsafe symlink target")
+    if posixpath.isabs(target):
+        normalized = posixpath.normpath(target)
+        if normalized == root:
+            relative_target = b""
+        elif normalized.startswith(root + b"/"):
+            relative_target = normalized[len(root) + 1 :]
+        else:
+            raise NativeProfileError(f"{label} symlink escapes the discovery root")
+    else:
+        relative_target = posixpath.normpath(posixpath.join(posixpath.dirname(relative), target))
+        if relative_target in {b".", b""}:
+            relative_target = b""
+        elif relative_target == b".." or relative_target.startswith(b"../"):
+            raise NativeProfileError(f"{label} symlink escapes the discovery root")
+    if len(relative_target) > _MAX_DISCOVERY_PATH_BYTES:
+        raise NativeProfileError(f"{label} contains an overlong resolved symlink target")
+    return [part for part in relative_target.split(b"/") if part]
 
 
 def _read_regular(
@@ -748,4 +1093,11 @@ def _render_toml(data: Mapping[str, TomlValue]) -> str:
     return "\n".join(lines) + "\n"
 
 
-__all__ = ["DiscoveryMount", "NativeProfileError", "NativeProfileProjection", "SourceIdentity"]
+__all__ = [
+    "DiscoveryMount",
+    "DiscoverySnapshot",
+    "NativeDiscoveryCompatibilityError",
+    "NativeProfileError",
+    "NativeProfileProjection",
+    "SourceIdentity",
+]

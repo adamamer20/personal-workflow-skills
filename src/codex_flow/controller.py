@@ -40,7 +40,7 @@ from .domain import (
     WorkspaceMode,
 )
 from .ledger import Ledger, NativeCompatibilityConflict, NativePermissionConflict
-from .native_profile import NativeProfileProjection
+from .native_profile import NativeDiscoveryCompatibilityError, NativeProfileProjection
 from .worktrees import WorktreeManager
 
 
@@ -930,6 +930,8 @@ class Controller:
             baseline,
         )
         self._fault("after_workspace_baseline")
+        if native_runtime is not None:
+            native_runtime.native_profile.verify_sources()
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,
@@ -983,9 +985,12 @@ class Controller:
             raise ControllerError("execution lacks a durable per-milestone workspace baseline")
         self._assert_workspace_history(capsule, integrity.workspace_baseline_head_sha)
         self.ledger.acquire_workspace_lease(capsule)
-        native_runtime, native_profile_sha256, compatibility_sha256, candidate_permission = self._native_runtime(
-            capsule
-        )
+        try:
+            native_runtime, native_profile_sha256, compatibility_sha256, candidate_permission = self._native_runtime(
+                capsule
+            )
+        except NativeDiscoveryCompatibilityError as exc:
+            raise UnsafeResumeCompatibilityChange(str(exc)) from exc
         try:
             integrity = self.ledger.rebind_native_profile_for_resume(
                 capsule.run_id,
@@ -1000,6 +1005,11 @@ class Controller:
             raise UnsafeResumePermissionChange(str(exc)) from exc
         if integrity.effective_permission is None:  # pragma: no cover - controller_v3 schema invariant
             raise UnsafeResumePermissionChange("durable effective native permission is missing")
+        if native_runtime is not None:
+            try:
+                native_runtime.native_profile.verify_sources()
+            except NativeDiscoveryCompatibilityError as exc:
+                raise UnsafeResumeCompatibilityChange(str(exc)) from exc
         adapter = self._adapter_factory(
             CodexSdkConfig(
                 capsule.model,

@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+import codex_flow.native_profile as native_profile_module
 from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
 from codex_flow.cli import app
 from codex_flow.controller import (
@@ -176,6 +177,14 @@ def _test_native_runtime(root: Path) -> tuple[Path, NativeRuntimeConfig]:
     workspace.mkdir(parents=True)
     profile = _test_native_profile(root / "native-home")
     return workspace, NativeRuntimeConfig(root / "runtime" / "home", profile)
+
+
+def _nested_discovery_file(home: Path, surface: str, *, content: str = "alpha") -> Path:
+    nested = home / surface / "demo" / "nested"
+    nested.mkdir(parents=True)
+    source = nested / "SOURCE.md"
+    source.write_text(content)
+    return source
 
 
 class FakeAdapter:
@@ -456,6 +465,144 @@ def test_resume_rejects_compatibility_change_before_adapter_creation() -> None:
         assert adapter_creations == 0
         assert service["resumes"] == 0
         second.close()
+
+
+@pytest.mark.parametrize("surface", ["skills", "plugins", "memories"])
+def test_fresh_resume_rejects_nested_discovery_drift_before_adapter_creation(surface: str) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        home = root / "native-home"
+        _test_native_profile(home)
+        source = _nested_discovery_file(home, surface)
+        initial = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_turn":
+                raise RuntimeError("injected post-turn crash")
+
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(service),
+            _trusted_test_native_profile=initial,
+            fault_injector=crash,
+        )
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="post-turn crash"):
+            first.start("run", "m1")
+        assert first.status("run", "m1").turn_id == "turn-stable"
+        first.close()
+
+        source.write_text("omega")
+        changed = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, service)
+
+        second = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            _trusted_test_native_profile=changed,
+        )
+        with pytest.raises(UnsafeResumeCompatibilityChange, match="compatibility changed"):
+            second.resume("run", "m1")
+        assert adapter_creations == 0
+        assert service == {"starts": 1, "resumes": 0, "turns": 1, "closes": 1}
+        second.close()
+
+
+def test_schema_v7_reopen_of_prior_discovery_fingerprint_fails_closed() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        current = _test_native_profile(root / "native-home")
+        prior_algorithm = replace(current, compatibility_sha256="f" * 64)
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_thread_identity":
+                raise RuntimeError("injected crash")
+
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(service),
+            _trusted_test_native_profile=prior_algorithm,
+            fault_injector=crash,
+        )
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="injected crash"):
+            first.start("run", "m1")
+        first.close()
+
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, service)
+
+        reopened = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            _trusted_test_native_profile=current,
+        )
+        with pytest.raises(UnsafeResumeCompatibilityChange, match="compatibility changed"):
+            reopened.resume("run", "m1")
+        assert adapter_creations == 0
+        assert service["resumes"] == 0
+        reopened.close()
+
+
+def test_resume_verifies_the_original_discovery_snapshot_before_adapter_creation() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository = root / "repo"
+        base, branch = _repository(repository)
+        home = root / "native-home"
+        _test_native_profile(home)
+        source = _nested_discovery_file(home, "skills")
+        captured = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        service = _service()
+
+        def crash(stage: str) -> None:
+            if stage == "after_turn":
+                raise RuntimeError("injected post-turn crash")
+
+        first = Controller(
+            repository,
+            _trusted_test_adapter_factory=_factory(service),
+            _trusted_test_native_profile=captured,
+            fault_injector=crash,
+        )
+        first.plan(_capsule(repository, repository, base, branch))
+        with pytest.raises(RuntimeError, match="post-turn crash"):
+            first.start("run", "m1")
+        first.close()
+
+        source.write_text("omega")
+        adapter_creations = 0
+
+        def factory(config: CodexSdkConfig) -> FakeAdapter:
+            nonlocal adapter_creations
+            adapter_creations += 1
+            return FakeAdapter(config, service)
+
+        reopened = Controller(
+            repository,
+            _trusted_test_adapter_factory=factory,
+            _trusted_test_native_profile=captured,
+        )
+        with pytest.raises(UnsafeResumeCompatibilityChange, match="discovery surface changed"):
+            reopened.resume("run", "m1")
+        assert adapter_creations == 0
+        assert service["resumes"] == 0
+        reopened.close()
 
 
 def test_projection_failure_cannot_undo_terminal_result() -> None:
@@ -1402,6 +1549,129 @@ def test_native_permission_change_is_inherited_by_the_next_runtime_without_globa
         assert second.effective_permissions(NativePermissionMode.READ_ONLY)["monotonic"] is True
         with pytest.raises(ValueError):
             NativePermissionMode("danger_full_access")
+
+
+@pytest.mark.parametrize("surface", ["skills", "plugins", "memories"])
+def test_recursive_discovery_identity_detects_same_length_nested_modification(surface: str) -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        source = _nested_discovery_file(home, surface)
+        before = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+        source.write_text("omega")
+
+        with pytest.raises(NativeProfileError, match="discovery surface changed"):
+            before.verify_sources()
+        after = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert after.compatibility_sha256 != before.compatibility_sha256
+        serialized_facts = json.dumps(after.sanitized_facts, sort_keys=True)
+        assert "SOURCE.md" not in serialized_facts
+        assert "omega" not in serialized_facts
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["create", "delete", "rename", "type", "root_substitution", "ancestor_substitution"],
+)
+def test_recursive_discovery_identity_detects_structural_substitution(operation: str) -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        source = _nested_discovery_file(home, "skills")
+        before = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+        if operation == "create":
+            source.with_name("CREATED.md").write_text("created")
+        elif operation == "delete":
+            source.unlink()
+        elif operation == "rename":
+            source.rename(source.with_name("RENAMED.md"))
+        elif operation == "type":
+            source.unlink()
+            source.mkdir()
+        elif operation == "root_substitution":
+            discovery_root = home / "skills"
+            discovery_root.rename(home / "skills-replaced")
+            discovery_root.mkdir(mode=0o700)
+            _nested_discovery_file(home, "skills")
+        else:
+            old_home = home.with_name("native-home-replaced")
+            home.rename(old_home)
+            home.mkdir(mode=0o700)
+            for child in old_home.iterdir():
+                child.rename(home / child.name)
+
+        with pytest.raises(NativeProfileError, match="discovery surface changed"):
+            before.verify_sources()
+        after = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert after.compatibility_sha256 != before.compatibility_sha256
+
+
+def test_discovery_symlinks_are_internal_fingerprinted_and_never_followed_outside() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        home = root / "native-home"
+        _test_native_profile(home)
+        target = _nested_discovery_file(home, "plugins")
+        alternate = target.with_name("ALTERNATE.md")
+        alternate.write_text("other")
+        link = home / "plugins" / "demo" / "current"
+        link.symlink_to("nested/SOURCE.md")
+        before = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+        link.unlink()
+        link.symlink_to("nested/ALTERNATE.md")
+        changed = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+        assert changed.compatibility_sha256 != before.compatibility_sha256
+        with pytest.raises(NativeProfileError, match="discovery surface changed"):
+            before.verify_sources()
+
+        external = root / "external.txt"
+        external.write_text("outside")
+        link.unlink()
+        link.symlink_to(external)
+        with pytest.raises(NativeProfileError, match="escapes the discovery root"):
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+
+def test_discovery_rejects_hardlinks_and_special_files() -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        source = _nested_discovery_file(home, "memories")
+        linked = source.with_name("LINKED.md")
+        os.link(source, linked)
+        with pytest.raises(NativeProfileError, match="hard-linked"):
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+        linked.unlink()
+        fifo = source.with_name("unsafe.fifo")
+        os.mkfifo(fifo)
+        with pytest.raises(NativeProfileError, match="unsupported special file"):
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+
+@pytest.mark.parametrize(
+    ("constant", "limit", "expected"),
+    [
+        ("_MAX_DISCOVERY_ENTRIES", 1, "entry limit"),
+        ("_MAX_DISCOVERY_DEPTH", 1, "depth limit"),
+        ("_MAX_DISCOVERY_PATH_BYTES", 5, "overlong relative path"),
+        ("_MAX_DISCOVERY_FILE_BYTES", 4, "per-file limit"),
+        ("_MAX_DISCOVERY_TOTAL_BYTES", 4, "total file-byte limit"),
+    ],
+)
+def test_discovery_limits_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, constant: str, limit: int, expected: str
+) -> None:
+    with TemporaryDirectory() as directory:
+        home = Path(directory) / "native-home"
+        _test_native_profile(home)
+        _nested_discovery_file(home, "skills")
+        monkeypatch.setattr(native_profile_module, constant, limit)
+        with pytest.raises(NativeProfileError, match=expected):
+            NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
 
 
 def test_native_profile_rejects_secret_fields_symlinks_and_launch_time_mutation() -> None:
