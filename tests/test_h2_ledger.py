@@ -7,6 +7,7 @@ import unittest
 from multiprocessing import Process, Queue
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 
 import codex_flow
 import codex_flow.artifacts as artifacts_module
@@ -737,6 +738,61 @@ class LedgerTests(unittest.TestCase):
             self.assertTrue(all(result == "ok:race/m/executor/1" for result in results), results)
             ledger = Ledger(path)
             self.assertEqual(len(ledger.events("race", "m")), 1)
+
+    def test_open_validation_keeps_one_snapshot_during_concurrent_claim(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            setup = Ledger(path)
+            setup.create_run("race")
+            setup.create_milestone("race", "m")
+            setup.close()
+
+            writer_at_commit = Event()
+            allow_commit = Event()
+            writer_done = Event()
+            writer_errors: list[BaseException] = []
+
+            def pause_writer(stage: str) -> None:
+                if stage == "before_commit":
+                    writer_at_commit.set()
+                    if not allow_commit.wait(5):
+                        raise RuntimeError("reader did not release the concurrent writer")
+
+            writer = Ledger(path, fault_injector=pause_writer)
+
+            def claim() -> None:
+                try:
+                    writer.claim_dispatch("race", "m", "executor", 1)
+                except BaseException as exc:  # pragma: no cover - surfaced below
+                    writer_errors.append(exc)
+                finally:
+                    writer_done.set()
+
+            claim_thread = Thread(target=claim)
+            started = False
+
+            def interleave_claim(stage: str) -> None:
+                nonlocal started
+                if stage != "after_dispatch_rows_read" or started:
+                    return
+                started = True
+                claim_thread.start()
+                self.assertTrue(writer_at_commit.wait(2), "writer did not reach commit")
+                allow_commit.set()
+                self.assertFalse(
+                    writer_done.wait(0.2),
+                    "writer committed between authority queries instead of waiting for the read snapshot",
+                )
+
+            opener = Ledger(path, fault_injector=interleave_claim)
+            claim_thread.join(5)
+            self.assertFalse(claim_thread.is_alive())
+            self.assertEqual(writer_errors, [])
+            self.assertTrue(started)
+            self.assertEqual(opener.current_state("race", "m"), WorkflowState.STARTING)
+            self.assertEqual(opener.get_dispatch("race/m/executor/1").role, "executor")
+            writer.close()
+            opener.close()
 
     def test_concurrent_conflicting_generations_have_one_owner(self) -> None:
         with TemporaryDirectory() as directory:

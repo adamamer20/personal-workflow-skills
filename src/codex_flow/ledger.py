@@ -569,11 +569,12 @@ class Ledger:
             raise CorruptSchemaError("invalid migration marker")
         if version < CURRENT_SCHEMA_VERSION:
             self._migrate(version)
-        self._validate_shape(CURRENT_SCHEMA_VERSION)
-        try:
-            self._validate_rows()
-        except ValueError as exc:
-            raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
+        with self._read_transaction():
+            self._validate_shape(CURRENT_SCHEMA_VERSION)
+            try:
+                self._validate_rows()
+            except ValueError as exc:
+                raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
 
     def _create_schema(self) -> None:
         try:
@@ -723,6 +724,7 @@ class Ledger:
         milestone_rows = self._db().execute("SELECT * FROM milestones ORDER BY run_id, milestone_id").fetchall()
         milestone_keys = {(str(row["run_id"]), str(row["milestone_id"])) for row in milestone_rows}
         dispatch_rows = self._db().execute("SELECT * FROM dispatches ORDER BY run_id, milestone_id, role").fetchall()
+        self._fault("after_dispatch_rows_read")
         dispatch_keys = set()
         dispatches_by_id: dict[DispatchId, DispatchClaim] = {}
         for row in dispatch_rows:
