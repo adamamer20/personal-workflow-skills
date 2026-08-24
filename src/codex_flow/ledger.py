@@ -867,14 +867,45 @@ class Ledger:
                 self._validate_schema_metadata(CURRENT_SCHEMA_VERSION)
                 self._validate_shape(CURRENT_SCHEMA_VERSION)
                 self._validate_rows()
+            self._commit_transaction(connection)
         except BaseException:
             try:
                 connection.execute("ROLLBACK")
             except sqlite3.DatabaseError:
                 pass
             raise
-        else:
+
+    def _commit_transaction(self, connection: sqlite3.Connection) -> None:
+        """Authorize identity at SQLite's transaction-commit boundary."""
+
+        boundary_error: BaseException | None = None
+
+        def authorize(
+            action_code: int,
+            operation: str | None,
+            _argument: str | None,
+            _database: str | None,
+            _source: str | None,
+        ) -> int:
+            nonlocal boundary_error
+            if action_code == sqlite3.SQLITE_TRANSACTION and operation == "COMMIT":
+                try:
+                    self._fault("at_commit_boundary")
+                    self._validate_live_identity()
+                except BaseException as exc:
+                    boundary_error = exc
+                    return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(authorize)
+        try:
             connection.execute("COMMIT")
+        except sqlite3.DatabaseError as exc:
+            if boundary_error is not None:
+                raise boundary_error from exc
+            raise
+        finally:
+            connection.set_authorizer(None)
 
     def _fault(self, stage: str) -> None:
         if self._fault_injector is not None:
@@ -1291,42 +1322,44 @@ class Ledger:
 
     def recovery_facts(self, run_id: RunId | str) -> tuple[RecoveryFact, ...]:
         run = _run_id(run_id)
-        rows = (
-            self._db()
-            .execute(
-                "SELECT d.*, m.current_state FROM dispatches d JOIN milestones m "
-                "ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id "
-                "WHERE d.run_id = ? ORDER BY d.milestone_id, d.role, d.generation",
-                (str(run),),
-            )
-            .fetchall()
-        )
-        facts: list[RecoveryFact] = []
-        for row in rows:
-            state = _row_state(row["current_state"])
-            if state in TERMINAL_STATES:
-                continue
-            dispatch = self._dispatch_from_row(row)
-            last_sequence = (
+        with self._read_transaction():
+            rows = (
                 self._db()
                 .execute(
-                    "SELECT MAX(sequence) FROM events WHERE run_id = ? AND milestone_id = ?",
-                    (str(dispatch.run_id), str(dispatch.milestone_id)),
+                    "SELECT d.*, m.current_state FROM dispatches d JOIN milestones m "
+                    "ON m.run_id = d.run_id AND m.milestone_id = d.milestone_id "
+                    "WHERE d.run_id = ? ORDER BY d.milestone_id, d.role, d.generation",
+                    (str(run),),
                 )
-                .fetchone()[0]
+                .fetchall()
             )
-            last = (
-                self._db()
-                .execute(
-                    "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? AND sequence = ?",
-                    (str(dispatch.run_id), str(dispatch.milestone_id), int(last_sequence)),
+            self._fault("after_recovery_dispatch_rows_read")
+            facts: list[RecoveryFact] = []
+            for row in rows:
+                state = _row_state(row["current_state"])
+                if state in TERMINAL_STATES:
+                    continue
+                dispatch = self._dispatch_from_row(row)
+                last_sequence = (
+                    self._db()
+                    .execute(
+                        "SELECT MAX(sequence) FROM events WHERE run_id = ? AND milestone_id = ?",
+                        (str(dispatch.run_id), str(dispatch.milestone_id)),
+                    )
+                    .fetchone()[0]
                 )
-                .fetchone()
-            )
-            if last is None:
-                raise SchemaError(f"dispatch {dispatch.dispatch_id} has no causal event")
-            facts.append(RecoveryFact(dispatch, state, self._event_from_row(last)))
-        return tuple(facts)
+                last = (
+                    self._db()
+                    .execute(
+                        "SELECT * FROM events WHERE run_id = ? AND milestone_id = ? AND sequence = ?",
+                        (str(dispatch.run_id), str(dispatch.milestone_id), int(last_sequence)),
+                    )
+                    .fetchone()
+                )
+                if last is None:
+                    raise SchemaError(f"dispatch {dispatch.dispatch_id} has no causal event")
+                facts.append(RecoveryFact(dispatch, state, self._event_from_row(last)))
+            return tuple(facts)
 
     def snapshot(self, run_id: RunId | str) -> LedgerSnapshot:
         run = _run_id(run_id)

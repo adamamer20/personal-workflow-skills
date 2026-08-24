@@ -63,6 +63,16 @@ def _claim_generation_worker(path: str, generation: int, queue: Queue[str]) -> N
         queue.put(f"error:{type(exc).__name__}")
 
 
+def _late_link_worker(path: str, exported: str, commands: Queue[str], results: Queue[str]) -> None:
+    try:
+        if commands.get(timeout=5) != "link":
+            raise RuntimeError("unexpected late-link command")
+        os.link(path, exported)
+        results.put("linked")
+    except Exception as exc:  # pragma: no cover - assertion captures worker result
+        results.put(f"error:{type(exc).__name__}:{exc}")
+
+
 def _make_v1_fixture(path: Path) -> None:
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -331,6 +341,66 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(ledger.journal_mode, "delete")
             self.assertFalse(hasattr(ledger, "connection"))
 
+    def test_recovery_facts_hold_one_snapshot_during_transition(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            setup = Ledger(path)
+            setup.create_run("r")
+            setup.create_milestone("r", "m")
+            setup.claim_dispatch("r", "m", "executor", 1)
+            setup.close()
+
+            writer_at_commit = Event()
+            allow_commit = Event()
+            writer_done = Event()
+            writer_errors: list[BaseException] = []
+
+            def pause_writer(stage: str) -> None:
+                if stage == "before_commit":
+                    writer_at_commit.set()
+                    if not allow_commit.wait(5):
+                        raise RuntimeError("reader did not release the concurrent transition")
+
+            writer = Ledger(path, fault_injector=pause_writer)
+
+            def transition() -> None:
+                try:
+                    writer.transition("r", "m", WorkflowState.RUNNING, expected_state=WorkflowState.STARTING)
+                except BaseException as exc:  # pragma: no cover - surfaced below
+                    writer_errors.append(exc)
+                finally:
+                    writer_done.set()
+
+            transition_thread = Thread(target=transition)
+            started = False
+
+            def interleave_transition(stage: str) -> None:
+                nonlocal started
+                if stage != "after_recovery_dispatch_rows_read" or started:
+                    return
+                started = True
+                transition_thread.start()
+                self.assertTrue(writer_at_commit.wait(2), "writer did not reach commit")
+                allow_commit.set()
+                self.assertFalse(
+                    writer_done.wait(0.2),
+                    "transition committed between recovery authority queries",
+                )
+
+            reader = Ledger(path, fault_injector=interleave_transition)
+            facts = reader.recovery_facts("r")
+            transition_thread.join(5)
+            self.assertFalse(transition_thread.is_alive())
+            self.assertEqual(writer_errors, [])
+            self.assertTrue(started)
+            self.assertEqual(len(facts), 1)
+            self.assertEqual(facts[0].state, WorkflowState.STARTING)
+            self.assertEqual(facts[0].last_event.from_state, WorkflowState.PLANNED)
+            self.assertEqual(facts[0].last_event.to_state, WorkflowState.STARTING)
+            self.assertEqual(reader.current_state("r", "m"), WorkflowState.RUNNING)
+            writer.close()
+            reader.close()
+
     def test_invalid_event_dispatch_combinations_fail_before_mutation(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "workflow.db"
@@ -499,6 +569,46 @@ class LedgerTests(unittest.TestCase):
             ledger.reopen()
             ledger.create_run("safe")
             self.assertEqual(ledger.get_run("safe").run_id, "safe")
+
+    def test_external_late_hardlink_aborts_at_commit_boundary(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "workflow.db"
+            exported = root / "exported.db"
+            armed = False
+            commands: Queue[str] = Queue()
+            results: Queue[str] = Queue()
+
+            def link_at_commit(stage: str) -> None:
+                if stage == "at_commit_boundary" and armed:
+                    commands.put("link")
+                    result = results.get(timeout=5)
+                    if result != "linked":
+                        raise RuntimeError(result)
+
+            ledger = Ledger(path, fault_injector=link_at_commit)
+            process = Process(
+                target=_late_link_worker,
+                args=(str(path), str(exported), commands, results),
+            )
+            process.start()
+            armed = True
+            with self.assertRaisesRegex(SchemaError, "link count changed"):
+                ledger.create_run("escaped")
+            armed = False
+            process.join(5)
+            self.assertFalse(process.is_alive())
+            exported_connection = sqlite3.connect(exported)
+            self.assertEqual(
+                exported_connection.execute("SELECT run_id FROM runs WHERE run_id = 'escaped'").fetchall(),
+                [],
+            )
+            exported_connection.close()
+            exported.unlink()
+            ledger.reopen()
+            with self.assertRaises(RecordNotFound):
+                ledger.get_run("escaped")
+            self.assertEqual(ledger.create_run("safe").run_id, "safe")
 
     def test_failed_first_open_cleans_only_its_empty_inode(self) -> None:
         with TemporaryDirectory() as directory:
