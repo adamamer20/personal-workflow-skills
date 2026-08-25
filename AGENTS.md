@@ -51,12 +51,17 @@ code. The planning task owns architecture, scope changes, milestone ordering,
 the plan, and this instruction file. Each execution task owns exactly one
 decision-ready milestone and may not expand into a later milestone.
 
-The `openai-codex` adapter is the only production Codex transport. There is no
-CLI backend and no direct app-server fallback. SQLite is the single durable
-workflow ledger. Give the SDK adapter, ledger/schema, worktree manager,
-controller state machine, routing configuration, and model-facing contracts one
-implementation owner at a time; do not add alternate scaffolding or duplicate
-production paths.
+The `openai-codex` adapter is the only headless Codex transport. App-visible
+execution uses one controller-owned App-native dispatch boundary: the
+controller prepares and claims a typed dispatch, the Codex app performs the
+native task action, and the returned native identity is bound back into the
+same SQLite authority before execution is acknowledged. There is no CLI
+transport backend, private Desktop socket attachment, or direct app-server
+fallback. SQLite is the single durable workflow ledger. Give the SDK adapter,
+App-native dispatch boundary, ledger/schema, worktree manager, controller state
+machine, routing configuration, and model-facing contracts one implementation
+owner at a time; do not add alternate scaffolding or duplicate production
+paths.
 
 Existing plugin hooks, workflow/audit skills, manifests, validators, the
 protected primary checkout, remotes, global Codex state, downstream

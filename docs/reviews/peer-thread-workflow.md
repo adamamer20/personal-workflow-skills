@@ -3,11 +3,13 @@
 ## Goal
 
 Replace model-owned peer-thread transport and callback bookkeeping with a small,
-SDK-first Python controller. Sol remains responsible for planning and material
-decisions, Luna executes decision-ready milestones, and independent review gates
-promotion. The controller owns lifecycle state, idempotency, worktrees, routing,
-recovery, budgets, and durable results so that messages are notifications rather
-than the workflow source of truth.
+controller-first Python harness. Sol remains responsible for planning and
+material decisions, Luna executes decision-ready milestones, and independent
+review gates promotion. The controller owns lifecycle state, idempotency,
+worktrees, routing, recovery, budgets, and durable results so that messages are
+notifications rather than the workflow source of truth. The same authority
+supports an SDK-headless mode and an App-native mode whose workers are ordinary
+visible Codex app conversations.
 
 ## Current context
 
@@ -118,11 +120,13 @@ Every dispatch has logical identity
 client queue handle, worktree path, or process id is metadata and never workflow
 identity.
 
-The SDK adapter owns one app-server connection boundary and normalizes installed
-SDK objects/events into controller-owned types. No controller component parses
-raw SDK or app-server envelopes outside this adapter. Direct app-server JSON-RPC
-is out of scope unless a later explicit milestone replaces the SDK after a
-documented capability failure.
+The SDK adapter owns the headless app-server connection boundary and normalizes
+installed SDK objects/events into controller-owned types. The App-native
+boundary does not attach to a private or undocumented Desktop socket: it emits
+one typed native task action for the hosting Codex app and binds the returned
+thread/host identity into the same claimed dispatch. No controller component
+parses raw SDK or app-server envelopes outside these boundaries. Direct
+app-server JSON-RPC remains out of scope.
 
 Every milestone declares one or more acceptance modes: `objective`, `visual`,
 and `architecture`. The controller derives implementation and review authorities
@@ -201,16 +205,19 @@ unavailability or explicit context rollover.
 
 ## Program scope and non-goals
 
-In scope: the Python package and CLI, stable SDK adapter, SQLite ledger, readable
-artifacts, worktree leases, role/routing configuration, structured task
-contracts, deterministic tests, prompt-input fixtures, native compatibility
-sentinels, documentation, and a bounded migration of the three workflow skills.
+In scope: the Python package and CLI, stable SDK adapter, App-native dispatch
+boundary, SQLite ledger, readable artifacts, worktree leases, role/routing
+configuration, structured task contracts, deterministic tests, prompt-input
+fixtures, native compatibility sentinels, documentation, and a bounded
+migration of the three workflow skills.
 
-Non-goals for v1: a general agent framework; a web UI; remote fleet scheduling;
-automatic Git push/merge; provider-agnostic backends; direct app-server protocol
-maintenance; recursive planners; subagent orchestration; periodic polling;
-automatic model substitution; deletion or disabling of the existing handoff
-path before production parity; and automatic Desktop sidebar management.
+Non-goals for v1: a general agent framework; a custom web UI; remote fleet
+scheduling; automatic Git push/merge; provider-agnostic backends; direct
+app-server protocol maintenance or private Desktop socket discovery; recursive
+planners; subagent orchestration; periodic polling; automatic model
+substitution; and deletion or disabling of the existing handoff path before
+production parity. The native Codex task list/sidebar is the App-native UI;
+building a second dashboard is not required for v1.
 
 ## Milestone H1 — Prove the stable Python SDK contract
 
@@ -995,6 +1002,123 @@ Successor: H6.
 
 ## Milestone H6 — Production pilot and legacy retirement decision
 
+### H6-R prerequisite — make the model-facing control boundary reachable
+
+Before the production pilots, repair the proven H5 reachability gap: `codex-flow
+schema` publishes `ModelFacingCapsule`, while `codex-flow control` currently
+loads only the repository-bound `ExecutionCapsule` projection. The bootstrap
+repair is implemented directly in this existing worktree because the broken
+boundary cannot execute itself. Its promotion proof must then invoke the fixed
+`codex-flow control` entrypoint with a serialized `ModelFacingCapsule`; no native
+peer task or `$codex-thread-handoff` is part of this route.
+
+Outcome: `control` accepts the exact closed model-facing schema, validates its
+declared acceptance authorities against `workflow.toml`, and deterministically
+projects it into the single existing controller execution path. The projection
+owns stable run/milestone identity, the selected checkout's physical Git facts,
+the executor route, inherited native permission, default bounded validation,
+and the model-facing result schema. Existing repository-bound execution
+capsules remain an explicit internal/controller compatibility input for fixed
+H3/H5/H6 pilots; malformed or ambiguous shapes fail before durable state.
+
+Mutable ownership: one new projection boundary module, the narrow `control`
+CLI integration, focused H5/H6 reachability tests, compatibility documentation,
+and this canonical plan. Preserve the H6 CLI/ledger/test changes already in the
+worktree and integrate without discarding or rewriting them.
+
+Protected surfaces: controller/ledger state semantics, worktree manager, SDK
+adapter and native-profile projection, workflow routes and limits, plugin
+installation/cache/trust, global Codex state, primary checkout, remotes,
+downstream repositories, and the explicit legacy handoff source.
+
+Acceptance modes: `objective` and `architecture`, with distinct
+`code-reviewer` and `architecture-reviewer` authorities. A model-facing capsule
+round-trips through `control` into one durable execution; identical input has
+stable identity and cannot duplicate work; route and authority drift fail
+closed; invalid input creates no controller state; protected and pre-existing
+worktree changes remain unchanged; focused tests and full `make check` pass;
+and the installed wheel is refreshed and proves the same model-facing command
+against a disposable repository before H6 pilots begin.
+
+Non-goals: redesigning H4 orchestration, changing model routes or limits,
+inventing a second transport, weakening mutation/protected-surface checks,
+installing or trusting plugin hooks, deleting legacy behavior, or modifying the
+user's dirty primary checkout.
+
+### H6-C prerequisite — Git-native workspace policy and App-native dispatch
+
+The R6A production pilot proved the SDK/controller path can complete a real
+milestone and independently promote its repository outcome, but the controller
+misclassified Git-ignored frontend build output as protected or out-of-scope
+source mutation. The same pilot also proved that a thread created by the
+controller's private SDK app-server is not automatically a visible task in the
+active Codex desktop app. H6-C closes both product gaps before replacement
+pilots continue.
+
+Outcome: workspace integrity follows Git authority, and a second App-native
+hosting mode makes controller-owned workers visible as ordinary Codex app
+conversations without weakening the durable harness. Tracked files are checked
+for protected integrity; tracked changes and non-ignored untracked files are
+checked for mutable-scope ownership; Git-ignored files and directories are
+excluded from ordinary source-mutation and directory-topology deltas. Explicit
+sensitive runtime/configuration roots remain protected by their existing
+dedicated integrity mechanisms rather than by accidental inclusion of all
+ignored build output.
+
+The App-native boundary is host-mediated, not a second scheduler or an
+undocumented socket client. The controller transactionally claims a logical
+dispatch and emits one closed action containing route, selected existing
+workspace, bounded prompt, and result contract. The hosting Codex app performs
+the native non-blocking task creation and returns its thread/host identity; a
+closed bind operation records that identity against the exact outstanding
+claim. Repeated prepare/bind calls are idempotent, conflicting or invented
+identities fail closed, and status/recovery continue to use SQLite. SDK-headless
+execution remains supported and cannot be silently substituted for an
+App-native request.
+
+Mutable ownership: `src/codex_flow/controller.py`, the narrow App-native
+boundary and typed contracts, required ledger/schema and CLI integration,
+`src/codex_flow/projection.py`, the source `workflow-control` skill, focused
+tests and compatibility documentation. H6-C owns integration and validation of
+the existing uncommitted H6-R candidate; it must preserve all unrelated user
+changes and retained evidence.
+
+Protected surfaces: this canonical plan and repository instructions; native
+Codex configuration/authentication/permissions; installed plugin caches and
+trust; the primary checkout, remotes, downstream repositories and legacy
+handoff source; existing accepted H1-H5 evidence; SDK provider/config/discovery
+projection; and all paths outside the declared mutable set. No worker may push,
+merge, rebase, stash, discard, install/trust a plugin, or discover/attach to a
+private Desktop app-server endpoint.
+
+Acceptance modes: `objective` and `architecture`, with distinct
+`code-reviewer` and `architecture-reviewer` authorities. Objective acceptance
+requires regression proof that `.next`, `node_modules` symlinks, caches and
+other ignored build output neither change protected digests nor appear in
+ordinary mutation/topology scope, while tracked protected edits and
+non-ignored untracked out-of-scope files still fail. It also requires closed
+prepare/bind/status contracts, stable logical identity, exact route/workspace
+projection, no duplicate ownership, and headless compatibility. Architecture
+acceptance requires one SQLite authority, one implementation owner, no direct
+Desktop socket/app-server protocol dependency, fail-closed host acknowledgments
+and explicit separation between App-native and SDK-headless dispatch.
+
+Promotion gates: focused adversarial tests, full `make check`, Ruff and
+`git diff --check`, complete diff self-review with zero P0/P1, wheel/package
+verification, and one bounded real App-native pilot launched from a visible
+Codex app thread. The pilot must bind a real native thread id, remain visible in
+the app, use the selected existing worktree without creating a duplicate, make
+only its authorized change, and persist a terminal typed result. If the current
+host does not expose a required native task action, report that exact capability
+as `EXTERNAL_BLOCKED`; do not fall back to the private SDK server and claim UI
+visibility.
+
+Non-goals: a custom run dashboard, automatic sidebar manipulation, remote fleet
+scheduling, autonomous multi-milestone polling, SDK removal, legacy deletion,
+plugin installation/trust, or weakening explicit sensitive-path protection.
+After H6-C promotion, H6 resumes with fresh medium and large pilots using the
+selected hosting mode and the same durable acceptance contract.
+
 Outcome: run one medium and one large real milestone through the controller,
 compare lifecycle correctness and usage against the legacy path, verify local
 and remote/Desktop compatibility gates, and make an evidence-backed decision on
@@ -1051,6 +1175,9 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   and permission-profile survival are not exposed by the H1 stable SDK surface;
   structured skill input exists but remains unexercised. These are optional or
   later compatibility gates, not inferred capabilities.
+- Desktop visibility is now an explicit H6-C App-native promotion gate. It is
+  not inferred from SDK thread creation and does not require attaching the SDK
+  controller to an undocumented Desktop-owned app-server.
 - The supplied audit's underlying archive is not stored in this repository;
   its findings motivate the design but do not substitute for H1 captured
   evidence.
@@ -1423,11 +1550,26 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   through `workflow-control`/`codex-flow`, made only its authorized edit, and
   reached durable completion. H5 is promoted; H6 is the now-executable final
   integrated promotion and legacy-decision milestone.
+- 2026-08-25: H6-R implemented the deterministic `ModelFacingCapsule` projection
+  and made `codex-flow control` reachable through the packaged SDK controller.
+  Focused tests, Ruff, diff checks, isolated-wheel packaging and a prior full
+  307-test gate were reported green; later draft integration reached 310 tests
+  before the user intentionally interrupted the aggregate run. A real R6A pilot
+  nevertheless completed and independently returned `PROMOTE` with zero P0/P1,
+  6,715 backend tests, 42 expected skips and 397 frontend tests, but controller
+  closure failed because ignored `.next` and `node_modules` output was treated
+  as source mutation. Its private SDK thread also did not appear in the active
+  Codex app. The user selected Git-native ignored-artifact semantics and an
+  App-native visible-worker mode while retaining SDK-headless execution; H6-C
+  is now the next executable prerequisite and owns both fixes.
 
 ## Next execution
 
-Milestone: H6 — production pilots, integrated compatibility gate, and typed
-legacy retirement decision.
+Milestone: H6-C — Git-native workspace policy and App-native dispatch boundary.
+
+Next executable capsule: implement and independently validate the complete H6-C
+contract above. This capsule also finishes integration of the existing H6-R
+candidate before further production pilots.
 
 Resolved route: `model=gpt-5.6-sol`, `thinking=high`.
 
@@ -1450,48 +1592,32 @@ Execution workspace:
 - lane: `python-sdk-controller`
 
 Starting state: accepted H5 implementation
-`b57a3534be96ee24fdeb319022f20a8c4aaffb36`, plus the local canonical-plan
-transition commit produced by this planning task. Reuse this worktree and
-branch; do not create another Git worktree or duplicate its controller state.
+`b57a3534be96ee24fdeb319022f20a8c4aaffb36`, the uncommitted H6-R candidate and
+Git-integrity draft currently preserved in this worktree, plus this planning
+update. Reuse this worktree and branch; do not create another Git worktree or
+duplicate its controller state.
 
-Owned surfaces: H6 pilot runner/configuration, fixed medium and large capsules,
-compatibility and usage comparison contracts, notification-failure/recovery
-scenarios, typed legacy-retirement decision and rationale, focused H6 tests,
-compatibility documentation, and sanitized retained H6 evidence. The executor
-owns pilot execution, bounded required repair, validation, independent
-required-mode review, the final evidence-backed decision, safe local commits,
-and exactly one terminal callback.
+Owned surfaces: controller workspace-integrity logic; App-native typed action,
+bind and status contracts; required ledger/schema, CLI and projection changes;
+the source `workflow-control` skill; focused tests, packaging and compatibility
+documentation. The executor owns implementation, bounded repair, validation,
+independent objective and architecture review, and exactly one durable terminal
+result. It does not own this plan or repository instructions.
 
-Protected surfaces: accepted H3-H5 implementation and retained evidence; plugin
-source packaging except for documentation or a proven H6 reachability repair;
-the sole Python SDK/bundled-app-server transport; native Codex provider/config/
-discovery/permission inheritance; installed plugin caches and trust; global
-Codex config/hooks/state; primary checkout; remotes; downstream pins; legacy
-source and commands; and unrelated repository paths. No push, merge, rebase,
-stash, discard, plugin installation/trust, global/remote mutation, hook
-disablement, or legacy deletion.
+Protected surfaces: this plan and `AGENTS.md`; accepted H1-H5 implementation and
+retained evidence outside the owned integration paths; native Codex provider,
+config, discovery and permission inheritance; installed plugin caches and
+trust; global Codex config/hooks/state; primary checkout; remotes; downstream
+pins; legacy source and commands; and unrelated repository paths. No push,
+merge, rebase, stash, discard, plugin installation/trust, global/remote
+mutation, hook disablement, private Desktop socket discovery or legacy deletion.
 
-Acceptance: one medium and one large real repository milestone enter through
-the canonical controller-backed `workflow-control` path with fixed typed
-capsules, explicit routes, real workspaces, structured execution/review/repair,
-observable repository outcomes, and retained sanitized evidence. Required
-`objective` and `architecture` authorities independently accept both pilots;
-add `visual` only when rendered quality is materially part of a pilot. There is
-one bounded recovery plus notification-failure scenario, no duplicate owner,
-and durable terminal facts remain authoritative without callback success.
-Compare available model turns, wall time, prompt/compaction use, recovery,
-ownership, review, and terminal durability to the retained legacy baseline;
-label unavailable cost or quality comparisons instead of inferring them.
-Exercise local SDK compatibility directly and record Desktop visibility, idle
-wake, remote host, native permission-profile behavior, and native review as
-`proven`, `unsupported`, `not_exposed`, or `not_run` with evidence. Produce one
-typed decision among `retain_legacy`, `disable_hooks_keep_manual`, and
-`ready_for_separate_cleanup`, defaulting to retention unless reachability and
-required parity are proven. The decision is evidence only: H6 never disables
-hooks, deletes legacy code, changes installed plugins, or mutates downstream
-pins. Both real pilots, required reviews with zero P0/P1, focused/full gates,
-retained evidence, truthful open external gates, clean worktree, and the typed
-decision are required for program closure.
+Acceptance: the exact H6-C objective and architecture criteria above, including
+ignored-artifact regressions that preserve explicit sensitive-path integrity;
+closed idempotent prepare/bind/status behavior; unchanged SDK-headless behavior;
+full repository gates; zero open P0/P1; and one visible App-native pilot when
+the host action is available. Medium/large parity pilots and the typed legacy
+retirement decision remain the successor after H6-C promotion.
 
 Escalate only for a genuinely underdetermined product/public-contract/security
 decision, missing user authority, an external prerequisite, or proven
