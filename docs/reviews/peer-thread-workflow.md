@@ -868,6 +868,36 @@ H4-A implementation boundary and gate:
   promotion-blocking for H4-B. Do not require another broad H3 review or label
   isolated hardening as blocking merely because it is severe.
 
+H4-B implementation boundary and gate:
+
+- derive distinct executor, objective/code-review, visual-review,
+  architecture-review, recovery, and decision authorities from capsule
+  acceptance modes plus `workflow.toml`; reject unavailable or aliased required
+  authorities without model, effort, permission, provider, or transport
+  substitution;
+- keep objective review on the accepted H4-A lifecycle and add fixed rendered
+  evidence plus an independent visual authority, an independent architecture
+  authority, and bounded recovery/planner decisions on the same controller,
+  SQLite authority, lease, checkpoint, finding, and projection path;
+- require every declared mode to accept. Preserve stable finding and repair
+  lineage across authority changes, distinguish new scope from surviving
+  findings, and retain a non-blocking finding without blocking an unrelated
+  successor gate;
+- make a rejected architecture finding produce a durable bounded
+  `CONTINUE_WITH_REPLAN`, then execute the accepted revised strategy without
+  changing user intent, public/persisted contracts, security/privacy boundary,
+  material cost, destructive authority, or milestone scope. Only genuinely
+  underdetermined or externally blocked cases may leave the autonomous path;
+- run one bounded disposable real multi-authority pilot through the Python SDK
+  and `codex-lb`: objective execution, independent objective and visual review,
+  an architecture rejection, bounded recovery/replan, same-workspace repair,
+  fresh distinct-authority re-review, and final acceptance over an observable
+  repository edit and fixed rendered evidence. Retain sanitized causal facts;
+- close H4 with focused/full gates, clean worktree, truthful compatibility and
+  retained evidence, and zero findings that are promotion-blocking for H5.
+  H4-B does not package plugins, simplify skills, run H6 medium/large pilots,
+  retire legacy behavior, or reopen a broad H3/H4-A audit.
+
 Validation includes hermetic scenario tests for every role/mode/result,
 surviving-versus-new findings, recovery replans, budget exhaustion, stale
 reviewers, notification failure, and result ordering, plus one disposable real
@@ -1310,11 +1340,22 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   final integrated hardening gate. H4-A is selected as the next executable
   slice; another broad H3 review is not one of its prerequisites or promotion
   gates.
+- 2026-08-25: H4-A implementation `fafa29b` adds the typed `workflow.toml`
+  role/limit authority and durable review, repair, recovery, decision, budget,
+  lifecycle, and projection facts on the existing controller and SQLite
+  connection. Planning independently verified exact path scope, the retained
+  sanitized pilot, seven focused tests, full `make check` with 282 tests, and a
+  clean worktree. The single real disposable Python-SDK/`codex-lb` pilot used
+  Luna XHigh for two turns on one thread, made an observable authorized edit,
+  received one deliberate promotion-blocking P1 rejection, repaired through
+  the same durable owner, passed a fresh read-only re-review, and reached
+  `ACCEPTED`. H4-A is promoted as the walking skeleton; H4-B is now executable
+  without another H3 or H4-A review cycle.
 
 ## Next execution
 
-Milestone: H4-A — objective review, rejection, same-owner repair, and acceptance
-walking skeleton.
+Milestone: H4-B — visual and architecture authorities, bounded recovery and
+planner decisions, and the full multi-authority H4 scenario.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
@@ -1335,46 +1376,49 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Starting state: exact pilot-ready H3 head
-`544c1c8a1dd634b890757c402c5c14443a34b3dd`, plus the local canonical-plan
+Starting state: accepted H4-A implementation
+`fafa29bada958247616bea11f5277e0be6db86ea`, plus the local canonical-plan
 transition commit produced by this planning task. Reuse this worktree and
 branch; do not create another Git worktree or duplicate its controller state.
 
-Owned surfaces: `workflow.toml`; H4 configuration and typed domain/result
-contracts; the existing controller, SQLite ledger/schema, artifact projection,
-and SDK-adapter extensions required by H4-A; focused H4 tests; compatibility
-documentation; one sanitized retained H4-A pilot evidence artifact. The
-executor owns implementation, tests, ordinary same-owner repair, self-review,
-safe local commits, and exactly one terminal callback.
+Owned surfaces: H4 role/acceptance configuration and typed contracts; the
+existing controller, SQLite H4 fact authority, artifact projection, and SDK
+adapter extensions required for visual/architecture/recovery/decision roles;
+fixed rendered pilot evidence; focused H4 tests; compatibility documentation;
+one sanitized retained H4-B evidence artifact. The executor owns
+implementation, tests, ordinary same-owner repair, self-review, safe local
+commits, and exactly one terminal callback.
 
-Protected surfaces: H5 plugin packaging and workflow-skill simplification;
-H4-B visual and architecture authorities; H6 medium/large pilots and legacy
-retirement; the sole Python SDK/bundled-app-server transport; native Codex
+Protected surfaces: accepted H4-A objective semantics and retained evidence;
+H5 plugin packaging and workflow-skill simplification; H6 medium/large pilots
+and legacy retirement; the sole Python SDK/bundled-app-server transport; native Codex
 provider/config/discovery/permission inheritance; existing retained H3
 sentinel evidence; primary checkout; remotes; global Codex state; plugins,
 hooks, manifests, templates, dependency files, and unrelated repository paths.
 No push, merge, rebase, stash, discard, plugin installation, remote mutation,
 or broad H3 review.
 
-Acceptance: one objective milestone follows the canonical production path from
-execution through independent read-only review, one deliberate
-promotion-blocking rejection, same-durable-owner repair, fresh read-only
-re-review, and final acceptance. Findings have stable identity, causal class,
-severity, separate `promotion_blocking` plus reason, evidence, criterion, and
-optional `defer_to`. Review/repair/recovery/decision/budget facts and causal
-events are durable and project only after authoritative results. Hermetic tests
-keep `CONTINUE_WITH_REPLAN`, `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, `FAILED`,
-context rollover, transport failure, stale review, and exhausted limits
-mutually distinct. One bounded disposable real Python-SDK/`codex-lb` pilot
-produces an observable repository edit and retained sanitized evidence. Focused
-and full repository gates pass, the worktree is clean, and self-review has zero
-findings that block H4-B.
+Acceptance: capsules derive distinct required authorities from objective,
+visual, and architecture modes; all declared modes must accept and authority
+aliasing or unavailable routes fail closed. One full real disposable
+Python-SDK/`codex-lb` scenario executes an observable repository change,
+retains fixed rendered evidence, passes independent objective and visual
+review, receives an architecture rejection, records a bounded
+`CONTINUE_WITH_REPLAN`, repairs in the same semantic workspace, receives fresh
+distinct-authority re-review, and reaches final acceptance. Finding lineage,
+new-versus-surviving scope, non-blocking deferral, planner/recovery decisions,
+budgets, events, results, and projections remain causal and durable.
+Hermetic scenarios prove `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, `FAILED`, stale
+authority, route unavailability, limit exhaustion, and notification failure do
+not collapse into replan or acceptance. Focused/full gates pass, retained
+evidence is sanitized and truthful, the worktree is clean, and self-review has
+zero findings blocking H5.
 
 Escalate only for a genuinely underdetermined product/public-contract/security
 decision, missing user authority, an external prerequisite, or proven
-infeasibility. Concrete H3 defects reached by H4-A are classified and repaired
-when they block this slice; they do not authorize reopening an unbounded H3
-audit.
+infeasibility. Concrete inherited defects reached by H4-B are classified and
+repaired when they block this slice; they do not authorize reopening an
+unbounded earlier-milestone audit.
 
 Completion callback:
 `threadId=01a035b4-1503-7d83-b11a-b36354bd2025`, `hostId=local`. Send exactly
