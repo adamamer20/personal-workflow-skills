@@ -1,0 +1,46 @@
+{
+  "accepted_state": "ACCEPTED",
+  "architecture_replan": true,
+  "authorized_changed_paths": [
+    "M objective.txt",
+    "?? .codex-flow/"
+  ],
+  "base_sha": "947dc586c3cc613c4de1b0329262b578fc0ed557",
+  "final_file_sha256": "aa6083f3a3c96f3860a4977f429ed51841511a3716ea3537472fea4365781e2b",
+  "fixed_rendered_evidence": {
+    "artifact_path": "fixed-rendered-evidence.svg",
+    "artifact_sha256": "2e3f78c73c42b7eda729a038efae1294d44961ebc393c991637939577fc53d47",
+    "evidence_id": "fixed-render-1"
+  },
+  "lifecycle_kinds": [
+    "authorities_derived",
+    "objective_completed",
+    "rendered_evidence_fixed",
+    "review_round_started",
+    "authority_review",
+    "authority_review",
+    "authority_review",
+    "multi_authority_rejected",
+    "recovery_decision",
+    "architecture_replan_accepted",
+    "repair_completed",
+    "repair_execution_completed",
+    "review_round_started",
+    "authority_review",
+    "authority_review",
+    "authority_review",
+    "all_authorities_accepted"
+  ],
+  "model": "gpt-5.6-luna",
+  "observable_edit": true,
+  "provider_route": "codex-lb",
+  "reasoning_effort": "xhigh",
+  "repair_count": 1,
+  "review_count": 6,
+  "same_owner_repair": true,
+  "schema": "codex-flow/h4-b-pilot/v1",
+  "sdk_turns": 2,
+  "status": "passed",
+  "thread_identity_reused": true,
+  "thread_started": true
+}

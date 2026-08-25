@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import inspect
 import json
 import os
 import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -18,10 +19,14 @@ from typing import Protocol, cast
 
 from .artifacts import write_h4_review_artifact, write_owned_artifact
 from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
-from .config import WorkflowConfig
+from .config import AuthorityUnavailable, WorkflowConfig, load_workflow_config
 from .domain import (
+    AcceptanceMode,
+    AuthorityPlan,
     Budget,
     ControllerCheckpoint,
+    DecisionRequest,
+    DecisionResponse,
     ExecutionCapsule,
     ExecutionRecord,
     ExecutionStatus,
@@ -29,6 +34,7 @@ from .domain import (
     JsonObject,
     LifecyclePhase,
     LifecycleRecord,
+    LifecycleStatus,
     MilestoneId,
     NativePermissionAuthority,
     NativePermissionMode,
@@ -36,7 +42,9 @@ from .domain import (
     ReasoningEffort,
     RecoveryDecision,
     RecoveryOutcome,
+    RenderedEvidence,
     RepairRecord,
+    ReplanProposal,
     ReviewFinding,
     ReviewResult,
     RunId,
@@ -278,6 +286,7 @@ def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
         "prompt": capsule.prompt,
         "output_schema": thaw_json(capsule.output_schema),
         "permission_mode": capsule.permission_mode.value,
+        "acceptance_modes": [mode.value for mode in capsule.acceptance_modes],
     }
 
 
@@ -301,7 +310,8 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         "output_schema",
         "permission_mode",
     }
-    if set(value) != expected:
+    optional = {"acceptance_modes"}
+    if set(value) not in (expected, expected | optional):
         raise ValueError(f"capsule keys must be exactly {sorted(expected)!r}")
 
     def require_string(field: str) -> str:
@@ -344,6 +354,9 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
     workspace_mode = require_string("workspace_mode")
     effort = require_string("reasoning_effort")
     permission_mode = require_string("permission_mode")
+    raw_modes = value.get("acceptance_modes", [AcceptanceMode.OBJECTIVE.value])
+    if not isinstance(raw_modes, list) or any(not isinstance(item, str) for item in raw_modes):
+        raise ValueError("capsule acceptance_modes must be an array of strings")
     run_id = require_string("run_id")
     milestone_id = require_string("milestone_id")
     return ExecutionCapsule(
@@ -364,6 +377,7 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         prompt,
         cast(JsonObject, schema),
         NativePermissionMode(permission_mode),
+        tuple(AcceptanceMode(item) for item in raw_modes),
     )
 
 
@@ -1741,6 +1755,8 @@ class H4WalkingSkeleton:
             "fresh": result.fresh,
             "read_only": result.read_only,
             "prior_review_id": result.prior_review_id,
+            "acceptance_mode": result.acceptance_mode.value,
+            "evidence_ids": list(result.evidence_ids),
             "findings": [cls._finding_json(finding) for finding in result.findings],
         }
 
@@ -1754,9 +1770,18 @@ class H4WalkingSkeleton:
         reviews: tuple[ReviewResult, ...],
         repairs: tuple[RepairRecord, ...],
         recovery: RecoveryDecision | None = None,
+        authority_plan: AuthorityPlan | None = None,
+        rendered_evidence: tuple[RenderedEvidence, ...] = (),
     ) -> H4LifecycleResult:
         if recovery is not None:
-            self.ledger.record_h4_recovery(run_id, milestone_id, recovery)
+            existing_recovery = any(
+                record.kind == "recovery_decision"
+                and record.data.get("outcome") == recovery.outcome.value
+                and record.data.get("checkpoint") == recovery.checkpoint
+                for record in self.ledger.h4_lifecycle(run_id, milestone_id)
+            )
+            if not existing_recovery:
+                self.ledger.record_h4_recovery(run_id, milestone_id, recovery)
         lifecycle = tuple(
             LifecycleRecord(
                 record.phase,
@@ -1774,6 +1799,8 @@ class H4WalkingSkeleton:
             tuple(repair.repair_id for repair in repairs),
             lifecycle,
             recovery,
+            authority_plan,
+            rendered_evidence,
         )
         write_h4_review_artifact(self.repository_root, run_id, str(milestone_id), result)
         return result
@@ -2079,3 +2106,759 @@ class H4WalkingSkeleton:
         return self._project_result(
             run_id, milestone_id, status="accepted", accepted=True, reviews=tuple(reviews), repairs=tuple(repairs)
         )
+
+    @staticmethod
+    def _authority_json(plan: AuthorityPlan) -> JsonObject:
+        return {
+            "assignments": [
+                {
+                    "mode": assignment.mode.value if assignment.mode is not None else None,
+                    "role": str(assignment.role),
+                    "model": assignment.model,
+                    "reasoning_effort": assignment.reasoning_effort.value,
+                }
+                for assignment in plan.assignments
+            ]
+        }
+
+    @staticmethod
+    def _evidence_json(evidence: RenderedEvidence) -> JsonObject:
+        return {
+            "evidence_id": evidence.evidence_id,
+            "revision": evidence.revision,
+            "artifact_sha256": evidence.artifact_sha256,
+            "artifact_path": evidence.artifact_path,
+            "width": evidence.width,
+            "height": evidence.height,
+        }
+
+    def run_multi_authority(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        objective: Callable[[], JsonObject],
+        repair: Callable[[ReviewFinding], RepairRecord],
+        current_revision: Callable[[], str],
+        acceptance_modes: Sequence[AcceptanceMode | str] | None = None,
+        capsule: ExecutionCapsule | None = None,
+        reviewers: Mapping[AcceptanceMode | str, Callable[..., ReviewResult]] | None = None,
+        objective_reviewer: Callable[[str, bool], ReviewResult] | None = None,
+        visual_reviewer: Callable[[str, RenderedEvidence, bool], ReviewResult] | None = None,
+        architecture_reviewer: Callable[[str, RenderedEvidence | None, bool], ReviewResult] | None = None,
+        render_evidence: Callable[[str], RenderedEvidence] | None = None,
+        architecture_replan: Callable[[ReviewFinding], ReplanProposal] | None = None,
+        planner: Callable[[DecisionRequest], DecisionResponse] | None = None,
+        notification: Callable[[H4LifecycleResult], None] | None = None,
+        budget: Budget | None = None,
+        available_models: set[str] | None = None,
+    ) -> H4LifecycleResult:
+        """Run the complete bounded H4 objective/visual/architecture route.
+
+        All mode reviewers are read-only and independent.  The first review
+        pass is complete before any repair is attempted; a rejection is then
+        diagnosed by the recovery authority and, for an unchanged boundary,
+        recorded as a bounded ``CONTINUE_WITH_REPLAN`` before the same owner
+        repairs in the leased workspace.
+        """
+
+        declared_modes = (
+            capsule.acceptance_modes if capsule is not None else (acceptance_modes or (AcceptanceMode.OBJECTIVE,))
+        )
+        modes = tuple(mode if isinstance(mode, AcceptanceMode) else AcceptanceMode(mode) for mode in declared_modes)
+        config = self.config or load_workflow_config(self.repository_root / "workflow.toml")
+        plan = config.derive_authorities(modes, available_models=available_models)
+        callback_map: dict[AcceptanceMode, Callable[..., ReviewResult]] = {}
+        if reviewers is not None:
+            for raw_mode, callback in reviewers.items():
+                mode = raw_mode if isinstance(raw_mode, AcceptanceMode) else AcceptanceMode(raw_mode)
+                callback_map[mode] = callback
+        if objective_reviewer is not None:
+            callback_map[AcceptanceMode.OBJECTIVE] = objective_reviewer
+        if visual_reviewer is not None:
+            callback_map[AcceptanceMode.VISUAL] = visual_reviewer
+        if architecture_reviewer is not None:
+            callback_map[AcceptanceMode.ARCHITECTURE] = architecture_reviewer
+        missing_callbacks = [mode.value for mode in modes if mode not in callback_map]
+        if missing_callbacks:
+            raise AuthorityUnavailable("required reviewer callbacks are unavailable: " + ",".join(missing_callbacks))
+        if AcceptanceMode.VISUAL in modes and render_evidence is None:
+            raise AuthorityUnavailable("visual acceptance requires fixed rendered evidence")
+
+        active_budget = budget or config.limits.budget()
+        reviews: list[ReviewResult] = []
+        repairs: list[RepairRecord] = []
+        evidence: list[RenderedEvidence] = []
+        recovery: RecoveryDecision | None = None
+
+        if self.ledger.current_state(run_id, milestone_id) is WorkflowState.PLANNED:
+            self.ledger.claim_dispatch(run_id, milestone_id, "executor", 1)
+            self.ledger.transition(run_id, milestone_id, WorkflowState.RUNNING, expected_state=WorkflowState.STARTING)
+        if self.ledger.current_state(run_id, milestone_id) is not WorkflowState.RUNNING:
+            raise ControllerError("multi-authority H4 requires a running milestone")
+        self.ledger.record_h4_fact(
+            run_id,
+            milestone_id,
+            phase=LifecyclePhase.ROUTING,
+            kind="authorities_derived",
+            data={"acceptance_modes": [mode.value for mode in modes], "authority_plan": self._authority_json(plan)},
+        )
+
+        def budget_failure(kind: str) -> H4LifecycleResult:
+            nonlocal recovery
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint=f"budget:{kind}")
+            self.ledger.record_h4_fact(
+                run_id,
+                milestone_id,
+                phase=LifecyclePhase.BUDGET,
+                kind="limit_exhausted",
+                data={"limit": kind},
+            )
+            state = self.ledger.current_state(run_id, milestone_id)
+            if state not in {WorkflowState.FAILED, WorkflowState.ACCEPTED}:
+                self.ledger.record_h4_transition(
+                    run_id,
+                    milestone_id,
+                    WorkflowState.FAILED,
+                    expected_state=state,
+                    phase=LifecyclePhase.BUDGET,
+                    kind="limit_exhausted",
+                    data={"limit": kind},
+                    reason=ReasonCode.EXECUTION_FAILURE,
+                )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.LIMIT_EXHAUSTED.value,
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                recovery=recovery,
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+
+        exhausted = active_budget.exhausted()
+        if exhausted is not None:
+            return budget_failure(exhausted.value)
+        active_budget = replace(active_budget, turns=active_budget.turns + 1)
+        try:
+            output = objective()
+            if not isinstance(output, Mapping):
+                raise ValueError("objective output must be a JSON object")
+        except (TransportFailureBeforeIdentity, TerminalFailureAfterIdentity) as exc:
+            recovery = self.classify_recovery(checkpoint="objective_transport_boundary")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.RUNNING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="transport_failure",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.TRANSPORT_FAILURE,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.TRANSPORT_FAILURE.value,
+                accepted=False,
+                reviews=(),
+                repairs=(),
+                recovery=recovery,
+                authority_plan=plan,
+            )
+        except Exception as exc:
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint="objective_failure")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.RUNNING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="objective_failed",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.EXECUTION_FAILURE,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.FAILED.value,
+                accepted=False,
+                reviews=(),
+                repairs=(),
+                recovery=recovery,
+                authority_plan=plan,
+            )
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.COMPLETED,
+            expected_state=WorkflowState.RUNNING,
+            phase=LifecyclePhase.EXECUTION,
+            kind="objective_completed",
+            data={"output": dict(output)},
+        )
+        revision = current_revision()
+        if AcceptanceMode.VISUAL in modes:
+            try:
+                rendered = render_evidence(revision)  # type: ignore[misc]
+            except Exception as exc:
+                self.ledger.record_h4_transition(
+                    run_id,
+                    milestone_id,
+                    WorkflowState.FAILED,
+                    expected_state=WorkflowState.COMPLETED,
+                    phase=LifecyclePhase.RECOVERY,
+                    kind="rendered_evidence_failed",
+                    data={"exception_class": type(exc).__name__},
+                    reason=ReasonCode.EXECUTION_FAILURE,
+                )
+                return self._project_result(
+                    run_id,
+                    milestone_id,
+                    status=LifecycleStatus.FAILED.value,
+                    accepted=False,
+                    reviews=(),
+                    repairs=(),
+                    recovery=self.classify_recovery(proven_infeasible=True, checkpoint="rendered_evidence"),
+                    authority_plan=plan,
+                )
+            if rendered.revision != revision:
+                self.ledger.record_h4_transition(
+                    run_id,
+                    milestone_id,
+                    WorkflowState.FAILED,
+                    expected_state=WorkflowState.COMPLETED,
+                    phase=LifecyclePhase.RECOVERY,
+                    kind="stale_rendered_evidence",
+                    data={"expected_revision": revision},
+                    reason=ReasonCode.REVIEW_REJECTED,
+                )
+                return self._project_result(
+                    run_id,
+                    milestone_id,
+                    status=LifecycleStatus.STALE_REVIEW.value,
+                    accepted=False,
+                    reviews=(),
+                    repairs=(),
+                    recovery=self.classify_recovery(checkpoint="rendered_evidence"),
+                    authority_plan=plan,
+                )
+            evidence.append(rendered)
+            self.ledger.record_h4_fact(
+                run_id,
+                milestone_id,
+                phase=LifecyclePhase.REVIEW,
+                kind="rendered_evidence_fixed",
+                data=self._evidence_json(rendered),
+            )
+
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.REVIEWING,
+            expected_state=WorkflowState.COMPLETED,
+            phase=LifecyclePhase.REVIEW,
+            kind="review_round_started",
+            data={"round": 1, "revision": revision, "acceptance_modes": [mode.value for mode in modes]},
+        )
+
+        def invoke(mode: AcceptanceMode, token: str, fresh: bool) -> ReviewResult:
+            callback = callback_map[mode]
+            rendered = evidence[0] if evidence else None
+            if mode is AcceptanceMode.OBJECTIVE:
+                result = callback(token, fresh)
+            elif mode is AcceptanceMode.VISUAL:
+                result = callback(token, rendered, fresh)
+            else:
+                # Architecture callbacks may choose either the rendered
+                # evidence-aware form or the objective-style two-argument
+                # form.  Inspecting arity avoids invoking an SDK callback
+                # twice after a consumed turn.
+                try:
+                    parameter_count = len(inspect.signature(callback).parameters)
+                except (TypeError, ValueError):
+                    parameter_count = 3
+                result = callback(token, rendered, fresh) if parameter_count >= 3 else callback(token, fresh)
+            if result.reviewer_role != plan.for_mode(mode).role:
+                raise ControllerError(f"stale authority for {mode.value} review")
+            if result.acceptance_mode is not mode:
+                raise ControllerError(f"reviewer returned the wrong acceptance mode for {mode.value}")
+            if not result.fresh or not result.read_only or result.reviewed_revision != token:
+                raise ControllerError(f"stale {mode.value} reviewer result")
+            if mode is AcceptanceMode.VISUAL and evidence[0].evidence_id not in result.evidence_ids:
+                raise ControllerError("visual review did not acknowledge fixed rendered evidence")
+            self.ledger.record_h4_fact(
+                run_id,
+                milestone_id,
+                phase=LifecyclePhase.REVIEW,
+                kind="authority_review",
+                data={"mode": mode.value, "review": self._review_json(result), "round": 1},
+            )
+            return result
+
+        try:
+            first_reviews = [invoke(mode, revision, True) for mode in modes]
+        except AuthorityUnavailable as exc:
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="route_unavailable",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.ENVIRONMENT_BLOCKED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.ROUTE_UNAVAILABLE.value,
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        except ControllerError as exc:
+            recovery = self.classify_recovery(checkpoint="stale_authority")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="stale_authority",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.STALE_AUTHORITY.value,
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                recovery=recovery,
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        except Exception as exc:
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="review_failed",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.FAILED.value,
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        reviews.extend(first_reviews)
+        blockers = [finding for review in first_reviews for finding in review.promotion_blockers]
+        if not blockers:
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.ACCEPTED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.ACCEPTANCE,
+                kind="all_authorities_accepted",
+                data={"review_ids": [review.review_id for review in first_reviews]},
+                reason=ReasonCode.TERMINAL_OUTCOME,
+            )
+            result = self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.ACCEPTED.value,
+                accepted=True,
+                reviews=tuple(reviews),
+                repairs=(),
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+            if notification is not None:
+                try:
+                    notification(result)
+                except Exception as exc:
+                    self.ledger.record_h4_fact(
+                        run_id,
+                        milestone_id,
+                        phase=LifecyclePhase.ACCEPTANCE,
+                        kind="notification_failure",
+                        data={"exception_class": type(exc).__name__},
+                    )
+                    result = replace(
+                        result,
+                        notification_failure=True,
+                        lifecycle=tuple(
+                            LifecycleRecord(item.phase, item.kind, item.sequence, thaw_json(item.data))
+                            for item in self.ledger.h4_lifecycle(run_id, milestone_id)
+                        ),
+                    )
+                    write_h4_review_artifact(self.repository_root, run_id, str(milestone_id), result)
+            return result
+
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.REPAIR_REQUIRED,
+            expected_state=WorkflowState.REVIEWING,
+            phase=LifecyclePhase.REVIEW,
+            kind="multi_authority_rejected",
+            data={"finding_ids": [finding.finding_id for finding in blockers]},
+            reason=ReasonCode.REVIEW_REJECTED,
+        )
+        architecture_blockers = [
+            finding
+            for review in first_reviews
+            if review.acceptance_mode is AcceptanceMode.ARCHITECTURE
+            for finding in review.promotion_blockers
+        ]
+        if architecture_blockers:
+            finding = architecture_blockers[0]
+            if architecture_replan is None:
+                raise AuthorityUnavailable("architecture rejection requires a recovery/replan authority")
+            proposal = architecture_replan(finding)
+            if not isinstance(proposal, ReplanProposal) or not proposal.boundary_unchanged:
+                request = DecisionRequest(
+                    "architecture-replan-decision",
+                    "The proposed architecture strategy changes an accepted boundary; confirm a new authorized scope.",
+                    ("keep-accepted-boundary", "request-user-decision"),
+                )
+                self.ledger.record_h4_decision_request(run_id, milestone_id, request)
+                if planner is not None:
+                    response = planner(request)
+                    if not isinstance(response, DecisionResponse) or response.request_id != request.request_id:
+                        raise ControllerError("planner returned an invalid decision response")
+                    self.ledger.record_h4_decision_response(run_id, milestone_id, response)
+                recovery = self.classify_recovery(
+                    intent_unchanged=isinstance(proposal, ReplanProposal) and proposal.intent_unchanged,
+                    contract_unchanged=isinstance(proposal, ReplanProposal) and proposal.contract_unchanged,
+                    security_boundary_unchanged=isinstance(proposal, ReplanProposal)
+                    and proposal.security_boundary_unchanged,
+                    cost_unchanged=isinstance(proposal, ReplanProposal) and proposal.cost_unchanged,
+                    destructive_behavior_unchanged=isinstance(proposal, ReplanProposal)
+                    and proposal.destructive_behavior_unchanged,
+                    scope_unchanged=isinstance(proposal, ReplanProposal) and proposal.scope_unchanged,
+                    checkpoint="architecture_replan",
+                )
+                self.ledger.record_h4_recovery(run_id, milestone_id, recovery)
+                return self._project_result(
+                    run_id,
+                    milestone_id,
+                    status=(
+                        LifecycleStatus.CONTINUE_WITH_REPLAN.value
+                        if recovery.outcome is RecoveryOutcome.CONTINUE_WITH_REPLAN
+                        else LifecycleStatus.NEEDS_DECISION.value
+                    ),
+                    accepted=False,
+                    reviews=tuple(reviews),
+                    repairs=(),
+                    recovery=recovery,
+                    authority_plan=plan,
+                    rendered_evidence=tuple(evidence),
+                )
+            recovery = self.classify_recovery(checkpoint="architecture_replan")
+            self.ledger.record_h4_recovery(run_id, milestone_id, recovery)
+            self.ledger.record_h4_fact(
+                run_id,
+                milestone_id,
+                phase=LifecyclePhase.RECOVERY,
+                kind="architecture_replan_accepted",
+                data={"finding_id": finding.finding_id, "strategy": proposal.strategy, "boundary_unchanged": True},
+            )
+
+        if active_budget.repairs >= active_budget.max_repairs:
+            return budget_failure("repairs")
+        active_budget = replace(active_budget, repairs=active_budget.repairs + 1)
+        finding = blockers[0]
+        try:
+            repair_record = repair(finding)
+        except Exception as exc:
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REPAIR_REQUIRED,
+                phase=LifecyclePhase.RECOVERY,
+                kind="repair_failed",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.EXECUTION_FAILURE,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.FAILED.value,
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                recovery=self.classify_recovery(proven_infeasible=True, checkpoint="repair_failed"),
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        if repair_record.finding_id != finding.finding_id or not repair_record.same_owner:
+            raise ControllerError("multi-authority repair must retain the exact finding and same owner")
+        repairs.append(repair_record)
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.RUNNING,
+            expected_state=WorkflowState.REPAIR_REQUIRED,
+            phase=LifecyclePhase.REPAIR,
+            kind="repair_completed",
+            data={"repair_id": repair_record.repair_id, "finding_id": finding.finding_id, "same_owner": True},
+            reason=ReasonCode.REVIEW_REJECTED,
+        )
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.COMPLETED,
+            expected_state=WorkflowState.RUNNING,
+            phase=LifecyclePhase.EXECUTION,
+            kind="repair_execution_completed",
+            data={"repair_id": repair_record.repair_id},
+        )
+        fresh_revision = current_revision()
+        if AcceptanceMode.VISUAL in modes:
+            try:
+                refreshed = render_evidence(fresh_revision)  # type: ignore[misc]
+            except Exception as exc:
+                self.ledger.record_h4_transition(
+                    run_id,
+                    milestone_id,
+                    WorkflowState.FAILED,
+                    expected_state=WorkflowState.COMPLETED,
+                    phase=LifecyclePhase.RECOVERY,
+                    kind="rendered_evidence_failed",
+                    data={"exception_class": type(exc).__name__},
+                    reason=ReasonCode.EXECUTION_FAILURE,
+                )
+                return self._project_result(
+                    run_id,
+                    milestone_id,
+                    status=LifecycleStatus.FAILED.value,
+                    accepted=False,
+                    reviews=tuple(reviews),
+                    repairs=tuple(repairs),
+                    recovery=self.classify_recovery(proven_infeasible=True, checkpoint="rendered_evidence"),
+                    authority_plan=plan,
+                    rendered_evidence=tuple(evidence),
+                )
+            if refreshed.evidence_id != evidence[0].evidence_id:
+                self.ledger.record_h4_transition(
+                    run_id,
+                    milestone_id,
+                    WorkflowState.FAILED,
+                    expected_state=WorkflowState.COMPLETED,
+                    phase=LifecyclePhase.RECOVERY,
+                    kind="stale_rendered_evidence",
+                    data={"expected_evidence_id": evidence[0].evidence_id},
+                    reason=ReasonCode.REVIEW_REJECTED,
+                )
+                return self._project_result(
+                    run_id,
+                    milestone_id,
+                    status=LifecycleStatus.STALE_REVIEW.value,
+                    accepted=False,
+                    reviews=tuple(reviews),
+                    repairs=tuple(repairs),
+                    recovery=self.classify_recovery(checkpoint="rendered_evidence"),
+                    authority_plan=plan,
+                    rendered_evidence=tuple(evidence),
+                )
+            evidence[0] = refreshed
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.REVIEWING,
+            expected_state=WorkflowState.COMPLETED,
+            phase=LifecyclePhase.REVIEW,
+            kind="review_round_started",
+            data={"round": 2, "revision": fresh_revision, "acceptance_modes": [mode.value for mode in modes]},
+        )
+        second_reviews: list[ReviewResult] = []
+        try:
+            for mode in modes:
+                callback = callback_map[mode]
+                rendered = evidence[0] if evidence else None
+                if mode is AcceptanceMode.OBJECTIVE:
+                    second = callback(fresh_revision, True)
+                elif mode is AcceptanceMode.VISUAL:
+                    second = callback(fresh_revision, rendered, True)
+                else:
+                    try:
+                        parameter_count = len(inspect.signature(callback).parameters)
+                    except (TypeError, ValueError):
+                        parameter_count = 3
+                    second = (
+                        callback(fresh_revision, rendered, True)
+                        if parameter_count >= 3
+                        else callback(fresh_revision, True)
+                    )
+                if second.reviewer_role != plan.for_mode(mode).role or second.acceptance_mode is not mode:
+                    raise ControllerError(f"stale authority for fresh {mode.value} review")
+                if not second.fresh or not second.read_only or second.reviewed_revision != fresh_revision:
+                    raise ControllerError(f"stale fresh {mode.value} review")
+                if mode is AcceptanceMode.VISUAL and evidence[0].evidence_id not in second.evidence_ids:
+                    raise ControllerError("fresh visual review did not acknowledge fixed rendered evidence")
+                prior = next(review for review in first_reviews if review.acceptance_mode is mode)
+                if prior.findings and second.prior_review_id != prior.review_id:
+                    raise ControllerError("fresh review must reference the exact prior authority review")
+                prior_ids = {item.finding_id for item in prior.findings}
+                for item in second.findings:
+                    if item.finding_id in prior_ids and not item.survives_prior_repair:
+                        raise ControllerError("surviving finding must acknowledge the exact prior repair")
+                    if item.finding_id not in prior_ids and item.survives_prior_repair:
+                        raise ControllerError("new review scope cannot masquerade as a surviving finding")
+                second_reviews.append(second)
+                self.ledger.record_h4_fact(
+                    run_id,
+                    milestone_id,
+                    phase=LifecyclePhase.REVIEW,
+                    kind="authority_review",
+                    data={"mode": mode.value, "review": self._review_json(second), "round": 2},
+                )
+        except AuthorityUnavailable as exc:
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="route_unavailable",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.ENVIRONMENT_BLOCKED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.ROUTE_UNAVAILABLE.value,
+                accepted=False,
+                reviews=tuple(reviews + second_reviews),
+                repairs=tuple(repairs),
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        except ControllerError as exc:
+            recovery = self.classify_recovery(checkpoint="stale_authority")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="stale_authority",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.STALE_AUTHORITY.value,
+                accepted=False,
+                reviews=tuple(reviews + second_reviews),
+                repairs=tuple(repairs),
+                recovery=recovery,
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        except Exception as exc:
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="review_failed",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.FAILED.value,
+                accepted=False,
+                reviews=tuple(reviews + second_reviews),
+                repairs=tuple(repairs),
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        reviews.extend(second_reviews)
+        remaining = [finding for review in second_reviews for finding in review.promotion_blockers]
+        if remaining:
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint="re_review_rejected")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="re_review_rejected",
+                data={"finding_ids": [finding.finding_id for finding in remaining]},
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.REJECTED_AFTER_REPAIR.value,
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                recovery=recovery,
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.ACCEPTED,
+            expected_state=WorkflowState.REVIEWING,
+            phase=LifecyclePhase.ACCEPTANCE,
+            kind="all_authorities_accepted",
+            data={"review_ids": [review.review_id for review in second_reviews], "same_owner_repair": True},
+            reason=ReasonCode.TERMINAL_OUTCOME,
+        )
+        result = self._project_result(
+            run_id,
+            milestone_id,
+            status=LifecycleStatus.ACCEPTED.value,
+            accepted=True,
+            reviews=tuple(reviews),
+            repairs=tuple(repairs),
+            recovery=recovery,
+            authority_plan=plan,
+            rendered_evidence=tuple(evidence),
+        )
+        if notification is not None:
+            try:
+                notification(result)
+            except Exception as exc:
+                self.ledger.record_h4_fact(
+                    run_id,
+                    milestone_id,
+                    phase=LifecyclePhase.ACCEPTANCE,
+                    kind="notification_failure",
+                    data={"exception_class": type(exc).__name__},
+                )
+                result = replace(
+                    result,
+                    notification_failure=True,
+                    lifecycle=tuple(
+                        LifecycleRecord(item.phase, item.kind, item.sequence, thaw_json(item.data))
+                        for item in self.ledger.h4_lifecycle(run_id, milestone_id)
+                    ),
+                )
+                write_h4_review_artifact(self.repository_root, run_id, str(milestone_id), result)
+        return result

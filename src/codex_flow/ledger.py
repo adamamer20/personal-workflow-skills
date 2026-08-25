@@ -2216,10 +2216,21 @@ class Ledger:
                 data=None,
             )
             _envelope, encoded = _encode_h4_event_data(payload)
+            lifecycle_sequence = (
+                int(
+                    self._db()
+                    .execute(
+                        "SELECT COALESCE(MAX(sequence), 0) FROM h4.lifecycle WHERE run_id = ? AND milestone_id = ?",
+                        (str(run), str(milestone)),
+                    )
+                    .fetchone()[0]
+                )
+                + 1
+            )
             self._db().execute(
                 "INSERT INTO h4.lifecycle(run_id, milestone_id, sequence, phase, kind, data_json, occurred_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (str(run), str(milestone), int(event.sequence), phase_value.value, kind, encoded, now),
+                (str(run), str(milestone), lifecycle_sequence, phase_value.value, kind, encoded, now),
             )
             self._fault("after_event_insert")
             return self._verify_event(event)

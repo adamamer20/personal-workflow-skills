@@ -369,9 +369,34 @@ def write_h4_review_artifact(
         "schema": "codex-flow/h4-review/v1",
         "status": result.status,
         "accepted": result.accepted,
+        "notification_failure": result.notification_failure,
         "review_ids": list(result.review_ids),
         "finding_ids": list(result.finding_ids),
         "repair_ids": list(result.repair_ids),
+        "authority_plan": (
+            [
+                {
+                    "mode": assignment.mode.value if assignment.mode is not None else None,
+                    "role": str(assignment.role),
+                    "model": assignment.model,
+                    "reasoning_effort": assignment.reasoning_effort.value,
+                }
+                for assignment in result.authority_plan.assignments
+            ]
+            if result.authority_plan is not None
+            else None
+        ),
+        "rendered_evidence": [
+            {
+                "evidence_id": evidence.evidence_id,
+                "revision": evidence.revision,
+                "artifact_sha256": evidence.artifact_sha256,
+                "artifact_path": evidence.artifact_path,
+                "width": evidence.width,
+                "height": evidence.height,
+            }
+            for evidence in result.rendered_evidence
+        ],
         "recovery": (
             {
                 "outcome": result.recovery.outcome.value,

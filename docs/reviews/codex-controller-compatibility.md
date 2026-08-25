@@ -194,3 +194,31 @@ repaired through the same SDK thread, passed a fresh re-review, and finished in
 `ACCEPTED` with two SDK turns and one repair. Evidence is sanitized to hashes,
 counts, lifecycle kinds, route, and status; no provider prose or credentials
 are persisted.
+
+## H4-B multi-authority acceptance
+
+H4-B extends the same H3 controller, SQLite fact authority, workspace lease,
+checkpoint, finding lineage, and result-before-projection path. A capsule's
+`objective`, `visual`, and `architecture` acceptance modes derive the executor,
+objective/code-reviewer, visual-reviewer, architecture-reviewer, recovery, and
+decision routes from `workflow.toml`; missing or aliased required routes fail
+closed without model, effort, provider, permission, or transport substitution.
+Visual reviewers receive an immutable fixed rendered-evidence digest. All
+declared modes must accept, while severity remains independent of successor
+promotion impact and non-blocking findings retain their `defer_to` reason.
+
+An architecture rejection is durably recorded, diagnosed as a bounded
+`CONTINUE_WITH_REPLAN` only when the revised strategy preserves intent,
+public/persisted contracts, security/privacy boundary, material cost,
+destructive authority, and milestone scope, then repaired by the same durable
+owner and re-reviewed by fresh distinct authorities. Stale authority, route
+unavailability, limits, notification failure, and terminal recovery outcomes
+remain distinct typed facts.
+
+The one authorized real disposable multi-authority pilot is retained at
+`docs/reviews/evidence/h4-b-multi-authority-pilot.json`. It used one Python
+SDK/`codex-lb` thread and two bounded turns, made an observable workspace edit,
+reviewed fixed rendered evidence independently, rejected architecture,
+accepted a same-boundary replan, repaired in the same workspace, and reached
+`ACCEPTED` after six authority reviews. The retained packet contains only
+sanitized hashes, route identities, counts, lifecycle kinds, and status.

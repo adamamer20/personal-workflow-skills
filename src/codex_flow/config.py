@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import math
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from .domain import Budget, ReasoningEffort, RoleId
+from .domain import AcceptanceMode, AuthorityAssignment, AuthorityPlan, Budget, ReasoningEffort, RoleId
 
 
 class WorkflowConfigError(ValueError):
     """The versioned workflow configuration is missing or malformed."""
+
+
+class AuthorityUnavailable(WorkflowConfigError):
+    """A required authority cannot be dispatched under the frozen routes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,11 +100,55 @@ class WorkflowConfig:
     def validate_runtime(self, *, available_models: set[str] | None = None) -> None:
         """Fail closed when a configured route is not available; never substitute."""
 
+        aliases = sorted(str(role) for role, route in self.roles.items() if route.role != role)
+        if aliases:
+            raise AuthorityUnavailable(f"configured role routes are aliased: {aliases!r}")
         if available_models is None:
             return
         missing = sorted({route.model for route in self.roles.values()} - available_models)
         if missing:
             raise WorkflowConfigError(f"configured model route is unavailable: {missing!r}")
+
+    def derive_authorities(
+        self,
+        acceptance_modes: Sequence[AcceptanceMode | str],
+        *,
+        available_models: set[str] | None = None,
+    ) -> AuthorityPlan:
+        """Derive all authorities for a capsule and fail closed on drift.
+
+        The mapping is deliberately explicit.  A reviewer role may not be
+        reused for another required acceptance mode, and a route's declared
+        role must agree with its table key.  No model, effort, provider, or
+        transport fallback is attempted here.
+        """
+
+        modes = tuple(mode if isinstance(mode, AcceptanceMode) else AcceptanceMode(mode) for mode in acceptance_modes)
+        if not modes or len(modes) != len(set(modes)):
+            raise AuthorityUnavailable("acceptance modes must be non-empty and unique")
+        required: list[tuple[AcceptanceMode | None, RoleId]] = [(None, RoleId("executor"))]
+        if AcceptanceMode.OBJECTIVE in modes:
+            required.append((AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")))
+        if AcceptanceMode.VISUAL in modes:
+            required.append((AcceptanceMode.VISUAL, RoleId("visual-reviewer")))
+        if AcceptanceMode.ARCHITECTURE in modes:
+            required.append((AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")))
+        # Recovery and decision are always part of the H4 authority graph:
+        # they are needed to classify a rejection even when the happy path
+        # never invokes them.
+        required.extend(((None, RoleId("recovery")), (None, RoleId("decision"))))
+        assignments: list[AuthorityAssignment] = []
+        for mode, role in required:
+            route = self.route(role)
+            if route.role != role:
+                raise AuthorityUnavailable(f"configured route for {role} is aliased to {route.role}")
+            if available_models is not None and route.model not in available_models:
+                raise AuthorityUnavailable(f"configured model route is unavailable: {route.model!r}")
+            assignments.append(AuthorityAssignment(mode, role, route.model, route.reasoning_effort))
+        try:
+            return AuthorityPlan(tuple(assignments))
+        except ValueError as exc:
+            raise AuthorityUnavailable(str(exc)) from exc
 
 
 def _table(value: object, *, label: str) -> Mapping[str, object]:

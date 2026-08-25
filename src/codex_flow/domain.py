@@ -521,6 +521,88 @@ class AcceptanceMode(str, Enum):
     ARCHITECTURE = "architecture"
 
 
+@dataclass(frozen=True, slots=True)
+class RenderedEvidence:
+    """Fixed, review-only evidence for a subjective acceptance mode.
+
+    Rendered evidence is intentionally represented by a digest and bounded
+    metadata rather than raw pixels.  The producer owns the actual artifact;
+    reviewers receive this immutable identity and can never write through the
+    H4 controller callback.
+    """
+
+    evidence_id: str
+    revision: str
+    artifact_sha256: str
+    artifact_path: str
+    width: int | None = None
+    height: int | None = None
+
+    def __post_init__(self) -> None:
+        _required_text(self.evidence_id, label="rendered evidence id", limit=256)
+        _required_text(self.revision, label="rendered evidence revision", limit=256)
+        _required_text(self.artifact_path, label="rendered evidence path", limit=512)
+        evidence_path = Path(self.artifact_path)
+        if evidence_path.is_absolute() or ".." in evidence_path.parts or evidence_path.as_posix() != self.artifact_path:
+            raise ValueError("rendered evidence path must be repository-relative")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.artifact_sha256):
+            raise ValueError("rendered evidence digest must be a lowercase SHA-256")
+        for label, value in (("width", self.width), ("height", self.height)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+                raise ValueError(f"rendered evidence {label} must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityAssignment:
+    """One concrete role route selected for a required acceptance authority."""
+
+    mode: AcceptanceMode | None
+    role: RoleId
+    model: str
+    reasoning_effort: ReasoningEffort
+
+    def __post_init__(self) -> None:
+        if self.mode is not None and not isinstance(self.mode, AcceptanceMode):
+            object.__setattr__(self, "mode", AcceptanceMode(self.mode))
+        if not isinstance(self.role, RoleId):
+            object.__setattr__(self, "role", RoleId(self.role))
+        if not isinstance(self.model, str) or not self.model.strip() or "\x00" in self.model:
+            raise ValueError("authority model must be a bounded non-empty string")
+        if not isinstance(self.reasoning_effort, ReasoningEffort):
+            object.__setattr__(self, "reasoning_effort", ReasoningEffort(self.reasoning_effort))
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityPlan:
+    """The immutable routing decision for one H4 multi-authority run."""
+
+    assignments: tuple[AuthorityAssignment, ...]
+
+    def __post_init__(self) -> None:
+        assignments = tuple(self.assignments)
+        roles = [str(item.role) for item in assignments]
+        if len(roles) != len(set(roles)):
+            raise ValueError("required H4 authorities must use distinct roles")
+        modes = [item.mode for item in assignments if item.mode is not None]
+        if len(modes) != len(set(modes)):
+            raise ValueError("required H4 acceptance modes must use distinct authorities")
+        object.__setattr__(self, "assignments", assignments)
+
+    def for_mode(self, mode: AcceptanceMode | str) -> AuthorityAssignment:
+        target = mode if isinstance(mode, AcceptanceMode) else AcceptanceMode(mode)
+        for assignment in self.assignments:
+            if assignment.mode is target:
+                return assignment
+        raise KeyError(target)
+
+    def role(self, role: RoleId | str) -> AuthorityAssignment:
+        target = str(role)
+        for assignment in self.assignments:
+            if str(assignment.role) == target:
+                return assignment
+        raise KeyError(target)
+
+
 class FindingCausalClass(str, Enum):
     """Causal classes used to diagnose a review finding without attempt counts."""
 
@@ -570,6 +652,7 @@ class LifecyclePhase(str, Enum):
     DECISION = "decision"
     BUDGET = "budget"
     ACCEPTANCE = "acceptance"
+    ROUTING = "routing"
 
 
 class BudgetExhaustion(str, Enum):
@@ -596,6 +679,9 @@ class LifecycleStatus(str, Enum):
     STALE_REVIEW = "stale_review"
     LIMIT_EXHAUSTED = "limit_exhausted"
     REJECTED_AFTER_REPAIR = "rejected_after_repair"
+    STALE_AUTHORITY = "stale_authority"
+    ROUTE_UNAVAILABLE = "route_unavailable"
+    NOTIFICATION_FAILURE = "notification_failure"
 
 
 TERMINAL_STATES: frozenset[WorkflowState] = frozenset(
@@ -789,6 +875,8 @@ class ReviewResult:
     fresh: bool = True
     read_only: bool = True
     prior_review_id: str | None = None
+    acceptance_mode: AcceptanceMode = AcceptanceMode.OBJECTIVE
+    evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _required_text(self.review_id, label="review id", limit=256)
@@ -802,6 +890,12 @@ class ReviewResult:
             raise ValueError("review result must declare read-only authority")
         if self.accepted and any(finding.promotion_blocking for finding in findings):
             raise ValueError("accepted review cannot contain promotion-blocking findings")
+        if not isinstance(self.acceptance_mode, AcceptanceMode):
+            object.__setattr__(self, "acceptance_mode", AcceptanceMode(self.acceptance_mode))
+        evidence_ids = tuple(self.evidence_ids)
+        if any(not isinstance(value, str) or not value.strip() for value in evidence_ids):
+            raise ValueError("review evidence ids must be non-empty strings")
+        object.__setattr__(self, "evidence_ids", evidence_ids)
         object.__setattr__(self, "findings", findings)
 
     @property
@@ -854,6 +948,50 @@ class RecoveryDecision:
         if self.outcome is RecoveryOutcome.NEEDS_DECISION and not self.decision_request_id:
             raise ValueError("needs-decision recovery requires a durable decision request")
         object.__setattr__(self, "finding_ids", tuple(self.finding_ids))
+
+
+@dataclass(frozen=True, slots=True)
+class ReplanProposal:
+    """Bounded architecture recovery proposal.
+
+    The controller compares the declared boundary flags before it permits the
+    executor to continue.  A proposal is therefore an implementation strategy
+    change, never an implicit change to user intent or public authority.
+    """
+
+    strategy: str
+    intent_unchanged: bool = True
+    contract_unchanged: bool = True
+    security_boundary_unchanged: bool = True
+    cost_unchanged: bool = True
+    destructive_behavior_unchanged: bool = True
+    scope_unchanged: bool = True
+
+    def __post_init__(self) -> None:
+        _required_text(self.strategy, label="revised strategy")
+        flags = (
+            self.intent_unchanged,
+            self.contract_unchanged,
+            self.security_boundary_unchanged,
+            self.cost_unchanged,
+            self.destructive_behavior_unchanged,
+            self.scope_unchanged,
+        )
+        if any(not isinstance(flag, bool) for flag in flags):
+            raise ValueError("replan boundary flags must be boolean")
+
+    @property
+    def boundary_unchanged(self) -> bool:
+        return all(
+            (
+                self.intent_unchanged,
+                self.contract_unchanged,
+                self.security_boundary_unchanged,
+                self.cost_unchanged,
+                self.destructive_behavior_unchanged,
+                self.scope_unchanged,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -964,6 +1102,9 @@ class H4LifecycleResult:
     repair_ids: tuple[str, ...]
     lifecycle: tuple[LifecycleRecord, ...]
     recovery: RecoveryDecision | None = None
+    authority_plan: AuthorityPlan | None = None
+    rendered_evidence: tuple[RenderedEvidence, ...] = ()
+    notification_failure: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, LifecycleStatus):
@@ -975,6 +1116,9 @@ class H4LifecycleResult:
         object.__setattr__(self, "finding_ids", tuple(self.finding_ids))
         object.__setattr__(self, "repair_ids", tuple(self.repair_ids))
         object.__setattr__(self, "lifecycle", tuple(self.lifecycle))
+        object.__setattr__(self, "rendered_evidence", tuple(self.rendered_evidence))
+        if not isinstance(self.notification_failure, bool):
+            raise ValueError("notification_failure must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1198,6 +1342,7 @@ class ExecutionCapsule:
     prompt: str
     output_schema: JsonObject
     permission_mode: NativePermissionMode = NativePermissionMode.INHERIT_NATIVE
+    acceptance_modes: tuple[AcceptanceMode, ...] = (AcceptanceMode.OBJECTIVE,)
 
     def __post_init__(self) -> None:
         if isinstance(self.capsule_version, bool) or not isinstance(self.capsule_version, int):
@@ -1239,6 +1384,12 @@ class ExecutionCapsule:
             raise ValueError("execution output schema must be an object")
         validate_output_schema(canonical_schema)
         object.__setattr__(self, "output_schema", canonical_schema)
+        modes = tuple(
+            mode if isinstance(mode, AcceptanceMode) else AcceptanceMode(mode) for mode in self.acceptance_modes
+        )
+        if not modes or len(modes) != len(set(modes)):
+            raise ValueError("execution capsule acceptance modes must be non-empty and unique")
+        object.__setattr__(self, "acceptance_modes", modes)
 
 
 def canonicalize_execution_capsule(capsule: ExecutionCapsule) -> ExecutionCapsule:
@@ -1267,6 +1418,7 @@ def canonicalize_execution_capsule(capsule: ExecutionCapsule) -> ExecutionCapsul
         capsule.prompt,
         capsule.output_schema,
         capsule.permission_mode,
+        tuple(capsule.acceptance_modes),
     )
 
 
