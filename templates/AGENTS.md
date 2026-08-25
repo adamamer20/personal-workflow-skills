@@ -1,9 +1,11 @@
 ## Personal Workflow Skills
 
 - For a new substantial or architecturally uncertain program, start with a Sol
-  High planning thread and use `$plan-work`. Update the single project-owned
+  Medium architecture thread and use `$plan-work`. Update the single project-owned
   canonical plan under `docs/reviews/` by default, or at the path defined by
-  repository instructions.
+  repository instructions. Write a detailed decision-ready design covering
+  boundaries, contracts, ownership, state transitions, failure and recovery,
+  migration, non-goals, acceptance, and unresolved decisions before execution.
 - If planning-only was requested, stop when the plan is decision-ready. If
   execution was requested, the planning thread selects the first executable
   milestone and uses `$codex-thread-handoff` to create a fresh peer execution
@@ -11,11 +13,17 @@
   child/subagent.
 - Substantial milestones normally use Luna XHigh with `$execute-milestone`;
   bounded or mechanical work may use Luna High directly.
+- After Sol Medium freezes the architecture, Luna XHigh becomes the single
+  mutable implementation owner. Luna resolves mechanical details but returns
+  material boundary, contract, ownership, security/privacy, cost, destructive-
+  behavior, or scope changes to Sol Medium for a bounded plan update.
 - Every milestone declares one or more acceptance modes: `objective`, `visual`,
   and `architecture`. Route by the judgment required for acceptance, not by file
   type. Objective code review uses Luna XHigh. Visual-judgment implementation
   uses Sol Medium and independent visual-quality promotion review uses Sol High.
-  Architecture/security review uses Sol High. When objective and visual modes
+  Architecture-conformance review uses Sol Medium. Sol High is reserved for
+  critical security, irreversible/system-wide decisions, or explicit
+  escalation after Sol Medium cannot close a material blocker. When objective and visual modes
   both apply, require both authorities; passing code tests never implies that a
   rendered result is good. Luna is appropriate for visually adjacent work only
   after the target is frozen and the remaining execution is mechanical and
@@ -35,11 +43,11 @@
   when a fresh peer is created, the handoff must pass the exact pair
   `model=gpt-5.6-luna, thinking=xhigh` for a substantial milestone or
   independent objective/code review, `model=gpt-5.6-luna, thinking=high` for
-  bounded/mechanical work, `model=gpt-5.6-sol, thinking=medium` for visual-
-  judgment or recovery implementation, and `model=gpt-5.6-sol, thinking=high`
-  for visual-quality promotion review, recovery diagnosis,
-  architecture/security review, or planning. The most specific applicable user
-  instruction wins.
+  bounded/mechanical work, `model=gpt-5.6-sol, thinking=medium` for architecture
+  planning/conformance, visual-judgment or ordinary recovery work, and
+  `model=gpt-5.6-sol, thinking=high` only for visual-quality promotion, critical
+  security/system-wide decisions, or explicit escalation. The most specific
+  applicable user instruction wins.
 - A plugin installation alone is not authorization to override native task
   settings. If the native schema does not advertise an authorized pair, or
   native creation rejects that pair, stop without retrying, substituting a

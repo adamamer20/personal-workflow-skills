@@ -1562,6 +1562,20 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   Codex app. The user selected Git-native ignored-artifact semantics and an
   App-native visible-worker mode while retaining SDK-headless execution; H6-C
   is now the next executable prerequisite and owns both fixes.
+- 2026-08-25: the user raised the milestone wall-clock budget from 15 minutes
+  to four hours (`14400` seconds) after the H6-C implementation demonstrated
+  that substantial controller work plus the full repository gate can exceed
+  the former nominal budget. Per-command and validation timeouts remain bounded
+  independently; the longer milestone budget does not authorize polling,
+  duplicate workers, weaker gates, or silent recovery.
+- 2026-08-25: the user selected architecture-first routing for future
+  substantial work. Sol Medium first writes a detailed decision-ready design in
+  the canonical plan; only then does Luna XHigh implement it as the single
+  mutable owner. Luna XHigh remains the objective/code reviewer and Sol Medium
+  checks architecture conformance when declared. Sol High is reserved for
+  critical security, irreversible/system-wide decisions or explicit
+  escalation. One review per authority and at most one bounded repair for
+  concrete blockers replaces repeated broad review waves.
 
 ## Next execution
 

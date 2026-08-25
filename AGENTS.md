@@ -94,12 +94,30 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 
 ## Controller routing and recovery semantics
 
+- For substantial or architecturally uncertain work, Sol Medium owns a distinct
+  architecture phase before implementation. It writes a detailed design into
+  the single canonical plan: boundaries, contracts, mutable ownership, state
+  transitions, failure and recovery behavior, migration, non-goals,
+  acceptance, and unresolved decisions. The design must be decision-ready
+  enough that the implementation capsule does not ask its executor to invent
+  architecture.
+- After that design is accepted, Luna XHigh implements it as the single mutable
+  owner. Luna may resolve local mechanical details but returns any material
+  boundary, public or persisted contract, ownership, security/privacy, cost,
+  destructive-behavior, or scope change to Sol Medium for a bounded plan update.
+- Luna XHigh is the normal objective/code reviewer. Sol Medium is the normal
+  architecture-conformance authority when that mode is declared. Sol High is
+  reserved for critical security, irreversible or system-wide decisions, or an
+  explicit escalation after Sol Medium cannot close a material blocker. Use one
+  review per declared authority by default and at most one bounded repair for
+  concrete promotion blockers; do not run repeated broad review waves.
 - Model milestones with explicit `objective`, `visual`, and `architecture`
   acceptance modes. Derive implementation and independent review authorities
   per mode; never infer them from file extension or repository area.
 - Objective/code review uses Luna. Visual-judgment implementation and rendered-
   quality review use Sol, with a separate objective reviewer when both modes
-  apply. Architecture and recovery diagnosis use Sol High.
+  apply. Architecture design/review and ordinary recovery diagnosis use Sol
+  Medium; the critical exceptions above use Sol High.
 - Non-convergence changes authority or approach; it does not terminate work.
   The recovery authority may finish locally, replace the implementation
   strategy, or update an implementation-level architecture assumption and
