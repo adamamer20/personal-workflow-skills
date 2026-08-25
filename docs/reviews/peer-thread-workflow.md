@@ -970,6 +970,27 @@ CLI help and package install, legacy reachability, `make check`, diff checks,
 and a real medium milestone initiated by a Codex agent through
 `workflow-control`/`codex-flow` rather than native peer tools.
 
+### Completion evidence
+
+Status: H5 is complete and accepted at implementation commit `b57a353`.
+`plan-work` and `execute-milestone` now expose only their bounded cognitive
+contracts, the new `workflow-control` skill owns controller invocation and
+durable status, and `$codex-thread-handoff` remains an explicit separately
+selectable legacy route that cannot be mixed into the controller path. Plugin
+source metadata advances to `0.1.5+codex.20260825000000`; no installed plugin or
+global Codex state was mutated.
+
+Prompt fixtures measured `plan-work` at 3,063 bytes versus 14,193 before,
+`execute-milestone` at 3,043 versus 14,310, and `workflow-control` at 1,716
+under its 4,000-byte cap. The retained real medium pilot at
+`docs/reviews/evidence/h5-workflow-control-medium.json` was initiated through
+`workflow-control`/`codex-flow`, used Luna/medium via the canonical controller,
+made only its authorized repository edit, preserved the protected file, and
+reached `result_durable`/`completed`. Planning independently verified the six
+focused H5 tests, CLI help, isolated wheel build, exact evidence, diff hygiene,
+full `make check` with 292 tests and 11 validated skills, and a clean worktree.
+No finding is known to block H6.
+
 Successor: H6.
 
 ## Milestone H6 — Production pilot and legacy retirement decision
@@ -1392,16 +1413,27 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   routine authorization prompt. This does not authorize plugin installation or
   trust, global/remote mutation, legacy deletion, or bypass of either
   milestone's evidence and promotion gates.
+- 2026-08-25: H5 implementation `b57a353` packages the controller-backed
+  workflow source and reduces model-visible planning/execution instructions to
+  cognitive contracts. Planning verified prompt-input reductions, the 1,716-
+  byte `workflow-control` skill, explicit non-mixable legacy reachability,
+  plugin metadata `0.1.5+codex.20260825000000`, CLI/schema help, an isolated
+  wheel build, six focused tests, full `make check` with 292 tests and 11
+  validated skills, and the sanitized real medium pilot. That pilot entered
+  through `workflow-control`/`codex-flow`, made only its authorized edit, and
+  reached durable completion. H5 is promoted; H6 is the now-executable final
+  integrated promotion and legacy-decision milestone.
 
 ## Next execution
 
-Milestone: H5 — reduce workflow instructions to cognitive roles and make the
-controller path agent-usable through the packaged plugin.
+Milestone: H6 — production pilots, integrated compatibility gate, and typed
+legacy retirement decision.
 
-Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
+Resolved route: `model=gpt-5.6-sol`, `thinking=high`.
 
-Routing authorization: repository `AGENTS.md` substantial-milestone policy and
-the user's explicit instruction to continue through program completion.
+Routing authorization: repository `AGENTS.md` critical architecture/promotion
+policy and the user's explicit instruction to continue through program
+completion.
 
 Planning thread: `01a035b4-1503-7d83-b11a-b36354bd2025` on host `local`.
 
@@ -1417,49 +1449,56 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Starting state: accepted H4 implementation
-`662d006733bfbc5eab205df0fd8100c7386a41c8`, plus the local canonical-plan
+Starting state: accepted H5 implementation
+`b57a3534be96ee24fdeb319022f20a8c4aaffb36`, plus the local canonical-plan
 transition commit produced by this planning task. Reuse this worktree and
 branch; do not create another Git worktree or duplicate its controller state.
 
-Owned surfaces: the `plan-work`, `execute-milestone`, and
-`codex-thread-handoff` workflow skills; one new minimal `workflow-control`
-skill; plugin manifest/version/marketplace metadata required to package that
-path; prompt-input fixtures and budgets; CLI help/docs; controller model-facing
-capsule/result schemas; focused H5 tests and retained evidence. Once dispatched,
-the executor owns implementation, tests, ordinary same-owner repair,
-self-review, safe local commits, and exactly one terminal callback.
+Owned surfaces: H6 pilot runner/configuration, fixed medium and large capsules,
+compatibility and usage comparison contracts, notification-failure/recovery
+scenarios, typed legacy-retirement decision and rationale, focused H6 tests,
+compatibility documentation, and sanitized retained H6 evidence. The executor
+owns pilot execution, bounded required repair, validation, independent
+required-mode review, the final evidence-backed decision, safe local commits,
+and exactly one terminal callback.
 
-Protected surfaces: accepted H3/H4 controller semantics and retained evidence;
-all audit skills unrelated to the three workflow roles; H6 medium/large pilots,
-compatibility verdict, and legacy retirement; the sole Python SDK/bundled-app-
-server transport; native Codex provider/config/discovery/permission
-inheritance; installed plugin caches and global Codex state; primary checkout;
-remotes; downstream pins; and unrelated repository paths. No push, merge,
-rebase, stash, discard, plugin installation/trust, global or remote mutation,
-or legacy deletion.
+Protected surfaces: accepted H3-H5 implementation and retained evidence; plugin
+source packaging except for documentation or a proven H6 reachability repair;
+the sole Python SDK/bundled-app-server transport; native Codex provider/config/
+discovery/permission inheritance; installed plugin caches and trust; global
+Codex config/hooks/state; primary checkout; remotes; downstream pins; legacy
+source and commands; and unrelated repository paths. No push, merge, rebase,
+stash, discard, plugin installation/trust, global/remote mutation, hook
+disablement, or legacy deletion.
 
-Acceptance: `plan-work` owns intent, decomposition, acceptance modes, and one
-decision-ready capsule; `execute-milestone` owns only implementation judgment
-inside that capsule; `workflow-control` invokes `codex-flow` and reports durable
-status. Native task creation, callbacks, recovery routing, attempt loops, and
-ledger/state-machine prose disappear from the default model-visible skills only
-after controller reachability is proven. One explicit legacy command remains
-reachable through H6, with no hidden dual routing. Typed Python is the authoring
-surface and JSON/JSONL only serialization. Measured prompt fixtures contain the
-intended skill once, explicit acceptance and protected surfaces, distinct
-objective/visual/architecture authorities, completion-biased recovery, no
-obsolete peer-transport protocol, and an enforced before/after size budget.
-Plugin/package validation, CLI help/install, legacy reachability, focused/full
-gates, and one real medium milestone initiated by an agent through
-`workflow-control`/`codex-flow` all pass with retained sanitized evidence and a
-clean worktree.
+Acceptance: one medium and one large real repository milestone enter through
+the canonical controller-backed `workflow-control` path with fixed typed
+capsules, explicit routes, real workspaces, structured execution/review/repair,
+observable repository outcomes, and retained sanitized evidence. Required
+`objective` and `architecture` authorities independently accept both pilots;
+add `visual` only when rendered quality is materially part of a pilot. There is
+one bounded recovery plus notification-failure scenario, no duplicate owner,
+and durable terminal facts remain authoritative without callback success.
+Compare available model turns, wall time, prompt/compaction use, recovery,
+ownership, review, and terminal durability to the retained legacy baseline;
+label unavailable cost or quality comparisons instead of inferring them.
+Exercise local SDK compatibility directly and record Desktop visibility, idle
+wake, remote host, native permission-profile behavior, and native review as
+`proven`, `unsupported`, `not_exposed`, or `not_run` with evidence. Produce one
+typed decision among `retain_legacy`, `disable_hooks_keep_manual`, and
+`ready_for_separate_cleanup`, defaulting to retention unless reachability and
+required parity are proven. The decision is evidence only: H6 never disables
+hooks, deletes legacy code, changes installed plugins, or mutates downstream
+pins. Both real pilots, required reviews with zero P0/P1, focused/full gates,
+retained evidence, truthful open external gates, clean worktree, and the typed
+decision are required for program closure.
 
 Escalate only for a genuinely underdetermined product/public-contract/security
 decision, missing user authority, an external prerequisite, or proven
-infeasibility. Concrete inherited defects reached by H5 are classified and
-repaired when they block controller reachability or H6; they do not authorize
-reopening an unbounded earlier-milestone audit or deleting legacy behavior.
+infeasibility. Concrete inherited defects reached by H6 are classified and
+repaired when they block required pilot/parity evidence; unavailable optional
+compatibility surfaces remain truthfully open and do not authorize invented
+proof, global mutation, or legacy deletion.
 
 Completion callback:
 `threadId=01a035b4-1503-7d83-b11a-b36354bd2025`, `hostId=local`. Send exactly
