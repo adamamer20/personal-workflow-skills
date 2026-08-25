@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "skill": "plan-work",
+  "input_text": "Use $plan-work to write one decision-ready typed capsule.",
+  "required": [
+    "objective",
+    "visual",
+    "architecture",
+    "protected surfaces",
+    "ModelFacingCapsule",
+    "code authority",
+    "visual authority",
+    "boundary/security authority",
+    "completion-biased"
+  ],
+  "forbidden": [
+    "create_thread",
+    "callback",
+    "peer-thread transport",
+    "attempt loop",
+    "state machine",
+    "ledger"
+  ]
+}

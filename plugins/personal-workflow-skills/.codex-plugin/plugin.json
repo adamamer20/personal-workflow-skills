@@ -1,15 +1,15 @@
 {
   "name": "personal-workflow-skills",
-  "version": "0.1.4+codex.20260820180447",
-  "description": "Cross-project planning, milestone execution, peer-thread handoff, and code-audit workflows.",
+  "version": "0.1.5+codex.20260825000000",
+  "description": "Cross-project planning, typed milestone execution, controller-backed workflow control, legacy handoff, and code-audit workflows.",
   "author": {
     "name": "Adam Amer"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Personal Workflow Skills",
-    "shortDescription": "Planning, milestone execution, handoff, and audits.",
-    "longDescription": "Personal Workflow Skills packages cross-project planning, milestone execution, event-based peer-thread handoff, and code-audit workflows for consistent use across repositories.",
+    "shortDescription": "Typed planning, controller execution, legacy handoff, and audits.",
+    "longDescription": "Personal Workflow Skills packages cognitive planning and execution roles, a typed codex-flow controller boundary, an explicit legacy peer-thread handoff, and code-audit workflows for consistent use across repositories.",
     "developerName": "Adam Amer",
     "category": "Productivity",
     "capabilities": [],

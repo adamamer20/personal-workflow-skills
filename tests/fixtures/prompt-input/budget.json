@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "budget_bytes": {
+    "plan-work": 6000,
+    "execute-milestone": 6000,
+    "workflow-control": 4000
+  },
+  "before_bytes": {
+    "plan-work": 14193,
+    "execute-milestone": 14310
+  }
+}

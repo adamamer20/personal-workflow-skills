@@ -1,4 +1,4 @@
 interface:
   display_name: "Execute Milestone"
   short_description: "Own one planned milestone end-to-end"
-  default_prompt: "Use $execute-milestone to implement one decision-ready milestone end-to-end in its selected execution workspace, escalating only material decisions to the planning thread."
+  default_prompt: "Use $execute-milestone to implement exactly one typed capsule, verify observable gates, and return one durable result."

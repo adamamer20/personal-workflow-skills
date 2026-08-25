@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "skill": "execute-milestone",
+  "input_text": "Use $execute-milestone to implement one typed capsule and return one durable result.",
+  "required": [
+    "objective",
+    "visual",
+    "architecture",
+    "protected surfaces",
+    "ModelFacingResult",
+    "completion-biased",
+    "workflow-control",
+    "observable",
+    "code authority",
+    "visual authority",
+    "boundary/security authority"
+  ],
+  "forbidden": [
+    "create_thread",
+    "callback",
+    "peer-thread transport",
+    "attempt loop",
+    "state machine",
+    "ledger"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "authorized_changed_paths": [
+    "M medium.txt",
+    "?? .codex-flow/"
+  ],
+  "base_sha": "57e8d6cb978172c442baf471abecd454f1d698c1",
+  "command": [
+    "codex-flow",
+    "control"
+  ],
+  "controller_checkpoint": "result_durable",
+  "controller_exit_code": 0,
+  "controller_status": "completed",
+  "final_file_sha256": "be9e35885d26bab9689ab7a97cac19b9eea7deeb4ba071ab394057229ef9caf7",
+  "model": "gpt-5.6-luna",
+  "observable_edit": true,
+  "protected_file_sha256": "4378f5f8c155589bc148ca4213669f0b620dd18942e10450eae5779ce6c59beb",
+  "protected_unchanged": true,
+  "reasoning_effort": "medium",
+  "result_status": "completed",
+  "route": "workflow-control/codex-flow",
+  "schema": "codex-flow/h5-workflow-control-medium/v1",
+  "status": "passed"
+}

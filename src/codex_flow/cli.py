@@ -9,10 +9,12 @@ from typing import Annotated
 
 import typer
 
-from .controller import Controller, ControllerError, execution_json, load_capsule
+from .contracts import model_facing_capsule_schema, model_facing_result_schema
+from .controller import Controller, ControllerError, ResumeRequired, execution_json, load_capsule
 from .controller_sentinel import run_controller_sentinel, write_controller_evidence
-from .domain import ExecutionRecord, ReasoningEffort
+from .domain import ExecutionRecord, ExecutionStatus, ReasoningEffort
 from .h4_pilot import run_h4_multi_authority_pilot, run_h4_objective_pilot
+from .h5_pilot import run_h5_medium_pilot, write_h5_evidence
 from .sentinel import run_real_sentinel, write_evidence
 
 app = typer.Typer(no_args_is_help=True, help="SDK-first Codex workflow tooling.")
@@ -133,6 +135,70 @@ def cancel_execution(
     _execution_action("cancel", run_id, milestone_id, state_root, as_json)
 
 
+@app.command("control")
+def control_execution(
+    capsule: Annotated[Path, typer.Option(exists=True, dir_okay=False, help="Typed execution capsule JSON.")],
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
+    resume: Annotated[
+        bool,
+        typer.Option("--resume", help="Explicitly resume an existing durable SDK identity."),
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit stable machine-readable JSON.")] = False,
+) -> None:
+    """Plan once, start once, and report the controller's durable status.
+
+    This is the packaged agent entrypoint.  It does not create native peer
+    tasks or retry an uncertain external call.  Use ``--resume`` only after a
+    prior status explicitly reports a durable SDK identity.
+    """
+
+    controller = _controller(state_root)
+    try:
+        parsed, _digest = load_capsule(capsule)
+        try:
+            planned = controller.plan(parsed)
+        except ControllerError as planning_error:
+            # Only a terminal existing plan may be reconciled read-only.  Do
+            # not hide a conflicting capsule, scope violation, or integrity
+            # failure behind a status lookup.
+            existing = controller.status(parsed.run_id, parsed.milestone_id)
+            if existing.status not in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                raise planning_error
+            planned = existing
+        if resume:
+            record = controller.resume(planned.run_id, planned.milestone_id)
+        else:
+            try:
+                record = controller.start(planned.run_id, planned.milestone_id)
+            except ResumeRequired:
+                record = controller.status(planned.run_id, planned.milestone_id)
+        _emit(record, as_json=as_json)
+    except (ControllerError, TypeError, ValueError, RuntimeError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        controller.close()
+
+
+@app.command("schema")
+def model_schema(
+    kind: Annotated[str, typer.Option(help="Schema to print: capsule, result, or all.")] = "all",
+) -> None:
+    """Print the typed model-facing capsule/result JSON schemas."""
+
+    if kind not in {"capsule", "result", "all"}:
+        typer.echo("error: kind must be capsule, result, or all", err=True)
+        raise typer.Exit(code=2)
+    payload: object
+    if kind == "capsule":
+        payload = model_facing_capsule_schema()
+    elif kind == "result":
+        payload = model_facing_result_schema()
+    else:
+        payload = {"capsule": model_facing_capsule_schema(), "result": model_facing_result_schema()}
+    typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False))
+
+
 @app.command("sdk-sentinel")
 def sdk_sentinel(
     real: Annotated[bool, typer.Option(help="Explicitly authorize starting the local SDK runtime.")] = False,
@@ -234,6 +300,32 @@ def h4b_pilot(
     evidence = run_h4_multi_authority_pilot(model=model, effort=effort)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    typer.echo(f"wrote {output}")
+    typer.echo(f"status={evidence['status']}")
+    if evidence["status"] != "passed":
+        raise typer.Exit(code=1)
+
+
+@app.command("h5-pilot")
+def h5_pilot(
+    real: Annotated[bool, typer.Option(help="Explicitly authorize the disposable real SDK pilot.")] = False,
+    model: Annotated[str, typer.Option(help="Explicit model id; no default substitution.")] = ...,
+    effort: Annotated[
+        ReasoningEffort,
+        typer.Option(help="Explicit reasoning effort; no default substitution."),
+    ] = ...,
+    output: Annotated[
+        Path,
+        typer.Option(help="Retained sanitized H5 evidence path."),
+    ] = Path("docs/reviews/evidence/h5-workflow-control-medium.json"),
+) -> None:
+    """Run one bounded medium milestone through workflow-control/codex-flow."""
+
+    if not real and os.environ.get("CODEX_FLOW_REAL_SDK") != "1":
+        typer.echo("refusing real SDK start: pass --real or CODEX_FLOW_REAL_SDK=1")
+        raise typer.Exit(code=2)
+    evidence = run_h5_medium_pilot(model=model, effort=effort)
+    write_h5_evidence(output, evidence)
     typer.echo(f"wrote {output}")
     typer.echo(f"status={evidence['status']}")
     if evidence["status"] != "passed":

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "skill": "workflow-control",
+  "input_text": "Use $workflow-control for one typed capsule and report durable status.",
+  "required": [
+    "codex-flow control",
+    "codex-flow status",
+    "durable status",
+    "JSON/JSONL",
+    "protected-surface",
+    "legacy"
+  ],
+  "forbidden": [
+    "native peer tools"
+  ]
+}

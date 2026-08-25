@@ -29,6 +29,7 @@ EXPECTED_SKILLS = {
     "overabstraction-audit",
     "plan-work",
     "strong-typing-audit",
+    "workflow-control",
 }
 FORBIDDEN_PROJECT_TEXT = (
     "sprintact",
@@ -42,12 +43,14 @@ FORBIDDEN_AUTHORING_PATHS = (
     ".codex/skills/",
 )
 GLOBAL_AGENTS_PATH = ROOT / "templates" / "AGENTS.md"
-BASELINE_PLUGIN_VERSION = "0.1.3+codex.20260820180447"
+BASELINE_PLUGIN_VERSION = "0.1.4+codex.20260820180447"
 WORKFLOW_PATHS = {
     "plan": SKILLS_ROOT / "plan-work" / "SKILL.md",
     "handoff": SKILLS_ROOT / "codex-thread-handoff" / "SKILL.md",
     "execute": SKILLS_ROOT / "execute-milestone" / "SKILL.md",
+    "control": SKILLS_ROOT / "workflow-control" / "SKILL.md",
 }
+PROMPT_FIXTURES_ROOT = ROOT / "tests" / "fixtures" / "prompt-input"
 STALE_ROUTING_CONTRACTS = (
     "Pass a model or reasoning override only when the user has explicitly requested it",
     "otherwise keep the recommendation in the capsule and let the new task use configured defaults",
@@ -172,6 +175,8 @@ def validate_marketplace() -> None:
     expected_path = f"./plugins/{PLUGIN_NAME}"
     if entry.get("name") != PLUGIN_NAME:
         fail("marketplace entry must match the plugin name")
+    if entry.get("version") != "0.1.5+codex.20260825000000":
+        fail("marketplace entry version must match the packaged plugin")
     if entry.get("source") != {"source": "local", "path": expected_path}:
         fail(f"marketplace source must be {expected_path}")
     if entry.get("policy") != {
@@ -240,24 +245,16 @@ def validate_plan_work_contract() -> None:
         "decision-ready",
         "exactly one active plan",
         "independently closable milestones",
-        "one milestone, one fresh peer execution thread",
-        "If implementation was requested",
-        "Completion callback: threadId=<planning thread id>",
-        "exact callback `threadId`",
-        "Never derive a callback host",
-        "Keep the planning thread unarchived and routable",
-        "Do not pass inherited chat history, poll, wait for progress",
-        "never silently fall back to a subagent",
-        "Before replacing any outstanding milestone",
-        "Reconcile an uncertain START without creating anything",
-        "resume the same thread after an `interrupted` turn",
-        "Never create a replacement merely because a server/client error",
-        "RECOVER_START or RECOVER_THREAD",
-        "Execution workspace:",
-        "current_checkout | existing_worktree | managed_worktree",
-        "A fresh thread or model context does not imply a fresh Git worktree",
-        "<parent>/<repo>.worktrees/",
-        "If native task creation cannot address that exact selected workspace",
+        "acceptance modes",
+        "objective",
+        "visual",
+        "architecture",
+        "protected surfaces",
+        "ModelFacingCapsule",
+        "code authority",
+        "visual authority",
+        "boundary/security authority",
+        "completion-biased",
     )
     require_contract(plan_path, required_text)
 
@@ -265,35 +262,127 @@ def validate_plan_work_contract() -> None:
 def validate_execute_milestone_contract() -> None:
     execute_path = SKILLS_ROOT / "execute-milestone" / "SKILL.md"
     required_text = (
-        "exactly one decision-ready milestone",
-        "planning thread owns the program plan",
-        "Escalate genuine user decisions only",
-        "Do not poll, wait for, or repeatedly list",
-        "Hard context rollover",
+        "exactly one decision-ready capsule",
         "self-review",
-        "Subjective-quality promotion",
-        "production reachability",
-        "prove parity before deletion",
-        "stage only exact task-owned paths",
-        "Never push, rebase, merge, stash, discard",
-        "planning callback `threadId`",
-        "Never derive a host",
-        "Every terminal exit must attempt exactly one bounded callback",
-        "Status: NEEDS_DECISION",
-        "Status: EXTERNAL_BLOCKED",
-        "Status: FAILED",
-        "`CONTINUE_WITH_REPLAN` is never a terminal callback",
-        "callback_status: sent|unsent",
-        "complete unsent packet",
-        "Recovery after interruption",
-        "do not restart the milestone blindly",
-        "inspect the existing worktree/diff, durable artifacts",
-        "A `REPUBLISH_CALLBACK` message is narrower",
-        "The execution workspace is also capsule-owned",
-        "does not imply a fresh worktree",
-        "reusing the exact same execution workspace",
+        "objective",
+        "visual",
+        "architecture",
+        "protected surfaces",
+        "workflow-control",
+        "codex-flow",
+        "completion-biased",
+        "ModelFacingResult",
+        "observable",
     )
     require_contract(execute_path, required_text)
+
+
+def validate_workflow_control_contract() -> None:
+    control_path = WORKFLOW_PATHS["control"]
+    required_text = (
+        "codex-flow control",
+        "codex-flow status",
+        "durable status",
+        "ModelFacingCapsule",
+        "JSON/JSONL",
+        "--resume",
+        "legacy",
+        "must not be silently mixed",
+    )
+    require_contract(control_path, required_text)
+
+
+def validate_prompt_fixtures() -> None:
+    budget_path = PROMPT_FIXTURES_ROOT / "budget.json"
+    budget = json.loads(budget_path.read_text(encoding="utf-8"))
+    if budget.get("schema_version") != 1:
+        fail("prompt budget schema must be version 1")
+    limits = budget.get("budget_bytes")
+    before = budget.get("before_bytes")
+    if not isinstance(limits, dict) or not isinstance(before, dict):
+        fail("prompt budget must contain budget_bytes and before_bytes")
+    for skill_name in ("plan-work", "execute-milestone", "workflow-control"):
+        fixture_path = PROMPT_FIXTURES_ROOT / f"{skill_name}.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        if fixture.get("schema_version") != 1 or fixture.get("skill") != skill_name:
+            fail(f"{fixture_path}: invalid prompt fixture identity")
+        input_text = fixture.get("input_text")
+        if not isinstance(input_text, str) or input_text.count(f"${skill_name}") != 1:
+            fail(f"{fixture_path}: intended skill must occur exactly once")
+        ui_prompt = (SKILLS_ROOT / skill_name / "agents" / "openai.yaml").read_text(encoding="utf-8")
+        if ui_prompt.count(f"${skill_name}") != 1:
+            fail(f"{skill_name}: default prompt must invoke the intended skill exactly once")
+        skill_text = (SKILLS_ROOT / skill_name / "SKILL.md").read_text(encoding="utf-8")
+        normalized = " ".join(skill_text.split())
+        for token in fixture.get("required", ()):
+            if not isinstance(token, str) or token not in normalized:
+                fail(f"{fixture_path}: missing required model-visible contract: {token}")
+        for token in fixture.get("forbidden", ()):
+            if not isinstance(token, str) or token in normalized:
+                fail(f"{fixture_path}: obsolete model-visible contract remains: {token}")
+        current_bytes = len(skill_text.encode("utf-8"))
+        limit = limits.get(skill_name)
+        if not isinstance(limit, int) or current_bytes > limit:
+            fail(f"{fixture_path}: prompt exceeds measured budget")
+        if skill_name in before:
+            old_bytes = before[skill_name]
+            if not isinstance(old_bytes, int) or current_bytes >= old_bytes:
+                fail(f"{fixture_path}: before/after prompt reduction is not proven")
+
+
+def validate_model_contracts() -> None:
+    contracts_path = ROOT / "src" / "codex_flow" / "contracts.py"
+    require_contract(
+        contracts_path,
+        (
+            "class ModelFacingCapsule",
+            "class ModelFacingResult",
+            "class ModelAuthority",
+            "class ModelValidation",
+            "model_facing_capsule_schema",
+            "model_facing_result_schema",
+            "completion_biased",
+        ),
+    )
+
+
+def validate_h5_evidence() -> None:
+    evidence_path = ROOT / "docs" / "reviews" / "evidence" / "h5-workflow-control-medium.json"
+    if not evidence_path.is_file():
+        fail("H5 real workflow-control evidence is missing")
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    required = {
+        "schema",
+        "status",
+        "route",
+        "command",
+        "model",
+        "reasoning_effort",
+        "controller_status",
+        "controller_checkpoint",
+        "result_status",
+        "observable_edit",
+        "protected_unchanged",
+        "authorized_changed_paths",
+    }
+    if set(evidence) != required | {"base_sha", "controller_exit_code", "final_file_sha256", "protected_file_sha256"}:
+        fail("H5 evidence shape is not the sanitized controller contract")
+    if evidence.get("schema") != "codex-flow/h5-workflow-control-medium/v1":
+        fail("H5 evidence schema is unsupported")
+    if evidence.get("status") != "passed" or evidence.get("route") != "workflow-control/codex-flow":
+        fail("H5 evidence does not prove controller reachability")
+    if evidence.get("controller_status") != "completed" or evidence.get("controller_checkpoint") != "result_durable":
+        fail("H5 evidence does not prove a durable terminal result")
+    if evidence.get("result_status") != "completed" or evidence.get("observable_edit") is not True:
+        fail("H5 evidence does not prove the observable medium outcome")
+    if evidence.get("protected_unchanged") is not True:
+        fail("H5 evidence does not prove protected-surface integrity")
+    command = evidence.get("command")
+    if command != ["codex-flow", "control"]:
+        fail("H5 evidence must name the controller entrypoint")
+    changed_paths = evidence.get("authorized_changed_paths")
+    if changed_paths != ["M medium.txt", "?? .codex-flow/"]:
+        fail("H5 evidence changed-path scope is not the bounded medium outcome")
 
 
 def validate_thread_handoff_contract() -> None:
@@ -350,97 +439,15 @@ def validate_thread_handoff_contract() -> None:
 
 def validate_native_routing_contract() -> None:
     workflow_text = {name: " ".join(path.read_text(encoding="utf-8").split()) for name, path in WORKFLOW_PATHS.items()}
-    combined = " ".join(workflow_text.values())
+    combined = " ".join(workflow_text[name] for name in ("plan", "execute"))
     for stale in STALE_ROUTING_CONTRACTS:
         if stale in combined:
             fail(f"workflow still contains stale routing contract: {stale}")
-
-    plan_required = (
-        "Resolve execution routing",
-        "concrete native route",
-        "applicable user-owned `AGENTS.md` routing policy",
-        "installing this skill is not authorization",
-        "`routing_status: not_authorized`",
-        "`gpt-5.6-luna`",
-        "`gpt-5.6-sol`",
-        "Visual-judgment implementation",
-        "`medium`",
-        "explicit acceptance modes",
-        "`objective`",
-        "`visual`",
-        "`architecture`",
-        "The presence of frontend, CSS, slide, or document files alone does not determine the route",
-        "Independent objective/code review",
-        "Independent visual-quality review",
-        "diagnostic continuation packet",
-        "`CONTINUE_WITH_REPLAN` is an internal workflow event",
-        "return `NEEDS_DECISION` only when user intent is genuinely underdetermined",
-        "return `EXTERNAL_BLOCKED` only for a missing permission",
-        "return `FAILED` only when evidence shows the goal is not reasonably achievable",
-        "A routing handoff changes authority and approach; it does not",
-        "Never escalate merely because implementation is difficult",
-        "schema advertises both fields",
-        "substitute another model",
-        "resolved exact native pair",
-        "passing the same exact pair as native `model` and `thinking` arguments",
-        "confirmed dispatch distinct from confirmed model enforcement",
-        "Never retry a rejected or unsupported route",
-        "one non-waiting peer-list reconciliation",
-        "rejected-looking response is not proof that no task exists",
-        "every terminal outcome",
-        "Keep the planning thread unarchived and routable",
-        "Select the execution workspace before dispatch",
-        "Allocate a new worktree only for concurrent mutable ownership",
-    )
-    require_contract(WORKFLOW_PATHS["plan"], plan_required)
-
-    handoff_required = (
-        "Native routing authorization",
-        "applicable user-owned `AGENTS.md` policy",
-        "skill installation by itself is not authorization",
-        "advertises both `model` and `thinking` plus the authorized values",
-        "pass both exact fields as top-level native arguments",
-        "`routing_status: not_authorized`",
-        "do not create a peer with a default or alternate route",
-        "`routing_status: enforced`",
-        "confirms dispatch",
-        "native response or tool contract confirms the exact pair",
-        "unknown project id is not sufficient proof that no task exists",
-        "Never retry `create_thread`",
-        "exact callback host id",
-        "Use `hostId` only when it came from",
-        "callback_status: unsent",
-        "START does not choose workspace topology",
-        "selected project's real path must equal the capsule's exact execution path",
-        "environment.type=worktree",
-    )
+    # The native route remains intentionally documented only by the explicit
+    # legacy handoff skill.  The default planning/execution prompts contain no
+    # peer transport, callback, routing, or state-machine policy.
+    handoff_required = ("Explicit legacy route", "$workflow-control", "never invoke both routes")
     require_contract(WORKFLOW_PATHS["handoff"], handoff_required)
-
-    execute_required = (
-        "concrete native pair",
-        "gpt-5.6-luna",
-        "gpt-5.6-sol",
-        "thinking=medium",
-        "Every milestone declares one or more acceptance modes",
-        "An objective gate uses Luna for code correctness",
-        "A visual gate uses Sol Medium",
-        "separate Sol High qualitative reviewer",
-        "Non-convergence changes the problem-solving authority or approach",
-        "`CONTINUE_WITH_REPLAN` is nonterminal",
-        "return `NEEDS_DECISION` only when user intent is genuinely underdetermined",
-        "return `EXTERNAL_BLOCKED` only for a missing credential",
-        "return `FAILED` only when evidence shows the goal is not reasonably achievable",
-        "Never escalate merely because implementation is difficult",
-        "Skill installation alone does not authorize model overrides",
-        "omits `model` and `thinking`",
-        "dispatch fails closed",
-        "no default-model, alternate-model, or retry fallback",
-        "task-creation contract, not capsule-only recommendation text",
-        "native confirmation of the exact pair",
-        "The execution workspace is also capsule-owned",
-        "fresh thread, model change, review, repair, recovery, or context rollover does not imply a fresh worktree",
-    )
-    require_contract(WORKFLOW_PATHS["execute"], execute_required)
 
     README_PATH = ROOT / "README.md"
     readme_text = " ".join(README_PATH.read_text(encoding="utf-8").split())
@@ -479,6 +486,11 @@ def validate_native_routing_contract() -> None:
         "A fresh execution thread is a model-context boundary, not a Git-workspace boundary",
         "<parent>/<repo>.worktrees/<program-slug>",
         "The handoff never defaults every Git task to a new worktree",
+        "`$workflow-control` is the packaged agent entrypoint",
+        "ModelFacingCapsule",
+        "ModelFacingResult",
+        "codex-flow control",
+        "explicit legacy command `$codex-thread-handoff`",
     )
     require_contract(README_PATH, readme_required)
 
@@ -555,8 +567,12 @@ def main() -> int:
     validate_independence()
     validate_plan_work_contract()
     validate_execute_milestone_contract()
+    validate_workflow_control_contract()
     validate_thread_handoff_contract()
     validate_native_routing_contract()
+    validate_prompt_fixtures()
+    validate_model_contracts()
+    validate_h5_evidence()
     validate_global_agents_template()
     print(f"Validated {len(EXPECTED_SKILLS)} cross-project skills.")
     return 0

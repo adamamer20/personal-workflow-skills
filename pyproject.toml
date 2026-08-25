@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codex-flow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Typed, SDK-first workflow transport boundary for Codex"
 readme = "README.md"
 requires-python = ">=3.10"

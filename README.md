@@ -2,8 +2,9 @@
 
 Versioned, cross-project Codex workflows owned by Adam Amer. This repository is
 both the source of the plugin and an installable Codex marketplace. It packages
-planning, milestone execution, event-based peer-thread handoff, and bounded
-code-audit instructions without embedding project-specific decisions.
+typed planning, controller-backed milestone execution, an explicit legacy
+peer-thread route, and bounded code-audit instructions without embedding
+project-specific decisions.
 
 ## Python SDK controller
 
@@ -16,6 +17,9 @@ codex-flow start --run-id RUN --milestone-id MILESTONE --state-root /absolute/ch
 codex-flow resume --run-id RUN --milestone-id MILESTONE --state-root /absolute/checkout --json
 codex-flow status --run-id RUN --milestone-id MILESTONE --state-root /absolute/checkout --json
 codex-flow cancel --run-id RUN --milestone-id MILESTONE --state-root /absolute/checkout --json
+codex-flow control --capsule /absolute/path/to/capsule.json --state-root /absolute/checkout --json
+codex-flow schema --kind all
+CODEX_FLOW_REAL_SDK=1 codex-flow h5-pilot --real --model gpt-5.6-luna --effort medium
 ```
 
 The capsule selects `current_checkout`, `existing_worktree`, or
@@ -29,6 +33,18 @@ On resume, a newly stricter native policy is durably rebound before the SDK
 call, while a newly broader policy cannot broaden the execution. The controller
 uses the published `openai-codex` Python SDK as its only Codex transport and
 never falls back to the CLI or direct app-server RPC.
+
+`$workflow-control` is the packaged agent entrypoint: it invokes
+`codex-flow control` for exactly one typed capsule and reports the durable
+checkpoint, result, validation facts, and protected-surface evidence. Planning
+authors use `codex_flow.contracts.ModelFacingCapsule`; executors return one
+`ModelFacingResult`. JSON/JSONL is only controller serialization. The default
+planning and execution skills describe cognitive roles and acceptance modes;
+runtime lifecycle policy lives in the controller and `workflow-control` skill.
+
+The explicit legacy command `$codex-thread-handoff` remains reachable through
+H6 for compatibility evidence. It is selected deliberately and is never mixed
+with the controller path for one milestone.
 
 Run the opt-in real crash/resume sentinel only in a disposable repository:
 
@@ -44,27 +60,25 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow controller-sentinel \
 new substantial program
         ↓
 $plan-work
-Sol High planning thread
         ↓
-decision-ready canonical plan
-        ↓
-fresh peer execution thread
+one typed decision-ready capsule
         ↓
 $execute-milestone
-authorized native route selected by task class
         ↓
-completion or material escalation
+$workflow-control
         ↓
-$codex-thread-handoff
+durable controller result
         ↓
 planning thread
+
+explicit H5/H6 legacy comparison only → $codex-thread-handoff
 ```
 
-Peer execution threads are not subagents. The planning thread does not wait for
-or poll them. It owns the canonical plan, architecture decisions, milestone
-ordering, and program completion. Each fresh execution thread owns exactly one
-milestone under normal conditions and sends one material escalation or terminal
-outcome when needed.
+The planner owns intent, decomposition, acceptance, and protected surfaces. The
+executor owns implementation inside one capsule and writes one typed result.
+The controller owns runtime lifecycle, workspace identity, durable evidence,
+and status. The legacy handoff remains available for explicit compatibility
+work only; it is never silently combined with the controller path.
 
 A fresh execution thread is a model-context boundary, not a Git-workspace
 boundary. The plan selects one execution workspace for the program or mutable
@@ -91,6 +105,7 @@ Workflow:
 
 - `plan-work`
 - `execute-milestone`
+- `workflow-control`
 - `codex-thread-handoff`
 
 Audits:

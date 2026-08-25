@@ -6,6 +6,7 @@
   "plugins": [
     {
       "name": "personal-workflow-skills",
+      "version": "0.1.5+codex.20260825000000",
       "source": {
         "source": "local",
         "path": "./plugins/personal-workflow-skills"
