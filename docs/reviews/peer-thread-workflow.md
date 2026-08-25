@@ -1386,6 +1386,12 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   `CONTINUE_WITH_REPLAN`, same-workspace repair, and fresh all-authority
   re-review. H4 is complete; H5 is the next program milestone but was not
   authorized for dispatch by the H4-only continuation request.
+- 2026-08-25: the user explicitly authorized continuing through the end of the
+  program. H5 and, after its verified terminal callback, H6 may now dispatch in
+  fresh sequential execution contexts from this planning owner without another
+  routine authorization prompt. This does not authorize plugin installation or
+  trust, global/remote mutation, legacy deletion, or bypass of either
+  milestone's evidence and promotion gates.
 
 ## Next execution
 
@@ -1394,9 +1400,8 @@ controller path agent-usable through the packaged plugin.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
-Routing authorization: repository `AGENTS.md` substantial-milestone policy.
-Dispatch is pending explicit user authorization because the completed request
-was scoped to H4; do not create an H5 peer from this plan update alone.
+Routing authorization: repository `AGENTS.md` substantial-milestone policy and
+the user's explicit instruction to continue through program completion.
 
 Planning thread: `01a035b4-1503-7d83-b11a-b36354bd2025` on host `local`.
 
