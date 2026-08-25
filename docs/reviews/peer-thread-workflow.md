@@ -747,8 +747,12 @@ Successor: H4.
 ### Completion evidence
 
 Status: H3 implementation, deterministic validation, and the corrected real
-promotion sentinel are complete; H4 remains blocked pending independent
-objective and architecture promotion review of the exact candidate.
+sentinel are complete. On 2026-08-25 the user accepted exact candidate
+`544c1c8` as pilot-ready and explicitly unblocked H4 rather than continuing an
+open-ended adversarial review/repair loop. This is a successor-safety decision,
+not a claim that H3 is finally production-promoted or defect-free: concrete
+findings reached by H4 remain classified by severity and promotion impact, and
+the integrated H6 system gate retains cross-cutting hardening authority.
 The user superseded the mandatory Bubblewrap containment contract: H3 now
 inherits the same native Codex permission authority and automatically follows
 later native restrictions. The bounded Git-authority snapshot remains required
@@ -789,6 +793,14 @@ original executor when useful; stable finding identities and causal classes
 drive diagnosis rather than attempt counts; limits and budgets live in
 `workflow.toml`.
 
+H4 is delivered in two independently useful slices. H4-A is the early walking
+skeleton: one objective milestone is executed, independently reviewed,
+rejected, repaired by the same durable owner, and accepted through the
+production SDK controller without callback authority. H4-B then adds distinct
+visual and architecture authorities, bounded planner decisions, and the
+complete H4 promotion scenario. H4-A must change observable repository behavior
+before H4-B deepens the policy surface.
+
 Acceptance: completed, continue-with-replan, needs-decision, repair-required,
 external-blocked, context-rollover, and transport-failure scenarios have typed
 deterministic integration tests. Replanning continues automatically when intent,
@@ -796,6 +808,9 @@ public/persisted contracts, security/privacy boundary, material cost,
 destructive behavior, and scope are unchanged. Review is read-only; mixed
 acceptance modes require every distinct authority; new reviewer scope cannot
 masquerade as a surviving finding; thread and compaction limits fail closed.
+Every finding records severity separately from `promotion_blocking`, a concrete
+reason, and `defer_to` when non-blocking. A gate blocks only dependent successor
+work; isolated non-propagating findings remain visible for the system gate.
 
 Promotion gate: one end-to-end disposable milestone exercises objective and
 visual review, review rejection, automatic architecture replan, repair, and
@@ -819,8 +834,9 @@ Implementation boundary:
   reviewer over fixed rendered evidence; architecture review and recovery
   diagnosis use Sol High. Multiple modes require all distinct authorities.
 - Typed reviewer output carries stable finding id, causal class, severity,
-  evidence, acceptance criterion, and whether it survives the exact prior
-  repair. New scope cannot impersonate a surviving finding.
+  promotion impact and reason, evidence, acceptance criterion, optional
+  `defer_to`, and whether it survives the exact prior repair. New scope cannot
+  impersonate a surviving finding.
 - A valid rejection resumes the executor/lease when useful. Non-convergence
   creates a diagnostic continuation. Recovery returns finish-local,
   change-strategy, `CONTINUE_WITH_REPLAN`, `NEEDS_DECISION`,
@@ -831,6 +847,26 @@ Implementation boundary:
   persisted for the user. Notification remains non-authoritative.
 - Limits fail closed before another external turn, preserve the last durable
   checkpoint, and never silently change model, effort, sandbox, or acceptance.
+
+H4-A implementation boundary and gate:
+
+- add canonical role/limit configuration plus typed objective-review finding,
+  repair, recovery, decision, budget, and lifecycle contracts to the existing
+  controller/ledger/artifact path; do not duplicate H3 transport, workspace, or
+  state authority;
+- implement objective execution -> read-only review -> rejection -> same-owner
+  repair -> fresh read-only re-review -> acceptance, with stable finding
+  identity, explicit promotion impact, causal event history, and durable result
+  before projections;
+- exercise `CONTINUE_WITH_REPLAN`, `NEEDS_DECISION`, `EXTERNAL_BLOCKED`,
+  `FAILED`, context rollover, transport failure, stale review, and exhausted
+  limits hermetically, keeping their semantics mutually distinct;
+- run one bounded real disposable objective pilot through the Python SDK and
+  `codex-lb`, producing an observable repository edit, one deliberate review
+  rejection, one repair, final acceptance, and retained sanitized evidence;
+- close H4-A with focused/full gates, self-review, and zero findings that are
+  promotion-blocking for H4-B. Do not require another broad H3 review or label
+  isolated hardening as blocking merely because it is severe.
 
 Validation includes hermetic scenario tests for every role/mode/result,
 surviving-versus-new findings, recovery replans, budget exhaustion, stale
@@ -1265,11 +1301,30 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   permission, and resume transport route remain unchanged. H3 remains blocked
   pending fresh independent objective and architecture promotion review; H4
   remains blocked.
+- 2026-08-25: after the subsequent independent review was interrupted by the
+  platform security gate, the user explicitly ended the open-ended H3
+  review/repair loop and accepted exact branch head `544c1c8` as pilot-ready so
+  H4 can begin. This decision does not relabel H3 as defect-free or finally
+  production-promoted. H4 must classify any concrete inherited defect it
+  reaches by both severity and successor promotion impact, while H6 retains the
+  final integrated hardening gate. H4-A is selected as the next executable
+  slice; another broad H3 review is not one of its prerequisites or promotion
+  gates.
 
 ## Next execution
 
-Milestone: H3 — controller-owned execution workspace, SDK execution, durable
-resume, validation, and agent-usable CLI vertical slice.
+Milestone: H4-A — objective review, rejection, same-owner repair, and acceptance
+walking skeleton.
+
+Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
+
+Routing authorization: repository `AGENTS.md` substantial-milestone policy and
+the user's explicit instruction to continue with H4.
+
+Planning thread: `01a035b4-1503-7d83-b11a-b36354bd2025` on host `local`.
+
+Plan path:
+`/home/adam/personal-workflow-skills.worktrees/python-sdk-controller/docs/reviews/peer-thread-workflow.md`.
 
 Execution workspace:
 
@@ -1280,18 +1335,48 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Dispatch status: H3 implementation commit `ca151fe` closes H3-ARCH-006C,
-H3-ARCH-007A, and H3-ARCH-007B on repair parent `3efa338`; this plan and the
-compatibility contract are updated in documentation commit `a63542a`.
-Deterministic gates and the retained authorized real sentinel are green in the
-existing semantic workspace. The repaired H3 implementation candidate is ready
-for fresh independent promotion review.
+Starting state: exact pilot-ready H3 head
+`544c1c8a1dd634b890757c402c5c14443a34b3dd`, plus the local canonical-plan
+transition commit produced by this planning task. Reuse this worktree and
+branch; do not create another Git worktree or duplicate its controller state.
 
-Next action: independently review exact repaired implementation HEAD `ca151fe`
-for objective and architecture promotion with zero open P0/P1. The retained real evidence
-proves the actual Python SDK route through `codex-lb`, sanitized native
-permission/profile parity, the allowed workspace edit and durable resume,
-unchanged Git authority, and unchanged global Codex config bytes. External-
-write denial is not an H3 gate. H4 remains blocked until that review promotes
-H3. The current branch may include documentation-only commits after the
-implementation HEAD; they do not change the H3 implementation candidate.
+Owned surfaces: `workflow.toml`; H4 configuration and typed domain/result
+contracts; the existing controller, SQLite ledger/schema, artifact projection,
+and SDK-adapter extensions required by H4-A; focused H4 tests; compatibility
+documentation; one sanitized retained H4-A pilot evidence artifact. The
+executor owns implementation, tests, ordinary same-owner repair, self-review,
+safe local commits, and exactly one terminal callback.
+
+Protected surfaces: H5 plugin packaging and workflow-skill simplification;
+H4-B visual and architecture authorities; H6 medium/large pilots and legacy
+retirement; the sole Python SDK/bundled-app-server transport; native Codex
+provider/config/discovery/permission inheritance; existing retained H3
+sentinel evidence; primary checkout; remotes; global Codex state; plugins,
+hooks, manifests, templates, dependency files, and unrelated repository paths.
+No push, merge, rebase, stash, discard, plugin installation, remote mutation,
+or broad H3 review.
+
+Acceptance: one objective milestone follows the canonical production path from
+execution through independent read-only review, one deliberate
+promotion-blocking rejection, same-durable-owner repair, fresh read-only
+re-review, and final acceptance. Findings have stable identity, causal class,
+severity, separate `promotion_blocking` plus reason, evidence, criterion, and
+optional `defer_to`. Review/repair/recovery/decision/budget facts and causal
+events are durable and project only after authoritative results. Hermetic tests
+keep `CONTINUE_WITH_REPLAN`, `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, `FAILED`,
+context rollover, transport failure, stale review, and exhausted limits
+mutually distinct. One bounded disposable real Python-SDK/`codex-lb` pilot
+produces an observable repository edit and retained sanitized evidence. Focused
+and full repository gates pass, the worktree is clean, and self-review has zero
+findings that block H4-B.
+
+Escalate only for a genuinely underdetermined product/public-contract/security
+decision, missing user authority, an external prerequisite, or proven
+infeasibility. Concrete H3 defects reached by H4-A are classified and repaired
+when they block this slice; they do not authorize reopening an unbounded H3
+audit.
+
+Completion callback:
+`threadId=01a035b4-1503-7d83-b11a-b36354bd2025`, `hostId=local`. Send exactly
+one compact `COMPLETION`, or accurately labelled `BLOCKED`/`FAILED`, after final
+verification; do not send routine progress updates.
