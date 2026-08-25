@@ -102,3 +102,7 @@ def test_explicit_legacy_route_remains_reachable_without_mixing() -> None:
     assert "$codex-thread-handoff" in handoff
     assert "never invoke both routes" in handoff
     assert "codex-flow control" in control
+    assert "--hosting app-native" in control
+    assert "codex-flow app-bind" in control
+    assert "codex-flow app-result" in control
+    assert "attach to a Desktop socket" in control

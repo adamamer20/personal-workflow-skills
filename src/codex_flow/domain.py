@@ -302,8 +302,14 @@ class ThreadIdentity:
     id: str
 
     def __post_init__(self) -> None:
-        if not self.id or any(character.isspace() for character in self.id):
-            raise ValueError("thread identity must be a non-empty, whitespace-free string")
+        if (
+            not isinstance(self.id, str)
+            or not self.id
+            or "\x00" in self.id
+            or any(character.isspace() for character in self.id)
+            or len(self.id.encode("utf-8")) > 512
+        ):
+            raise ValueError("thread identity must be a bounded non-empty, whitespace-free string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1255,11 +1261,26 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
         unknown = set(node) - _SCHEMA_KEYS
         if unknown:
             raise ValueError(f"output schema contains unsupported keys: {sorted(map(str, unknown))!r}")
-        schema_type = node.get("type")
-        if not isinstance(schema_type, str) or schema_type not in _SCHEMA_TYPES:
+        raw_type = node.get("type")
+        if isinstance(raw_type, str):
+            schema_types = (raw_type,)
+        elif isinstance(raw_type, list | tuple) and all(isinstance(item, str) for item in raw_type):
+            schema_types = tuple(raw_type)
+        else:
+            schema_types = ()
+        if (
+            not schema_types
+            or len(schema_types) != len(set(schema_types))
+            or any(item not in _SCHEMA_TYPES for item in schema_types)
+        ):
             raise ValueError("output schema type must be one of the supported JSON types")
-        if root and schema_type != "object":
+        if root and schema_types != ("object",):
             raise ValueError("execution output schema must require an object")
+        if len(schema_types) > 1:
+            if set(node) != {"type"}:
+                raise ValueError("union schemas may contain only type")
+            return
+        schema_type = schema_types[0]
 
         if schema_type == "object":
             if set(node) != {"type", "properties", "required", "additionalProperties"}:

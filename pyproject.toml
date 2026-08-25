@@ -19,6 +19,9 @@ codex-flow = "codex_flow.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/codex_flow"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"workflow.toml" = "codex_flow/workflow.toml"
+
 [tool.uv]
 package = true
 

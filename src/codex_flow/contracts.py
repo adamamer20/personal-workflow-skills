@@ -368,7 +368,7 @@ def model_facing_result_schema() -> JsonObject:
                 },
             },
             "durable_status": {"type": "string"},
-            "next_action": {"type": "string"},
+            "next_action": {"type": ["string", "null"]},
         },
         "required": [
             "schema_version",

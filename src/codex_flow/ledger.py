@@ -20,6 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from .app_native import (
+    AppNativeDispatchRecord,
+    AppNativeState,
+    AppNativeTaskAction,
+    HostIdentity,
+    HostReceipt,
+    claim_token_sha256,
+)
+from .contracts import ModelFacingResult, ModelResultStatus
 from .domain import (
     TERMINAL_STATES,
     Budget,
@@ -72,7 +81,7 @@ from .domain import (
     strict_json_loads,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(8)
+CURRENT_SCHEMA_VERSION = SchemaVersion(9)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -82,6 +91,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(5),
         SchemaVersion(6),
         SchemaVersion(7),
+        SchemaVersion(8),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -355,6 +365,51 @@ _EXECUTION_INTEGRITY_DDL = """CREATE TABLE execution_integrity (
 )"""
 _V8_TABLE_DDL = {**_V3_TABLE_DDL, "execution_integrity": _EXECUTION_INTEGRITY_DDL}
 
+_APP_NATIVE_DISPATCHES_DDL = """CREATE TABLE app_native_dispatches (
+    dispatch_id TEXT PRIMARY KEY NOT NULL,
+    run_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('prepared', 'bound', 'completed', 'failed', 'cancelled')),
+    action_json TEXT NOT NULL CHECK(length(action_json) > 0),
+    action_sha256 TEXT NOT NULL CHECK(length(action_sha256) = 64),
+    claim_token_sha256 TEXT NOT NULL CHECK(length(claim_token_sha256) = 64),
+    host_id TEXT CHECK(host_id IS NULL OR length(host_id) BETWEEN 1 AND 512),
+    thread_id TEXT CHECK(thread_id IS NULL OR length(thread_id) BETWEEN 1 AND 512),
+    result_json TEXT,
+    result_sha256 TEXT CHECK(result_sha256 IS NULL OR length(result_sha256) = 64),
+    workspace_baseline_head_sha TEXT NOT NULL CHECK(length(workspace_baseline_head_sha) = 40),
+    workspace_baseline_json TEXT NOT NULL,
+    workspace_baseline_sha256 TEXT NOT NULL CHECK(length(workspace_baseline_sha256) = 64),
+    git_authority_before_sha256 TEXT NOT NULL CHECK(length(git_authority_before_sha256) = 64),
+    git_authority_after_sha256 TEXT CHECK(git_authority_after_sha256 IS NULL OR length(git_authority_after_sha256) = 64),
+    controller_state_sha256 TEXT NOT NULL CHECK(length(controller_state_sha256) = 64),
+    workspace_terminal_head_sha TEXT CHECK(workspace_terminal_head_sha IS NULL OR length(workspace_terminal_head_sha) = 40),
+    workspace_terminal_json TEXT,
+    workspace_terminal_sha256 TEXT CHECK(workspace_terminal_sha256 IS NULL OR length(workspace_terminal_sha256) = 64),
+    prepared_at TEXT NOT NULL,
+    bound_at TEXT,
+    completed_at TEXT,
+    UNIQUE(run_id, milestone_id),
+    CHECK((host_id IS NULL AND thread_id IS NULL) OR (host_id IS NOT NULL AND thread_id IS NOT NULL)),
+    CHECK((result_json IS NULL AND result_sha256 IS NULL) OR (result_json IS NOT NULL AND result_sha256 IS NOT NULL)),
+    CHECK((workspace_terminal_head_sha IS NULL AND workspace_terminal_json IS NULL AND workspace_terminal_sha256 IS NULL)
+       OR (workspace_terminal_head_sha IS NOT NULL AND workspace_terminal_json IS NOT NULL AND workspace_terminal_sha256 IS NOT NULL)),
+    CHECK((state = 'prepared' AND host_id IS NULL AND result_json IS NULL AND bound_at IS NULL AND completed_at IS NULL)
+       OR (state = 'bound' AND host_id IS NOT NULL AND result_json IS NULL AND bound_at IS NOT NULL AND completed_at IS NULL)
+       OR (state IN ('completed', 'failed') AND host_id IS NOT NULL AND result_json IS NOT NULL
+           AND bound_at IS NOT NULL AND completed_at IS NOT NULL AND git_authority_after_sha256 IS NOT NULL)
+       OR (state = 'cancelled' AND result_json IS NULL AND completed_at IS NOT NULL
+           AND ((host_id IS NULL AND bound_at IS NULL) OR (host_id IS NOT NULL AND bound_at IS NOT NULL)))),
+    FOREIGN KEY(dispatch_id) REFERENCES dispatches(dispatch_id) ON DELETE RESTRICT,
+    FOREIGN KEY(run_id, milestone_id) REFERENCES executions(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_APP_NATIVE_DISPATCHES_DRAFT_V9_DDL = _APP_NATIVE_DISPATCHES_DDL.replace(", 'cancelled'", "").replace(
+    "\n       OR (state = 'cancelled' AND result_json IS NULL AND completed_at IS NOT NULL"
+    "\n           AND ((host_id IS NULL AND bound_at IS NULL) OR (host_id IS NOT NULL AND bound_at IS NOT NULL)))",
+    "",
+)
+_V9_TABLE_DDL = {**_V8_TABLE_DDL, "app_native_dispatches": _APP_NATIVE_DISPATCHES_DDL}
+
 
 def _canonical_ddl(sql: str) -> str:
     """Return exact SQLite DDL modulo whitespace outside quoted values."""
@@ -431,9 +486,64 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(5): "codex_flow_h3_native_profile_v5",
     SchemaVersion(6): "codex_flow_h3_permission_authority_v6",
     SchemaVersion(7): "codex_flow_h3_causal_workspace_v7",
-    CURRENT_SCHEMA_VERSION: "codex_flow_h3_terminal_workspace_v8",
+    SchemaVersion(8): "codex_flow_h3_terminal_workspace_v8",
+    CURRENT_SCHEMA_VERSION: "codex_flow_h6_app_native_v9",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
+
+
+def ledger_schema_compatibility(path: Path) -> JsonObject:
+    """Inspect migration compatibility without creating or migrating a ledger."""
+
+    if not path.exists():
+        return {
+            "candidate_schema_version": int(CURRENT_SCHEMA_VERSION),
+            "ledger_schema_version": None,
+            "compatible": True,
+            "migration_required": False,
+        }
+    try:
+        connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+        row = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+    except sqlite3.DatabaseError as exc:
+        raise CorruptSchemaError("unable to inspect ledger schema read-only") from exc
+    finally:
+        if "connection" in locals():
+            connection.close()
+    if row is None:
+        raise CorruptSchemaError("schema_version marker is missing")
+    try:
+        version = SchemaVersion(row[0])
+    except ValueError as exc:
+        raise CorruptSchemaError("schema_version marker is not an integer") from exc
+    draft_upgrade_required = False
+    if version == CURRENT_SCHEMA_VERSION:
+        ddl_connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+        try:
+            raw_ddl = ddl_connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'app_native_dispatches'"
+            ).fetchone()
+            count = int(ddl_connection.execute("SELECT COUNT(*) FROM app_native_dispatches").fetchone()[0])
+        except sqlite3.DatabaseError as exc:
+            raise CorruptSchemaError("unable to inspect App-native schema read-only") from exc
+        finally:
+            ddl_connection.close()
+        draft_upgrade_required = raw_ddl is not None and _canonical_ddl(str(raw_ddl[0])) == _canonical_ddl(
+            _APP_NATIVE_DISPATCHES_DRAFT_V9_DDL
+        )
+        if draft_upgrade_required and count != 0:
+            return {
+                "candidate_schema_version": int(CURRENT_SCHEMA_VERSION),
+                "ledger_schema_version": int(version),
+                "compatible": False,
+                "migration_required": True,
+            }
+    return {
+        "candidate_schema_version": int(CURRENT_SCHEMA_VERSION),
+        "ledger_schema_version": int(version),
+        "compatible": version in SUPPORTED_SCHEMA_VERSIONS and version <= CURRENT_SCHEMA_VERSION,
+        "migration_required": version < CURRENT_SCHEMA_VERSION or draft_upgrade_required,
+    }
 
 
 class LedgerError(RuntimeError):
@@ -950,6 +1060,8 @@ class Ledger:
         if version not in SUPPORTED_SCHEMA_VERSIONS:
             raise UnsupportedSchemaVersion(f"ledger schema {version} is unsupported")
         self._validate_schema_metadata(version)
+        if version == CURRENT_SCHEMA_VERSION:
+            self._migrate_empty_v9_draft()
         if version < CURRENT_SCHEMA_VERSION:
             self._migrate(version)
         with self._read_transaction():
@@ -959,6 +1071,20 @@ class Ledger:
                 self._validate_rows()
             except ValueError as exc:
                 raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
+
+    def _migrate_empty_v9_draft(self) -> None:
+        row = (
+            self._db()
+            .execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'app_native_dispatches'")
+            .fetchone()
+        )
+        if row is None or _canonical_ddl(str(row[0])) != _canonical_ddl(_APP_NATIVE_DISPATCHES_DRAFT_V9_DDL):
+            return
+        if int(self._db().execute("SELECT COUNT(*) FROM app_native_dispatches").fetchone()[0]) != 0:
+            raise UnsupportedSchemaVersion("non-empty draft schema v9 requires explicit recovery before upgrade")
+        with self._transaction(validate_authority=False):
+            self._db().execute("DROP TABLE app_native_dispatches")
+            self._db().execute(_APP_NATIVE_DISPATCHES_DDL)
 
     def _validate_schema_metadata(self, expected_version: SchemaVersion) -> None:
         version = self.schema_version
@@ -984,7 +1110,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V8_TABLE_DDL.values():
+                for statement in _V9_TABLE_DDL.values():
                     self._db().execute(statement)
                 self._db().execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -1014,6 +1140,7 @@ class Ledger:
             SchemaVersion(6): _V6_TABLE_DDL,
             SchemaVersion(7): _V7_TABLE_DDL,
             SchemaVersion(8): _V8_TABLE_DDL,
+            SchemaVersion(9): _V9_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -1127,6 +1254,31 @@ class Ledger:
                 "created_at": ("TEXT", 1, 0),
                 "updated_at": ("TEXT", 1, 0),
             },
+            "app_native_dispatches": {
+                "dispatch_id": ("TEXT", 1, 1),
+                "run_id": ("TEXT", 1, 0),
+                "milestone_id": ("TEXT", 1, 0),
+                "state": ("TEXT", 1, 0),
+                "action_json": ("TEXT", 1, 0),
+                "action_sha256": ("TEXT", 1, 0),
+                "claim_token_sha256": ("TEXT", 1, 0),
+                "host_id": ("TEXT", 0, 0),
+                "thread_id": ("TEXT", 0, 0),
+                "result_json": ("TEXT", 0, 0),
+                "result_sha256": ("TEXT", 0, 0),
+                "workspace_baseline_head_sha": ("TEXT", 1, 0),
+                "workspace_baseline_json": ("TEXT", 1, 0),
+                "workspace_baseline_sha256": ("TEXT", 1, 0),
+                "git_authority_before_sha256": ("TEXT", 1, 0),
+                "git_authority_after_sha256": ("TEXT", 0, 0),
+                "controller_state_sha256": ("TEXT", 1, 0),
+                "workspace_terminal_head_sha": ("TEXT", 0, 0),
+                "workspace_terminal_json": ("TEXT", 0, 0),
+                "workspace_terminal_sha256": ("TEXT", 0, 0),
+                "prepared_at": ("TEXT", 1, 0),
+                "bound_at": ("TEXT", 0, 0),
+                "completed_at": ("TEXT", 0, 0),
+            },
         }
         if version == SchemaVersion(1):
             expected["runs"].pop("closed_at")
@@ -1156,6 +1308,8 @@ class Ledger:
             expected["execution_integrity"].pop("workspace_terminal_head_sha")
             expected["execution_integrity"].pop("workspace_terminal_json")
             expected["execution_integrity"].pop("workspace_terminal_sha256")
+        if version < SchemaVersion(9):
+            expected.pop("app_native_dispatches")
         for table, expected_columns in expected.items():
             rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
@@ -1208,6 +1362,16 @@ class Ledger:
                     ("executions", "milestone_id", "milestone_id", "CASCADE"),
                 ),
             )
+        if version >= SchemaVersion(9):
+            self._require_unique_index("app_native_dispatches", ("run_id", "milestone_id"))
+            self._require_foreign_keys(
+                "app_native_dispatches",
+                (
+                    ("dispatches", "dispatch_id", "dispatch_id", "RESTRICT"),
+                    ("executions", "run_id", "run_id", "CASCADE"),
+                    ("executions", "milestone_id", "milestone_id", "CASCADE"),
+                ),
+            )
         foreign_keys = self._db().execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
@@ -1237,6 +1401,7 @@ class Ledger:
     def _validate_rows(self) -> None:
         has_h3 = any(item[1] == "executions" for item in _schema_inventory(self._db()))
         has_integrity = any(item[1] == "execution_integrity" for item in _schema_inventory(self._db()))
+        has_app_native = any(item[1] == "app_native_dispatches" for item in _schema_inventory(self._db()))
         has_causal_workspace = has_integrity and any(
             str(row[1]) == "turn_started_at"
             for row in self._db().execute("PRAGMA table_info(execution_integrity)").fetchall()
@@ -1259,6 +1424,15 @@ class Ledger:
             orphan_queries.append(
                 "SELECT COUNT(*) FROM execution_integrity i LEFT JOIN executions x "
                 "ON x.run_id = i.run_id AND x.milestone_id = i.milestone_id WHERE x.run_id IS NULL"
+            )
+        if has_app_native:
+            orphan_queries.extend(
+                (
+                    "SELECT COUNT(*) FROM app_native_dispatches a LEFT JOIN dispatches d "
+                    "ON d.dispatch_id = a.dispatch_id WHERE d.dispatch_id IS NULL",
+                    "SELECT COUNT(*) FROM app_native_dispatches a LEFT JOIN executions x "
+                    "ON x.run_id = a.run_id AND x.milestone_id = a.milestone_id WHERE x.run_id IS NULL",
+                )
             )
         if any(int(self._db().execute(query).fetchone()[0]) for query in orphan_queries):
             raise CorruptSchemaError("workflow ledger contains orphan rows")
@@ -1355,13 +1529,44 @@ class Ledger:
                 if has_integrity
                 else set()
             )
+            app_native_by_execution: dict[tuple[str, str], AppNativeDispatchRecord] = {}
+            if has_app_native:
+                for app_row in (
+                    self._db().execute("SELECT * FROM app_native_dispatches ORDER BY run_id, milestone_id").fetchall()
+                ):
+                    app_record = self._app_native_from_row(app_row)
+                    dispatch = dispatches_by_id.get(app_record.action.dispatch_id)
+                    if dispatch is None or dispatch.role != RoleId("executor"):
+                        raise CorruptSchemaError("App-native action lacks its executor dispatch authority")
+                    key = (str(dispatch.run_id), str(dispatch.milestone_id))
+                    if key != (str(app_row["run_id"]), str(app_row["milestone_id"])):
+                        raise CorruptSchemaError("App-native action does not match its execution identity")
+                    if key in app_native_by_execution:
+                        raise CorruptSchemaError("execution has duplicate App-native ownership")
+                    app_native_by_execution[key] = app_record
             execution_rows = self._db().execute("SELECT * FROM executions ORDER BY run_id, milestone_id").fetchall()
             for row in execution_rows:
                 execution = self._execution_from_row(row)
+                execution_key = (str(execution.run_id), str(execution.milestone_id))
+                app_native = app_native_by_execution.get(execution_key)
+                if app_native is not None:
+                    app_lease = leases.get(str(app_native.action.workspace_path))
+                    if (
+                        app_native.action.workspace_path != execution.workspace_path
+                        or app_lease is None
+                        or app_lease.owner_run_id != execution.run_id
+                    ):
+                        raise CorruptSchemaError("App-native action workspace does not match execution/lease authority")
+                if app_native is not None and (
+                    (app_native.identity is None) != (execution.thread_id is None)
+                    or (app_native.identity is not None and app_native.identity.thread_id != execution.thread_id)
+                ):
+                    raise CorruptSchemaError("App-native host/thread identity does not match its execution")
                 if (
                     has_integrity
                     and execution.status not in {ExecutionStatus.PLANNED, ExecutionStatus.CANCELLED}
-                    and (str(execution.run_id), str(execution.milestone_id)) not in integrity_keys
+                    and execution_key not in integrity_keys
+                    and app_native is None
                 ):
                     raise CorruptSchemaError("non-planned execution lacks its integrity authority row")
                 milestone_state = _row_state(
@@ -1396,18 +1601,37 @@ class Ledger:
                         raise CorruptSchemaError("started execution has incomplete thread authority")
                     if milestone_state is not WorkflowState.RUNNING:
                         raise CorruptSchemaError("started execution is not paired with RUNNING workflow state")
+                    if app_native is not None and (
+                        app_native.state is not AppNativeState.BOUND
+                        or app_native.identity is None
+                        or app_native.identity.thread_id != execution.thread_id
+                    ):
+                        raise CorruptSchemaError("started App-native execution has mismatched host identity")
                 elif execution.status is ExecutionStatus.COMPLETED:
                     if (
                         execution.checkpoint is not ControllerCheckpoint.RESULT_DURABLE
                         or execution.thread_id is None
-                        or execution.turn_id is None
+                        or (execution.turn_id is None and app_native is None)
                         or execution.result is None
                         or execution.validation is None
                         or execution.protected_after_sha256 is None
                     ):
                         raise CorruptSchemaError("completed execution is missing terminal evidence")
-                    if milestone_state is not WorkflowState.COMPLETED:
-                        raise CorruptSchemaError("completed execution is not paired with COMPLETED workflow state")
+                    if milestone_state not in {
+                        WorkflowState.COMPLETED,
+                        WorkflowState.REVIEWING,
+                        WorkflowState.ACCEPTED,
+                        WorkflowState.FAILED,
+                    }:
+                        raise CorruptSchemaError(
+                            "completed execution is not paired with a valid post-execution workflow state"
+                        )
+                    if app_native is not None and (
+                        app_native.state is not AppNativeState.COMPLETED
+                        or app_native.result is None
+                        or app_native.result.to_json() != execution.result
+                    ):
+                        raise CorruptSchemaError("completed App-native execution has mismatched terminal result")
                 elif execution.status is ExecutionStatus.UNCERTAIN_PRE_IDENTITY and execution.thread_id is not None:
                     raise CorruptSchemaError("pre-identity uncertainty cannot carry a thread identity")
                 elif execution.status is ExecutionStatus.FAILED and (
@@ -1416,10 +1640,26 @@ class Ledger:
                     or execution.protected_after_sha256 is None
                 ):
                     raise CorruptSchemaError("failed execution is missing terminal evidence")
+                if (
+                    execution.status is ExecutionStatus.FAILED
+                    and app_native is not None
+                    and (
+                        app_native.state is not AppNativeState.FAILED
+                        or app_native.result is None
+                        or app_native.result.to_json() != execution.result
+                    )
+                ):
+                    raise CorruptSchemaError("failed App-native execution has mismatched terminal result")
                 if execution.status is ExecutionStatus.FAILED and milestone_state is not WorkflowState.FAILED:
                     raise CorruptSchemaError("failed execution is not paired with FAILED workflow state")
                 if execution.status is ExecutionStatus.CANCELLED and milestone_state is not WorkflowState.CANCELLED:
                     raise CorruptSchemaError("cancelled execution is not paired with CANCELLED workflow state")
+                if (
+                    execution.status is ExecutionStatus.CANCELLED
+                    and app_native is not None
+                    and (app_native.state is not AppNativeState.CANCELLED or app_native.result is not None)
+                ):
+                    raise CorruptSchemaError("cancelled execution has nonterminal App-native recovery state")
                 if (
                     execution.status is ExecutionStatus.UNCERTAIN_PRE_IDENTITY
                     and milestone_state is not WorkflowState.STARTING
@@ -1438,7 +1678,7 @@ class Ledger:
                     sequences = tuple(int(item[0]) for item in event_rows)
                     if sequences != tuple(range(len(sequences))):
                         raise CorruptSchemaError("SDK lifecycle sequence is not contiguous")
-                if has_causal_workspace and (str(execution.run_id), str(execution.milestone_id)) in integrity_keys:
+                if has_causal_workspace and execution_key in integrity_keys:
                     integrity = self.get_execution_integrity(execution.run_id, execution.milestone_id)
                     if integrity.provenance in {"controller_v4", "controller_v5"} and (
                         integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None
@@ -1478,6 +1718,9 @@ class Ledger:
                         raise CorruptSchemaError("Git authority after-state lacks its pre-turn authority")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(8):
+            self._migrate_v8_to_v9()
+            return
         if version == SchemaVersion(7):
             self._migrate_v7_to_v8()
             return
@@ -1685,6 +1928,23 @@ class Ledger:
                 "FROM execution_integrity_v7"
             )
             self._db().execute("DROP TABLE execution_integrity_v7")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(int(SchemaVersion(8))),),
+            )
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(8)],),
+            )
+            self._fault("after_migration")
+        self._migrate_v8_to_v9()
+
+    def _migrate_v8_to_v9(self) -> None:
+        self._validate_schema_metadata(SchemaVersion(8))
+        self._validate_shape(SchemaVersion(8))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._db().execute(_APP_NATIVE_DISPATCHES_DDL)
             self._db().execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(int(CURRENT_SCHEMA_VERSION)),),
@@ -2415,6 +2675,383 @@ class Ledger:
     def _reject_terminal_execution(record: ExecutionRecord) -> None:
         if record.status in _TERMINAL_EXECUTION_STATUSES:
             raise StaleWriter("terminal execution rejects further mutation")
+
+    def get_app_native_dispatch(self, dispatch_id: DispatchId | str) -> AppNativeDispatchRecord:
+        dispatch = DispatchId(dispatch_id)
+        row = (
+            self._db().execute("SELECT * FROM app_native_dispatches WHERE dispatch_id = ?", (str(dispatch),)).fetchone()
+        )
+        if row is None:
+            raise RecordNotFound(f"App-native dispatch {dispatch} does not exist")
+        return self._app_native_from_row(row)
+
+    def get_app_native_for_execution(
+        self, run_id: RunId | str, milestone_id: MilestoneId | str
+    ) -> AppNativeDispatchRecord | None:
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        row = (
+            self._db()
+            .execute(
+                "SELECT * FROM app_native_dispatches WHERE run_id = ? AND milestone_id = ?",
+                (str(run), str(milestone)),
+            )
+            .fetchone()
+        )
+        return self._app_native_from_row(row) if row is not None else None
+
+    @staticmethod
+    def _same_native_action(left: AppNativeTaskAction, right: AppNativeTaskAction) -> bool:
+        return (
+            left.dispatch_id,
+            left.model,
+            left.reasoning_effort,
+            left.workspace_path,
+            left.prompt,
+            left.output_schema,
+            left.action,
+            left.non_blocking,
+        ) == (
+            right.dispatch_id,
+            right.model,
+            right.reasoning_effort,
+            right.workspace_path,
+            right.prompt,
+            right.output_schema,
+            right.action,
+            right.non_blocking,
+        )
+
+    def prepare_app_native_dispatch(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        action: AppNativeTaskAction,
+        *,
+        workspace_baseline_head_sha: str,
+        workspace_baseline: tuple[tuple[str, str], ...],
+        git_authority_before_sha256: str,
+        controller_state_sha256: str,
+    ) -> AppNativeDispatchRecord:
+        """Atomically claim the executor and retain exactly one host action."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        expected_dispatch = DispatchId.from_parts(run, milestone, "executor", 1)
+        if action.dispatch_id != expected_dispatch:
+            raise ValueError("App-native action must address executor generation one")
+        baseline_head = _git_sha(workspace_baseline_head_sha, field_name="App-native baseline HEAD")
+        baseline_json, baseline_sha256 = _encode_workspace_baseline(workspace_baseline)
+        git_before = _sha256(git_authority_before_sha256, field_name="App-native Git authority")
+        controller_state = _sha256(controller_state_sha256, field_name="controller-state digest")
+        action_json = _encode_json(action.to_json())
+        token_sha256 = claim_token_sha256(action.claim_token)
+        now = utc_now()
+        with self._transaction():
+            execution = self.get_execution(run, milestone)
+            if execution.workspace_path != action.workspace_path:
+                raise StaleWriter("App-native action workspace does not match its durable execution")
+            lease_row = (
+                self._db()
+                .execute("SELECT * FROM workspace_leases WHERE workspace_path = ?", (str(action.workspace_path),))
+                .fetchone()
+            )
+            if lease_row is None:
+                raise StaleWriter("App-native prepare requires its durable workspace lease")
+            lease = self._workspace_lease_from_row(lease_row)
+            if lease.owner_run_id != run:
+                raise StaleWriter("App-native action workspace does not match its durable lease")
+            existing_row = (
+                self._db()
+                .execute(
+                    "SELECT * FROM app_native_dispatches WHERE run_id = ? AND milestone_id = ?",
+                    (str(run), str(milestone)),
+                )
+                .fetchone()
+            )
+            if existing_row is not None:
+                existing = self._app_native_from_row(existing_row)
+                if (
+                    not self._same_native_action(existing.action, action)
+                    or existing.workspace_baseline_head_sha != baseline_head
+                    or existing.workspace_baseline != workspace_baseline
+                    or existing.git_authority_before_sha256 != git_before
+                    or existing.controller_state_sha256 != controller_state
+                ):
+                    raise StaleWriter("App-native execution is already prepared with different facts")
+                return existing
+            self._reject_terminal_execution(execution)
+            if execution.status is not ExecutionStatus.PLANNED or execution.checkpoint not in {
+                ControllerCheckpoint.WORKSPACE_LEASED,
+                ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE,
+            }:
+                raise StaleWriter("App-native prepare requires one planned leased execution")
+            current = self.get_milestone(run, milestone)
+            if current.state is not WorkflowState.PLANNED:
+                raise InvalidTransition(f"App-native prepare requires PLANNED, found {current.state.value}")
+            owner = (
+                self._db()
+                .execute(
+                    "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = 'executor'",
+                    (str(run), str(milestone)),
+                )
+                .fetchone()
+            )
+            if owner is not None:
+                raise DispatchConflict(f"App-native executor is already owned by {owner['dispatch_id']}")
+            self._db().execute(
+                "INSERT INTO dispatches(dispatch_id, run_id, milestone_id, role, generation, claimed_at) "
+                "VALUES (?, ?, ?, 'executor', 1, ?)",
+                (str(expected_dispatch), str(run), str(milestone), now),
+            )
+            self._db().execute(
+                "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (WorkflowState.STARTING.value, now, str(run), str(milestone)),
+            )
+            event = self._append_event_in_transaction(
+                run,
+                milestone,
+                from_state=WorkflowState.PLANNED,
+                to_state=WorkflowState.STARTING,
+                event_type="dispatch_claimed",
+                reason=WorkflowReason(ReasonCode.DISPATCH_CLAIMED),
+                dispatch_id=expected_dispatch,
+                data=None,
+            )
+            self._db().execute(
+                "INSERT INTO app_native_dispatches(dispatch_id, run_id, milestone_id, state, action_json, "
+                "action_sha256, claim_token_sha256, host_id, thread_id, result_json, result_sha256, "
+                "workspace_baseline_head_sha, workspace_baseline_json, workspace_baseline_sha256, "
+                "git_authority_before_sha256, git_authority_after_sha256, controller_state_sha256, "
+                "workspace_terminal_head_sha, "
+                "workspace_terminal_json, workspace_terminal_sha256, prepared_at, bound_at, completed_at) "
+                "VALUES (?, ?, ?, 'prepared', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, "
+                "NULL, NULL, NULL, ?, NULL, NULL)",
+                (
+                    str(expected_dispatch),
+                    str(run),
+                    str(milestone),
+                    action_json,
+                    action.sha256,
+                    token_sha256,
+                    baseline_head,
+                    baseline_json,
+                    baseline_sha256,
+                    git_before,
+                    controller_state,
+                    now,
+                ),
+            )
+            self._db().execute(
+                "UPDATE executions SET checkpoint = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (
+                    ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE.value,
+                    now,
+                    str(run),
+                    str(milestone),
+                ),
+            )
+            self._verify_event(event)
+            return self.get_app_native_dispatch(expected_dispatch)
+
+    def bind_app_native_dispatch(
+        self,
+        dispatch_id: DispatchId | str,
+        *,
+        claim_token: str,
+        receipt: HostReceipt,
+    ) -> AppNativeDispatchRecord:
+        dispatch = DispatchId(dispatch_id)
+        token_sha256 = claim_token_sha256(claim_token)
+        identity = receipt.identity
+        now = utc_now()
+        with self._transaction():
+            current = self.get_app_native_dispatch(dispatch)
+            claim = self.get_dispatch(dispatch)
+            if claim_token_sha256(current.action.claim_token) != token_sha256:
+                raise StaleWriter("App-native bind capability does not match its prepared action")
+            try:
+                receipt.verify(current.action, claim_token=claim_token)
+            except ValueError as exc:
+                raise StaleWriter(str(exc)) from exc
+            if current.state is AppNativeState.CANCELLED:
+                raise StaleWriter("cancelled App-native dispatch rejects late bind receipt replay")
+            if current.identity is not None:
+                if current.identity != identity:
+                    raise StaleWriter("App-native dispatch is already bound to a different host identity")
+                return current
+            if current.state is not AppNativeState.PREPARED:
+                raise StaleWriter("only a prepared App-native dispatch can be bound")
+            execution = self.get_execution(claim.run_id, claim.milestone_id)
+            if execution.status is not ExecutionStatus.PLANNED:
+                raise StaleWriter("App-native bind requires a planned execution")
+            workflow = self.get_milestone(claim.run_id, claim.milestone_id)
+            if workflow.state is not WorkflowState.STARTING:
+                raise StaleWriter("App-native bind requires a STARTING workflow state")
+            self._db().execute(
+                "UPDATE app_native_dispatches SET state = 'bound', host_id = ?, thread_id = ?, bound_at = ? "
+                "WHERE dispatch_id = ?",
+                (identity.host_id, identity.thread_id.id, now, str(dispatch)),
+            )
+            self._db().execute(
+                "UPDATE executions SET status = ?, checkpoint = ?, thread_id = ?, updated_at = ? "
+                "WHERE run_id = ? AND milestone_id = ?",
+                (
+                    ExecutionStatus.THREAD_STARTED.value,
+                    ControllerCheckpoint.THREAD_IDENTITY_DURABLE.value,
+                    identity.thread_id.id,
+                    now,
+                    str(claim.run_id),
+                    str(claim.milestone_id),
+                ),
+            )
+            self._db().execute(
+                "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (WorkflowState.RUNNING.value, now, str(claim.run_id), str(claim.milestone_id)),
+            )
+            event = self._append_event_in_transaction(
+                claim.run_id,
+                claim.milestone_id,
+                from_state=WorkflowState.STARTING,
+                to_state=WorkflowState.RUNNING,
+                event_type="state_transition",
+                reason=None,
+                dispatch_id=None,
+                data=None,
+            )
+            self._verify_event(event)
+            return self.get_app_native_dispatch(dispatch)
+
+    def record_app_native_result(
+        self,
+        dispatch_id: DispatchId | str,
+        *,
+        claim_token: str,
+        identity: HostIdentity,
+        result: ModelFacingResult,
+        validation: ValidationObservation,
+        protected_after_sha256: str,
+        git_authority_after_sha256: str,
+        workspace_terminal_head_sha: str | None,
+        workspace_terminal: tuple[tuple[str, str], ...] | None,
+    ) -> AppNativeDispatchRecord:
+        """Persist one exact terminal host result and controller gate atomically."""
+
+        dispatch = DispatchId(dispatch_id)
+        token_sha256 = claim_token_sha256(claim_token)
+        protected_after = _sha256(protected_after_sha256, field_name="protected-path digest")
+        git_after = _sha256(git_authority_after_sha256, field_name="App-native Git authority")
+        result_json = _encode_json(result.to_json())
+        result_sha256 = hashlib.sha256(result_json.encode("utf-8")).hexdigest()
+        if (workspace_terminal_head_sha is None) != (workspace_terminal is None):
+            raise ValueError("App-native terminal workspace authority must be complete or absent")
+        terminal_head = (
+            _git_sha(workspace_terminal_head_sha, field_name="App-native terminal HEAD")
+            if workspace_terminal_head_sha is not None
+            else None
+        )
+        terminal_json: str | None = None
+        terminal_sha256: str | None = None
+        if workspace_terminal is not None:
+            terminal_json, terminal_sha256 = _encode_workspace_baseline(workspace_terminal)
+        passed = (
+            validation.exit_code == 0
+            and not validation.timed_out
+            and result.status is ModelResultStatus.COMPLETED
+            and all(item.passed for item in result.validations)
+        )
+        if passed and (terminal_head is None or terminal_json is None or terminal_sha256 is None):
+            raise StaleWriter("completed App-native execution requires terminal workspace authority")
+        app_state = AppNativeState.COMPLETED if passed else AppNativeState.FAILED
+        execution_status = ExecutionStatus.COMPLETED if passed else ExecutionStatus.FAILED
+        workflow_state = WorkflowState.COMPLETED if passed else WorkflowState.FAILED
+        now = utc_now()
+        with self._transaction():
+            current = self.get_app_native_dispatch(dispatch)
+            claim = self.get_dispatch(dispatch)
+            if claim_token_sha256(current.action.claim_token) != token_sha256:
+                raise StaleWriter("App-native result capability does not match its prepared action")
+            if current.identity != identity:
+                raise StaleWriter("App-native result identity does not match the exact bound host thread")
+            if current.result is not None:
+                terminal_execution = self.get_execution(claim.run_id, claim.milestone_id)
+                if (
+                    current.result != result
+                    or current.git_authority_after_sha256 != git_after
+                    or current.workspace_terminal_head_sha != terminal_head
+                    or current.workspace_terminal != workspace_terminal
+                    or current.state is not app_state
+                    or terminal_execution.validation != validation
+                    or terminal_execution.protected_after_sha256 != protected_after
+                ):
+                    raise StaleWriter("App-native dispatch already owns different terminal facts")
+                return current
+            if current.state is not AppNativeState.BOUND:
+                raise StaleWriter("App-native result requires a bound dispatch")
+            execution = self.get_execution(claim.run_id, claim.milestone_id)
+            if execution.status is not ExecutionStatus.THREAD_STARTED or execution.thread_id != identity.thread_id:
+                raise StaleWriter("App-native result requires its durable bound execution identity")
+            workflow = self.get_milestone(claim.run_id, claim.milestone_id)
+            if workflow.state is not WorkflowState.RUNNING:
+                raise StaleWriter("App-native result requires a RUNNING workflow state")
+            self._db().execute(
+                "UPDATE app_native_dispatches SET state = ?, result_json = ?, result_sha256 = ?, "
+                "git_authority_after_sha256 = ?, workspace_terminal_head_sha = ?, workspace_terminal_json = ?, "
+                "workspace_terminal_sha256 = ?, completed_at = ? WHERE dispatch_id = ?",
+                (
+                    app_state.value,
+                    result_json,
+                    result_sha256,
+                    git_after,
+                    terminal_head if passed else None,
+                    terminal_json if passed else None,
+                    terminal_sha256 if passed else None,
+                    now,
+                    str(dispatch),
+                ),
+            )
+            validation_argv: object = (
+                list(validation.argv)
+                if validation.error_code is None
+                else {"argv": list(validation.argv), "error_code": validation.error_code.value}
+            )
+            self._db().execute(
+                "UPDATE executions SET status = ?, checkpoint = ?, result_json = ?, validation_argv_json = ?, "
+                "validation_exit_code = ?, validation_stdout_sha256 = ?, validation_stderr_sha256 = ?, "
+                "validation_timed_out = ?, validation_duration_seconds = ?, protected_after_sha256 = ?, "
+                "updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (
+                    execution_status.value,
+                    ControllerCheckpoint.RESULT_DURABLE.value,
+                    result_json,
+                    _encode_json(validation_argv),
+                    validation.exit_code,
+                    validation.stdout_sha256,
+                    validation.stderr_sha256,
+                    int(validation.timed_out),
+                    validation.duration_seconds,
+                    protected_after,
+                    now,
+                    str(claim.run_id),
+                    str(claim.milestone_id),
+                ),
+            )
+            self._db().execute(
+                "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (workflow_state.value, now, str(claim.run_id), str(claim.milestone_id)),
+            )
+            event = self._append_event_in_transaction(
+                claim.run_id,
+                claim.milestone_id,
+                from_state=WorkflowState.RUNNING,
+                to_state=workflow_state,
+                event_type="state_transition",
+                reason=WorkflowReason(ReasonCode.TERMINAL_OUTCOME if passed else ReasonCode.EXECUTION_FAILURE),
+                dispatch_id=None,
+                data=None,
+            )
+            self._verify_event(event)
+            return self.get_app_native_dispatch(dispatch)
 
     def record_native_profile(
         self,
@@ -3160,6 +3797,13 @@ class Ledger:
                     str(milestone),
                 ),
             )
+            app_native = self.get_app_native_for_execution(run, milestone)
+            if app_native is not None:
+                self._db().execute(
+                    "UPDATE app_native_dispatches SET state = 'cancelled', completed_at = ? "
+                    "WHERE run_id = ? AND milestone_id = ?",
+                    (now, str(run), str(milestone)),
+                )
             self._db().execute(
                 "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
                 (WorkflowState.CANCELLED.value, now, str(run), str(milestone)),
@@ -3415,6 +4059,61 @@ class Ledger:
             str(row["lane"]),
             RunId(row["owner_run_id"]),
             str(row["created_at"]),
+        )
+
+    @staticmethod
+    def _app_native_from_row(row: sqlite3.Row) -> AppNativeDispatchRecord:
+        action_value = _decode_json_object(str(row["action_json"]), field_name="App-native action")
+        if action_value is None:  # pragma: no cover - non-null row contract
+            raise CorruptSchemaError("App-native action is missing")
+        action = AppNativeTaskAction.from_json(action_value)
+        if str(action.dispatch_id) != str(row["dispatch_id"]) or action.sha256 != str(row["action_sha256"]):
+            raise CorruptSchemaError("App-native action digest or dispatch identity does not match")
+        if claim_token_sha256(action.claim_token) != str(row["claim_token_sha256"]):
+            raise CorruptSchemaError("App-native claim capability digest does not match")
+        identity = None
+        if row["host_id"] is not None and row["thread_id"] is not None:
+            identity = HostIdentity(str(row["host_id"]), ThreadIdentity(str(row["thread_id"])))
+        result = None
+        if row["result_json"] is not None:
+            result_value = _decode_json_object(str(row["result_json"]), field_name="App-native result")
+            if result_value is None:  # pragma: no cover - non-null row contract
+                raise CorruptSchemaError("App-native result is missing")
+            result = ModelFacingResult.from_json(result_value)
+            result_digest = hashlib.sha256(_encode_json(result.to_json()).encode("utf-8")).hexdigest()
+            if result_digest != str(row["result_sha256"]):
+                raise CorruptSchemaError("App-native result digest does not match")
+        baseline = _decode_workspace_baseline(
+            str(row["workspace_baseline_json"]), str(row["workspace_baseline_sha256"])
+        )
+        terminal_workspace = None
+        if row["workspace_terminal_json"] is not None:
+            terminal_workspace = _decode_workspace_baseline(
+                str(row["workspace_terminal_json"]), str(row["workspace_terminal_sha256"])
+            )
+        return AppNativeDispatchRecord(
+            action,
+            AppNativeState(str(row["state"])),
+            identity,
+            result,
+            _git_sha(str(row["workspace_baseline_head_sha"]), field_name="App-native baseline HEAD"),
+            baseline,
+            _sha256(str(row["git_authority_before_sha256"]), field_name="App-native Git authority"),
+            (
+                _sha256(str(row["git_authority_after_sha256"]), field_name="App-native Git authority")
+                if row["git_authority_after_sha256"] is not None
+                else None
+            ),
+            _sha256(str(row["controller_state_sha256"]), field_name="controller-state digest"),
+            (
+                _git_sha(str(row["workspace_terminal_head_sha"]), field_name="App-native terminal HEAD")
+                if row["workspace_terminal_head_sha"] is not None
+                else None
+            ),
+            terminal_workspace,
+            str(row["prepared_at"]),
+            str(row["bound_at"]) if row["bound_at"] is not None else None,
+            str(row["completed_at"]) if row["completed_at"] is not None else None,
         )
 
     @staticmethod

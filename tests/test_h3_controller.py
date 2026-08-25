@@ -42,6 +42,7 @@ from codex_flow.domain import (
     ExecutionCapsule,
     ExecutionStatus,
     LifecycleEvent,
+    LifecyclePhase,
     MilestoneId,
     NativePermissionAuthority,
     NativePermissionMode,
@@ -52,6 +53,7 @@ from codex_flow.domain import (
     ValidationFailureCode,
     ValidationObservation,
     ValidationSpec,
+    WorkflowState,
     WorkspaceMode,
 )
 from codex_flow.ledger import (
@@ -195,6 +197,121 @@ def _nested_discovery_file(home: Path, surface: str, *, content: str = "alpha") 
     return source
 
 
+def test_protected_path_digest_uses_git_relative_path_order_for_sibling_directories(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    _repository(repository)
+    (repository / "mocks" / "mock-api").mkdir(parents=True)
+    (repository / "mocks" / "mock-api-client").mkdir(parents=True)
+    (repository / "mocks" / "mock-api" / "fixture.txt").write_text("api\n")
+    (repository / "mocks" / "mock-api-client" / "fixture.txt").write_text("client\n")
+    _git(repository, "add", "mocks")
+    _git(repository, "commit", "-qm", "add mock fixtures")
+    base_sha = _git(repository, "rev-parse", "HEAD")
+
+    paths = ("mocks",)
+    assert controller_module.protected_paths_digest(repository, paths) == (
+        controller_module.protected_paths_digest_at_revision(repository, base_sha, paths)
+    )
+
+
+def test_protected_path_digest_ignores_build_outputs_but_observes_tracked_content(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    _repository(repository)
+    frontend = repository / "frontend"
+    frontend.mkdir()
+    (frontend / ".gitignore").write_text(".next/\nnode_modules/\n")
+    (frontend / "source.ts").write_text("export const value = 1;\n")
+    _git(repository, "add", "frontend")
+    _git(repository, "commit", "-qm", "add frontend")
+    base_sha = _git(repository, "rev-parse", "HEAD")
+    paths = ("frontend",)
+    baseline = controller_module.protected_paths_digest_at_revision(repository, base_sha, paths)
+
+    (frontend / ".next").mkdir()
+    (frontend / ".next" / "build-manifest.json").write_text("{}\n")
+    executable = frontend / "node_modules" / "package" / "bin.js"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("export {};\n")
+    bin_directory = frontend / "node_modules" / ".bin"
+    bin_directory.mkdir()
+    (bin_directory / "package").symlink_to("../package/bin.js")
+
+    assert controller_module.protected_paths_digest(repository, paths) == baseline
+
+    (frontend / "source.ts").write_text("export const value = 2;\n")
+    assert controller_module.protected_paths_digest(repository, paths) != baseline
+
+
+def test_ignored_build_outputs_and_symlinks_are_excluded_from_preflight_scope() -> None:
+    class BuildOutputAdapter(FakeAdapter):
+        def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
+            observation = super().run_turn(thread, input, output_schema=output_schema)
+            assert self.config.cwd is not None
+            frontend = self.config.cwd / "frontend"
+            (frontend / ".next").mkdir()
+            (frontend / ".next" / "build-manifest.json").write_text("{}\n")
+            executable = frontend / "node_modules" / "package" / "bin.js"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("export {};\n")
+            bin_directory = frontend / "node_modules" / ".bin"
+            bin_directory.mkdir()
+            (bin_directory / "package").symlink_to("../package/bin.js")
+            return observation
+
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        frontend = repository / "frontend"
+        frontend.mkdir()
+        (frontend / ".gitignore").write_text(".next/\nnode_modules/\n")
+        (frontend / "source.ts").write_text("export const value = 1;\n")
+        _git(repository, "add", "frontend")
+        _git(repository, "commit", "-qm", "add frontend")
+        base = _git(repository, "rev-parse", "HEAD")
+        capsule = replace(_capsule(repository, repository, base, branch), protected_paths=("frontend",))
+        controller = Controller(
+            repository,
+            _trusted_test_adapter_factory=lambda config: BuildOutputAdapter(config, _service()),
+        )
+        controller.plan(capsule)
+
+        terminal = controller.start("run", "m1")
+
+        assert terminal.status is ExecutionStatus.COMPLETED
+        assert terminal.protected_after_sha256 == terminal.protected_before_sha256
+        controller.close()
+
+
+def test_preflight_ignores_existing_venv_symlink_and_build_directories() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        frontend = repository / "frontend"
+        frontend.mkdir()
+        (frontend / ".gitignore").write_text(".next/\nnode_modules/\n.venv/\n")
+        (frontend / "source.ts").write_text("export const value = 1;\n")
+        _git(repository, "add", "frontend")
+        _git(repository, "commit", "-qm", "add frontend")
+        base = _git(repository, "rev-parse", "HEAD")
+
+        venv_bin = frontend / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python").symlink_to(repository / "protected.txt")
+        (frontend / ".next").mkdir()
+        (frontend / ".next" / "manifest.json").write_text("{}\n")
+        (frontend / "node_modules" / ".bin").mkdir(parents=True)
+        (frontend / "node_modules" / ".bin" / "tool").symlink_to("../../source.ts")
+
+        capsule = replace(_capsule(repository, repository, base, branch), protected_paths=("frontend",))
+        controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        controller.plan(capsule)
+        terminal = controller.start("run", "m1")
+
+        assert terminal.status is ExecutionStatus.COMPLETED
+        assert terminal.protected_after_sha256 == terminal.protected_before_sha256
+        controller.close()
+
+
 def _tamper_pre_external_authority(repository: Path, base: str, kind: str) -> None:
     if kind == "git_config":
         _git(repository, "config", "codex-flow.drift", "changed")
@@ -307,6 +424,46 @@ def test_current_checkout_start_persists_result_before_projection() -> None:
         assert len(controller.ledger.sdk_lifecycle_events("run", "m1")) == 2
         assert (repository / ".codex-flow/runs/run/execution.json").is_file()
         controller.close()
+
+
+def test_completed_execution_reopens_through_integrated_review_and_acceptance() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        controller.plan(_capsule(repository, repository, base, branch))
+        terminal = controller.start("run", "m1")
+        assert terminal.status is ExecutionStatus.COMPLETED
+
+        controller.ledger.record_h4_transition(
+            "run",
+            "m1",
+            WorkflowState.REVIEWING,
+            expected_state=WorkflowState.COMPLETED,
+            phase=LifecyclePhase.REVIEW,
+            kind="integrated_review_started",
+            data={"modes": ["objective", "architecture"]},
+        )
+        controller.close()
+
+        reviewing = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        assert reviewing.status("run", "m1").status is ExecutionStatus.COMPLETED
+        assert reviewing.ledger.current_state("run", "m1") is WorkflowState.REVIEWING
+        reviewing.ledger.record_h4_transition(
+            "run",
+            "m1",
+            WorkflowState.ACCEPTED,
+            expected_state=WorkflowState.REVIEWING,
+            phase=LifecyclePhase.ACCEPTANCE,
+            kind="integrated_review_accepted",
+            data={"P0": 0, "P1": 0},
+        )
+        reviewing.close()
+
+        accepted = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        assert accepted.status("run", "m1").status is ExecutionStatus.COMPLETED
+        assert accepted.ledger.current_state("run", "m1") is WorkflowState.ACCEPTED
+        accepted.close()
 
 
 def test_post_identity_crash_requires_fresh_process_resume_without_duplicates() -> None:
@@ -2543,6 +2700,8 @@ def test_active_native_profile_projects_all_mcp_servers_through_pinned_runtime_p
     import codex_cli_bin
 
     source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
+    if ".codex-flow" in source_home.parts and "sdk-runtime" in source_home.parts:
+        source_home = (Path.home() / ".codex").resolve()
     source_before = (source_home / "config.toml").read_bytes()
     profile = NativeProfileProjection.load(source_home, environment={"CODEX_LB_API_KEY": "test-only"})
     projected = tomllib.loads(profile.projected_toml)
@@ -3361,7 +3520,7 @@ def test_v2_ledger_migrates_forward_to_canonical_h3_schema() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_terminal_workspace_v8"
+        assert ledger.schema_identity == "codex_flow_h6_app_native_v9"
         assert "checkpoint" in ledger.schema_columns("executions")
         ledger.close()
 
@@ -3384,7 +3543,7 @@ def test_v4_sandbox_authority_schema_migrates_to_truthful_native_profile_authori
         connection.close()
 
         ledger = Ledger(path)
-        assert ledger.schema_identity == "codex_flow_h3_terminal_workspace_v8"
+        assert ledger.schema_identity == "codex_flow_h6_app_native_v9"
         assert "native_profile_sha256" in ledger.schema_columns("execution_integrity")
         assert "sandbox_policy_sha256" not in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -3409,7 +3568,7 @@ def test_v5_native_profile_schema_migrates_to_permission_authority_v6() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_terminal_workspace_v8"
+        assert ledger.schema_identity == "codex_flow_h6_app_native_v9"
         assert "native_compatibility_sha256" in ledger.schema_columns("execution_integrity")
         assert "effective_permission_json" in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -3536,7 +3695,7 @@ def test_v6_permission_schema_migrates_to_causal_workspace_v7() -> None:
 
         ledger = Ledger(path)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_h3_terminal_workspace_v8"
+        assert ledger.schema_identity == "codex_flow_h6_app_native_v9"
         columns = ledger.schema_columns("execution_integrity")
         assert "workspace_baseline_sha256" in columns
         assert "turn_started_at" in columns
@@ -3574,6 +3733,7 @@ def test_migrated_v7_predecessor_without_terminal_snapshot_requires_explicit_rec
         database = repository / ".codex-flow" / "workflow.db"
         connection = sqlite3.connect(database)
         connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("DROP TABLE app_native_dispatches")
         connection.execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v8")
         connection.execute(_EXECUTION_INTEGRITY_V7_DDL)
         connection.execute(
@@ -3610,7 +3770,7 @@ def test_migrated_v7_predecessor_without_terminal_snapshot_requires_explicit_rec
         successor.close()
 
 
-def test_ignored_out_of_scope_file_is_rejected() -> None:
+def test_ignored_out_of_scope_file_is_excluded_from_preflight_scope() -> None:
     class IgnoringAdapter(FakeAdapter):
         def run_turn(self, thread: ThreadIdentity, input: str, *, output_schema: Any = None) -> TurnObservation:
             observation = super().run_turn(thread, input, output_schema=output_schema)
@@ -3627,8 +3787,7 @@ def test_ignored_out_of_scope_file_is_rejected() -> None:
         )
         controller.plan(_capsule(repository, repository, base, branch))
         terminal = controller.start("run", "m1")
-        assert terminal.status is ExecutionStatus.FAILED
-        assert terminal.result == {"status": "failed", "reason": "mutation_outside_owned_paths"}
+        assert terminal.status is ExecutionStatus.COMPLETED
         controller.close()
 
 

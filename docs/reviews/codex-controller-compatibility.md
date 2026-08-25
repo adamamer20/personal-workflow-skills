@@ -222,3 +222,66 @@ reviewed fixed rendered evidence independently, rejected architecture,
 accepted a same-boundary replan, repaired in the same workspace, and reached
 `ACCEPTED` after six authority reviews. The retained packet contains only
 sanitized hashes, route identities, counts, lifecycle kinds, and status.
+
+## H6-C App-native hosting boundary
+
+Schema v9 adds one `app_native_dispatches` authority beside the existing SDK
+execution tables. `control --hosting app-native` plans and leases the selected
+checkout, captures Git/protected/controller-state baselines, atomically claims
+executor generation one, and returns one closed non-blocking native-task
+action. It does not construct the SDK adapter, discover an app-server, or
+attach to a Desktop socket. The hosting Codex app creates the visible task and
+constructs one closed `HostReceipt` from the actual native response. It binds
+the dispatch, action digest, controller challenge, claim capability and exact
+host/thread pair. The receipt proves capability possession, not cryptographic
+App attestation: the host workflow is the explicit trusted authority.
+`app-bind` verifies that receipt; `app-result`
+accepts one closed `ModelFacingResult` only for that capability and identity.
+Prepare, bind, and result replay are idempotent; conflicts fail closed. Status
+retains prepared/bound/terminal recovery facts in the same SQLite authority.
+
+The action carries the repository-configured model and effort, exact existing
+checkout, bounded prompt, and closed output contract. App result ingestion
+re-runs validation and checks protected content, mutation scope, Git authority,
+controller static state, and terminal workspace authority. Git-ignored build
+output remains outside ordinary mutation/topology facts, while tracked and
+non-ignored out-of-scope changes still fail. SDK-headless `control` remains the
+default and is never substituted for an App-native request.
+
+The SDK worker cannot invoke the host's native task action, so the visible-App
+promotion proof remains host-only. After this H6-C execution is terminal, the
+planning owner can generate a bounded same-run successor capsule and prepare
+its action exactly as follows:
+
+```bash
+uv run codex-flow h6-app-pilot-capsule \
+  --parent-run-id model-2c1f6c447b3f22b8ca2e91daaed16e07 \
+  --state-root /home/adam/personal-workflow-skills.worktrees/python-sdk-controller
+uv run codex-flow control --hosting app-native \
+  --capsule /home/adam/personal-workflow-skills.worktrees/python-sdk-controller/.codex-flow/capsules/model-2c1f6c447b3f22b8ca2e91daaed16e07/h6-c-visible-app-pilot.json \
+  --state-root /home/adam/personal-workflow-skills.worktrees/python-sdk-controller --json
+```
+
+The App host must then issue exactly the returned native action and run the
+returned `app-bind`/`app-result` sequence. No UI visibility claim is made until
+that host-only pilot binds a real visible thread.
+
+Before any installed controller opens or migrates a live ledger, refresh and
+prove the candidate package in this exact order, with `DIST` set to a newly
+created temporary directory:
+
+```bash
+DIST="$(mktemp -d /tmp/codex-flow-candidate.XXXXXX)"
+uv build --wheel --out-dir "$DIST"
+uvx --from "$DIST"/codex_flow-0.2.0-py3-none-any.whl codex-flow --help
+uv tool install --force "$DIST"/codex_flow-0.2.0-py3-none-any.whl
+codex-flow schema-compatibility --state-root /absolute/path/to/selected-checkout
+codex-flow status --run-id RUN --milestone-id MILESTONE \
+  --state-root /absolute/path/to/selected-checkout --json
+```
+
+`schema-compatibility` opens the ledger read-only and reports both versions.
+Only the final controller command may migrate v8 to v9 or canonicalize the
+empty source-draft v9 App table. A non-empty draft table fails closed. Building,
+proving and installing must finish first; an older schema-v8 executable must
+not open the ledger after the candidate migrates it.

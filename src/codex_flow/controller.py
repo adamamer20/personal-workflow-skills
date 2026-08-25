@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import os
+import secrets
 import stat
 import subprocess
 import threading
@@ -17,9 +18,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
 
+from .app_native import AppNativeDispatchRecord, AppNativeState, AppNativeTaskAction, HostIdentity, HostReceipt
 from .artifacts import write_h4_review_artifact, write_owned_artifact
 from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
 from .config import AuthorityUnavailable, WorkflowConfig, load_workflow_config
+from .contracts import ModelFacingResult, model_facing_result_schema
 from .domain import (
     AcceptanceMode,
     AuthorityPlan,
@@ -27,6 +30,7 @@ from .domain import (
     ControllerCheckpoint,
     DecisionRequest,
     DecisionResponse,
+    DispatchId,
     ExecutionCapsule,
     ExecutionRecord,
     ExecutionStatus,
@@ -62,7 +66,7 @@ from .domain import (
     strict_json_loads,
     thaw_json,
 )
-from .ledger import Ledger, NativeCompatibilityConflict, NativePermissionConflict
+from .ledger import Ledger, NativeCompatibilityConflict, NativePermissionConflict, RecordNotFound
 from .native_profile import NativeDiscoveryCompatibilityError, NativeProfileProjection
 from .worktrees import WorktreeManager
 
@@ -279,7 +283,7 @@ def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
         "protected_paths": list(capsule.protected_paths),
         "validation": {
             "argv": list(capsule.validation.argv),
-            "timeout_seconds": capsule.validation.timeout_seconds,
+            "timeout_seconds": float(capsule.validation.timeout_seconds),
         },
         "model": capsule.model,
         "reasoning_effort": capsule.reasoning_effort.value,
@@ -395,20 +399,27 @@ def load_capsule(path: Path) -> tuple[ExecutionCapsule, str]:
 def protected_paths_digest(root: Path, paths: tuple[str, ...]) -> str:
     digest = hashlib.sha256()
     for relative in sorted(paths):
-        target = root / relative
         digest.update(relative.encode())
-        if not target.exists():
+        listing = subprocess.run(
+            ("git", "ls-files", "--cached", "-z", "--", relative),
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+        if listing.returncode != 0:
+            raise ControllerError("unable to inspect protected workspace files")
+        names = [os.fsdecode(item) for item in listing.stdout.split(b"\0") if item]
+        if not names:
             digest.update(b"\0missing\0")
             continue
-        if target.is_symlink():
-            raise ControllerError(f"protected path is a symlink: {target}")
-        candidates = (
-            (target,) if target.is_file() else tuple(sorted(item for item in target.rglob("*") if item.is_file()))
-        )
-        for candidate in candidates:
+        for name in sorted(names):
+            candidate = root / name
             if candidate.is_symlink():
                 raise ControllerError(f"protected path contains a symlink: {candidate}")
-            digest.update(str(candidate.relative_to(root)).encode())
+            digest.update(name.encode())
+            if not candidate.is_file():
+                digest.update(b"\0missing\0")
+                continue
             digest.update(candidate.read_bytes())
     return digest.hexdigest()
 
@@ -565,13 +576,31 @@ class Controller:
         repository_toplevel = self._git_toplevel(capsule.repository_root)
         if repository_toplevel != capsule.repository_root:
             raise ControllerError("execution repository_root must be the physical Git toplevel")
-        if self.state_root != repository_toplevel:
-            raise ControllerError("controller state root must equal the execution repository toplevel")
+        if self._git_toplevel(self.state_root) != self.state_root or self.state_root not in {
+            repository_toplevel,
+            capsule.workspace_path,
+        }:
+            raise ControllerError("controller state root must equal the repository or selected checkout toplevel")
         protected_before = protected_paths_digest_at_revision(
             capsule.repository_root, capsule.base_sha, capsule.protected_paths
         )
         content = _canonical_json(capsule_json(capsule))
         capsule_path = self._capsule_path(capsule)
+        try:
+            existing = self.ledger.get_execution(capsule.run_id, capsule.milestone_id)
+        except RecordNotFound:
+            pass
+        else:
+            if (
+                existing.capsule_path != capsule_path
+                or existing.capsule_sha256 != _digest_bytes(content)
+                or existing.protected_before_sha256 != protected_before
+            ):
+                raise ControllerError("execution is already planned with different durable facts")
+            durable, digest = load_capsule(capsule_path)
+            if durable != capsule or digest != existing.capsule_sha256:
+                raise ControllerError("existing durable capsule does not match the requested plan")
+            return existing
         self.ledger.create_run(capsule.run_id)
         self.ledger.create_milestone(capsule.run_id, capsule.milestone_id)
         write_owned_artifact(
@@ -637,6 +666,61 @@ class Controller:
         if result.returncode != 0:
             raise ControllerError(f"unable to inspect Git workspace: {' '.join(arguments)}")
         return result.stdout
+
+    @staticmethod
+    def _git_workspace_filter(workspace: Path) -> tuple[frozenset[str], frozenset[str]]:
+        """Return tracked paths and Git-ignored untracked paths.
+
+        Git is the authority for ordinary source scope.  The ``--directory``
+        form intentionally collapses ignored trees (``.venv/``, ``node_modules/``
+        and build output) so topology scans can prune them without traversing
+        their contents.  Tracked paths are kept separately because a tracked
+        path remains in scope even when an ignore rule also matches it.
+        """
+
+        tracked = subprocess.run(
+            ("git", "ls-files", "--cached", "-z"),
+            cwd=workspace,
+            capture_output=True,
+            check=False,
+        )
+        ignored = subprocess.run(
+            ("git", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"),
+            cwd=workspace,
+            capture_output=True,
+            check=False,
+        )
+        if tracked.returncode != 0 or ignored.returncode != 0:
+            raise ControllerError("unable to inspect Git ignored-artifact policy")
+        tracked_paths = frozenset(os.fsdecode(item) for item in tracked.stdout.split(b"\0") if item)
+        ignored_paths = frozenset(os.fsdecode(item).rstrip("/") for item in ignored.stdout.split(b"\0") if item)
+        return tracked_paths, ignored_paths
+
+    @staticmethod
+    def _path_is_ignored(
+        workspace: Path,
+        relative: str,
+        tracked_paths: frozenset[str],
+        ignored_paths: frozenset[str],
+    ) -> bool:
+        """Apply Git ignore rules to one path without hiding tracked descendants."""
+
+        candidate = Path(relative).as_posix()
+        if any(tracked == candidate or tracked.startswith(candidate + "/") for tracked in tracked_paths):
+            return False
+        if any(candidate == ignored or Path(ignored) in Path(candidate).parents for ignored in ignored_paths):
+            return True
+        result = subprocess.run(
+            ("git", "check-ignore", "--no-index", "--quiet", "--", candidate),
+            cwd=workspace,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        raise ControllerError("unable to inspect Git ignored-artifact policy")
 
     def _native_runtime(
         self, capsule: ExecutionCapsule
@@ -747,20 +831,13 @@ class Controller:
             capture_output=True,
             check=False,
         )
-        ignored = subprocess.run(
-            ("git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
-            cwd=workspace,
-            capture_output=True,
-            check=False,
-        )
-        if tracked.returncode != 0 or untracked.returncode != 0 or ignored.returncode != 0:
+        if tracked.returncode != 0 or untracked.returncode != 0:
             raise ControllerError("unable to inspect workspace mutation scope")
         return frozenset(
             path
             for path in (
                 *(os.fsdecode(item) for item in tracked.stdout.split(b"\0") if item),
                 *(os.fsdecode(item) for item in untracked.stdout.split(b"\0") if item),
-                *(os.fsdecode(item) for item in ignored.stdout.split(b"\0") if item),
             )
             if path
         )
@@ -793,6 +870,7 @@ class Controller:
         """Capture bounded repository directory topology without following links."""
 
         workspace = capsule.workspace_path
+        tracked_paths, ignored_paths = self._git_workspace_filter(workspace)
         directories: set[str] = set()
         entries_seen = 0
         pending: list[tuple[Path, int]] = [(workspace, 0)]
@@ -804,13 +882,15 @@ class Controller:
             except OSError as exc:
                 raise ControllerError("unable to inspect workspace directory topology") from exc
             for entry in entries:
-                entries_seen += 1
-                if entries_seen > _MAX_WORKSPACE_SCAN_ENTRIES:
-                    raise ControllerError("workspace directory topology exceeds the entry limit")
                 path = Path(entry.path)
                 relative = path.relative_to(workspace).as_posix()
                 if len(os.fsencode(relative)) > _MAX_WORKSPACE_PATH_BYTES:
                     raise ControllerError("workspace directory topology contains an overlong path")
+                if self._path_is_ignored(workspace, relative, tracked_paths, ignored_paths):
+                    continue
+                entries_seen += 1
+                if entries_seen > _MAX_WORKSPACE_SCAN_ENTRIES:
+                    raise ControllerError("workspace directory topology exceeds the entry limit")
                 try:
                     metadata = entry.stat(follow_symlinks=False)
                 except OSError as exc:
@@ -854,8 +934,23 @@ class Controller:
         internal = Path(".codex-flow")
         return candidate == internal or internal in candidate.parents
 
-    @staticmethod
-    def _path_signature(path: Path) -> str:
+    def _path_signature(
+        self,
+        path: Path,
+        *,
+        workspace: Path | None = None,
+        tracked_paths: frozenset[str] | None = None,
+        ignored_paths: frozenset[str] | None = None,
+    ) -> str:
+        workspace = path if workspace is None else workspace
+        if tracked_paths is None or ignored_paths is None:
+            tracked_paths, ignored_paths = self._git_workspace_filter(workspace)
+        try:
+            root_relative = path.relative_to(workspace).as_posix()
+        except ValueError:
+            root_relative = ""
+        if root_relative and self._path_is_ignored(workspace, root_relative, tracked_paths, ignored_paths):
+            return "ignored"
         try:
             metadata = os.lstat(path)
         except FileNotFoundError:
@@ -874,6 +969,26 @@ class Controller:
             for current, directories, files in os.walk(path, followlinks=False):
                 directories.sort()
                 files.sort()
+                directories[:] = [
+                    name
+                    for name in directories
+                    if not self._path_is_ignored(
+                        workspace,
+                        (Path(current) / name).relative_to(workspace).as_posix(),
+                        tracked_paths,
+                        ignored_paths,
+                    )
+                ]
+                files[:] = [
+                    name
+                    for name in files
+                    if not self._path_is_ignored(
+                        workspace,
+                        (Path(current) / name).relative_to(workspace).as_posix(),
+                        tracked_paths,
+                        ignored_paths,
+                    )
+                ]
                 for name in (*directories, *files):
                     entry_count += 1
                     if entry_count > _MAX_WORKSPACE_SCAN_ENTRIES:
@@ -915,7 +1030,15 @@ class Controller:
             if self._is_controller_path(capsule.workspace_path, relative):
                 continue
             self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
-            facts.append((relative, self._path_signature(capsule.workspace_path / relative)))
+            facts.append(
+                (
+                    relative,
+                    self._path_signature(
+                        capsule.workspace_path / relative,
+                        workspace=capsule.workspace_path,
+                    ),
+                )
+            )
         by_path = dict(facts)
         for relative, signature in self._directory_topology_changes(capsule, baseline_head):
             by_path.setdefault(relative, signature)
@@ -923,11 +1046,30 @@ class Controller:
 
     def _owned_workspace_snapshot(self, capsule: ExecutionCapsule) -> tuple[tuple[str, str], ...]:
         workspace_device = os.stat(capsule.workspace_path).st_dev
+        tracked_paths, ignored_paths = self._git_workspace_filter(capsule.workspace_path)
         facts: list[tuple[str, str]] = []
         for relative in sorted(capsule.mutable_paths):
+            if self._path_is_ignored(capsule.workspace_path, relative, tracked_paths, ignored_paths):
+                continue
             self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
-            self._assert_safe_tree(capsule.workspace_path / relative, workspace_device)
-            facts.append((relative, self._path_signature(capsule.workspace_path / relative)))
+            self._assert_safe_tree(
+                capsule.workspace_path / relative,
+                workspace_device,
+                workspace=capsule.workspace_path,
+                tracked_paths=tracked_paths,
+                ignored_paths=ignored_paths,
+            )
+            facts.append(
+                (
+                    relative,
+                    self._path_signature(
+                        capsule.workspace_path / relative,
+                        workspace=capsule.workspace_path,
+                        tracked_paths=tracked_paths,
+                        ignored_paths=ignored_paths,
+                    ),
+                )
+            )
         return tuple(facts)
 
     def _assert_predecessor_terminal_authority(
@@ -941,6 +1083,24 @@ class Controller:
         current_git = git_authority_snapshot(capsule.workspace_path).sha256
         for predecessor in predecessors:
             predecessor_capsule = self._load_durable_capsule(predecessor)
+            app_native = self.ledger.get_app_native_for_execution(predecessor.run_id, predecessor.milestone_id)
+            if app_native is not None:
+                if (
+                    app_native.state is not AppNativeState.COMPLETED
+                    or app_native.workspace_terminal_head_sha is None
+                    or app_native.workspace_terminal is None
+                    or app_native.git_authority_after_sha256 is None
+                ):
+                    raise ControllerError(
+                        "App-native predecessor terminal authority is unavailable; explicit reconciliation is required"
+                    )
+                if current_head != app_native.workspace_terminal_head_sha:
+                    raise ControllerError("App-native predecessor terminal Git HEAD changed before successor start")
+                if current_git != app_native.git_authority_after_sha256:
+                    raise ControllerError("App-native predecessor Git authority changed before successor start")
+                if self._owned_workspace_snapshot(predecessor_capsule) != app_native.workspace_terminal:
+                    raise ControllerError("App-native predecessor-owned content changed before successor start")
+                continue
             integrity = self.ledger.get_execution_integrity(predecessor.run_id, predecessor.milestone_id)
             if (
                 integrity.workspace_terminal_head_sha is None
@@ -957,10 +1117,26 @@ class Controller:
             if self._owned_workspace_snapshot(predecessor_capsule) != integrity.workspace_terminal:
                 raise ControllerError("predecessor-owned terminal workspace content changed before successor start")
 
-    @staticmethod
-    def _assert_safe_tree(root: Path, workspace_device: int) -> None:
+    def _assert_safe_tree(
+        self,
+        root: Path,
+        workspace_device: int,
+        *,
+        workspace: Path | None = None,
+        tracked_paths: frozenset[str] | None = None,
+        ignored_paths: frozenset[str] | None = None,
+    ) -> None:
         """Reject symlink traversal and multiply-linked files in mutable roots."""
 
+        workspace = root if workspace is None else workspace
+        if tracked_paths is None or ignored_paths is None:
+            tracked_paths, ignored_paths = self._git_workspace_filter(workspace)
+        try:
+            root_relative = root.relative_to(workspace).as_posix()
+        except ValueError:
+            root_relative = ""
+        if root_relative and self._path_is_ignored(workspace, root_relative, tracked_paths, ignored_paths):
+            return
         pending: list[tuple[Path, int]] = [(root, 0)]
         entries_seen = 0
         while pending:
@@ -987,10 +1163,13 @@ class Controller:
             except OSError as exc:
                 raise ControllerError(f"unable to inspect mutable path: {root}") from exc
             for entry in entries:
+                child = Path(entry.path)
+                child_relative = child.relative_to(workspace).as_posix()
+                if self._path_is_ignored(workspace, child_relative, tracked_paths, ignored_paths):
+                    continue
                 entries_seen += 1
                 if entries_seen > _MAX_WORKSPACE_SCAN_ENTRIES:
                     raise ControllerError(f"mutable path exceeds the entry limit: {root}")
-                child = Path(entry.path)
                 relative = child.relative_to(root)
                 if len(os.fsencode(relative.as_posix())) > _MAX_WORKSPACE_PATH_BYTES:
                     raise ControllerError(f"mutable path contains an overlong entry: {root}")
@@ -1064,9 +1243,17 @@ class Controller:
         prior = dict(baseline)
         changes = frozenset(path for path in current.keys() | prior.keys() if current.get(path) != prior.get(path))
         workspace_device = os.stat(capsule.workspace_path).st_dev
+        tracked_paths, ignored_paths = self._git_workspace_filter(capsule.workspace_path)
         for relative in capsule.mutable_paths:
-            self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
-            self._assert_safe_tree(capsule.workspace_path / relative, workspace_device)
+            if not self._path_is_ignored(capsule.workspace_path, relative, tracked_paths, ignored_paths):
+                self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
+            self._assert_safe_tree(
+                capsule.workspace_path / relative,
+                workspace_device,
+                workspace=capsule.workspace_path,
+                tracked_paths=tracked_paths,
+                ignored_paths=ignored_paths,
+            )
         for relative in changes:
             if not self._is_controller_path(capsule.workspace_path, relative):
                 self._assert_safe_changed_path(capsule.workspace_path, relative, workspace_device)
@@ -1155,6 +1342,171 @@ class Controller:
             raise ControllerError("Git authority changed from its durable baseline before external call")
         if protected != current.protected_before_sha256:
             raise ControllerError("protected paths changed from their durable baseline before external call")
+
+    def _app_controller_state_digest(self) -> str:
+        snapshot = {
+            path: digest
+            for path, digest in self._controller_tree_snapshot(self.state_root).items()
+            if path != ".codex-flow/controller.lock" and not path.startswith(".codex-flow/workflow.db")
+        }
+        return _digest_bytes(_canonical_json(snapshot))
+
+    def prepare_app_native(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> AppNativeDispatchRecord:
+        """Prepare one visible App task without constructing or calling an SDK adapter."""
+
+        with self._mutation_lock():
+            record = self.ledger.get_execution(run_id, milestone_id)
+            existing = self.ledger.get_app_native_for_execution(record.run_id, record.milestone_id)
+            if existing is not None:
+                return existing
+            if record.status is not ExecutionStatus.PLANNED:
+                raise ControllerError("App-native prepare cannot replace an SDK-headless execution")
+            capsule = self._load_durable_capsule(record)
+            if capsule.workspace_mode is WorkspaceMode.MANAGED_WORKTREE:
+                raise ControllerError("App-native dispatch requires an already selected existing checkout")
+            if capsule.output_schema != model_facing_result_schema():
+                raise ControllerError("App-native dispatch requires the ModelFacingResult output contract")
+            self._worktrees.select(capsule)
+            self._assert_protected_clean(capsule)
+            predecessors = self.ledger.completed_workspace_predecessors(
+                capsule.run_id, capsule.milestone_id, capsule.workspace_path
+            )
+            self._assert_predecessor_terminal_authority(capsule, predecessors)
+            prior_roots = {
+                mutable
+                for predecessor in predecessors
+                for mutable in self._load_durable_capsule(predecessor).mutable_paths
+            }
+            trusted_roots = tuple(sorted((*prior_roots, *capsule.mutable_paths)))
+            self._assert_workspace_history(capsule, capsule.base_sha, trusted_roots)
+            self._assert_mutation_scope(capsule, capsule.base_sha, (), trusted_roots)
+            self.ledger.acquire_workspace_lease(capsule)
+            baseline_head = self._git_output(capsule.workspace_path, "rev-parse", "HEAD")
+            baseline, git_before, protected = self._stable_workspace_authority(capsule, baseline_head)
+            if protected != record.protected_before_sha256:
+                raise ControllerError("protected paths changed between App-native plan and prepare")
+            dispatch_id = DispatchId.from_parts(capsule.run_id, capsule.milestone_id, "executor", 1)
+            action = AppNativeTaskAction(
+                1,
+                dispatch_id,
+                secrets.token_hex(32),
+                secrets.token_hex(32),
+                capsule.model,
+                capsule.reasoning_effort,
+                capsule.workspace_path,
+                capsule.prompt,
+                capsule.output_schema,
+            )
+            return self.ledger.prepare_app_native_dispatch(
+                capsule.run_id,
+                capsule.milestone_id,
+                action,
+                workspace_baseline_head_sha=baseline_head,
+                workspace_baseline=baseline,
+                git_authority_before_sha256=git_before,
+                controller_state_sha256=self._app_controller_state_digest(),
+            )
+
+    def bind_app_native(
+        self,
+        dispatch_id: DispatchId | str,
+        *,
+        claim_token: str,
+        receipt: HostReceipt,
+    ) -> AppNativeDispatchRecord:
+        with self._mutation_lock():
+            return self.ledger.bind_app_native_dispatch(
+                dispatch_id,
+                claim_token=claim_token,
+                receipt=receipt,
+            )
+
+    def complete_app_native(
+        self,
+        dispatch_id: DispatchId | str,
+        *,
+        claim_token: str,
+        identity: HostIdentity,
+        result: ModelFacingResult,
+    ) -> AppNativeDispatchRecord:
+        """Validate and durably ingest one exact result from the bound App worker."""
+
+        with self._mutation_lock():
+            current = self.ledger.get_app_native_dispatch(dispatch_id)
+            if not secrets.compare_digest(current.action.claim_token, claim_token):
+                raise ControllerError("App-native result capability does not match its prepared action")
+            if current.state is AppNativeState.CANCELLED:
+                raise ControllerError("cancelled App-native dispatch rejects late native results")
+            if current.identity != identity:
+                raise ControllerError("App-native result does not match the bound host identity")
+            if current.result is not None:
+                if current.result != result:
+                    raise ControllerError("App-native dispatch already owns a different terminal result")
+                return current
+            claim = self.ledger.get_dispatch(dispatch_id)
+            execution = self.ledger.get_execution(claim.run_id, claim.milestone_id)
+            capsule = self._load_durable_capsule(execution)
+            self._worktrees.select(capsule)
+            validation = _run_validation(capsule.validation, capsule.workspace_path)
+            integrity_failed = False
+            try:
+                protected_after = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+                self._assert_workspace_history(capsule, current.workspace_baseline_head_sha)
+                self._assert_mutation_scope(
+                    capsule,
+                    current.workspace_baseline_head_sha,
+                    current.workspace_baseline,
+                )
+                git_after = git_authority_snapshot(capsule.workspace_path).sha256
+                if git_after != current.git_authority_before_sha256:
+                    raise ControllerError("Git authority changed during App-native execution")
+                if protected_after != execution.protected_before_sha256:
+                    raise ControllerError("protected paths changed during App-native execution")
+                if self._app_controller_state_digest() != current.controller_state_sha256:
+                    raise ControllerError("controller state changed during App-native execution")
+            except Exception:
+                integrity_failed = True
+                protected_after = execution.protected_before_sha256
+                git_after = current.git_authority_before_sha256
+            if integrity_failed:
+                validation = ValidationObservation(
+                    validation.argv,
+                    validation.exit_code if validation.exit_code != 0 else 125,
+                    validation.stdout_sha256,
+                    validation.stderr_sha256,
+                    validation.timed_out,
+                    validation.duration_seconds,
+                    ValidationFailureCode.INTEGRITY_FAILURE,
+                )
+            passed = (
+                validation.exit_code == 0
+                and not validation.timed_out
+                and result.status.value == "completed"
+                and all(item.passed for item in result.validations)
+            )
+            terminal_head: str | None = None
+            terminal_workspace: tuple[tuple[str, str], ...] | None = None
+            if passed:
+                terminal_head = self._git_output(capsule.workspace_path, "rev-parse", "HEAD")
+                terminal_workspace = self._owned_workspace_snapshot(capsule)
+                if git_authority_snapshot(capsule.workspace_path).sha256 != git_after:
+                    raise ControllerError("Git authority changed during App-native terminal capture")
+            terminal = self.ledger.record_app_native_result(
+                dispatch_id,
+                claim_token=claim_token,
+                identity=identity,
+                result=result,
+                validation=validation,
+                protected_after_sha256=protected_after,
+                git_authority_after_sha256=git_after,
+                workspace_terminal_head_sha=terminal_head,
+                workspace_terminal=terminal_workspace,
+            )
+            self._project_execution(self.ledger.get_execution(claim.run_id, claim.milestone_id))
+            return terminal
+
+    def app_native_status(self, dispatch_id: DispatchId | str) -> AppNativeDispatchRecord:
+        return self.ledger.get_app_native_dispatch(dispatch_id)
 
     def start(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> ExecutionRecord:
         with self._mutation_lock():

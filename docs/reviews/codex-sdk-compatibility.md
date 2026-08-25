@@ -64,3 +64,10 @@ The evidence JSON records every required and optional capability with one of
 Thread creation alone is not evidence for Desktop, queue wake, remote host,
 review delivery, skill execution, or permission-profile survival. Those checks
 remain outside H1's transport contract and are not silently inferred.
+
+H6-C retains this SDK-headless transport unchanged and adds a separate
+host-mediated App-native mode. App-native prepare never imports or calls the
+SDK adapter and never discovers or attaches to a private app-server socket; it
+returns a typed action for the hosting Codex app. Accordingly, a successful
+SDK thread remains no evidence of Desktop visibility, and the visible-App gate
+requires its own real host-native pilot.

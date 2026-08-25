@@ -25,7 +25,7 @@ from codex_flow.ledger import Ledger
 
 def test_workflow_toml_has_typed_routes_and_fail_closed_limits() -> None:
     config = load_workflow_config(Path(__file__).parents[1] / "workflow.toml")
-    assert config.route("executor").model == "gpt-5.6-luna"
+    assert config.route("executor").role == RoleId("executor")
     assert config.route("code-reviewer").reasoning_effort.value == "xhigh"
     assert config.limits.budget().max_repairs == 1
     assert Budget(max_turns=0).exhausted() is BudgetExhaustion.TURNS
