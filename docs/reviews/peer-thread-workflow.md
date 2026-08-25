@@ -904,6 +904,28 @@ reviewers, notification failure, and result ordering, plus one disposable real
 SDK milestone that is rejected, repaired, separately code/visual reviewed, and
 accepted with durable evidence.
 
+### Completion evidence
+
+Status: H4 is complete and accepted at implementation commit `662d006`.
+H4-A established the objective rejection/repair/re-review walking skeleton;
+H4-B derives distinct executor, objective/code, visual, architecture, recovery,
+and decision authorities from capsule modes and `workflow.toml`, requires every
+declared authority to accept, and fails closed on missing or aliased roles.
+
+The retained real multi-authority pilot at
+`docs/reviews/evidence/h4-b-multi-authority-pilot.json` used the Python SDK and
+`codex-lb` on one reused thread for two turns. It made an observable authorized
+edit, fixed rendered evidence by digest, passed independent objective and
+visual review, received an architecture rejection, durably recorded a
+boundary-preserving `CONTINUE_WITH_REPLAN`, repaired in the same workspace, and
+reached `ACCEPTED` after fresh distinct-authority re-review. Evidence contains
+only sanitized hashes, counts, route, lifecycle kinds, and terminal status.
+Planning independently reran the 11 focused H4 tests and full `make check` with
+286 tests plus formatting, lint, cross-skill validation, compileall, and
+pre-commit; the exact worktree is clean and H4-A evidence is unchanged. No
+finding is known to block H5. This closes H4 without claiming H5 packaging or
+H6 integrated-pilot/retirement work.
+
 Successor: H5.
 
 ## Milestone H5 — Reduce workflow instructions to cognitive roles
@@ -1351,16 +1373,30 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   the same durable owner, passed a fresh read-only re-review, and reached
   `ACCEPTED`. H4-A is promoted as the walking skeleton; H4-B is now executable
   without another H3 or H4-A review cycle.
+- 2026-08-25: H4-B implementation `662d006` completes the multi-authority
+  workflow. Capsules now derive fail-closed distinct executor, objective/code,
+  visual, architecture, recovery, and decision routes; immutable rendered
+  evidence, finding survival/new-scope lineage, non-blocking deferral,
+  boundary-preserving architecture replans, planner decisions, and result-before-
+  projection artifacts share the accepted H4/SQLite authority. Planning
+  verified the sanitized real pilot, 11 focused tests, full `make check` with
+  286 tests, exact diff hygiene, H4-A evidence preservation, and a clean
+  worktree. The pilot reused one SDK thread for two `codex-lb` turns and reached
+  `ACCEPTED` after objective/visual review, architecture rejection,
+  `CONTINUE_WITH_REPLAN`, same-workspace repair, and fresh all-authority
+  re-review. H4 is complete; H5 is the next program milestone but was not
+  authorized for dispatch by the H4-only continuation request.
 
 ## Next execution
 
-Milestone: H4-B — visual and architecture authorities, bounded recovery and
-planner decisions, and the full multi-authority H4 scenario.
+Milestone: H5 — reduce workflow instructions to cognitive roles and make the
+controller path agent-usable through the packaged plugin.
 
 Resolved route: `model=gpt-5.6-luna`, `thinking=xhigh`.
 
-Routing authorization: repository `AGENTS.md` substantial-milestone policy and
-the user's explicit instruction to continue with H4.
+Routing authorization: repository `AGENTS.md` substantial-milestone policy.
+Dispatch is pending explicit user authorization because the completed request
+was scoped to H4; do not create an H5 peer from this plan update alone.
 
 Planning thread: `01a035b4-1503-7d83-b11a-b36354bd2025` on host `local`.
 
@@ -1376,49 +1412,49 @@ Execution workspace:
 - base SHA: `6a2ac17`
 - lane: `python-sdk-controller`
 
-Starting state: accepted H4-A implementation
-`fafa29bada958247616bea11f5277e0be6db86ea`, plus the local canonical-plan
+Starting state: accepted H4 implementation
+`662d006733bfbc5eab205df0fd8100c7386a41c8`, plus the local canonical-plan
 transition commit produced by this planning task. Reuse this worktree and
 branch; do not create another Git worktree or duplicate its controller state.
 
-Owned surfaces: H4 role/acceptance configuration and typed contracts; the
-existing controller, SQLite H4 fact authority, artifact projection, and SDK
-adapter extensions required for visual/architecture/recovery/decision roles;
-fixed rendered pilot evidence; focused H4 tests; compatibility documentation;
-one sanitized retained H4-B evidence artifact. The executor owns
-implementation, tests, ordinary same-owner repair, self-review, safe local
-commits, and exactly one terminal callback.
+Owned surfaces: the `plan-work`, `execute-milestone`, and
+`codex-thread-handoff` workflow skills; one new minimal `workflow-control`
+skill; plugin manifest/version/marketplace metadata required to package that
+path; prompt-input fixtures and budgets; CLI help/docs; controller model-facing
+capsule/result schemas; focused H5 tests and retained evidence. Once dispatched,
+the executor owns implementation, tests, ordinary same-owner repair,
+self-review, safe local commits, and exactly one terminal callback.
 
-Protected surfaces: accepted H4-A objective semantics and retained evidence;
-H5 plugin packaging and workflow-skill simplification; H6 medium/large pilots
-and legacy retirement; the sole Python SDK/bundled-app-server transport; native Codex
-provider/config/discovery/permission inheritance; existing retained H3
-sentinel evidence; primary checkout; remotes; global Codex state; plugins,
-hooks, manifests, templates, dependency files, and unrelated repository paths.
-No push, merge, rebase, stash, discard, plugin installation, remote mutation,
-or broad H3 review.
+Protected surfaces: accepted H3/H4 controller semantics and retained evidence;
+all audit skills unrelated to the three workflow roles; H6 medium/large pilots,
+compatibility verdict, and legacy retirement; the sole Python SDK/bundled-app-
+server transport; native Codex provider/config/discovery/permission
+inheritance; installed plugin caches and global Codex state; primary checkout;
+remotes; downstream pins; and unrelated repository paths. No push, merge,
+rebase, stash, discard, plugin installation/trust, global or remote mutation,
+or legacy deletion.
 
-Acceptance: capsules derive distinct required authorities from objective,
-visual, and architecture modes; all declared modes must accept and authority
-aliasing or unavailable routes fail closed. One full real disposable
-Python-SDK/`codex-lb` scenario executes an observable repository change,
-retains fixed rendered evidence, passes independent objective and visual
-review, receives an architecture rejection, records a bounded
-`CONTINUE_WITH_REPLAN`, repairs in the same semantic workspace, receives fresh
-distinct-authority re-review, and reaches final acceptance. Finding lineage,
-new-versus-surviving scope, non-blocking deferral, planner/recovery decisions,
-budgets, events, results, and projections remain causal and durable.
-Hermetic scenarios prove `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, `FAILED`, stale
-authority, route unavailability, limit exhaustion, and notification failure do
-not collapse into replan or acceptance. Focused/full gates pass, retained
-evidence is sanitized and truthful, the worktree is clean, and self-review has
-zero findings blocking H5.
+Acceptance: `plan-work` owns intent, decomposition, acceptance modes, and one
+decision-ready capsule; `execute-milestone` owns only implementation judgment
+inside that capsule; `workflow-control` invokes `codex-flow` and reports durable
+status. Native task creation, callbacks, recovery routing, attempt loops, and
+ledger/state-machine prose disappear from the default model-visible skills only
+after controller reachability is proven. One explicit legacy command remains
+reachable through H6, with no hidden dual routing. Typed Python is the authoring
+surface and JSON/JSONL only serialization. Measured prompt fixtures contain the
+intended skill once, explicit acceptance and protected surfaces, distinct
+objective/visual/architecture authorities, completion-biased recovery, no
+obsolete peer-transport protocol, and an enforced before/after size budget.
+Plugin/package validation, CLI help/install, legacy reachability, focused/full
+gates, and one real medium milestone initiated by an agent through
+`workflow-control`/`codex-flow` all pass with retained sanitized evidence and a
+clean worktree.
 
 Escalate only for a genuinely underdetermined product/public-contract/security
 decision, missing user authority, an external prerequisite, or proven
-infeasibility. Concrete inherited defects reached by H4-B are classified and
-repaired when they block this slice; they do not authorize reopening an
-unbounded earlier-milestone audit.
+infeasibility. Concrete inherited defects reached by H5 are classified and
+repaired when they block controller reachability or H6; they do not authorize
+reopening an unbounded earlier-milestone audit or deleting legacy behavior.
 
 Completion callback:
 `threadId=01a035b4-1503-7d83-b11a-b36354bd2025`, `hostId=local`. Send exactly
