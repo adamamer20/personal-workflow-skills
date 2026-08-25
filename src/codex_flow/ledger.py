@@ -22,7 +22,11 @@ from typing import Any, Literal
 
 from .domain import (
     TERMINAL_STATES,
+    Budget,
+    BudgetExhaustion,
     ControllerCheckpoint,
+    DecisionRequest,
+    DecisionResponse,
     DispatchClaim,
     DispatchId,
     EventId,
@@ -36,6 +40,8 @@ from .domain import (
     JsonObject,
     LedgerSnapshot,
     LifecycleEvent,
+    LifecyclePhase,
+    LifecycleRecord,
     MilestoneId,
     MilestoneRecord,
     NativePermissionAuthority,
@@ -43,6 +49,7 @@ from .domain import (
     PreIdentityTransportFailure,
     ReasonCode,
     ReasoningEffort,
+    RecoveryDecision,
     RecoveryFact,
     ReviewRejected,
     RoleId,
@@ -546,6 +553,30 @@ def _decode_json_object(raw: str | None, *, field_name: str) -> JsonObject | Non
     return decoded
 
 
+def _encode_h4_event_data(value: Mapping[str, object]) -> tuple[JsonObject, str]:
+    """Encode the one explicitly owned non-empty event envelope."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError("H4 event data must be a mapping")
+    try:
+        decoded = strict_json_loads(_encode_json(dict(value)))
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("H4 event data must be interoperable JSON") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("H4 event data must be a JSON object")
+    envelope: JsonObject = {"__h4": decoded}
+    return envelope, _encode_json(envelope)
+
+
+def _decode_event_data(raw: str | None) -> JsonObject | None:
+    if raw is None:
+        return None
+    decoded = _decode_json_object(raw, field_name="event data")
+    if decoded is None or set(decoded) != {"__h4"} or not isinstance(decoded["__h4"], dict):
+        raise SchemaError("event data contains unsupported durable content")
+    return decoded
+
+
 def _sha256(value: str, *, field_name: str) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
@@ -767,6 +798,7 @@ class Ledger:
             self._connection = connection
             connection = None
             self._ensure_schema()
+            self._ensure_h4_store()
             self._validate_live_identity()
             if self._expected_identity is None:
                 self._expected_identity = identity
@@ -800,6 +832,25 @@ class Ledger:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
+
+    def _ensure_h4_store(self) -> None:
+        """Attach the H4 fact store without changing the frozen H3 schema."""
+
+        connection = self._db()
+        sidecar = self.path.with_name(self.path.name + ".h4")
+        try:
+            metadata = os.lstat(sidecar)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise SchemaError("H4 fact store is not a single-link regular file")
+        except FileNotFoundError:
+            pass
+        connection.execute("ATTACH DATABASE ? AS h4", (str(sidecar),))
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS h4.lifecycle ("
+            "run_id TEXT NOT NULL, milestone_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+            "phase TEXT NOT NULL, kind TEXT NOT NULL, data_json TEXT NOT NULL, occurred_at TEXT NOT NULL, "
+            "PRIMARY KEY(run_id, milestone_id, sequence))"
+        )
 
     def _cleanup_failed_first_open(self) -> None:
         if self._database_fd is None or not self._directory_fds or self._open_identity is None:
@@ -2097,6 +2148,253 @@ class Ledger:
             data,
         )
         return self._verify_event(expected)
+
+    # ------------------------------------------------------------------
+    # H4 typed review/repair/recovery facts
+    # ------------------------------------------------------------------
+
+    def record_h4_transition(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        to_state: WorkflowState | str,
+        *,
+        expected_state: WorkflowState | str,
+        phase: LifecyclePhase | str,
+        kind: str,
+        data: Mapping[str, object],
+        reason: WorkflowReason | ReasonCode | str | BaseException | None = None,
+    ) -> EventRecord:
+        """Persist one H4 fact and its state transition atomically.
+
+        H2 callers continue to reject arbitrary event payloads.  H4 callers
+        use this explicit envelope so review, repair, budget, and recovery
+        facts remain causally ordered in the existing SQLite ledger.
+        """
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        target = coerce_state(to_state)
+        expected_value = coerce_state(expected_state)
+        try:
+            phase_value = phase if isinstance(phase, LifecyclePhase) else LifecyclePhase(phase)
+        except ValueError as exc:
+            raise ValueError(f"unknown H4 lifecycle phase: {phase!r}") from exc
+        if not isinstance(kind, str) or not kind or len(kind) > 128 or any(character.isspace() for character in kind):
+            raise ValueError("H4 lifecycle kind must be a bounded whitespace-free string")
+        if not isinstance(data, Mapping):
+            raise TypeError("H4 lifecycle data must be a mapping")
+        payload = {
+            "schema": "codex-flow/h4/v1",
+            "phase": phase_value.value,
+            "kind": kind,
+            "payload": dict(data),
+        }
+        normalized_reason = _reason(reason)
+        if normalized_reason is None and target in TERMINAL_STATES:
+            normalized_reason = WorkflowReason(ReasonCode.TERMINAL_OUTCOME)
+        with self._transaction():
+            current = self.get_milestone(run, milestone)
+            if current.state is not expected_value:
+                raise StaleWriter(f"stale H4 writer: expected {expected_value.value}, current is {current.state.value}")
+            if not is_transition_allowed(current.state, target):
+                raise InvalidTransition(f"{current.state.value} -> {target.value} is not allowed")
+            now = utc_now()
+            self._db().execute(
+                "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (target.value, now, str(run), str(milestone)),
+            )
+            self._fault("after_state_update")
+            event = self._append_event_in_transaction(
+                run,
+                milestone,
+                from_state=current.state,
+                to_state=target,
+                event_type="state_transition",
+                reason=normalized_reason,
+                dispatch_id=None,
+                data=None,
+            )
+            _envelope, encoded = _encode_h4_event_data(payload)
+            self._db().execute(
+                "INSERT INTO h4.lifecycle(run_id, milestone_id, sequence, phase, kind, data_json, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(run), str(milestone), int(event.sequence), phase_value.value, kind, encoded, now),
+            )
+            self._fault("after_event_insert")
+            return self._verify_event(event)
+
+    def h4_lifecycle(self, run_id: RunId | str, milestone_id: MilestoneId | str) -> tuple[LifecycleRecord, ...]:
+        """Read H4 facts from the authoritative event stream in sequence order."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        rows = (
+            self._db()
+            .execute(
+                "SELECT sequence, phase, kind, data_json FROM h4.lifecycle "
+                "WHERE run_id = ? AND milestone_id = ? ORDER BY sequence",
+                (str(run), str(milestone)),
+            )
+            .fetchall()
+        )
+        records: list[LifecycleRecord] = []
+        for row in rows:
+            envelope = _decode_event_data(row["data_json"])
+            if envelope is None:
+                raise SchemaError("H4 event envelope is missing")
+            body = envelope.get("__h4")
+            if not isinstance(body, dict) or body.get("schema") != "codex-flow/h4/v1":
+                raise SchemaError("H4 event envelope is invalid")
+            phase = body.get("phase")
+            kind = body.get("kind")
+            payload = body.get("payload")
+            if not isinstance(phase, str) or not isinstance(kind, str) or not isinstance(payload, dict):
+                raise SchemaError("H4 event envelope has invalid typed fields")
+            if str(row["phase"]) != phase or str(row["kind"]) != kind:
+                raise SchemaError("H4 lifecycle index disagrees with its typed envelope")
+            records.append(LifecycleRecord(LifecyclePhase(phase), kind, int(row["sequence"]), payload))
+        return tuple(records)
+
+    def record_h4_fact(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        phase: LifecyclePhase | str,
+        kind: str,
+        data: Mapping[str, object],
+    ) -> LifecycleRecord:
+        """Persist a typed H4 fact that does not itself change workflow state."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        phase_value = phase if isinstance(phase, LifecyclePhase) else LifecyclePhase(phase)
+        if not isinstance(kind, str) or not kind or len(kind) > 128 or any(character.isspace() for character in kind):
+            raise ValueError("H4 lifecycle kind must be a bounded whitespace-free string")
+        payload = {
+            "schema": "codex-flow/h4/v1",
+            "phase": phase_value.value,
+            "kind": kind,
+            "payload": dict(data),
+        }
+        envelope, encoded = _encode_h4_event_data(payload)
+        with self._transaction():
+            self.get_milestone(run, milestone)
+            row = (
+                self._db()
+                .execute(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM h4.lifecycle WHERE run_id = ? AND milestone_id = ?",
+                    (str(run), str(milestone)),
+                )
+                .fetchone()
+            )
+            sequence = int(row[0]) + 1
+            occurred_at = utc_now()
+            self._db().execute(
+                "INSERT INTO h4.lifecycle(run_id, milestone_id, sequence, phase, kind, data_json, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(run), str(milestone), sequence, phase_value.value, kind, encoded, occurred_at),
+            )
+        body = envelope["__h4"]
+        if not isinstance(body, dict) or not isinstance(body.get("payload"), dict):
+            raise CorruptSchemaError("H4 fact envelope has an invalid payload")
+        return LifecycleRecord(phase_value, kind, sequence, body["payload"])
+
+    def record_h4_recovery(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        decision: RecoveryDecision,
+    ) -> LifecycleRecord:
+        return self.record_h4_fact(
+            run_id,
+            milestone_id,
+            phase=LifecyclePhase.RECOVERY,
+            kind="recovery_decision",
+            data={
+                "outcome": decision.outcome.value,
+                "rationale": decision.rationale,
+                "checkpoint": decision.checkpoint,
+                "finding_ids": list(decision.finding_ids),
+                "external_prerequisite": decision.external_prerequisite,
+                "decision_request_id": decision.decision_request_id,
+            },
+        )
+
+    def record_h4_decision_request(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        request: DecisionRequest,
+    ) -> LifecycleRecord:
+        return self.record_h4_fact(
+            run_id,
+            milestone_id,
+            phase=LifecyclePhase.DECISION,
+            kind="decision_request",
+            data={
+                "request_id": request.request_id,
+                "question": request.question,
+                "options": list(request.options),
+                "blocking": request.blocking,
+            },
+        )
+
+    def record_h4_decision_response(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        response: DecisionResponse,
+    ) -> LifecycleRecord:
+        requests = [
+            record
+            for record in self.h4_lifecycle(run_id, milestone_id)
+            if record.kind == "decision_request" and record.data.get("request_id") == response.request_id
+        ]
+        if not requests:
+            raise RecordNotFound(f"decision request {response.request_id} does not exist")
+        options = requests[-1].data.get("options")
+        if not isinstance(options, list | tuple) or response.choice not in options:
+            raise ValueError("decision response choice is not one of the persisted request options")
+        return self.record_h4_fact(
+            run_id,
+            milestone_id,
+            phase=LifecyclePhase.DECISION,
+            kind="decision_response",
+            data={
+                "request_id": response.request_id,
+                "choice": response.choice,
+                "rationale": response.rationale,
+            },
+        )
+
+    def record_h4_budget(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        budget: Budget,
+        exhaustion: BudgetExhaustion | None = None,
+    ) -> LifecycleRecord:
+        return self.record_h4_fact(
+            run_id,
+            milestone_id,
+            phase=LifecyclePhase.BUDGET,
+            kind="budget_snapshot",
+            data={
+                "max_turns": budget.max_turns,
+                "max_repairs": budget.max_repairs,
+                "max_reviews": budget.max_reviews,
+                "max_compactions": budget.max_compactions,
+                "max_validations": budget.max_validations,
+                "turns": budget.turns,
+                "repairs": budget.repairs,
+                "reviews": budget.reviews,
+                "compactions": budget.compactions,
+                "validations": budget.validations,
+                "exhaustion": exhaustion.value if exhaustion is not None else None,
+            },
+        )
 
     # ------------------------------------------------------------------
     # H3 controller facts

@@ -1,0 +1,28 @@
+{
+  "accepted_state": "ACCEPTED",
+  "authorized_changed_paths": [
+    "M objective.txt",
+    "?? .codex-flow/"
+  ],
+  "base_sha": "0fbb00da509d553e597e01fff552719bdb16f445",
+  "final_file_sha256": "aa6083f3a3c96f3860a4977f429ed51841511a3716ea3537472fea4365781e2b",
+  "lifecycle_kinds": [
+    "objective_completed",
+    "review_started",
+    "review_rejected",
+    "repair_completed",
+    "repair_execution_completed",
+    "review_started",
+    "review_accepted"
+  ],
+  "model": "gpt-5.6-luna",
+  "observable_edit": true,
+  "provider_route": "codex-lb",
+  "reasoning_effort": "xhigh",
+  "repair_count": 1,
+  "review_count": 2,
+  "same_owner_repair": true,
+  "sdk_turns": 2,
+  "status": "passed",
+  "thread_started": true
+}

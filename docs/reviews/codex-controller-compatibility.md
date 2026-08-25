@@ -169,3 +169,28 @@ repository-external writes.
 Desktop visibility, idle wake, remote hosts, permission-profile survival, and
 native review remain outside H3. Later milestones must label each as proven,
 unsupported, not exposed, or not run; none is inferred from local SDK success.
+
+## H4-A objective walking skeleton
+
+H4-A adds `workflow.toml` as the typed role/limit authority and layers typed
+review finding, repair, recovery, decision, budget, and lifecycle contracts on
+the existing controller and SQLite path. H3's schema-v8 tables and the sole
+Python SDK transport remain unchanged; H4 lifecycle facts are atomically
+attached to the same SQLite connection in the controller-owned `.h4` fact
+store, while state transitions remain authoritative in the H3 ledger.
+
+The bounded walking skeleton is objective execution -> fresh read-only review
+-> one deliberate promotion-blocking rejection -> same durable-owner repair ->
+fresh read-only re-review -> acceptance. Finding identity, causal class,
+severity, promotion impact/reason, evidence, criterion, optional `defer_to`,
+and exact-prior-repair survival are typed and retained. Recovery outcomes keep
+`CONTINUE_WITH_REPLAN`, `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, and `FAILED`
+distinct; stale review and exhausted limits are separately classified.
+
+The one authorized real disposable pilot is retained at
+`docs/reviews/evidence/h4-a-objective-pilot.json`. It used the Python SDK and
+`codex-lb`, made an observable authorized edit, rejected the first review,
+repaired through the same SDK thread, passed a fresh re-review, and finished in
+`ACCEPTED` with two SDK turns and one repair. Evidence is sanitized to hashes,
+counts, lifecycle kinds, route, and status; no provider prose or credentials
+are persisted.

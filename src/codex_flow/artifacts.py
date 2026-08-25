@@ -14,10 +14,12 @@ from typing import Any
 from .domain import (
     DispatchClaim,
     EventRecord,
+    H4LifecycleResult,
     LedgerSnapshot,
     MilestoneRecord,
     RunId,
     WorkflowReason,
+    thaw_json,
 )
 from .ledger import Ledger
 
@@ -351,3 +353,51 @@ def write_owned_artifact(
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def write_h4_review_artifact(
+    repository_root: str | Path,
+    run_id: RunId | str,
+    milestone_id: str,
+    result: H4LifecycleResult,
+) -> Path:
+    """Project one sanitized H4 result after its ledger facts are committed."""
+
+    if not milestone_id or any(character in milestone_id for character in "/\\"):
+        raise UnsafeArtifactPath("milestone id is not a safe artifact path component")
+    payload: dict[str, Any] = {
+        "schema": "codex-flow/h4-review/v1",
+        "status": result.status,
+        "accepted": result.accepted,
+        "review_ids": list(result.review_ids),
+        "finding_ids": list(result.finding_ids),
+        "repair_ids": list(result.repair_ids),
+        "recovery": (
+            {
+                "outcome": result.recovery.outcome.value,
+                "rationale": result.recovery.rationale,
+                "checkpoint": result.recovery.checkpoint,
+                "finding_ids": list(result.recovery.finding_ids),
+                "external_prerequisite": result.recovery.external_prerequisite,
+                "decision_request_id": result.recovery.decision_request_id,
+            }
+            if result.recovery is not None
+            else None
+        ),
+        "lifecycle": [
+            {
+                "phase": record.phase.value,
+                "kind": record.kind,
+                "sequence": record.sequence,
+                "data": thaw_json(record.data),
+            }
+            for record in result.lifecycle
+        ],
+    }
+    content = _canonical_json(payload).encode("utf-8")
+    return write_owned_artifact(
+        repository_root,
+        Path(".codex-flow") / "runs" / str(run_id) / "milestones" / milestone_id / "review.json",
+        content,
+        replace=True,
+    )

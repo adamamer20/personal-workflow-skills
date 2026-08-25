@@ -12,6 +12,7 @@ import typer
 from .controller import Controller, ControllerError, execution_json, load_capsule
 from .controller_sentinel import run_controller_sentinel, write_controller_evidence
 from .domain import ExecutionRecord, ReasoningEffort
+from .h4_pilot import run_h4_objective_pilot
 from .sentinel import run_real_sentinel, write_evidence
 
 app = typer.Typer(no_args_is_help=True, help="SDK-first Codex workflow tooling.")
@@ -179,6 +180,33 @@ def controller_sentinel(
         raise typer.Exit(code=2)
     evidence = run_controller_sentinel(model=model, effort=effort)
     write_controller_evidence(output, evidence)
+    typer.echo(f"wrote {output}")
+    typer.echo(f"status={evidence['status']}")
+    if evidence["status"] != "passed":
+        raise typer.Exit(code=1)
+
+
+@app.command("h4-pilot")
+def h4_pilot(
+    real: Annotated[bool, typer.Option(help="Explicitly authorize the disposable real SDK pilot.")] = False,
+    model: Annotated[str, typer.Option(help="Explicit model id; no default substitution.")] = ...,
+    effort: Annotated[
+        ReasoningEffort,
+        typer.Option(help="Explicit reasoning effort; no default substitution."),
+    ] = ...,
+    output: Annotated[
+        Path,
+        typer.Option(help="Retained sanitized H4-A pilot evidence path."),
+    ] = Path("docs/reviews/evidence/h4-a-objective-pilot.json"),
+) -> None:
+    """Run one bounded objective/review/repair/fresh-review SDK pilot."""
+
+    if not real and os.environ.get("CODEX_FLOW_REAL_SDK") != "1":
+        typer.echo("refusing real SDK start: pass --real or CODEX_FLOW_REAL_SDK=1")
+        raise typer.Exit(code=2)
+    evidence = run_h4_objective_pilot(model=model, effort=effort)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n")
     typer.echo(f"wrote {output}")
     typer.echo(f"status={evidence['status']}")
     if evidence["status"] != "passed":

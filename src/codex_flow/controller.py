@@ -12,26 +12,38 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
 
-from .artifacts import write_owned_artifact
+from .artifacts import write_h4_review_artifact, write_owned_artifact
 from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
+from .config import WorkflowConfig
 from .domain import (
+    Budget,
     ControllerCheckpoint,
     ExecutionCapsule,
     ExecutionRecord,
     ExecutionStatus,
+    H4LifecycleResult,
     JsonObject,
+    LifecyclePhase,
+    LifecycleRecord,
     MilestoneId,
     NativePermissionAuthority,
     NativePermissionMode,
     ReasonCode,
     ReasoningEffort,
+    RecoveryDecision,
+    RecoveryOutcome,
+    RepairRecord,
+    ReviewFinding,
+    ReviewResult,
     RunId,
     Schema,
+    TerminalFailureAfterIdentity,
     ThreadIdentity,
+    TransportFailureBeforeIdentity,
     TurnObservation,
     ValidationFailureCode,
     ValidationObservation,
@@ -496,6 +508,11 @@ class Controller:
 
     def close(self) -> None:
         self.ledger.close()
+
+    def h4_walking_skeleton(self, config: WorkflowConfig | None = None) -> H4WalkingSkeleton:
+        """Return the H4 orchestration view over this controller's ledger."""
+
+        return H4WalkingSkeleton(self.ledger, self.state_root, config)
 
     def _fault(self, stage: str) -> None:
         if self._fault_injector is not None:
@@ -1629,3 +1646,436 @@ def execution_json(record: ExecutionRecord) -> JsonObject:
         "created_at": record.created_at,
         "updated_at": record.updated_at,
     }
+
+
+class H4WalkingSkeleton:
+    """Objective execution/review/repair loop over the existing SDK ledger.
+
+    The callbacks are deliberately narrow seams: the executor may call the
+    existing :class:`Controller`/SDK adapter, while reviewers receive only a
+    revision token and can never mutate the workspace through this class.
+    """
+
+    def __init__(self, ledger: Ledger, repository_root: str | Path, config: WorkflowConfig | None = None) -> None:
+        self.ledger = ledger
+        self.repository_root = Path(repository_root).resolve()
+        self.config = config
+
+    @staticmethod
+    def classify_recovery(
+        *,
+        intent_unchanged: bool = True,
+        contract_unchanged: bool = True,
+        security_boundary_unchanged: bool = True,
+        cost_unchanged: bool = True,
+        destructive_behavior_unchanged: bool = True,
+        scope_unchanged: bool = True,
+        underdetermined: bool = False,
+        external_prerequisite: str | None = None,
+        proven_infeasible: bool = False,
+        checkpoint: str = "durable_checkpoint",
+    ) -> RecoveryDecision:
+        """Classify recovery deterministically without attempt counters."""
+
+        if external_prerequisite is not None:
+            return RecoveryDecision(
+                RecoveryOutcome.EXTERNAL_BLOCKED,
+                "an external prerequisite is unavailable",
+                checkpoint,
+                external_prerequisite=external_prerequisite,
+            )
+        if underdetermined:
+            return RecoveryDecision(
+                RecoveryOutcome.NEEDS_DECISION,
+                "accepted intent or authority is underdetermined",
+                checkpoint,
+                decision_request_id="decision-required",
+            )
+        if proven_infeasible:
+            return RecoveryDecision(
+                RecoveryOutcome.FAILED,
+                "evidence shows the accepted goal is infeasible under its constraints",
+                checkpoint,
+            )
+        unchanged = (
+            intent_unchanged,
+            contract_unchanged,
+            security_boundary_unchanged,
+            cost_unchanged,
+            destructive_behavior_unchanged,
+            scope_unchanged,
+        )
+        if all(unchanged):
+            return RecoveryDecision(
+                RecoveryOutcome.CONTINUE_WITH_REPLAN,
+                "the accepted contract and safety boundary remain unchanged",
+                checkpoint,
+            )
+        return RecoveryDecision(
+            RecoveryOutcome.CHANGE_STRATEGY,
+            "implementation strategy must change while the accepted outcome remains fixed",
+            checkpoint,
+        )
+
+    @staticmethod
+    def _finding_json(finding: ReviewFinding) -> JsonObject:
+        return {
+            "finding_id": finding.finding_id,
+            "causal_class": finding.causal_class.value,
+            "severity": finding.severity.value,
+            "promotion_blocking": finding.promotion_blocking,
+            "promotion_reason": finding.promotion_reason,
+            "evidence": thaw_json(finding.evidence),
+            "criterion": finding.criterion,
+            "defer_to": finding.defer_to,
+            "survives_prior_repair": finding.survives_prior_repair,
+        }
+
+    @classmethod
+    def _review_json(cls, result: ReviewResult) -> JsonObject:
+        return {
+            "review_id": result.review_id,
+            "reviewer_role": str(result.reviewer_role),
+            "accepted": result.accepted,
+            "reviewed_revision": result.reviewed_revision,
+            "fresh": result.fresh,
+            "read_only": result.read_only,
+            "prior_review_id": result.prior_review_id,
+            "findings": [cls._finding_json(finding) for finding in result.findings],
+        }
+
+    def _project_result(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        status: str,
+        accepted: bool,
+        reviews: tuple[ReviewResult, ...],
+        repairs: tuple[RepairRecord, ...],
+        recovery: RecoveryDecision | None = None,
+    ) -> H4LifecycleResult:
+        if recovery is not None:
+            self.ledger.record_h4_recovery(run_id, milestone_id, recovery)
+        lifecycle = tuple(
+            LifecycleRecord(
+                record.phase,
+                record.kind,
+                record.sequence,
+                thaw_json(record.data),
+            )
+            for record in self.ledger.h4_lifecycle(run_id, milestone_id)
+        )
+        result = H4LifecycleResult(
+            status,
+            accepted,
+            tuple(review.review_id for review in reviews),
+            tuple(finding.finding_id for review in reviews for finding in review.findings),
+            tuple(repair.repair_id for repair in repairs),
+            lifecycle,
+            recovery,
+        )
+        write_h4_review_artifact(self.repository_root, run_id, str(milestone_id), result)
+        return result
+
+    def run(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        objective: Callable[[], JsonObject],
+        reviewer: Callable[[str, bool], ReviewResult],
+        repair: Callable[[ReviewFinding], RepairRecord],
+        current_revision: Callable[[], str],
+        budget: Budget | None = None,
+    ) -> H4LifecycleResult:
+        """Run one bounded objective -> review -> repair -> fresh review loop."""
+
+        active_budget = budget or Budget(max_turns=2, max_repairs=1, max_reviews=2, max_validations=2)
+        current = self.ledger.current_state(run_id, milestone_id)
+        if current is WorkflowState.PLANNED:
+            self.ledger.claim_dispatch(run_id, milestone_id, "executor", 1)
+            self.ledger.transition(run_id, milestone_id, WorkflowState.RUNNING, expected_state=WorkflowState.STARTING)
+            current = WorkflowState.RUNNING
+        if current is not WorkflowState.RUNNING:
+            raise ControllerError(f"H4 objective requires RUNNING workflow state, found {current.value}")
+        exhausted = active_budget.exhausted()
+        if exhausted is not None:
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint=f"budget:{exhausted.value}")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.RUNNING,
+                phase=LifecyclePhase.BUDGET,
+                kind="limit_exhausted",
+                data={"limit": exhausted.value},
+                reason=ReasonCode.EXECUTION_FAILURE,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status="limit_exhausted",
+                accepted=False,
+                reviews=(),
+                repairs=(),
+                recovery=recovery,
+            )
+        active_budget = replace(active_budget, turns=active_budget.turns + 1)
+        try:
+            objective_output = objective()
+            if not isinstance(objective_output, Mapping):
+                raise ValueError("objective output must be a JSON object")
+        except (TransportFailureBeforeIdentity, TerminalFailureAfterIdentity) as exc:
+            recovery = self.classify_recovery(
+                checkpoint="objective_transport_boundary",
+            )
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.RUNNING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="transport_failure",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.TRANSPORT_FAILURE,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status="transport_failure",
+                accepted=False,
+                reviews=(),
+                repairs=(),
+                recovery=recovery,
+            )
+        except Exception as exc:
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint="objective_failure")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.RUNNING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="objective_failed",
+                data={"exception_class": type(exc).__name__},
+                reason=ReasonCode.EXECUTION_FAILURE,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status="failed",
+                accepted=False,
+                reviews=(),
+                repairs=(),
+                recovery=recovery,
+            )
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.COMPLETED,
+            expected_state=WorkflowState.RUNNING,
+            phase=LifecyclePhase.EXECUTION,
+            kind="objective_completed",
+            data={"output": dict(objective_output)},
+        )
+
+        reviews: list[ReviewResult] = []
+        repairs: list[RepairRecord] = []
+        revision = current_revision()
+        if active_budget.reviews >= active_budget.max_reviews:
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint="review_limit")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.COMPLETED,
+                phase=LifecyclePhase.BUDGET,
+                kind="limit_exhausted",
+                data={"limit": "reviews"},
+                reason=ReasonCode.EXECUTION_FAILURE,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status="limit_exhausted",
+                accepted=False,
+                reviews=(),
+                repairs=(),
+                recovery=recovery,
+            )
+        active_budget = replace(active_budget, reviews=active_budget.reviews + 1)
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.REVIEWING,
+            expected_state=WorkflowState.COMPLETED,
+            phase=LifecyclePhase.REVIEW,
+            kind="review_started",
+            data={"review_index": 1, "revision": revision, "read_only": True},
+        )
+        first = reviewer(revision, True)
+        if first.reviewed_revision != revision or not first.fresh or not first.read_only:
+            recovery = self.classify_recovery(checkpoint="stale_review")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.REPAIR_REQUIRED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="stale_review",
+                data={
+                    "review_id": first.review_id,
+                    "expected_revision": revision,
+                    "reviewed_revision": first.reviewed_revision,
+                },
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status="stale_review",
+                accepted=False,
+                reviews=(first,),
+                repairs=(),
+                recovery=recovery,
+            )
+        reviews.append(first)
+        blockers = first.promotion_blockers
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.REPAIR_REQUIRED if blockers else WorkflowState.ACCEPTED,
+            expected_state=WorkflowState.REVIEWING,
+            phase=LifecyclePhase.REVIEW,
+            kind="review_rejected" if blockers else "review_accepted",
+            data={"review": self._review_json(first)},
+            reason=ReasonCode.REVIEW_REJECTED if blockers else ReasonCode.TERMINAL_OUTCOME,
+        )
+        if not blockers:
+            return self._project_result(
+                run_id, milestone_id, status="accepted", accepted=True, reviews=tuple(reviews), repairs=()
+            )
+
+        if len(blockers) > active_budget.max_repairs - active_budget.repairs:
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint="repair_limit")
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status="limit_exhausted",
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=(),
+                recovery=recovery,
+            )
+        finding = blockers[0]
+        repair_record = repair(finding)
+        if repair_record.finding_id != finding.finding_id or not repair_record.same_owner:
+            raise ControllerError("repair must acknowledge the exact finding and same durable owner")
+        repairs.append(repair_record)
+        active_budget = replace(active_budget, repairs=active_budget.repairs + 1)
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.RUNNING,
+            expected_state=WorkflowState.REPAIR_REQUIRED,
+            phase=LifecyclePhase.REPAIR,
+            kind="repair_completed",
+            data={
+                "repair_id": repair_record.repair_id,
+                "finding_id": repair_record.finding_id,
+                "same_owner": repair_record.same_owner,
+                "outcome": repair_record.outcome,
+            },
+            reason=ReasonCode.REVIEW_REJECTED,
+        )
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.COMPLETED,
+            expected_state=WorkflowState.RUNNING,
+            phase=LifecyclePhase.EXECUTION,
+            kind="repair_execution_completed",
+            data={"repair_id": repair_record.repair_id},
+        )
+        fresh_revision = current_revision()
+        if active_budget.reviews >= active_budget.max_reviews:
+            raise ControllerError("H4 review limit exhausted before fresh re-review")
+        active_budget = replace(active_budget, reviews=active_budget.reviews + 1)
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.REVIEWING,
+            expected_state=WorkflowState.COMPLETED,
+            phase=LifecyclePhase.REVIEW,
+            kind="review_started",
+            data={"review_index": 2, "revision": fresh_revision, "read_only": True, "fresh": True},
+        )
+        second = reviewer(fresh_revision, True)
+        if second.reviewed_revision != fresh_revision or not second.fresh or not second.read_only:
+            recovery = self.classify_recovery(checkpoint="stale_re_review")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.REPAIR_REQUIRED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="stale_review",
+                data={
+                    "review_id": second.review_id,
+                    "expected_revision": fresh_revision,
+                    "reviewed_revision": second.reviewed_revision,
+                },
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            reviews.append(second)
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status="stale_review",
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                recovery=recovery,
+            )
+        prior_ids = {finding.finding_id for finding in first.findings}
+        for finding in second.findings:
+            if finding.finding_id in prior_ids and not finding.survives_prior_repair:
+                raise ControllerError("a surviving finding must explicitly survive the exact prior repair")
+            if finding.finding_id not in prior_ids and finding.survives_prior_repair:
+                raise ControllerError("new review scope cannot masquerade as a surviving finding")
+        reviews.append(second)
+        if second.promotion_blockers:
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint="re_review_rejected")
+            self.ledger.record_h4_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="re_review_rejected",
+                data={"review": self._review_json(second)},
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status="rejected_after_repair",
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                recovery=recovery,
+            )
+        self.ledger.record_h4_transition(
+            run_id,
+            milestone_id,
+            WorkflowState.ACCEPTED,
+            expected_state=WorkflowState.REVIEWING,
+            phase=LifecyclePhase.ACCEPTANCE,
+            kind="review_accepted",
+            data={"review": self._review_json(second), "same_owner_repair": True},
+            reason=ReasonCode.TERMINAL_OUTCOME,
+        )
+        return self._project_result(
+            run_id, milestone_id, status="accepted", accepted=True, reviews=tuple(reviews), repairs=tuple(repairs)
+        )

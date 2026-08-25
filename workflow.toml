@@ -1,0 +1,37 @@
+version = 1
+
+[roles.planner]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[roles.executor]
+model = "gpt-5.6-luna"
+reasoning_effort = "xhigh"
+
+[roles.code-reviewer]
+model = "gpt-5.6-luna"
+reasoning_effort = "xhigh"
+
+[roles.visual-reviewer]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[roles.architecture-reviewer]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[roles.recovery]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[roles.decision]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[limits]
+max_turns = 4
+max_repairs = 1
+max_reviews = 2
+max_compactions = 1
+max_validations = 2
+wall_clock_seconds = 900

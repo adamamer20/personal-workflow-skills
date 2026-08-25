@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | dict[str, "JsonValue"] | list["JsonValue"]
@@ -513,6 +513,91 @@ class WorkflowState(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class AcceptanceMode(str, Enum):
+    """Independent acceptance authorities a milestone may require."""
+
+    OBJECTIVE = "objective"
+    VISUAL = "visual"
+    ARCHITECTURE = "architecture"
+
+
+class FindingCausalClass(str, Enum):
+    """Causal classes used to diagnose a review finding without attempt counts."""
+
+    IMPLEMENTATION = "implementation"
+    CONTRACT = "contract"
+    ACCEPTANCE = "acceptance"
+    SECURITY = "security"
+    ENVIRONMENT = "environment"
+    TRANSPORT = "transport"
+    REVIEW = "review"
+    STALE_REVIEW = "stale_review"
+
+
+class Severity(str, Enum):
+    """Severity is intentionally independent from successor promotion impact."""
+
+    P0 = "P0"
+    P1 = "P1"
+    P2 = "P2"
+    P3 = "P3"
+
+
+# Short aliases keep the public contract readable for callers that use the
+# plan's prose names rather than the longer enum class names.
+CausalClass = FindingCausalClass
+FindingSeverity = Severity
+
+
+class RecoveryOutcome(str, Enum):
+    """Typed recovery outcomes; terminal and non-terminal meanings are distinct."""
+
+    FINISH_LOCALLY = "finish_locally"
+    CHANGE_STRATEGY = "change_strategy"
+    CONTINUE_WITH_REPLAN = "continue_with_replan"
+    NEEDS_DECISION = "needs_decision"
+    EXTERNAL_BLOCKED = "external_blocked"
+    FAILED = "failed"
+
+
+class LifecyclePhase(str, Enum):
+    """Durable H4 walking-skeleton phases."""
+
+    EXECUTION = "execution"
+    REVIEW = "review"
+    REPAIR = "repair"
+    RECOVERY = "recovery"
+    DECISION = "decision"
+    BUDGET = "budget"
+    ACCEPTANCE = "acceptance"
+
+
+class BudgetExhaustion(str, Enum):
+    """Which bounded resource stopped another external turn."""
+
+    TURNS = "turns"
+    REPAIRS = "repairs"
+    REVIEWS = "reviews"
+    COMPACTIONS = "compactions"
+    VALIDATIONS = "validations"
+    WALL_CLOCK = "wall_clock"
+
+
+class LifecycleStatus(str, Enum):
+    """Observable result labels kept distinct from recovery decisions."""
+
+    ACCEPTED = "accepted"
+    CONTINUE_WITH_REPLAN = "continue_with_replan"
+    NEEDS_DECISION = "needs_decision"
+    EXTERNAL_BLOCKED = "external_blocked"
+    FAILED = "failed"
+    CONTEXT_ROLLOVER = "context_rollover"
+    TRANSPORT_FAILURE = "transport_failure"
+    STALE_REVIEW = "stale_review"
+    LIMIT_EXHAUSTED = "limit_exhausted"
+    REJECTED_AFTER_REPAIR = "rejected_after_repair"
+
+
 TERMINAL_STATES: frozenset[WorkflowState] = frozenset(
     {WorkflowState.ACCEPTED, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED}
 )
@@ -626,6 +711,270 @@ class ReviewRejected(WorkflowReason):
 class TerminalOutcome(WorkflowReason):
     def __init__(self) -> None:
         super().__init__(ReasonCode.TERMINAL_OUTCOME)
+
+
+def _required_text(value: str, *, label: str, limit: int = 4096) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > limit or "\x00" in value:
+        raise ValueError(f"{label} must be a bounded non-empty string")
+    return value
+
+
+def _owned_json_object(value: Mapping[str, object], *, label: str) -> JsonObject:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    try:
+        frozen = freeze_json(dict(value))
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"{label} must contain interoperable JSON") from exc
+    if not isinstance(frozen, Mapping):  # pragma: no cover - guarded above
+        raise ValueError(f"{label} must be a JSON object")
+    return cast(JsonObject, frozen)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewFinding:
+    """A stable, independently reviewable finding."""
+
+    finding_id: str
+    causal_class: FindingCausalClass
+    severity: Severity
+    promotion_blocking: bool
+    promotion_reason: str
+    evidence: JsonObject
+    criterion: str
+    defer_to: str | None = None
+    survives_prior_repair: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.finding_id, str) or _ID_PATTERN.fullmatch(self.finding_id) is None:
+            raise ValueError("finding id must be a stable bounded identifier")
+        if not isinstance(self.causal_class, FindingCausalClass):
+            raise ValueError("finding causal class must be typed")
+        if not isinstance(self.severity, Severity):
+            raise ValueError("finding severity must be typed")
+        if not isinstance(self.promotion_blocking, bool):
+            raise ValueError("promotion_blocking must be boolean")
+        _required_text(self.promotion_reason, label="promotion reason")
+        _required_text(self.criterion, label="acceptance criterion")
+        if self.defer_to is not None:
+            _required_text(self.defer_to, label="defer_to", limit=256)
+        object.__setattr__(self, "evidence", _owned_json_object(self.evidence, label="finding evidence"))
+
+    @property
+    def blocks_successor(self) -> bool:
+        return self.promotion_blocking
+
+    @property
+    def id(self) -> str:
+        return self.finding_id
+
+    @property
+    def reason(self) -> str:
+        return self.promotion_reason
+
+    @property
+    def promotion_impact(self) -> bool:
+        return self.promotion_blocking
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewResult:
+    """Read-only reviewer output whose freshness is explicit and durable."""
+
+    review_id: str
+    reviewer_role: RoleId
+    accepted: bool
+    findings: tuple[ReviewFinding, ...]
+    reviewed_revision: str
+    fresh: bool = True
+    read_only: bool = True
+    prior_review_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _required_text(self.review_id, label="review id", limit=256)
+        _required_text(self.reviewed_revision, label="reviewed revision", limit=256)
+        if not isinstance(self.reviewer_role, RoleId):
+            object.__setattr__(self, "reviewer_role", RoleId(self.reviewer_role))
+        findings = tuple(self.findings)
+        if len({finding.finding_id for finding in findings}) != len(findings):
+            raise ValueError("review findings must have unique stable identities")
+        if not self.read_only:
+            raise ValueError("review result must declare read-only authority")
+        if self.accepted and any(finding.promotion_blocking for finding in findings):
+            raise ValueError("accepted review cannot contain promotion-blocking findings")
+        object.__setattr__(self, "findings", findings)
+
+    @property
+    def promotion_blockers(self) -> tuple[ReviewFinding, ...]:
+        return tuple(finding for finding in self.findings if finding.promotion_blocking)
+
+
+@dataclass(frozen=True, slots=True)
+class RepairRecord:
+    """Durable repair acknowledgement, normally owned by the original executor."""
+
+    repair_id: str
+    finding_id: str
+    owner_dispatch_id: DispatchId
+    action: str
+    outcome: str
+    same_owner: bool = True
+    prior_finding_survives: bool = False
+
+    def __post_init__(self) -> None:
+        _required_text(self.repair_id, label="repair id", limit=256)
+        if not isinstance(self.finding_id, str) or not self.finding_id:
+            raise ValueError("repair finding id must be non-empty")
+        _required_text(self.action, label="repair action")
+        _required_text(self.outcome, label="repair outcome")
+        if not isinstance(self.owner_dispatch_id, DispatchId):
+            object.__setattr__(self, "owner_dispatch_id", DispatchId(self.owner_dispatch_id))
+        if self.same_owner is not True:
+            raise ValueError("H4-A repairs must remain with the durable owner")
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryDecision:
+    """A typed diagnosis; only the three terminal outcomes are user-visible."""
+
+    outcome: RecoveryOutcome
+    rationale: str
+    checkpoint: str
+    finding_ids: tuple[str, ...] = ()
+    external_prerequisite: str | None = None
+    decision_request_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.outcome, RecoveryOutcome):
+            object.__setattr__(self, "outcome", RecoveryOutcome(self.outcome))
+        _required_text(self.rationale, label="recovery rationale")
+        _required_text(self.checkpoint, label="recovery checkpoint", limit=256)
+        if self.outcome is RecoveryOutcome.EXTERNAL_BLOCKED and not self.external_prerequisite:
+            raise ValueError("external-blocked recovery requires an actionable prerequisite")
+        if self.outcome is RecoveryOutcome.NEEDS_DECISION and not self.decision_request_id:
+            raise ValueError("needs-decision recovery requires a durable decision request")
+        object.__setattr__(self, "finding_ids", tuple(self.finding_ids))
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionRequest:
+    """Durable user decision request; notification is never authoritative."""
+
+    request_id: str
+    question: str
+    options: tuple[str, ...]
+    blocking: bool = True
+
+    def __post_init__(self) -> None:
+        _required_text(self.request_id, label="decision request id", limit=256)
+        _required_text(self.question, label="decision question")
+        options = tuple(_required_text(option, label="decision option", limit=512) for option in self.options)
+        if not options or len(set(options)) != len(options):
+            raise ValueError("decision request options must be unique and non-empty")
+        object.__setattr__(self, "options", options)
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionResponse:
+    """A validated response to a previously persisted decision request."""
+
+    request_id: str
+    choice: str
+    rationale: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.request_id, label="decision request id", limit=256)
+        _required_text(self.choice, label="decision choice", limit=512)
+        _required_text(self.rationale, label="decision rationale")
+
+
+@dataclass(frozen=True, slots=True)
+class Budget:
+    """Bounded resource usage with fail-closed checks before external turns."""
+
+    max_turns: int = 1
+    max_repairs: int = 1
+    max_reviews: int = 2
+    max_compactions: int = 1
+    max_validations: int = 2
+    wall_clock_seconds: float = 900.0
+    turns: int = 0
+    repairs: int = 0
+    reviews: int = 0
+    compactions: int = 0
+    validations: int = 0
+    elapsed_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in ("max_turns", "max_repairs", "max_reviews", "max_compactions", "max_validations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not math.isfinite(self.wall_clock_seconds) or self.wall_clock_seconds <= 0:
+            raise ValueError("wall_clock_seconds must be positive")
+        for name in ("turns", "repairs", "reviews", "compactions", "validations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not math.isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0:
+            raise ValueError("elapsed_seconds must be non-negative")
+
+    def exhausted(self) -> BudgetExhaustion | None:
+        checks = (
+            (self.turns, self.max_turns, BudgetExhaustion.TURNS),
+            (self.repairs, self.max_repairs, BudgetExhaustion.REPAIRS),
+            (self.reviews, self.max_reviews, BudgetExhaustion.REVIEWS),
+            (self.compactions, self.max_compactions, BudgetExhaustion.COMPACTIONS),
+            (self.validations, self.max_validations, BudgetExhaustion.VALIDATIONS),
+        )
+        for used, limit, kind in checks:
+            if used >= limit:
+                return kind
+        if self.elapsed_seconds >= self.wall_clock_seconds:
+            return BudgetExhaustion.WALL_CLOCK
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleRecord:
+    """One durable H4 fact projected from authoritative ledger events."""
+
+    phase: LifecyclePhase
+    kind: str
+    sequence: int
+    data: JsonObject
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.phase, LifecyclePhase):
+            object.__setattr__(self, "phase", LifecyclePhase(self.phase))
+        _required_text(self.kind, label="lifecycle kind", limit=128)
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
+            raise ValueError("lifecycle sequence must be a positive integer")
+        object.__setattr__(self, "data", _owned_json_object(self.data, label="lifecycle data"))
+
+
+@dataclass(frozen=True, slots=True)
+class H4LifecycleResult:
+    """Observable terminal walking-skeleton result."""
+
+    status: LifecycleStatus | str
+    accepted: bool
+    review_ids: tuple[str, ...]
+    finding_ids: tuple[str, ...]
+    repair_ids: tuple[str, ...]
+    lifecycle: tuple[LifecycleRecord, ...]
+    recovery: RecoveryDecision | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, LifecycleStatus):
+            try:
+                object.__setattr__(self, "status", LifecycleStatus(self.status))
+            except ValueError as exc:
+                raise ValueError("unknown H4 lifecycle status") from exc
+        object.__setattr__(self, "review_ids", tuple(self.review_ids))
+        object.__setattr__(self, "finding_ids", tuple(self.finding_ids))
+        object.__setattr__(self, "repair_ids", tuple(self.repair_ids))
+        object.__setattr__(self, "lifecycle", tuple(self.lifecycle))
 
 
 @dataclass(frozen=True, slots=True)
