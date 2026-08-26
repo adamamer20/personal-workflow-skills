@@ -79,6 +79,14 @@ controller re-arming. Do not use `wait_threads`, repeated status reads or an
 open controller turn for supervision; checkpoint and terminal wake-ups must be
 harness-owned and App-independent.
 
+The model owns capsule intent, not capsule serialization. In the normal
+plan-driven path `workflow-control` receives the canonical plan path and exact
+milestone id; a closed harness parser compiles the single typed
+`ModelFacingCapsule` and owns JSON projection, identities, routing and durable
+digests. Do not ask a model to copy a capsule into a sidecar JSON. Retain the
+explicit `--capsule` entrypoint only for low-level integration tests and callers
+that already own a typed serialized contract.
+
 Existing plugin hooks, workflow/audit skills, manifests, validators, the
 protected primary checkout, remotes, global Codex state, downstream
 repositories, and later milestones remain protected unless the canonical plan

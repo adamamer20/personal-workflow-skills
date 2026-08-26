@@ -2587,6 +2587,16 @@ path; objective and architecture reviews remain pending until that gap closes.
   capability. Direct `codex exec` is not a production or recovery execution
   path unless a harness-owned wrapper binds and ingests its result before the
   process is released.
+- The planner owns the typed capsule content but not its serialization. The
+  normal `plan-work` to `workflow-control` path passes only the canonical plan
+  path and exact milestone id. A closed, non-executing AST parser accepts one
+  exact `ModelFacingCapsule(...)` constructor from that active milestone,
+  rejects arbitrary Python, duplicate/ambiguous blocks and plan revision drift,
+  then the controller serializes the JSON projection below `.codex-flow` and
+  binds its digest. Models do not hand-author sidecar JSON, run ids, milestone
+  ids, workspace routes, source identity, permissions or callback facts.
+  `--capsule` remains only an explicit low-level/testing input; it is not the
+  normal plan-driven workflow.
 - `CODEX_THREAD_ID`, when present at `codex-flow control` enqueue, is captured
   by the controller as a host-owned source identity. It is not authored in the
   model-facing capsule, copied into a worker prompt or guessed from App state.
@@ -2706,6 +2716,7 @@ ModelFacingCapsule(
     ),
     decomposition=(
         "Add the crash-atomic v11 source-identity, worker-liveness, one-shot controller checkpoint and terminal-wake outbox contract with exact idempotency and restart reconciliation.",
+        "Connect plan-work to workflow-control through a closed harness-owned canonical-plan capsule compiler so models never copy or serialize runtime capsule JSON.",
         "Capture the host-owned source thread and effective native permission authority at enqueue, preserve its monotonic sandbox/approval boundary in the shared leaf worker, and deliver one bounded terminal wake-up by resuming the exact standard SDK source thread.",
         "Atomically release only pre-authorized successor and parallel review dispatches after terminal result commit, while workers remain capability-bound leaves.",
         "Run exact-wheel/service, App-closed continuation and later App-visible callback pilots plus failure-injection gates before parallel independent reviews.",
@@ -2713,6 +2724,7 @@ ModelFacingCapsule(
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
         "Worker prompts contain no callback, peer-message, result-routing or successor responsibility; the production SDK worker submits exactly one schema-bounded result through capability-bound IPC and the harness durably closes it.",
+        "The normal workflow-control command accepts canonical plan path plus exact milestone id, compiles one closed typed ModelFacingCapsule without eval/exec or hand-authored JSON, and durably binds the plan revision and generated projection digest before enqueue.",
         "The controller captures CODEX_THREAD_ID as a host-owned enqueue fact and a detached shared-session SDK notifier resumes that exact source task once, with no private home, App dependency, auth copy, or model/effort/cwd/global override.",
         "The detached worker inherits the controller's effective native sandbox and approval authority instead of hardcoding workspace-write: danger-full-access remains available when natively granted, while profile drift or an explicitly narrower capsule can only reduce authority before thread creation.",
         "A configurable one-shot controller checkpoint defaults to 30 minutes: while the dispatch remains nonterminal it wakes the source controller once with harness-owned liveness facts, never polls Codex tasks or mutates the worker, and repeats only after explicit controller re-arming.",
@@ -2730,6 +2742,7 @@ ModelFacingCapsule(
         "src/codex_flow/worker.py",
         "src/codex_flow/ipc.py",
         "src/codex_flow/service.py",
+        "src/codex_flow/plan_capsule.py",
         "src/codex_flow/backends/codex_sdk.py",
         "src/codex_flow/contracts.py",
         "src/codex_flow/config.py",
@@ -2745,6 +2758,11 @@ ModelFacingCapsule(
         "tests/test_h6_service.py",
         "tests/test_h6_ipc.py",
         "tests/test_h6_visible_sdk.py",
+        "tests/test_h6_plan_capsule.py",
+        "plugins/personal-workflow-skills/skills/plan-work/SKILL.md",
+        "plugins/personal-workflow-skills/skills/plan-work/agents/openai.yaml",
+        "plugins/personal-workflow-skills/skills/workflow-control/SKILL.md",
+        "plugins/personal-workflow-skills/skills/workflow-control/agents/openai.yaml",
         "docs/reviews/codex-controller-compatibility.md",
         "docs/reviews/evidence/h6-e-detached-supervisor.json",
     ),
@@ -2757,7 +2775,7 @@ ModelFacingCapsule(
         "src/codex_flow/worktrees.py",
         "src/codex_flow/app_native.py",
         "src/codex_flow/h6_pilot.py",
-        "plugins",
+        "plugins/personal-workflow-skills/skills/codex-thread-handoff",
         "skills",
         "docs/reviews/evidence/h1-sdk-sentinel.json",
         "docs/reviews/evidence/h4-a-objective-pilot.json",
@@ -2771,7 +2789,7 @@ ModelFacingCapsule(
     prompt=(
         "Use execute-milestone and implement only H6-E-W from the canonical plan in the existing python-sdk-controller worktree. "
         "Preserve the complete H6-E-V donor and committed plan. Remove all callback responsibility from worker prompts: result ingress, successor release and controller wake-up are harness-owned. "
-        "Add the v11 source identity, effective native permission binding, process/lease liveness, one-shot 30-minute controller checkpoint and terminal wake outbox; preserve danger-full-access when natively granted without ever broadening authority, resume the exact source controller through the shared standard SDK, and release only pre-authorized successors. "
+        "Add the closed canonical-plan capsule compiler plus v11 source identity, effective native permission binding, process/lease liveness, one-shot 30-minute controller checkpoint and terminal wake outbox; preserve danger-full-access when natively granted without ever broadening authority, resume the exact source controller through the shared standard SDK, and release only pre-authorized successors. "
         "Keep workers leaf and create no subagents, peer tasks or reviews. Do not modify protected/global state, copy auth, use App polling or introduce another transport. "
         "Run the bounded deterministic gates and prepare the exact installed-wheel App-closed/App-reopen pilot; if closing the App requires user action, return one precise pilot command/checkpoint rather than weakening or simulating the gate. "
         "Return exactly one raw schema-v1 ModelFacingResult; objective and architecture reviews remain controller-owned and pending."
