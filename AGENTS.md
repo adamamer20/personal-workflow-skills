@@ -51,17 +51,33 @@ code. The planning task owns architecture, scope changes, milestone ordering,
 the plan, and this instruction file. Each execution task owns exactly one
 decision-ready milestone and may not expand into a later milestone.
 
-The `openai-codex` adapter is the only headless Codex transport. App-visible
-execution uses one controller-owned App-native dispatch boundary: the
-controller prepares and claims a typed dispatch, the Codex app performs the
-native task action, and the returned native identity is bound back into the
-same SQLite authority before execution is acknowledged. There is no CLI
-transport backend, private Desktop socket attachment, or direct app-server
-fallback. SQLite is the single durable workflow ledger. Give the SDK adapter,
-App-native dispatch boundary, ledger/schema, worktree manager, controller state
-machine, routing configuration, and model-facing contracts one implementation
-owner at a time; do not add alternate scaffolding or duplicate production
-paths.
+The `openai-codex` adapter is the only Codex execution transport. Production
+workers use the official shared Codex authentication/session store, so the same
+SDK thread remains App-visible without making the App lifecycle authority.
+Leaf-worker topology does not imply a narrower filesystem sandbox: inherit the
+source controller's effective native sandbox and approval authority, bind it in
+durable route/capability facts, and revalidate it before thread creation.
+Preserve `danger-full-access` when natively granted; permission drift may only
+narrow authority. Never hardcode `workspace-write` as a detached-worker
+default.
+Never force a private `CODEX_HOME`, copy authentication, scrape App state, add a
+CLI transport backend, attach to a private Desktop socket, or create a second
+App-native worker for the same dispatch. App-native is legacy compatibility,
+not the production worker route. SQLite and the detached supervisor are the
+single durable workflow authority. Give the SDK adapter, supervisor/IPC,
+ledger/schema, worktree manager, controller state machine, routing
+configuration, and model-facing contracts one implementation owner at a time;
+do not add alternate scaffolding or duplicate production paths.
+
+Worker prompts never own callbacks, peer messages, successor scheduling or
+controller supervision. Workers are capability-bound leaves and submit one raw
+typed result directly to the harness. The harness atomically closes results and
+authorized successors, wakes the source controller immediately on terminal
+outcomes, and may arm one durable controller checkpoint (30 minutes by default)
+while work remains nonterminal. A checkpoint repeats only after explicit
+controller re-arming. Do not use `wait_threads`, repeated status reads or an
+open controller turn for supervision; checkpoint and terminal wake-ups must be
+harness-owned and App-independent.
 
 Existing plugin hooks, workflow/audit skills, manifests, validators, the
 protected primary checkout, remotes, global Codex state, downstream

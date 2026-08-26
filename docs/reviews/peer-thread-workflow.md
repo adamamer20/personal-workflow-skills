@@ -2555,3 +2555,232 @@ H6-E-V is the sole executable implementation milestone. Its implementation
 candidate must be frozen before the controller dispatches the Luna XHigh
 objective review and Sol Medium architecture review in parallel. The old H6-E-R
 capsule and queue are recovery inputs only, never parallel work.
+
+## H6-E-W architecture correction — harness-owned terminal wake-up
+
+The one-time H6-E-V bootstrap completed outside the supervisor because the
+installed predecessor could neither authenticate against the private
+`CODEX_HOME` nor cancel its stale queue. Task
+`01a03dd7-6f31-7e21-96d6-4dc6ddabbf66` returned one valid terminal
+`ModelFacingResult`, but the result remained in the manually owned `codex exec`
+process output until the planning controller reconciled that process. This was
+not a worker callback failure: the leaf prompt correctly prohibited peer
+messages and requested only the typed result. The failure was architectural:
+the manual bootstrap bypassed the supervisor-owned SDK worker, capability and
+IPC ingress, so no harness component owned terminal acquisition or source-task
+wake-up.
+
+The H6-E-V candidate is retained as an implementation donor, not promoted. It
+already supplies shared standard Codex authentication/session persistence,
+SDK/App-visible worker identity, leaf policy, resultless cancellation, direct
+worker-to-supervisor IPC, 341 passing tests and an exact wheel. The planning
+controller has also read the exact completed worker task through the App, so
+later App readability of the shared SDK task is now observed. The remaining
+promotion gap is the App-closed sentinel and a real harness-owned continuation
+path; objective and architecture reviews remain pending until that gap closes.
+
+### Definitive callback and continuation model
+
+- Prompt prose never owns callback delivery, result ingress, successor
+  scheduling or notification. A worker receives only its bounded work prompt
+  and schema, and returns the schema-bounded result through its single-use IPC
+  capability. Direct `codex exec` is not a production or recovery execution
+  path unless a harness-owned wrapper binds and ingests its result before the
+  process is released.
+- `CODEX_THREAD_ID`, when present at `codex-flow control` enqueue, is captured
+  by the controller as a host-owned source identity. It is not authored in the
+  model-facing capsule, copied into a worker prompt or guessed from App state.
+  A missing source identity makes UI wake-up `not_applicable`, while durable
+  execution and already-authorized successors continue normally.
+- Leaf topology and filesystem/process authority are independent controls. At
+  enqueue the controller resolves the existing native permission profile and
+  binds its effective sandbox and approval authority into immutable route,
+  integrity and capability facts. The shared SDK worker must not hardcode
+  `workspace-write`: it receives `danger-full-access` when that is the source
+  controller's effective authority, and preserves `workspace-write` or
+  `read-only` when those are effective instead. Immediately before thread
+  creation the worker revalidates the shared native profile and takes the
+  monotonic meet; permission drift may narrow execution but can never broaden
+  it. No global profile is modified or copied into a private home.
+- Terminal result commit and eligibility of already-authorized successors are
+  one SQLite transaction. Dependency/DAG policy is fixed before dispatch;
+  neither the worker result nor a notification may invent a successor. Reviews
+  whose authorities are declared in the capsule are controller-owned successor
+  dispatches and may run in parallel only after the exact implementation
+  candidate is frozen.
+- A separate harness notification runner uses the official shared Codex SDK to
+  resume the recorded source thread by exact id with no private `CODEX_HOME`,
+  no model/effort/cwd/global-config override and no App dependency. It starts
+  exactly one new controller turn containing a bounded harness-authored terminal
+  envelope: delivery id, dispatch id, terminal label, durable ledger location
+  and result digest. Raw worker prose is never interpolated. The resumed
+  controller reads durable authority and continues; this consumes controller
+  tokens only after terminal delivery, never while work is running.
+- Delivery has its own immutable idempotency key and state machine. Failures
+  before a source turn identity may receive one bounded retry. Once the SDK
+  returns a source turn id, the outbox records that identity and never starts a
+  replacement turn. A crash in the ambiguous bind window is reconciled once by
+  exact source-thread history and delivery id; it is never resolved by App
+  polling, prompt inference or duplicate delivery. Notification remains
+  non-authoritative: result/successor closure never depends on it.
+- Enqueue may arm one durable controller-check deadline, 30 minutes by default.
+  If the dispatch is still nonterminal when it expires, the supervisor creates
+  one distinct `CHECKPOINT` wake-up for the source controller containing only
+  dispatch state, exact worker/thread/process identity, start time and last
+  harness-observed activity. It does not cancel, resume or duplicate the worker.
+  The controller performs one evidence-backed inspection and may explicitly
+  re-arm a later checkpoint; automatic recurring wake-ups are forbidden. A
+  terminal result cancels an undelivered checkpoint and triggers the immediate
+  terminal wake-up instead.
+- Worker liveness for that checkpoint is host-owned evidence, not model prose:
+  the supervisor persists the spawned PID plus process-birth identity and the
+  worker wrapper renews a bounded IPC lease independently of the model output.
+  Missing or stale liveness is reported to the controller but never converted
+  into completion. `wait_threads`, repeated status reads and an open controller
+  turn are not used; the durable timer/wake path remains correct when the App
+  and source turn are closed.
+- The notification runner is not a worker and does not weaken leaf enforcement.
+  Worker SDK threads keep `agents.enabled=false` and
+  `features.multi_agent=false`; the resumed source controller retains its own
+  stored controller configuration so it can schedule the next authorized work.
+- With the App closed, the SDK/app-server, supervisor, workers, result ingress,
+  successor scheduling and source-controller wake-up continue. Reopening the
+  App is only a projection: it must display the same worker thread and the
+  single terminal wake-up turn on the original controller task.
+
+### Persistence, failure and recovery contract
+
+The unpromoted v10 ledger is already present in local recovery state, so the
+correction uses one serialized crash-atomic v10-to-v11 migration rather than
+editing schema assumptions in place. The source thread identity is an immutable
+enqueue fact. A dedicated controller-wake outbox records delivery id, dispatch,
+source thread, wake kind (`checkpoint` or `terminal`), payload digest, state
+(`not_applicable`, `pending`, `starting`, `delivered`, `failed`, `ambiguous`),
+bounded attempt count, optional source turn id and timestamps. The queue also
+records the optional next controller-check deadline, worker PID/process-birth
+identity, last harness liveness time and the effective native permission facts
+plus their source-profile digest. Closed-schema validation rejects partial identities,
+conflicting payloads, terminal mutation, duplicate active delivery and a wake
+for resultless cancellation.
+
+Supervisor restart performs one bounded recovery snapshot. Pending pre-turn
+delivery may be retried within its budget; a recorded source turn is immutable;
+an ambiguous post-call delivery is reconciled once through the standard SDK
+session store. A source task that is currently running or cannot be resumed is
+recorded truthfully without reopening the completed dispatch or suppressing
+eligible successors. No `wait_threads`, `read_thread`, App action, controller
+model keepalive, periodic task polling, raw Desktop socket or authentication
+copy is introduced.
+
+### Promotion proof and non-goals
+
+The production pilot must start from a normal controller task, enqueue through
+the exact installed wheel/service, close the App before or during a real Luna
+leaf turn, and prove from durable facts that the worker submitted, terminalized
+and released its pre-authorized successors while no controller model was
+running. A delayed fixture must first produce exactly one 30-minute-equivalent
+checkpoint wake-up without a second worker or recurring controller turn; the
+controller explicitly re-arms or continues once. The detached notifier must
+then resume the exact source task once for the terminal outcome.
+After the App reopens, both the original worker thread and one source callback
+turn with the same delivery id must be readable/navigable. The pilot also
+injects pre-identity, post-identity and restart failures and proves no duplicate
+worker, result, successor, notification or controller turn.
+
+This milestone does not build a replacement UI, scrape the App, make App-native
+the production route, expose auth, copy a Codex home, accept worker-authored
+successors, or promise exactly-once external delivery where SDK evidence cannot
+disambiguate process death. It also does not repair unrelated pre-commit files:
+the previously reported `.agents/plugins/marketplace.json` blocker was a worker
+sandbox artifact; the file is writable and already newline-terminated outside
+that sandbox.
+
+## Next execution — H6-E-W
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make terminal acquisition, authorized successor scheduling and source-controller wake-up "
+        "fully harness-owned and App-independent, with no worker prompt callback responsibility."
+    ),
+    decomposition=(
+        "Add the crash-atomic v11 source-identity, worker-liveness, one-shot controller checkpoint and terminal-wake outbox contract with exact idempotency and restart reconciliation.",
+        "Capture the host-owned source thread and effective native permission authority at enqueue, preserve its monotonic sandbox/approval boundary in the shared leaf worker, and deliver one bounded terminal wake-up by resuming the exact standard SDK source thread.",
+        "Atomically release only pre-authorized successor and parallel review dispatches after terminal result commit, while workers remain capability-bound leaves.",
+        "Run exact-wheel/service, App-closed continuation and later App-visible callback pilots plus failure-injection gates before parallel independent reviews.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Worker prompts contain no callback, peer-message, result-routing or successor responsibility; the production SDK worker submits exactly one schema-bounded result through capability-bound IPC and the harness durably closes it.",
+        "The controller captures CODEX_THREAD_ID as a host-owned enqueue fact and a detached shared-session SDK notifier resumes that exact source task once, with no private home, App dependency, auth copy, or model/effort/cwd/global override.",
+        "The detached worker inherits the controller's effective native sandbox and approval authority instead of hardcoding workspace-write: danger-full-access remains available when natively granted, while profile drift or an explicitly narrower capsule can only reduce authority before thread creation.",
+        "A configurable one-shot controller checkpoint defaults to 30 minutes: while the dispatch remains nonterminal it wakes the source controller once with harness-owned liveness facts, never polls Codex tasks or mutates the worker, and repeats only after explicit controller re-arming.",
+        "Terminal commit atomically releases only successors authorized before execution, including disjoint objective and architecture review lanes; no worker or notification can invent, duplicate or suppress a successor.",
+        "The v10-to-v11 migration and wake outbox reject conflicting identity, payload, replay and cancellation facts and recover pre-identity, post-identity and crash-window outcomes without duplicate controller turns.",
+        "A real installed-wheel pilot completes with the App closed, uses zero controller-model tokens and zero lifecycle polling while the worker runs, then creates one source-controller wake-up turn and exposes both persisted tasks after the App reopens.",
+        "Focused adversarial tests, make check, Ruff, diff hygiene, exact wheel/service checks, protected hashes and sanitized evidence pass; the retained H6-E-V candidate remains intact except for owned integration changes.",
+        "Independent Luna XHigh objective and Sol Medium architecture reviews of the exact combined candidate both report P0=0/P1=0 after at most one bounded concrete repair.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/config.py",
+        "src/codex_flow/native_profile.py",
+        "pyproject.toml",
+        "uv.lock",
+        "tests/test_h2_ledger.py",
+        "tests/test_h3_controller.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_h5_workflow_control.py",
+        "tests/test_h6_model_facing_projection.py",
+        "tests/test_h6_supervisor.py",
+        "tests/test_h6_service.py",
+        "tests/test_h6_ipc.py",
+        "tests/test_h6_visible_sdk.py",
+        "docs/reviews/codex-controller-compatibility.md",
+        "docs/reviews/evidence/h6-e-detached-supervisor.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "workflow.toml",
+        "src/codex_flow/domain.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/worktrees.py",
+        "src/codex_flow/app_native.py",
+        "src/codex_flow/h6_pilot.py",
+        "plugins",
+        "skills",
+        "docs/reviews/evidence/h1-sdk-sentinel.json",
+        "docs/reviews/evidence/h4-a-objective-pilot.json",
+        "docs/reviews/evidence/h4-b-multi-authority-pilot.json",
+        "docs/reviews/evidence/h5-workflow-control-medium.json",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone and implement only H6-E-W from the canonical plan in the existing python-sdk-controller worktree. "
+        "Preserve the complete H6-E-V donor and committed plan. Remove all callback responsibility from worker prompts: result ingress, successor release and controller wake-up are harness-owned. "
+        "Add the v11 source identity, effective native permission binding, process/lease liveness, one-shot 30-minute controller checkpoint and terminal wake outbox; preserve danger-full-access when natively granted without ever broadening authority, resume the exact source controller through the shared standard SDK, and release only pre-authorized successors. "
+        "Keep workers leaf and create no subagents, peer tasks or reviews. Do not modify protected/global state, copy auth, use App polling or introduce another transport. "
+        "Run the bounded deterministic gates and prepare the exact installed-wheel App-closed/App-reopen pilot; if closing the App requires user action, return one precise pilot command/checkpoint rather than weakening or simulating the gate. "
+        "Return exactly one raw schema-v1 ModelFacingResult; objective and architecture reviews remain controller-owned and pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+H6-E-W is the sole next executable implementation milestone. H6-E-V is its
+same-worktree donor, not a parallel owner. Freeze the combined candidate before
+the controller dispatches the objective and architecture reviews in parallel.
