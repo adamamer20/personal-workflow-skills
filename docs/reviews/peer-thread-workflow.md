@@ -2263,3 +2263,137 @@ systemd/App/runtime capability is a typed external/capability fact with the
 safe SDK-headless or foreground route retained when its acceptance still holds;
 implementation difficulty or App UI absence never authorizes polling, invented
 completion, backend substitution, global mutation or weakened gates.
+
+### H6-E terminal audit and bounded repair decision — 2026-08-26
+
+H6-E returned one corrected raw `ModelFacingResult` that parses as the complete
+schema-v1 agent message (`1665` bytes, SHA-256
+`841def5184f141094138942fc2aad0825ad28dc6351c994ac1257c6dba870562`).
+Controller-owned revalidation passed `make check` with 333 tests, protected
+surface equality and `git diff --check`, but durable closure correctly recorded
+`failed` / `integrity_failure`. The result is therefore implementation evidence,
+not promotion authority.
+
+The failure has two reproduced causes. Git authority still changes when the
+Codex host updates exact `refs/codex/snapshots/**` refs, although H6-D normalized
+only `refs/codex/turn-diffs/**`. Separately, the App controller-state digest
+includes `.codex-flow/runs/**`, even though those files are derived lifecycle
+projections expected to change at bind and terminal projection. History,
+mutable-surface confinement and protected bytes all passed. The candidate also
+lacks dedicated supervisor/service/IPC test modules and retained evidence does
+not contain the exact wheel, App-absent, crash-point and service identities
+required by the H6-E gate. Independent review must not start from this candidate.
+
+The repair boundary is exact:
+
+- normalize only the two proven host-owned volatile namespaces
+  `refs/codex/turn-diffs/**` and `refs/codex/snapshots/**`, including matching
+  packed-ref and reflog treatment, while rejecting near-prefixes and preserving
+  every branch, tag, remote, user ref, HEAD, index, config and ordinary history
+  authority;
+- make the controller-state digest cover immutable controller inputs and
+  unknown state, while excluding only the ledger/lock/runtime and derived
+  `.codex-flow/runs/**` projections that the controller itself must mutate;
+  capsule bytes remain included and tampering still fails closed;
+- add direct migration/queue/supervisor/IPC/worker/service tests and the named
+  adversarial bounds, then retain exact sanitized wheel/service/App-absent,
+  zero-poll, recovery and integrity evidence rather than a summary claim; and
+- replay the failed App-native integrity sentinel and one App-absent real
+  SDK-headless direct-submission sentinel. No App-native leaf guarantee may be
+  invented; that path remains explicitly unsupported/fail-closed.
+
+This is one bounded repair milestone because the authority fixes, regression
+tests and retained evidence share the same controller/ledger integration owner.
+Splitting them would create two owners for the same persisted and production
+boundaries. The objective and architecture reviews remain two parallel,
+first-class, read-only successors after the repaired candidate is frozen.
+
+## Next execution — H6-E-R
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Repair H6-E's reproduced App-owned Git/controller-projection integrity "
+        "failures and supply the missing direct supervisor/service/IPC and exact "
+        "retained evidence gates without changing the accepted authority model."
+    ),
+    decomposition=(
+        "Correct exact host-ref and derived controller-projection normalization with adversarial near-prefix and tamper tests.",
+        "Add direct v10 queue, supervisor, IPC, worker, service, recovery and package tests for the existing implementation.",
+        "Run the App-native regression and App-absent SDK-headless direct-submission sentinels and retain sanitized exact evidence.",
+        "Freeze the repaired candidate for controller-owned objective and architecture review successors.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The reproduced H6-E dispatch-integrity scenario closes without normalizing any ref or controller path outside the two exact host-ref prefixes and the named derived/runtime state.",
+        "Capsule, ordinary Git authority, near-prefix refs, unknown controller files, protected surfaces and the starting dirty baseline remain fail-closed and byte-preserved.",
+        "Dedicated tests directly exercise v10 migration/queue, singleton supervisor and recovery, bounded authenticated IPC, leaf worker submission and exact service identity, including the plan's adversarial bounds.",
+        "One exact-wheel App-absent SDK-headless sentinel completes through direct IPC with zero controller-model polling/tokens; the App-native limitation remains truthful and recoverable.",
+        "Retained sanitized evidence records exact candidate, wheel and executable digests, test counts, crash/recovery facts, App absence, zero-poll counters and integrity results without secrets or raw prompts/results.",
+        "make check, focused tests, Ruff, diff hygiene and self-review pass; the terminal response is one raw schema-v1 JSON object and leaves both independent reviews pending.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/app_native.py",
+        "src/codex_flow/contracts.py",
+        "pyproject.toml",
+        "uv.lock",
+        "tests/test_h2_ledger.py",
+        "tests/test_h3_controller.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_h5_workflow_control.py",
+        "tests/test_h6_model_facing_projection.py",
+        "tests/test_h6_app_native.py",
+        "tests/test_h6_supervisor.py",
+        "tests/test_h6_service.py",
+        "tests/test_h6_ipc.py",
+        "docs/reviews/codex-controller-compatibility.md",
+        "docs/reviews/evidence/h6-e-detached-supervisor.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "workflow.toml",
+        "src/codex_flow/domain.py",
+        "src/codex_flow/config.py",
+        "src/codex_flow/native_profile.py",
+        "src/codex_flow/worktrees.py",
+        "src/codex_flow/h6_pilot.py",
+        "plugins",
+        "skills",
+        "docs/reviews/evidence/h1-sdk-sentinel.json",
+        "docs/reviews/evidence/h4-a-objective-pilot.json",
+        "docs/reviews/evidence/h4-b-multi-authority-pilot.json",
+        "docs/reviews/evidence/h5-workflow-control-medium.json",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Implement only H6-E-R from the canonical plan in the existing python-sdk-controller worktree. "
+        "Preserve the complete dirty H6-E candidate and fix the two reproduced integrity boundaries without broad ignore rules. "
+        "Add direct tests and exact sanitized evidence for every named supervisor/service/IPC/App-absent gate; repair implementation defects those tests expose within owned surfaces. "
+        "Remain a leaf worker: do not create subagents, peer tasks, reviewers or successors, and do not poll Codex tasks. "
+        "Do not modify the canonical plan, routes, protected surfaces, global configuration, installed services/plugins or other worktrees. "
+        "Do not run medium/large parity pilots or retire legacy code. Return exactly one raw ModelFacingResult JSON object with independent reviews pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+H6-E-R is the sole executable implementation milestone. After its exact
+candidate freezes, the controller may dispatch the objective review (Luna
+XHigh) and architecture review (Sol Medium) in parallel on isolated read-only
+review workspaces. Medium/large parity pilots remain blocked until both report
+zero promotion-blocking P0/P1 findings.
