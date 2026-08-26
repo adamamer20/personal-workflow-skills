@@ -7,9 +7,10 @@ controller-first Python harness. Sol remains responsible for planning and
 material decisions, Luna executes decision-ready milestones, and independent
 review gates promotion. The controller owns lifecycle state, idempotency,
 worktrees, routing, recovery, budgets, and durable results so that messages are
-notifications rather than the workflow source of truth. The same authority
-supports an SDK-headless mode and an App-native mode whose workers are ordinary
-visible Codex app conversations.
+notifications rather than the workflow source of truth. SDK-headless execution
+must start, recover and complete with the Codex App closed. When open, the App
+is only an optional projection for visible native workers and one terminal
+wake-up notification; it is never lifecycle, liveness or result authority.
 
 ## Current context
 
@@ -120,13 +121,15 @@ Every dispatch has logical identity
 client queue handle, worktree path, or process id is metadata and never workflow
 identity.
 
-The SDK adapter owns the headless app-server connection boundary and normalizes
-installed SDK objects/events into controller-owned types. The App-native
-boundary does not attach to a private or undocumented Desktop socket: it emits
-one typed native task action for the hosting Codex app and binds the returned
-thread/host identity into the same claimed dispatch. No controller component
-parses raw SDK or app-server envelopes outside these boundaries. Direct
-app-server JSON-RPC remains out of scope.
+The SDK adapter owns the headless bundled-runtime connection boundary and
+normalizes installed SDK objects/events into controller-owned types without a
+running Codex App. The App-native boundary does not attach to a private or
+undocumented Desktop socket: when the App is open it may emit one typed visible
+task action and bind the returned thread/host identity into the same claimed
+dispatch. Every worker closes directly through the harness-owned result IPC;
+the App cannot close or recover a dispatch. No controller component parses raw
+SDK or app-server envelopes outside these boundaries. Direct app-server
+JSON-RPC remains out of scope.
 
 Every milestone declares one or more acceptance modes: `objective`, `visual`,
 and `architecture`. The controller derives implementation and review authorities
@@ -182,9 +185,11 @@ unavailability or explicit context rollover.
 - `transport_failure` is controller-owned. A surviving finding or disproven plan
   triggers diagnosis/replan; only underdetermined intent or missing user
   authority becomes `NEEDS_DECISION`.
-- No polling loop is introduced. A foreground `run` may consume its own event
-  stream; recovery and human inspection use bounded snapshots or explicit
-  commands.
+- No polling loop is introduced. The detached supervisor blocks on local IPC
+  and explicit deadlines, takes one recovery snapshot at startup, and receives
+  raw terminal results directly from workers. Human inspection uses bounded
+  status snapshots or explicit commands; normal execution never calls
+  `wait_threads`, `read_thread` or a source-controller model.
 - Existing plugin hooks and handoff skills remain available as a migration
   bridge until the SDK controller passes a real medium milestone. They are not
   extended in parallel and are not deleted based only on unit tests.
@@ -205,11 +210,13 @@ unavailability or explicit context rollover.
 
 ## Program scope and non-goals
 
-In scope: the Python package and CLI, stable SDK adapter, App-native dispatch
-boundary, SQLite ledger, readable artifacts, worktree leases, role/routing
-configuration, structured task contracts, deterministic tests, prompt-input
-fixtures, native compatibility sentinels, documentation, and a bounded
-migration of the three workflow skills.
+In scope: the Python package and CLI, stable SDK adapter, optional App-native
+projection boundary, detached repository supervisor, durable SQLite queue,
+capability-bound local worker-result IPC, readable artifacts, worktree leases,
+role/routing configuration, structured task contracts, deterministic tests,
+prompt-input fixtures, native compatibility sentinels, packaging/service
+management, documentation, and a bounded migration of the three workflow
+skills.
 
 Non-goals for v1: a general agent framework; a custom web UI; remote fleet
 scheduling; automatic Git push/merge; provider-agnostic backends; direct
@@ -1116,11 +1123,11 @@ visibility.
 Non-goals: a custom run dashboard, automatic sidebar manipulation, remote fleet
 scheduling, autonomous multi-milestone polling, SDK removal, legacy deletion,
 plugin installation/trust, or weakening explicit sensitive-path protection.
-After H6-C and its H6-D follow-up promote, H6 resumes with fresh medium and
-large pilots using the selected hosting mode and the same durable acceptance
-contract.
+H6-C's historical successor was H6-D. The definitive App-independence
+requirement supersedes that route; H6 resumes with fresh medium and large pilots
+only after H6-E promotes under the detached-supervisor acceptance contract.
 
-### Milestone H6-D — Normalize App-owned Git refs and ingest the raw terminal envelope
+### Milestone H6-D — superseded donor: App ref and raw-envelope normalization
 
 The bounded visible H6-C pilot proved the host-mediated task path, real visible
 thread binding, selected-worktree reuse and the requested one-line repository
@@ -1134,7 +1141,38 @@ the host improvised the contract and terminal ingestion used a hand-constructed
 projection. `wait_threads` is a deliberately compact progress/summary surface,
 not the lossless terminal message authority.
 
-Outcome: fix exactly those two defects without weakening any other controller
+This milestone was planned at commit `678105a` but was superseded before
+execution by the definitive App-independence requirement. Its uncommitted donor
+diff is not a separate implementation owner and must not be discarded or
+rewritten before the H6-E executor captures its exact bytes. H6-E absorbs the
+following useful, still-required pieces:
+
+- `src/codex_flow/controller.py`: exact semantic normalization of only
+  `refs/codex/turn-diffs/**`, including shared-common-directory ref/reflog
+  treatment, plus the raw-result completion seam;
+- `src/codex_flow/contracts.py`: bounded strict parsing of one complete raw
+  `ModelFacingResult`, the canonical schema digest and the in-band result
+  envelope formatter;
+- `src/codex_flow/app_native.py`: readable version-1 actions and a version-2
+  action that binds the result-contract digest without claiming native
+  `create_thread` accepts `output_schema`.
+
+The donor's working-tree SHA-256 values at planning time are
+`controller.py=38a591b1e5c4712013a9b3acd470b40501900a35c38f74623998f1298c5a0c1d`,
+`app_native.py=4eeefe47032ceb5ae920f5ae16981065f47a359b8216dfbd1a8f1b139dfc7d27`
+and
+`contracts.py=1b4c278d66010dc0105d21612d2b77acfc8ae0b98595c8acc85abe4d7d5cb3ea`.
+The planning task preserves all three byte-for-byte. The H6-E implementation
+owner may integrate and repair them inside its declared mutable surfaces after
+capturing the baseline.
+
+The remainder of the old design is rejected: App-host `read_thread`,
+`wait_threads`, a host-authored result object, a source-controller callback, or
+an open App cannot be lifecycle, liveness, recovery or terminal-result
+authority. The detailed H6-D acceptance text below is retained only as donor
+history; H6-E is the sole executable milestone and its stricter gates win.
+
+Historical H6-D outcome: fix exactly those two defects without weakening any other controller
 boundary. Git authority semantically normalizes only the exact App-owned
 `refs/codex/turn-diffs/` namespace, whether refs are loose or packed and whether
 their reflogs live in the shared common Git directory. `HEAD`, the checked-out
@@ -1294,7 +1332,312 @@ authority, successful protected/mutation/validation checks and durable
 worktree's pre-existing compatibility-document change and all other dirty bytes
 are unchanged. Failure to expose the full raw terminal message is
 `EXTERNAL_BLOCKED`; do not substitute `wait_threads`, inferred JSON or the SDK
-server. H6 medium/large parity pilots resume only after H6-D promotion.
+server. This historical promotion route is superseded; H6 medium/large parity
+pilots resume only after H6-E promotion.
+
+### Milestone H6-E — detached supervisor and App-independent completion
+
+#### Outcome and acceptance modes
+
+`codex-flow control` durably queues a workflow and returns after the harness has
+accepted ownership. A harness-owned detached supervisor, running as the same OS
+user but independently of the invoking terminal and Codex App, executes the
+queue, accepts worker results, closes milestones and schedules already-authorized
+successors. SQLite remains the only lifecycle and result authority. The source
+controller model spends zero tokens and makes zero lifecycle tool calls while a
+worker runs.
+
+The milestone declares `objective` and `architecture` acceptance. Luna XHigh is
+the independent objective/code authority; Sol Medium is the independent
+architecture, lifecycle and security-boundary authority. Both review the exact
+candidate once; at most one bounded repair addresses concrete P0/P1 blockers.
+Promotion requires P0=0/P1=0 from both. No App-visible or notification success
+can waive a durable harness gate.
+
+#### Fixed process and authority model
+
+- The invoking `codex-flow` CLI is a short-lived producer/status client. It
+  validates and projects the capsule, commits a queue item, wakes the supervisor
+  through local IPC and exits. It never owns the worker after enqueue.
+- One repository-bound supervisor owns queue claims and state transitions for
+  that repository's `.codex-flow/workflow.db`. It is a deterministic Python
+  process, not a model turn. A durable epoch/lease row plus verified PID/process
+  birth identity prevents two live supervisors; a stale lease may be stolen
+  only after expiry and a liveness check. PID files and socket existence are
+  diagnostics, never authority.
+- Each model worker runs outside the supervisor process. The SDK-headless runner
+  uses only the stable `openai-codex` adapter and pinned runtime. An App-native
+  runner may ask the open App to create/display a visible native worker, but the
+  worker receives the same result-submission capability and must close through
+  the same harness IPC boundary.
+- The worker submits its complete raw, bounded `ModelFacingResult` directly with
+  `codex-flow worker-submit` over the controller-owned local socket. Neither the
+  App, the source controller thread, `read_thread`, `wait_threads`, prose, a
+  summary nor a host-created dictionary may translate or submit the result.
+- The supervisor strictly decodes, validates and binds the raw bytes to the
+  dispatch/generation/capability, rechecks validation and workspace/Git
+  integrity, records the terminal result and transition in one SQLite
+  transaction, and only then projects artifacts or considers a successor.
+- Successors are finite edges already authorized by the durable capsule and H4
+  state machine: required review, bounded repair/recovery, or the next declared
+  milestone action. Scheduling is a deterministic transaction, not a recursive
+  planner or controller-model turn. A material contract/scope/security decision
+  still becomes the existing typed decision state.
+
+#### Daemon lifecycle, packaging and service management
+
+The installed wheel exposes the existing `codex-flow` command and an internal
+supervisor entrypoint from the same exact distribution. Production Linux uses a
+generated per-repository user-systemd unit with `Restart=on-failure`, an exact
+absolute installed executable, canonical repository/state-root arguments, a
+private runtime directory and no App dependency. `codex-flow supervisor
+install|start|status|stop|uninstall` validates the canonical repository identity
+and exact wheel version. Install/uninstall are explicit user operations; normal
+`control` may start an already-installed unit but may not silently modify user
+service configuration. Tests generate and exercise units under temporary
+`XDG_CONFIG_HOME`/runtime roots; this milestone does not install a real user
+service or mutate the user's normal tool/plugin configuration.
+
+For development and hermetic tests, `codex-flow supervisor run --foreground`
+uses the identical supervisor loop. A bounded detached-spawn fallback is
+allowed only when configuration explicitly selects it: `Popen(start_new_session=True,
+close_fds=True)` plus a one-shot readiness pipe, exact executable/version and
+canonical repository identity. It must not pretend to provide boot-time restart.
+If neither an installed user service nor the explicitly selected detached mode
+can provide the requested recovery contract, enqueue fails `EXTERNAL_BLOCKED`
+before a worker call. Supervisor startup performs one recovery scan, then blocks
+on its local socket/timers; it never periodically polls SQLite or Codex tasks.
+
+#### Durable schema, queue and idempotency
+
+Advance the SQLite schema from v9 in one serialized, crash-atomic migration.
+The exact names may follow repository conventions, but the following facts are
+mandatory and closed-schema validated:
+
+- one supervisor authority row: repository/state-root identity, epoch, random
+  owner nonce hash, PID and process-birth identity, acquired/renewed/expiry
+  times, executable/version digest and requested shutdown state;
+- one dispatch queue row per logical dispatch/generation: backend
+  (`sdk_headless` or `app_native`), immutable capsule/action/route/workspace and
+  result-contract digests, state (`queued`, `claimed`, `starting`, `running`,
+  `result_submitted`, `finalizing`, terminal), availability/deadline, claim
+  epoch/nonce, attempt number and bound SDK/App thread identity when known;
+- one capability row per attempt: dispatch/generation, allowed operation
+  `submit_result`, schema/workspace/backend binding, issued/expiry/consumed
+  facts, random-token hash and accepted raw-result digest; plaintext capability
+  bytes never enter SQLite, logs, artifacts or prompts;
+- one successor/outbox fact that makes terminal-result commit and successor
+  enqueue atomic, and one optional terminal-notification fact with source task,
+  payload digest and outcome (`not_applicable`, `unavailable`, `attempted_ok`,
+  `attempted_failed`). A database constraint permits at most one notification
+  attempt per terminal dispatch.
+
+Enqueue, claim, bind, submit, finalize and successor scheduling are idempotent
+only for byte-identical immutable facts. Conflicts fail closed. A repeated raw
+submission with the same capability/result digest returns the recorded terminal
+fact without another transition; any different result, consumed token reuse,
+wrong dispatch/generation/backend/workspace/schema, stale epoch or terminal
+mutation is rejected with exact database bytes unchanged. Queue selection is
+FIFO by durable sequence among eligible items, with explicit route/workspace
+lease constraints and bounded retry/recovery counts; no wall-clock ordering is
+used as identity.
+
+#### Local IPC, authentication and security boundaries
+
+The supervisor listens on a Unix-domain socket below a controller-owned runtime
+directory created descriptor-first with no-follow checks, directory mode 0700
+and socket mode 0600. Every request is length-prefixed/canonically encoded,
+bounded before allocation, versioned and closed. Linux peer credentials must
+match the controller OS uid. The same-uid process boundary remains the product
+trust boundary, but same uid alone grants no workflow mutation: a 256-bit
+single-purpose capability is also required.
+
+The plaintext capability is delivered to the worker in a descriptor-anchored
+0400 capability file below the private runtime root (or an inherited read-only
+file descriptor for the SDK child), never as an environment variable, argv,
+model prompt, SQLite value or artifact. The worker CLI reads it, connects to the
+bound socket and submits one raw UTF-8 payload of at most 65,536 bytes. The
+capability binds dispatch id, generation, backend, workspace identity and
+`ModelFacingResult` schema digest, expires, is consumed transactionally and is
+removed best-effort after durable closure. Crash recovery can reissue a new
+attempt capability only after invalidating the old attempt and proving the old
+worker dead or incapable of submission; ambiguous live work is never duplicated.
+Socket substitution, symlink/hardlink/special-file paths, oversized frames,
+partial writes, invalid UTF-8/BOM, unknown keys, replay, cross-repository use and
+concurrent conflicting submissions are rejected before workflow mutation.
+
+Workers have no direct SQLite write authority and controller state remains
+outside their mutable surfaces. Native Codex sandbox/approval/provider/profile
+inheritance remains unchanged. Secrets, capability bytes, raw prompts and raw
+results are excluded from logs and sanitized retained evidence. No network
+listener, privileged daemon, private Desktop socket, direct app-server JSON-RPC,
+global Codex config change or App authentication scraping is introduced.
+
+#### Recovery and terminal protocol
+
+On clean start or crash restart the supervisor takes one transactional snapshot
+and reconciles each nonterminal item:
+
+- `queued` work is claimable once; a claim committed without spawn is returned
+  to eligible state after its expired supervisor epoch;
+- a known-live SDK runner remains owned and is allowed to submit; a dead runner
+  before thread identity is retried within the typed transport budget; a dead
+  runner after durable SDK identity resumes that exact SDK thread through the
+  existing checkpoint contract, never starts a duplicate;
+- a bound App-native runner is never completed from App status. If it survives
+  App closure it submits normally. If it is proven dead before submission, the
+  queue records a recoverable App-worker loss and waits for the configured
+  App-native recovery action; it is never silently converted to SDK-headless.
+  Failure to resume/recreate the visible native worker without the App is an
+  App-native capability limitation, not loss of the durable workflow fact;
+- `result_submitted`/`finalizing` rows are replayed from the stored bounded raw
+  result digest/body to exactly one terminal transaction. Terminal rows are
+  immutable. Projection, notification or process death after commit cannot
+  reopen them.
+
+The worker terminal protocol is: finish owned work; write one complete schema-v1
+`ModelFacingResult`; invoke `codex-flow worker-submit --capability-file <path>
+--result-file <path>`; receive a small acknowledgement containing only dispatch,
+terminal status and result digest; then exit. The result file and capability
+path must be controller-provided private paths, and the raw result is retained
+only in the bounded controller record/projection required by the existing
+contract.
+
+After terminal commit, an already-open App adapter may make exactly one
+best-effort native `send_message` notification to the recorded source task with
+`COMPLETION`, run/milestone id and durable status. The attempt is outbox-backed,
+non-authoritative and never retried: unavailable App records `unavailable`, an
+API error records `attempted_failed`, and success records `attempted_ok`.
+Notification happens after successor enqueue and cannot affect completion,
+review scheduling or recovery. The source controller is never required to call
+`wait_threads` or poll; notification is only a wake-up hint.
+
+#### Adapter boundaries and App-closed truth table
+
+- SDK-headless: start, execute, result submission, review/recovery successors,
+  terminal commit and status work with the Codex App never started, closed
+  before enqueue, or closed during execution. This is the mandatory production
+  route and must have a real App-closed sentinel.
+- App-native: the App is permitted only to create/display a visible native
+  worker and to attempt the terminal notification. Binding identity does not
+  grant it ledger authority. The worker submits directly to harness IPC. If the
+  App/runtime keeps the worker alive after the window closes, the workflow must
+  durably complete; if closing the App kills the worker and no documented native
+  resume exists, H6-E must retain a recoverable nonterminal fact and report the
+  exact App-native capability gap. It may not invent completion or substitute
+  SDK-headless.
+- With the App closed it is impossible for codex-flow to create a new App UI
+  task, add/update sidebar or thread-visible content, wake a visible source
+  task, or deliver a native notification. These are optional UI projections,
+  never SDK-headless lifecycle or result requirements.
+
+#### Mutable ownership
+
+- `src/codex_flow/ledger.py`, `src/codex_flow/controller.py`,
+  `src/codex_flow/cli.py` and `src/codex_flow/projection.py` for the v10 queue,
+  supervisor-owned transitions, result closure and command boundary;
+- `src/codex_flow/supervisor.py`, `src/codex_flow/worker.py`,
+  `src/codex_flow/ipc.py` and `src/codex_flow/service.py` as the sole new process,
+  worker, local-protocol and service-management implementations;
+- `src/codex_flow/backends/codex_sdk.py`, `src/codex_flow/app_native.py` and
+  `src/codex_flow/contracts.py` only for runner integration, App projection and
+  the retained H6-D normalization/raw-envelope donor;
+- `pyproject.toml` and `uv.lock` only for exact entrypoints/package data; focused
+  controller/ledger/App/SDK/IPC/service tests, fixtures and temporary service
+  templates; `docs/reviews/codex-controller-compatibility.md` and one sanitized
+  `docs/reviews/evidence/h6-e-detached-supervisor.json` record.
+
+The H6-E executor is the one mutable owner of all these surfaces, including the
+three-file donor. Shared ledger/schema, public CLI/contracts and production
+entrypoints have no parallel owner.
+
+#### Protected surfaces and non-goals
+
+Protected: this canonical plan and `AGENTS.md`; `workflow.toml` routes/limits;
+`src/codex_flow/domain.py`, `src/codex_flow/config.py`,
+`src/codex_flow/native_profile.py`, `src/codex_flow/worktrees.py` and existing
+H4 acceptance semantics except the named integration seams; `src/codex_flow/h6_pilot.py`;
+all plugin/skill sources, manifests, validators, accepted H1-H5 evidence and
+legacy handoff code; installed plugins/trust/hooks, normal user service/config
+roots, global Codex authentication/state, the primary checkout, other
+worktrees, remotes and downstream repositories; every pre-existing change
+outside the three-file donor and every path not expressly mutable.
+
+Non-goals: a general distributed scheduler, remote/network IPC, multi-user or
+root service, custom UI/dashboard, App sidebar automation, undocumented App
+attachment, provider/backend abstraction, route/model/effort changes, recursive
+planning, periodic `wait_threads`/task/status/SQLite polling, controller-model
+keepalives, automatic Git push/merge/rebase/stash/discard, real user-service or
+plugin installation, legacy retirement, medium/large H6 parity pilots, or
+claiming App-native UI operations work while the App is closed.
+
+#### Objective acceptance and adversarial tests
+
+1. Install/build: `make check`, focused tests, Ruff, `git diff --check` and full
+   diff self-review pass. Build one wheel in a fresh directory; run help/schema,
+   v9-to-v10 migration, foreground supervisor, detached/service-template,
+   enqueue/status and worker-submit checks via `uvx --from <exact-wheel>` with
+   source imports unavailable. Install the same wheel into temporary
+   `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, `XDG_CONFIG_HOME` and runtime roots and
+   prove generated units use the exact installed executable/version. Do not
+   install/start a real user unit.
+2. Queue/idempotency: cover empty/one/500-item FIFO queues, 501/beyond configured
+   limits, concurrent producers, two supervisor contenders, lease expiry,
+   claim-before-spawn crash, spawn-before-observation crash, duplicate and
+   conflicting raw submissions, stale generations, expired/revoked tokens,
+   result-commit/projection/notification boundaries and atomic successor enqueue.
+3. IPC/security: cover fragmented and coalesced frames, zero/maximum/oversized
+   payloads, invalid version/type/UTF-8/BOM/JSON/schema, wrong uid where
+   injectable, token guessing/replay/cross-dispatch/cross-repository use,
+   socket/capability path substitution, symlink/hardlink/special files,
+   concurrent same/different submissions and log/artifact secret scans.
+4. Recovery: inject process death at every durable boundary. Restart with one
+   fresh supervisor and prove no duplicate model turn, worker, result,
+   transition, successor or notification. Resume an identified SDK thread;
+   safely retry a pre-identity transport loss; retain rather than guess an
+   ambiguous live worker; finalize a submitted result exactly once.
+5. Zero-poll/token proof: instrument all controller adapters and native task
+   tools during a deliberately blocked worker. From enqueue until direct result
+   submission, assert zero `wait_threads`, `read_thread`, list/status polling,
+   source-task messages, controller model/API calls and controller-model token
+   usage. The supervisor blocks on socket/timer readiness; no status-read count
+   scales with elapsed wall time. Only the documented singleton-lease renewal
+   write may run at its bounded cadence.
+6. App independence: with the App process proven absent, run a real disposable
+   SDK-headless worker through direct IPC, observable file change, validation,
+   required successor scheduling and durable terminal completion. Open then
+   close the App during a second SDK-headless run and prove identical authority.
+   For one bounded App-native sentinel, close the App after visible bind and
+   before result submission: accept durable completion only from the worker's
+   direct IPC; otherwise retain and report the exact recoverable capability gap.
+7. Notification: terminal commit and successor scheduling precede notification.
+   Test App absent, success, injected failure and supervisor crash around the
+   outbox. Each terminal dispatch has zero attempts when no App is available or
+   exactly one attempted outcome when available; no path retries or changes the
+   terminal bytes/status.
+8. Donor/protection: retain exact `refs/codex/turn-diffs/**` normalization and
+   adversarial near-prefix/ordinary-ref/history checks; retain strict raw-result
+   envelope/parser and v1 action recovery. Capture the initial three donor
+   hashes above and prove all unrelated starting bytes/status, protected paths,
+   global state and selected worktree topology remain unchanged.
+
+#### Architecture promotion gate and successor
+
+The architecture reviewer must confirm one SQLite authority, one supervisor and
+one implementation owner; event-driven no-poll operation; capability-confined
+same-uid IPC; crash-atomic migration and transitions; explicit process and App
+failure semantics; no secret/token leakage; immutable terminal results; direct
+worker-to-harness raw result ownership; exact package/service identity; and
+truthful App-closed limitations. The objective reviewer independently confirms
+runtime behavior and regressions. Retained sanitized evidence must include
+process/service identity digests, queue/epoch transitions, worker/capability and
+raw-result digests (never secrets/raw sensitive text), App-absent proof,
+zero-poll/token counters, crash points, notification outcome, Git/workspace
+integrity and exact wheel identity.
+
+After H6-E promotion, H6 resumes with one medium and one large parity pilot and
+the typed legacy-retirement decision. H6-E itself neither runs those pilots nor
+retires anything.
 
 Outcome: run one medium and one large real milestone through the controller,
 compare lifecycle correctness and usage against the legacy path, verify local
@@ -1352,15 +1695,21 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   and permission-profile survival are not exposed by the H1 stable SDK surface;
   structured skill input exists but remains unexercised. These are optional or
   later compatibility gates, not inferred capabilities.
-- Desktop visibility is now an explicit H6-C App-native promotion gate. It is
-  not inferred from SDK thread creation and does not require attaching the SDK
-  controller to an undocumented Desktop-owned app-server.
+- Desktop visibility is an optional H6 App-native projection. It is never
+  inferred from SDK thread creation and never required for SDK-headless
+  execution, durable completion or recovery. No undocumented Desktop-owned
+  app-server attachment is permitted.
 - The visible H6-C pilot proved App-native visibility and native identity
-  binding, but promotion is withheld: the exact App-owned
-  `refs/codex/turn-diffs/**` namespace caused a false Git-integrity failure, and
-  native `create_thread` lacks `output_schema` while the current host workflow
-  has no lossless raw-terminal ingestion contract. H6-D owns exactly these two
-  defects; medium/large pilots remain blocked until it promotes.
+  binding, but also exposed false Git-integrity failure from
+  `refs/codex/turn-diffs/**` and the lack of native `output_schema`. The partial
+  H6-D donor addresses exact ref normalization and strict raw envelopes. H6-E
+  absorbs those changes while replacing App/source-thread lifecycle ownership
+  with the detached supervisor and direct worker submission contract.
+- With the App closed, SDK-headless workflows must remain fully functional.
+  Creating/updating visible App UI threads and native notifications are
+  impossible and optional. Whether a bound App-native worker survives an App
+  close is an acceptance fact to measure, not a prerequisite for headless
+  correctness or authority to infer a result.
 - The supplied audit's underlying archive is not stored in this repository;
   its findings motivate the design but do not substitute for H1 captured
   evidence.
@@ -1771,11 +2120,19 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   canonical raw-message boundary. H6-C is not promoted. H6-D is the sole next
   milestone and fixes exactly those two defects while preserving the existing
   uncommitted compatibility-document line and all other user changes.
+- 2026-08-26: the user made App independence definitive before H6-D execution.
+  Commit `678105a` contains the now-superseded H6-D plan; the uncommitted
+  three-file donor is retained byte-for-byte by planning and classified above.
+  H6-E replaces host callback/read/poll closure with a harness-owned detached
+  supervisor, durable SQLite queue, capability-bound direct worker result
+  submission, event-driven restart/recovery and post-terminal at-most-once App
+  notification. SDK-headless execution is mandatory with the App absent;
+  App-native UI creation/update remains truthfully unavailable while closed.
+  H6-E is the sole next executable milestone.
 
 ## Next execution
 
-Milestone: H6-D — Normalize App-owned Git refs and ingest the raw terminal
-envelope.
+Milestone: H6-E — Detached supervisor and App-independent completion.
 
 Next executable capsule (authoritative typed authoring form):
 
@@ -1783,78 +2140,96 @@ Next executable capsule (authoritative typed authoring form):
 ModelFacingCapsule(
     schema_version=1,
     objective=(
-        "Fix exactly the two visible-pilot App-native defects: normalize only "
-        "refs/codex/turn-diffs/** in Git authority and make the exact bound "
-        "thread's full raw agentMessage the strictly parsed ModelFacingResult authority."
+        "Make codex-flow complete SDK-headless workflows with the Codex App closed by moving queue, "
+        "worker lifecycle, direct raw-result closure, recovery and successor scheduling into one "
+        "harness-owned detached supervisor and durable SQLite authority."
     ),
     decomposition=(
-        "Implement exact bounded Git-ref/ref-log normalization with ordinary Git authority unchanged.",
-        "Version the App-native host action, embed one canonical result envelope in its prompt, and ingest raw terminal text.",
-        "Run adversarial regressions, full gates, isolated wheel/install checks, independent reviews, and one visible disposable pilot.",
+        "Integrate the three-file H6-D donor and add the crash-atomic v10 queue, supervisor lease, attempt capability, successor and notification-outbox facts.",
+        "Implement packaged service/detached lifecycle, event-driven local IPC and capability-bound direct raw ModelFacingResult submission for SDK-headless and App-native workers.",
+        "Implement exact restart recovery, immutable terminal closure, optional at-most-once App notification and truthful App-closed limitations without wait_threads or controller-model polling.",
+        "Run adversarial unit/integration/migration/package/service gates, App-closed and App-close sentinels, independent objective and architecture reviews, and retain sanitized evidence.",
     ),
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
-        "Only refs/codex/turn-diffs/** is normalized; HEAD, current branch, index, config, ordinary refs/history, protected paths and out-of-scope mutations remain fail-closed.",
-        "Native create_thread receives no output_schema; one canonical prompt template produces a strict ModelFacingResult from the entire raw agentMessage, never a wait_threads summary.",
-        "Focused and full tests, Ruff, diff hygiene, isolated wheel/install checks and exact dirty-baseline protection pass.",
-        "One bounded visible App-native disposable-repository pilot binds a real thread and reaches durable COMPLETED with retained sanitized evidence.",
-        "Independent objective and architecture reviews both report P0=0/P1=0.",
-        "The existing docs/reviews/codex-controller-compatibility.md insertion and every other pre-existing user change remain byte-identical.",
+        "With the App absent, a real SDK-headless worker completes through direct capability-bound IPC, durable terminal commit and successor scheduling; controller-model token and lifecycle-tool usage while it runs are zero.",
+        "One crash-atomic v9-to-v10 SQLite migration and event-driven supervisor provide singleton process ownership, FIFO bounded queueing, exact idempotency and restart recovery without duplicate worker, turn, result, transition, successor or notification.",
+        "The worker submits one complete raw bounded ModelFacingResult through the controller CLI/socket; strict dispatch, generation, backend, workspace, schema, peer and single-use capability binding rejects malformed, replayed or conflicting submissions before mutation.",
+        "The App is only an optional visible-worker and terminal-notification projection: closure never reads wait_threads/read_thread or awaits a source callback, and notification is post-terminal, best-effort and attempted at most once.",
+        "The retained donor continues to normalize only refs/codex/turn-diffs/** and supplies the canonical raw-result envelope/parser while ordinary Git authority, v1 recovery and SDK structured behavior remain fail-closed.",
+        "Focused adversarial tests, make check, Ruff, diff hygiene, exact-wheel/temporary-install/service checks, App-closed and App-close sentinels, and exact dirty-baseline protection pass with sanitized retained evidence.",
+        "Independent objective and architecture reviews of the exact candidate both report P0=0/P1=0.",
     ),
     mutable_surfaces=(
+        "src/codex_flow/ledger.py",
         "src/codex_flow/controller.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/backends/codex_sdk.py",
         "src/codex_flow/app_native.py",
         "src/codex_flow/contracts.py",
-        "src/codex_flow/projection.py",
-        "src/codex_flow/cli.py",
+        "pyproject.toml",
+        "uv.lock",
+        "tests/test_h2_ledger.py",
         "tests/test_h3_controller.py",
+        "tests/test_codex_sdk_adapter.py",
         "tests/test_h5_workflow_control.py",
+        "tests/test_h6_model_facing_projection.py",
         "tests/test_h6_app_native.py",
-        "tests/fixtures/h6-d-app-native",
-        "docs/reviews/evidence/h6-d-app-native-pilot.json",
+        "tests/test_h6_supervisor.py",
+        "tests/test_h6_service.py",
+        "docs/reviews/codex-controller-compatibility.md",
+        "docs/reviews/evidence/h6-e-detached-supervisor.json",
     ),
     protected_surfaces=(
         "docs/reviews/peer-thread-workflow.md",
         "AGENTS.md",
         "workflow.toml",
-        "docs/reviews/codex-controller-compatibility.md",
-        "src/codex_flow/ledger.py",
-        "src/codex_flow/worktrees.py",
         "src/codex_flow/domain.py",
         "src/codex_flow/config.py",
         "src/codex_flow/native_profile.py",
-        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/worktrees.py",
         "src/codex_flow/h6_pilot.py",
         "plugins",
+        "skills",
+        "docs/reviews/evidence/h1-sdk-sentinel.json",
+        "docs/reviews/evidence/h4-a-objective-pilot.json",
+        "docs/reviews/evidence/h4-b-multi-authority-pilot.json",
+        "docs/reviews/evidence/h5-workflow-control-medium.json",
     ),
     authorities=(
         ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
     ),
     prompt=(
-        "Implement only H6-D from the canonical plan in the selected existing worktree. "
-        "Preserve the complete dirty baseline, especially the existing compatibility-document line. "
-        "Use one implementation owner; test and self-review the two defects, prove packaging from an exact isolated wheel/install, "
-        "obtain one independent review per declared authority, repair at most once for concrete blockers, and run exactly one bounded visible App-native pilot. "
-        "The pilot must ingest the exact bound thread's full raw agentMessage; never use a wait_threads summary as result data. "
-        "Return one schema-valid ModelFacingResult and do not expand into medium/large pilots or legacy retirement."
+        "Implement only H6-E from the canonical plan in the selected existing worktree. "
+        "Capture and preserve the complete dirty baseline, then integrate rather than discard the exact three-file H6-D donor. "
+        "Use one mutable owner for schema, queue, supervisor, IPC, adapters, CLI and packaging. "
+        "Prove SDK-headless completion with the App absent, direct raw worker submission, crash/restart idempotency, zero wait_threads/read_thread/controller-model polling, and post-terminal at-most-once optional notification. "
+        "Test exact wheel and temporary service management without installing a real user service or mutating global Codex/plugin state. "
+        "Obtain the declared independent reviews, repair at most once for concrete blockers, retain sanitized evidence, and return one schema-valid ModelFacingResult. "
+        "Do not run medium/large parity pilots, retire legacy paths, change routes, or claim App UI operations work while the App is closed."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000,
 )
 ```
 
-Planning repair validation (2026-08-26): the exact capsule above instantiated
-and projected successfully against the selected checkout as
-`run_id=model-d6e82f5a60225c5be9b7443831e21079`,
-`milestone_id=milestone-2436db9c2bb466102de0449d1670931a`,
-`workspace_mode=existing_worktree`, route `gpt-5.6-luna/xhigh`. No capsule
-surface overlaps and every surface is a canonical repository-relative path.
-
-Resolved implementation route: `model=gpt-5.6-luna`, `thinking=xhigh`.
-Independent routes are `code-reviewer = Luna XHigh` and
-`architecture-reviewer = Sol Medium`, as fixed by `workflow.toml` and repository
-instructions. This planning-only update does not dispatch them.
+Planning validation (2026-08-26): the exact capsule above instantiated and
+projected successfully against this checkout as
+`run_id=model-36d442572b67827298bb7dd891c780c3`,
+`milestone_id=milestone-8e374b232309f1f4cecfb4b6fa6c6010`,
+`workspace_mode=existing_worktree`, route `gpt-5.6-luna/xhigh`. Its 23 mutable
+and 14 protected surfaces are canonical repository-relative paths with zero
+overlap; the execution prompt is 919 bytes under its 12,000-byte cap. The
+independent routes remain `code-reviewer = Luna XHigh` and
+`architecture-reviewer = Sol Medium` from `workflow.toml` and repository
+instructions. This planning-only task does not dispatch any executor or
+reviewer.
 
 Planning owner: source task `01a038ae-62ee-7910-ae89-6c13c2e0112c`.
 
@@ -1867,24 +2242,24 @@ Execution workspace:
 - repository: `/home/adam/personal-workflow-skills`
 - path: `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller`
 - branch: `agent/python-sdk-controller`
-- base SHA: `6feb9277472d85b480c1cf851c53ab6c1f2a537b`
+- base SHA: `678105a0e55f89525e8adc0ff90d4ac7c7e75c34`
 - lane: `python-sdk-controller`
 
-Starting state: H6-C implementation commit `6feb927`, the one pre-existing
-uncommitted insertion in `docs/reviews/codex-controller-compatibility.md`, and
-this planning update. Capture exact status and bytes before work. Reuse this
-worktree and branch; do not create another repository worktree or duplicate its
-controller state. The H6-D pilot alone uses a disposable repository/worktree.
+Starting dirty state is exactly the three H6-D donor files listed and hashed in
+the milestone plus this canonical planning change. The executor captures status,
+diff and hashes before edits, reuses this worktree and branch, and creates only
+disposable repositories/runtime/service roots for tests and sentinels. No other
+worktree, repository, installed service, plugin, global configuration or task is
+mutable.
 
-The executor owns only the typed capsule's mutable surfaces plus bounded repair,
-validation, the two independent reviews and one durable result. The planner
-retains this plan, scope, milestone ordering and program closure. Medium/large
-parity pilots and the typed legacy-retirement decision are the successor only
-after H6-D promotion.
+The executor owns only the capsule's mutable surfaces, one bounded repair,
+validation, the two independent reviews and one durable terminal result. The
+planner retains scope, ordering, this plan and program closure. Medium/large
+parity pilots and the legacy decision are successors only after H6-E promotion.
 
-Escalate only for a genuinely underdetermined product/public-contract/security
-decision, missing user authority, an external prerequisite, or proven
-infeasibility. Concrete inherited defects reached by H6 are classified and
-repaired when they block required pilot/parity evidence; unavailable optional
-compatibility surfaces remain truthfully open and do not authorize invented
-proof, global mutation, or legacy deletion.
+Escalate only for genuinely underdetermined user intent or a material public,
+persisted, security, destructive-behavior, cost or scope decision. Missing
+systemd/App/runtime capability is a typed external/capability fact with the
+safe SDK-headless or foreground route retained when its acceptance still holds;
+implementation difficulty or App UI absence never authorizes polling, invented
+completion, backend substitution, global mutation or weakened gates.
