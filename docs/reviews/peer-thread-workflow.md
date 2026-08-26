@@ -2397,3 +2397,161 @@ candidate freezes, the controller may dispatch the objective review (Luna
 XHigh) and architecture review (Sol Medium) in parallel on isolated read-only
 review workspaces. Medium/large parity pilots remain blocked until both report
 zero promotion-blocking P0/P1 findings.
+
+### H6-E-V architecture correction — shared App-visible SDK authority
+
+The user selected one definitive execution architecture after a live local
+sentinel disproved the earlier visibility assumption. A normal persisted
+`codex exec` thread created inside the saved project was immediately readable
+and navigable by the Codex App as task
+`01a03dce-3c69-7a10-8eda-48f465c4f3c9`; a projectless `/tmp` CLI thread was
+also readable and navigable by exact id. The official Python SDK controls the
+local Codex app-server and creates/resumes the same class of local Codex thread.
+SDK execution is therefore not inherently invisible to the App.
+
+The harness made its H6-E SDK thread invisible by forcing a private
+`CODEX_HOME`. That same isolation also produced a real `401 Missing bearer or
+basic authentication` worker failure because the private home did not own the
+user's normal Codex authentication. The H6-E-R supervisor and child were stopped
+before any new worktree delta. Its durable queue row remains recoverably
+`running`: the current cancellation transition is itself defective because row
+validation requires an immutable result for `cancelled`, although cancellation
+must be terminal without an invented model result. H6-E-R is superseded and
+must never be restarted or treated as implementation evidence.
+
+#### Selected process, session and UI model
+
+- The only production execution owner is the harness SDK worker. It uses the
+  official local Codex app-server and the canonical user Codex session store;
+  it does not set a private `CODEX_HOME`, copy authentication, scrape App state,
+  or create a second App-native worker.
+- Authentication, model access and normal Codex session persistence remain
+  owned by the standard Codex runtime. Harness-specific queue, capability,
+  result and successor authority remains repository-bound in SQLite. No secret,
+  auth material or full Codex home is copied into the repository or ledger.
+- The harness applies leaf and milestone policy through supported process/thread
+  configuration overlays (`agents.enabled=false`,
+  `features.multi_agent=false`, sandbox/approval/model/effort and bounded
+  prompt/result settings) without rewriting the user's global config. Unsupported
+  overrides fail before thread creation.
+- The App is an optional UI over the same persisted SDK thread. While open it
+  can display and let the user inspect that task; if closed before or during
+  execution, the SDK/app-server and detached supervisor continue. Reopening the
+  App must make the persisted task readable/navigable in its saved project.
+  App presence, sidebar refresh and notification never own completion.
+- `app_native` is retained only as explicitly labelled legacy compatibility
+  during migration. It is not the production worker route, is never paired with
+  an SDK worker for the same dispatch, and cannot waive SDK/ledger gates.
+- The harness does not keep a controller model alive. SQLite and the supervisor
+  deterministically close results, recover work and schedule already-authorized
+  successors. An open App may surface the worker transcript and a best-effort
+  source notification, but no model waits, polls or translates results.
+
+This preserves what the harness adds beyond native App task management: one
+durable lifecycle/result authority independent of UI; crash/restart idempotency;
+FIFO queueing and bounded successor scheduling; typed capsule/result contracts;
+model/effort/budget and leaf policy; worktree and mutable/protected ownership;
+dependency-aware parallel lanes; first-class independent reviews; and retained
+auditable evidence. It deliberately does not replace Codex inference,
+authentication, transcripts, project registration or the App UI.
+
+#### Recovery correction
+
+The superseded H6-E-R dispatch
+`model-74c74cfb35fe3e5195028c974f1af111/milestone-6fd650278d755dd490a5e9b6853c401b/executor/1`
+must close exactly once as `cancelled`/superseded without a fabricated
+`ModelFacingResult`, successor, notification or restart. Queue validation must
+distinguish completed/failed result terminals from resultless cancellation, and
+startup recovery must not claim a queue whose owning execution is already
+cancelled. Migration/validation must accept only the internally consistent
+cancelled shape and reject partial or conflicting terminal facts.
+
+## Next execution — H6-E-V
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make the detached SDK route use the standard App-visible Codex thread "
+        "and authentication authority while keeping all orchestration, result, "
+        "recovery and ownership authority in codex-flow."
+    ),
+    decomposition=(
+        "Replace private-CODEX_HOME execution with supported shared-session SDK/app-server configuration and immutable per-thread policy overlays.",
+        "Repair resultless cancellation and recover the superseded H6-E-R queue without restart, duplicate work or invented result facts.",
+        "Prove App-closed continuation plus later App readability/navigation of the same SDK thread in a saved project.",
+        "Complete the missing supervisor/IPC/service adversarial tests and exact sanitized evidence before parallel independent reviews.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A real SDK worker uses normal Codex authentication without copying secrets, persists one standard Codex thread, and is readable/navigable in the App under the selected saved project.",
+        "Closing the App before or during the run does not stop queue, SDK/app-server, direct result submission, terminal commit or authorized successor scheduling; reopening surfaces the same thread id.",
+        "Leaf, model, effort, sandbox, approval and bounded result policy are applied through supported per-process/thread configuration without modifying global Codex config.",
+        "No production dispatch creates both SDK and App-native workers; App-native remains explicitly non-authoritative legacy compatibility.",
+        "The superseded H6-E-R queue closes resultlessly as cancelled exactly once and can never be reclaimed, resumed, notified or given a fabricated result/successor.",
+        "Dedicated queue/supervisor/IPC/worker/service tests, exact-wheel temporary install, App visibility/closure sentinels, make check, Ruff, diff hygiene and sanitized retained evidence pass.",
+        "The implementation worker remains leaf, modifies only owned surfaces, sends no progress callbacks and emits exactly one raw schema-v1 ModelFacingResult with both independent reviews pending.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/config.py",
+        "src/codex_flow/native_profile.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/app_native.py",
+        "src/codex_flow/contracts.py",
+        "pyproject.toml",
+        "uv.lock",
+        "tests/test_h2_ledger.py",
+        "tests/test_h3_controller.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_h5_workflow_control.py",
+        "tests/test_h6_model_facing_projection.py",
+        "tests/test_h6_app_native.py",
+        "tests/test_h6_supervisor.py",
+        "tests/test_h6_service.py",
+        "tests/test_h6_ipc.py",
+        "tests/test_h6_visible_sdk.py",
+        "docs/reviews/codex-controller-compatibility.md",
+        "docs/reviews/evidence/h6-e-detached-supervisor.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "workflow.toml",
+        "src/codex_flow/worktrees.py",
+        "src/codex_flow/h6_pilot.py",
+        "plugins",
+        "skills",
+        "docs/reviews/evidence/h1-sdk-sentinel.json",
+        "docs/reviews/evidence/h4-a-objective-pilot.json",
+        "docs/reviews/evidence/h4-b-multi-authority-pilot.json",
+        "docs/reviews/evidence/h5-workflow-control-medium.json",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone and implement only H6-E-V from the canonical plan in the existing python-sdk-controller worktree. "
+        "Preserve the complete H6-E dirty candidate and the committed plan. Replace the private CODEX_HOME route with the official shared Codex session/auth path and supported per-thread leaf policy; never copy or expose auth. "
+        "Repair the superseded queue as a resultless cancellation and prove it cannot restart. Add the direct tests, exact-wheel evidence, App-closed continuation and later App visibility sentinel specified by the plan. "
+        "You are a leaf worker: create no subagents, peer tasks, reviewers or successors and do not poll Codex tasks. Do not modify protected/global state, install a real service, run parity pilots or retire legacy code. "
+        "Return exactly one raw ModelFacingResult JSON object; objective and architecture reviews remain controller-owned and pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+H6-E-V is the sole executable implementation milestone. Its implementation
+candidate must be frozen before the controller dispatches the Luna XHigh
+objective review and Sol Medium architecture review in parallel. The old H6-E-R
+capsule and queue are recovery inputs only, never parallel work.
