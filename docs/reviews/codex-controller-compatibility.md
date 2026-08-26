@@ -285,3 +285,4 @@ Only the final controller command may migrate v8 to v9 or canonicalize the
 empty source-draft v9 App table. A non-empty draft table fails closed. Building,
 proving and installing must finish first; an older schema-v8 executable must
 not open the ledger after the candidate migrates it.
+App-native visible pilot: passed

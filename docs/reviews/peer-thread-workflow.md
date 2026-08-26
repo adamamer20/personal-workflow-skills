@@ -1116,8 +1116,185 @@ visibility.
 Non-goals: a custom run dashboard, automatic sidebar manipulation, remote fleet
 scheduling, autonomous multi-milestone polling, SDK removal, legacy deletion,
 plugin installation/trust, or weakening explicit sensitive-path protection.
-After H6-C promotion, H6 resumes with fresh medium and large pilots using the
-selected hosting mode and the same durable acceptance contract.
+After H6-C and its H6-D follow-up promote, H6 resumes with fresh medium and
+large pilots using the selected hosting mode and the same durable acceptance
+contract.
+
+### Milestone H6-D — Normalize App-owned Git refs and ingest the raw terminal envelope
+
+The bounded visible H6-C pilot proved the host-mediated task path, real visible
+thread binding, selected-worktree reuse and the requested one-line repository
+edit. It also proved two App-native promotion defects. First, Codex App writes
+host-owned checkpoint and capture refs below `refs/codex/turn-diffs/**` in the
+repository's shared common Git directory during an ordinary turn; the v1 Git
+authority hashes that volatile namespace and therefore converted the otherwise
+valid pilot into `integrity_failure`. Second, the native `create_thread` action
+does not accept `output_schema`: the worker returned usable JSON only because
+the host improvised the contract and terminal ingestion used a hand-constructed
+projection. `wait_threads` is a deliberately compact progress/summary surface,
+not the lossless terminal message authority.
+
+Outcome: fix exactly those two defects without weakening any other controller
+boundary. Git authority semantically normalizes only the exact App-owned
+`refs/codex/turn-diffs/` namespace, whether refs are loose or packed and whether
+their reflogs live in the shared common Git directory. `HEAD`, the checked-out
+branch, index, config, ordinary refs and reflogs, history/operation state,
+protected paths, tracked mutations and non-ignored out-of-scope mutations remain
+fail-closed. App-native action preparation no longer represents
+`output_schema` as an argument accepted by native task creation. Instead, one
+controller-owned formatter appends a compact canonical `ModelFacingResult`
+schema-version-1 JSON envelope/template and the instruction to emit that JSON
+object alone, without prose or a Markdown fence, to the native prompt.
+Terminal ingestion accepts the full raw terminal `agentMessage` text for the
+exact bound thread, applies the existing bounded strict JSON decoder to the
+entire text, constructs `ModelFacingResult`, and only then enters the existing
+capability-, identity-, validation- and integrity-checked durable completion
+path. A `wait_threads` summary, excerpt, commentary item, inferred object or
+host-rewritten dictionary is never terminal-result authority.
+
+Design and ownership:
+
+- `git_authority_snapshot()` keeps its bounded `HEAD`, current branch, Git-dir,
+  index, config and operation-state facts. Replace raw all-ref hashing with one
+  canonical, bounded ordinary-ref projection derived from Git's ref inventory:
+  parse complete ref records strictly, discard a ref only when its full name is
+  exactly below `refs/codex/turn-diffs/`, sort and hash every remaining ref name,
+  object id and symbolic target. Apply the same exact-subtree exclusion to
+  loose-ref and ref-log metadata in the common directory; do not use prefix,
+  substring or general `refs/codex/**` exclusions. Packed ordinary refs remain
+  protected through the semantic inventory. `HEAD` and ordinary reflogs retain
+  transient-history detection, including commit-then-reset.
+- The canonical result-envelope formatter lives beside
+  `ModelFacingResult`/`model_facing_result_schema()` and is the sole source used
+  by App-native prompt construction and its tests. New App-native actions use a
+  versioned host contract that binds the result-contract digest but does not
+  instruct the host to pass `output_schema` to `create_thread`. Existing
+  persisted version-1 action/status rows remain readable and recoverable; no
+  second result type, transport, scheduler or ledger authority is introduced.
+- The `codex-flow app-result --agent-message PATH` CLI/controller terminal
+  boundary reads one bounded raw UTF-8 `agentMessage` payload; the former
+  host-authored `--result` JSON-file input is not an alternate authority. It
+  rejects BOMs, invalid UTF-8, leading/trailing prose,
+  Markdown fences, concatenated JSON, non-object roots, missing/extra keys,
+  invalid enums/types and over-limit content, and then delegates the typed
+  result to the unchanged `complete_app_native()` authority. Host orchestration
+  must obtain the final full message through native `read_thread` for the bound
+  `thread_id` and copy its complete raw `agentMessage` text without rewriting;
+  `wait_threads` may wait for lifecycle state but its summary text must never be
+  ingested.
+
+Mutable ownership:
+
+- `src/codex_flow/controller.py` only for the exact Git-authority normalization
+  and raw-result completion entrypoint;
+- `src/codex_flow/app_native.py`, `src/codex_flow/contracts.py`,
+  `src/codex_flow/projection.py` and `src/codex_flow/cli.py` only for the
+  versioned native action, canonical prompt envelope and raw `agentMessage`
+  ingestion boundary;
+- `tests/test_h3_controller.py`, `tests/test_h5_workflow_control.py`,
+  `tests/test_h6_app_native.py` and new focused fixtures required by the two
+  defects;
+- `docs/reviews/evidence/h6-d-app-native-pilot.json` as the one sanitized,
+  retained visible-pilot record.
+
+Protected surfaces:
+
+- `docs/reviews/peer-thread-workflow.md`, `AGENTS.md`, `workflow.toml`, the
+  existing uncommitted line in
+  `docs/reviews/codex-controller-compatibility.md`, and every other pre-existing
+  user change;
+- ledger schema/state semantics and `src/codex_flow/ledger.py`; worktree lease,
+  mutation-scope and protected-digest behavior outside the owned
+  `controller.py` functions; `src/codex_flow/worktrees.py`,
+  `src/codex_flow/domain.py`, `src/codex_flow/config.py`,
+  `src/codex_flow/native_profile.py`, `src/codex_flow/backends/codex_sdk.py`,
+  `src/codex_flow/h6_pilot.py`, all plugin sources, accepted H1-H5 evidence and
+  unrelated H6-C behavior;
+- installed plugin caches/trust, global Codex configuration/hooks/state, the
+  primary checkout, remotes, downstream repositories, legacy handoff source,
+  and every path outside the mutable set. No push, merge, rebase, stash,
+  discard, plugin installation/trust, legacy disablement/deletion or private
+  Desktop socket/app-server discovery is authorized.
+
+Non-goals: broad Git-ignore policy changes; excluding all `refs/codex/**`, all
+unknown host refs, ordinary ref logs or packed refs; weakening current-branch,
+index, config, history, protected-path or mutation-scope checks; changing
+`ModelFacingResult` fields/status semantics; adding native structured-output
+support that the host action does not expose; parsing task summaries; changing
+routes, budgets, SQLite schema or SDK-headless structured-output behavior; and
+running the medium/large H6 parity pilots or making the legacy-retirement
+decision.
+
+Acceptance modes: `objective` and `architecture`. The objective authority is
+the independent `code-reviewer` (Luna XHigh); the architecture authority is the
+independent `architecture-reviewer` (Sol Medium). Both must review the complete
+H6-D candidate once, with at most one bounded repair for concrete blockers.
+Promotion requires P0=0/P1=0 from both authorities; one authority cannot waive
+the other.
+
+Objective acceptance and regression validation:
+
+- In a repository with at least two worktrees sharing one common Git directory,
+  create, update and delete loose and packed refs plus reflogs strictly below
+  `refs/codex/turn-diffs/**` between baseline and completion. The normalized Git
+  authority and a valid App-native completion remain stable. Prove exact-name
+  discrimination: `refs/codex/turn-diffs-evil/**`, `refs/codex/other/**`,
+  heads, tags and remotes still change the digest and fail completion.
+- Retain or extend adversarial regressions proving changes to `HEAD`, current
+  branch, index, local/worktree config, ordinary reflogs, merge/rebase/sequencer
+  state and commit-then-hard-reset history fail closed. Tracked protected edits,
+  tracked out-of-scope edits, non-ignored untracked out-of-scope files and
+  terminal-capture races still fail; Git-ignored build-output behavior remains
+  unchanged.
+- Assert that a newly prepared App-native host action maps only supported
+  native creation inputs and carries no `output_schema` argument. Its prompt
+  contains exactly one deterministic canonical envelope/template whose digest
+  is bound by the closed action/receipt contract; SDK-headless turns continue
+  to receive `output_schema` exactly as before. Persisted version-1 App-native
+  actions remain readable without being silently reinterpreted as version 2.
+- Feed terminal ingestion the full raw valid `agentMessage` and prove one typed,
+  idempotent durable result for the exact bound host/thread/capability. Reject a
+  truncated or summarized `wait_threads` projection and every malformed form
+  listed above before ledger mutation; compare database bytes/state before and
+  after each rejection. Reject a correct message for the wrong host/thread or
+  stale/cancelled dispatch through the existing closed checks.
+- Run the focused H3/H5/H6-D tests, Ruff on every changed Python path,
+  `git diff --check`, the complete `make check`, exact dirty-baseline/status and
+  protected-surface comparisons, and a full candidate self-review. Preserve the
+  existing compatibility-document insertion byte-for-byte.
+
+Packaging and install acceptance: after source gates pass, build one wheel into
+a fresh temporary directory; run `uvx --from <exact-wheel> codex-flow --help`,
+schema output and the focused App-native prepare/raw-ingest checks against a
+disposable Git repository. Then install that exact wheel into fresh temporary
+`UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` roots and repeat the same CLI checks from the
+installed executable. The isolated install must not mutate the user's normal
+tool directory, plugin cache/trust, global Codex state or the live H6 ledger,
+and source-tree imports must be unavailable during the wheel/install checks.
+
+Architecture acceptance: one SQLite/controller authority and one
+implementation owner remain; the exclusion is exact, semantic and bounded
+rather than a general App trust bypass; shared-common-dir/worktree behavior is
+explicit; v1 action recovery is preserved; the prompt schema/template and
+strict parser have one source of truth; raw response ownership is the exact
+bound thread's full terminal `agentMessage`; summaries and host-created result
+objects are non-authoritative; SDK-headless behavior remains separate; and no
+private Desktop/app-server protocol, second transport or schema migration is
+introduced.
+
+Visible promotion pilot: run exactly one bounded App-native task from the
+installed isolated wheel against a disposable Git repository/worktree. Bind its
+real visible native thread, make one declared sentinel-file edit, wait only for
+lifecycle completion, read the full raw terminal `agentMessage` from that exact
+thread, and ingest that raw text. Retain sanitized evidence of native identity,
+supported create inputs, raw-message digest/length (not lossy summary text),
+the exact `refs/codex/turn-diffs/**` before/after delta, unchanged normalized Git
+authority, successful protected/mutation/validation checks and durable
+`COMPLETED`. Confirm the selected worktree gained no duplicate and the source
+worktree's pre-existing compatibility-document change and all other dirty bytes
+are unchanged. Failure to expose the full raw terminal message is
+`EXTERNAL_BLOCKED`; do not substitute `wait_threads`, inferred JSON or the SDK
+server. H6 medium/large parity pilots resume only after H6-D promotion.
 
 Outcome: run one medium and one large real milestone through the controller,
 compare lifecycle correctness and usage against the legacy path, verify local
@@ -1178,6 +1355,12 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
 - Desktop visibility is now an explicit H6-C App-native promotion gate. It is
   not inferred from SDK thread creation and does not require attaching the SDK
   controller to an undocumented Desktop-owned app-server.
+- The visible H6-C pilot proved App-native visibility and native identity
+  binding, but promotion is withheld: the exact App-owned
+  `refs/codex/turn-diffs/**` namespace caused a false Git-integrity failure, and
+  native `create_thread` lacks `output_schema` while the current host workflow
+  has no lossless raw-terminal ingestion contract. H6-D owns exactly these two
+  defects; medium/large pilots remain blocked until it promotes.
 - The supplied audit's underlying archive is not stored in this repository;
   its findings motivate the design but do not substitute for H1 captured
   evidence.
@@ -1576,22 +1759,104 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   critical security, irreversible/system-wide decisions or explicit
   escalation. One review per authority and at most one bounded repair for
   concrete blockers replaces repeated broad review waves.
+- 2026-08-26: H6-C implementation commit `6feb927` supplied Git-native ignored-
+  artifact semantics and the host-mediated App-native prepare/bind/result path.
+  The visible pilot bound real task `01a03d56-1658-7e02-a082-890b26251106`,
+  reused the selected worktree and produced only the requested existing
+  compatibility-document insertion plus a complete result envelope. Durable
+  closure nevertheless failed with `integrity_failure`: Codex App created or
+  updated host-owned `refs/codex/turn-diffs/**` in the shared common Git
+  directory after the baseline. The pilot also proved native `create_thread`
+  cannot receive `output_schema`; terminal JSON was reconstructed outside a
+  canonical raw-message boundary. H6-C is not promoted. H6-D is the sole next
+  milestone and fixes exactly those two defects while preserving the existing
+  uncommitted compatibility-document line and all other user changes.
 
 ## Next execution
 
-Milestone: H6-C — Git-native workspace policy and App-native dispatch boundary.
+Milestone: H6-D — Normalize App-owned Git refs and ingest the raw terminal
+envelope.
 
-Next executable capsule: implement and independently validate the complete H6-C
-contract above. This capsule also finishes integration of the existing H6-R
-candidate before further production pilots.
+Next executable capsule (authoritative typed authoring form):
 
-Resolved route: `model=gpt-5.6-sol`, `thinking=high`.
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Fix exactly the two visible-pilot App-native defects: normalize only "
+        "refs/codex/turn-diffs/** in Git authority and make the exact bound "
+        "thread's full raw agentMessage the strictly parsed ModelFacingResult authority."
+    ),
+    decomposition=(
+        "Implement exact bounded Git-ref/ref-log normalization with ordinary Git authority unchanged.",
+        "Version the App-native host action, embed one canonical result envelope in its prompt, and ingest raw terminal text.",
+        "Run adversarial regressions, full gates, isolated wheel/install checks, independent reviews, and one visible disposable pilot.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Only refs/codex/turn-diffs/** is normalized; HEAD, current branch, index, config, ordinary refs/history, protected paths and out-of-scope mutations remain fail-closed.",
+        "Native create_thread receives no output_schema; one canonical prompt template produces a strict ModelFacingResult from the entire raw agentMessage, never a wait_threads summary.",
+        "Focused and full tests, Ruff, diff hygiene, isolated wheel/install checks and exact dirty-baseline protection pass.",
+        "One bounded visible App-native disposable-repository pilot binds a real thread and reaches durable COMPLETED with retained sanitized evidence.",
+        "Independent objective and architecture reviews both report P0=0/P1=0.",
+        "The existing docs/reviews/codex-controller-compatibility.md insertion and every other pre-existing user change remain byte-identical.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/controller.py",
+        "src/codex_flow/app_native.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/cli.py",
+        "tests/test_h3_controller.py",
+        "tests/test_h5_workflow_control.py",
+        "tests/test_h6_app_native.py",
+        "tests/fixtures/h6-d-app-native",
+        "docs/reviews/evidence/h6-d-app-native-pilot.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "workflow.toml",
+        "docs/reviews/codex-controller-compatibility.md",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/worktrees.py",
+        "src/codex_flow/domain.py",
+        "src/codex_flow/config.py",
+        "src/codex_flow/native_profile.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/h6_pilot.py",
+        "plugins",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Implement only H6-D from the canonical plan in the selected existing worktree. "
+        "Preserve the complete dirty baseline, especially the existing compatibility-document line. "
+        "Use one implementation owner; test and self-review the two defects, prove packaging from an exact isolated wheel/install, "
+        "obtain one independent review per declared authority, repair at most once for concrete blockers, and run exactly one bounded visible App-native pilot. "
+        "The pilot must ingest the exact bound thread's full raw agentMessage; never use a wait_threads summary as result data. "
+        "Return one schema-valid ModelFacingResult and do not expand into medium/large pilots or legacy retirement."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
 
-Routing authorization: repository `AGENTS.md` critical architecture/promotion
-policy and the user's explicit instruction to continue through program
-completion.
+Planning repair validation (2026-08-26): the exact capsule above instantiated
+and projected successfully against the selected checkout as
+`run_id=model-d6e82f5a60225c5be9b7443831e21079`,
+`milestone_id=milestone-2436db9c2bb466102de0449d1670931a`,
+`workspace_mode=existing_worktree`, route `gpt-5.6-luna/xhigh`. No capsule
+surface overlaps and every surface is a canonical repository-relative path.
 
-Planning thread: `01a035b4-1503-7d83-b11a-b36354bd2025` on host `local`.
+Resolved implementation route: `model=gpt-5.6-luna`, `thinking=xhigh`.
+Independent routes are `code-reviewer = Luna XHigh` and
+`architecture-reviewer = Sol Medium`, as fixed by `workflow.toml` and repository
+instructions. This planning-only update does not dispatch them.
+
+Planning owner: source task `01a038ae-62ee-7910-ae89-6c13c2e0112c`.
 
 Plan path:
 `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller/docs/reviews/peer-thread-workflow.md`.
@@ -1602,36 +1867,20 @@ Execution workspace:
 - repository: `/home/adam/personal-workflow-skills`
 - path: `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller`
 - branch: `agent/python-sdk-controller`
-- base SHA: `6a2ac17`
+- base SHA: `6feb9277472d85b480c1cf851c53ab6c1f2a537b`
 - lane: `python-sdk-controller`
 
-Starting state: accepted H5 implementation
-`b57a3534be96ee24fdeb319022f20a8c4aaffb36`, the uncommitted H6-R candidate and
-Git-integrity draft currently preserved in this worktree, plus this planning
-update. Reuse this worktree and branch; do not create another Git worktree or
-duplicate its controller state.
+Starting state: H6-C implementation commit `6feb927`, the one pre-existing
+uncommitted insertion in `docs/reviews/codex-controller-compatibility.md`, and
+this planning update. Capture exact status and bytes before work. Reuse this
+worktree and branch; do not create another repository worktree or duplicate its
+controller state. The H6-D pilot alone uses a disposable repository/worktree.
 
-Owned surfaces: controller workspace-integrity logic; App-native typed action,
-bind and status contracts; required ledger/schema, CLI and projection changes;
-the source `workflow-control` skill; focused tests, packaging and compatibility
-documentation. The executor owns implementation, bounded repair, validation,
-independent objective and architecture review, and exactly one durable terminal
-result. It does not own this plan or repository instructions.
-
-Protected surfaces: this plan and `AGENTS.md`; accepted H1-H5 implementation and
-retained evidence outside the owned integration paths; native Codex provider,
-config, discovery and permission inheritance; installed plugin caches and
-trust; global Codex config/hooks/state; primary checkout; remotes; downstream
-pins; legacy source and commands; and unrelated repository paths. No push,
-merge, rebase, stash, discard, plugin installation/trust, global/remote
-mutation, hook disablement, private Desktop socket discovery or legacy deletion.
-
-Acceptance: the exact H6-C objective and architecture criteria above, including
-ignored-artifact regressions that preserve explicit sensitive-path integrity;
-closed idempotent prepare/bind/status behavior; unchanged SDK-headless behavior;
-full repository gates; zero open P0/P1; and one visible App-native pilot when
-the host action is available. Medium/large parity pilots and the typed legacy
-retirement decision remain the successor after H6-C promotion.
+The executor owns only the typed capsule's mutable surfaces plus bounded repair,
+validation, the two independent reviews and one durable result. The planner
+retains this plan, scope, milestone ordering and program closure. Medium/large
+parity pilots and the typed legacy-retirement decision are the successor only
+after H6-D promotion.
 
 Escalate only for a genuinely underdetermined product/public-contract/security
 decision, missing user authority, an external prerequisite, or proven
@@ -1639,8 +1888,3 @@ infeasibility. Concrete inherited defects reached by H6 are classified and
 repaired when they block required pilot/parity evidence; unavailable optional
 compatibility surfaces remain truthfully open and do not authorize invented
 proof, global mutation, or legacy deletion.
-
-Completion callback:
-`threadId=01a035b4-1503-7d83-b11a-b36354bd2025`, `hostId=local`. Send exactly
-one compact `COMPLETION`, or accurately labelled `BLOCKED`/`FAILED`, after final
-verification; do not send routine progress updates.
