@@ -7707,6 +7707,29 @@ different round.  Because the policy change does not own controller lease code,
 that failure is retained as an integration-checkpoint blocker rather than
 repaired or hidden here.
 
+### Integration checkpoint activation
+
+The planning-time dirty-baseline blocker above is now closed. Read-only
+provenance audit classified the complete accumulated program candidate as 109
+authorized logical changes with no unrelated nonignored user surface. The
+lease discriminator was not an authority failure: its per-future 15-second
+wall-clock bound was shorter than the intentionally serialized full-validation
+path under load. The test now waits for both contenders under one bounded
+60-second deadline and still requires exactly one durable winner; 48 focused
+rounds and the full repository gate passed.
+
+Local integration checkpoint commit
+`093eb64accd51c0516680c2c7779bcba0fe4641a` is the frozen DAG base. It
+contains the complete authorized codex-flow program candidate, the narrow
+retained-SVG whitespace exception required to preserve exact historical
+evidence bytes, and no `.codex-flow`, retained-wheel, cache, environment or
+remote state. `make check` passed with Ruff, 769 tests, 16 skill and 7 schema
+validations, compileall and every pre-commit hook; `git diff --cached --check`
+also passed before commit. The active provider-transient milestone is now
+ready for one managed semantic child lane based on this exact checkpoint; the
+later metadata commit that records this SHA does not change its implementation
+or acceptance boundary.
+
 ## Next execution — provider-transient-backoff-and-fresh-e2e-smoke
 
 The next owner repairs only typed transient provider recovery and then runs one
