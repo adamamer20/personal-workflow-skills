@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Discovery Spike"
+  short_description: "Resolve one design question with evidence"
+  default_prompt: "Use $run-discovery-spike to compare bounded approaches for one named decision and report adopt, reject, or inconclusive evidence."

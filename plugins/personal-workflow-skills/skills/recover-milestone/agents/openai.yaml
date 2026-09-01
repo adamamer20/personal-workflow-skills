@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recover Milestone"
+  short_description: "Diagnose failure and continue safely"
+  default_prompt: "Use $recover-milestone to diagnose repeated milestone failure and continue, replan, or request a material decision."

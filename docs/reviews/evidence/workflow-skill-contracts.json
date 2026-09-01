@@ -1,0 +1,480 @@
+{
+  "candidate_digest_scope": "sorted bytes of the exact 45 reconciliation paths with path-NUL-bytes framing, excluding this evidence record; proportional closure gates: focused 400-digit integer, Draft 2020-12, provider-free SDK and canonical-plan discriminators, 54-test contracts partition, focused controller output-schema selection, focused Ruff, fresh Python 3.12 exact-wheel static/generated schema and ten-asset byte parity, plugin and JSON validation, git diff --check, and four-path plus complete eleven-path self-review; the prior 538-test broad gate and unaffected partitions are carried forward",
+  "candidate_sha256": "fd9331c855d8352febc84ad56df142aec1bc7864f07fcd07d0b582321860996d",
+  "inventory": [
+    {
+      "capability": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/SKILL.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/SKILL.md",
+      "destination_sha256": "e99c3dd4f58f57e8b00a3de7b11b5cf21cfb0496ff5e634848307930ed55204e",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/SKILL.md",
+      "source_sha256": "e99c3dd4f58f57e8b00a3de7b11b5cf21cfb0496ff5e634848307930ed55204e"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/agents/openai.yaml",
+      "destination_sha256": "ea1069ff1c67bb26c17344a1b271af10eec1da1a6affd2f658ff91246da24158",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/agents/openai.yaml",
+      "source_sha256": "ea1069ff1c67bb26c17344a1b271af10eec1da1a6affd2f658ff91246da24158"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/references/patterns.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/references/patterns.md",
+      "destination_sha256": "55ecfb344c979dff76b3d684efef6fc8cfa1650ccf12ae639c77bde6e8df967b",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/abstraction-opportunity-audit/references/patterns.md",
+      "source_sha256": "55ecfb344c979dff76b3d684efef6fc8cfa1650ccf12ae639c77bde6e8df967b"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/codex-thread-handoff/SKILL.md",
+      "decision": "superseded",
+      "destination_path": "plugins/personal-workflow-skills/skills/codex-thread-handoff/SKILL.md",
+      "destination_sha256": "501d2e9d7064a23a1c67e12fd7f60c1637ead1ed93a7c70e9fca9711074030bb",
+      "reason": "Current destination handoff contract is newer and remains protected; stale donor wording was not copied.",
+      "source_path": "plugins/personal-workflow-skills/skills/codex-thread-handoff/SKILL.md",
+      "source_sha256": "8e2f1d249c3bb7f5c9790f72067a3acca75cef61ea915e3524d71ff1eee2f347"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/codex-thread-handoff/agents/openai.yaml",
+      "decision": "superseded",
+      "destination_path": "plugins/personal-workflow-skills/skills/codex-thread-handoff/agents/openai.yaml",
+      "destination_sha256": "982d6887dd86ec7555b502caf0990304d149791c652badd60d060029e32ec5f8",
+      "reason": "Current destination handoff contract is newer and remains protected; stale donor wording was not copied.",
+      "source_path": "plugins/personal-workflow-skills/skills/codex-thread-handoff/agents/openai.yaml",
+      "source_sha256": "2734073a0b9f3582bc9c80794b71e36019e4ea1e9ba04f29d0246d0c06c2ed75"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/collect-evidence/SKILL.md",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/collect-evidence/SKILL.md",
+      "destination_sha256": "b5c232284d7021f1fc643406281660041822458fee6ee4892444293e811f40ac",
+      "reason": "Donor cognitive role was adopted with explicit controller-only ownership wording.",
+      "source_path": "plugins/personal-workflow-skills/skills/collect-evidence/SKILL.md",
+      "source_sha256": "b7c6d3b5c60b1e0b8113a130633e391ed13723c4c751b846ece173a5c37b7806"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/collect-evidence/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/collect-evidence/agents/openai.yaml",
+      "destination_sha256": "7df3f0bb5f40040c4d8493e57d536c96110b70efd8ae4bbe4870d0b2ea5ef91b",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/collect-evidence/agents/openai.yaml",
+      "source_sha256": "7df3f0bb5f40040c4d8493e57d536c96110b70efd8ae4bbe4870d0b2ea5ef91b"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/SKILL.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/SKILL.md",
+      "destination_sha256": "8b75d7a184089fb75b5c71ed211c68801f34f89e7e7ae7bda1103f04e0a0f0c7",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/SKILL.md",
+      "source_sha256": "8b75d7a184089fb75b5c71ed211c68801f34f89e7e7ae7bda1103f04e0a0f0c7"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/agents/openai.yaml",
+      "destination_sha256": "bb53545fd5bbdb03129aa02b67005b358ca47f928948a792fb0bdc5746b47031",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/agents/openai.yaml",
+      "source_sha256": "bb53545fd5bbdb03129aa02b67005b358ca47f928948a792fb0bdc5746b47031"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/references/rubric.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/references/rubric.md",
+      "destination_sha256": "c4bd7d89a0c5e903234bafddb0823516bec7bf36e4e930a9c33aa99ba8799f24",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/references/rubric.md",
+      "source_sha256": "c4bd7d89a0c5e903234bafddb0823516bec7bf36e4e930a9c33aa99ba8799f24"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/scripts/find_unreferenced_python_symbols.py",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/scripts/find_unreferenced_python_symbols.py",
+      "destination_sha256": "5891983ef617ecaffe0333b98611ef4eba9c57804668a6ee70943149d3d75b8b",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/dead-code-elimination-audit/scripts/find_unreferenced_python_symbols.py",
+      "source_sha256": "5891983ef617ecaffe0333b98611ef4eba9c57804668a6ee70943149d3d75b8b"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/dedup-naming-audit/SKILL.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/dedup-naming-audit/SKILL.md",
+      "destination_sha256": "9d83cdab9dcdd13ae61ea07373704349dc9988dcc7bc121e560836bbf6a14261",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/dedup-naming-audit/SKILL.md",
+      "source_sha256": "9d83cdab9dcdd13ae61ea07373704349dc9988dcc7bc121e560836bbf6a14261"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/dedup-naming-audit/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/dedup-naming-audit/agents/openai.yaml",
+      "destination_sha256": "2a09289a18c9adba005aa626ca4aa0cbbc122e7a0fc2de7ef9e3736dce4387c9",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/dedup-naming-audit/agents/openai.yaml",
+      "source_sha256": "2a09289a18c9adba005aa626ca4aa0cbbc122e7a0fc2de7ef9e3736dce4387c9"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/dedup-naming-audit/references/rubric.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/dedup-naming-audit/references/rubric.md",
+      "destination_sha256": "3f851486675beaad9dccce6b70605a4c28a6eab876b435e66453155151bc5567",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/dedup-naming-audit/references/rubric.md",
+      "source_sha256": "3f851486675beaad9dccce6b70605a4c28a6eab876b435e66453155151bc5567"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/define-visual-contract/SKILL.md",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/define-visual-contract/SKILL.md",
+      "destination_sha256": "34abae91d86626a60b4fac67f4ded30f7385da07db9e57b0ec05bbf13c961f96",
+      "reason": "Donor cognitive role was adopted with explicit controller-only ownership wording.",
+      "source_path": "plugins/personal-workflow-skills/skills/define-visual-contract/SKILL.md",
+      "source_sha256": "e4c8457ccb21f737d61d63e092a75ecdec7613febc9dfa4bb579b52c877b7af7"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/define-visual-contract/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/define-visual-contract/agents/openai.yaml",
+      "destination_sha256": "fa838d053d4ec947560012f32ebb59e5e3bcff4d8b7de886c3291f556ebae808",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/define-visual-contract/agents/openai.yaml",
+      "source_sha256": "fa838d053d4ec947560012f32ebb59e5e3bcff4d8b7de886c3291f556ebae808"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/execute-milestone/SKILL.md",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/execute-milestone/SKILL.md",
+      "destination_sha256": "690e5f718a64e5c689d1a2afb8edc3a8732774a3f0e1dc60924383c9ced86410",
+      "reason": "Current controller-owned typed-capsule and architecture wording was retained and donor guidance was merged.",
+      "source_path": "plugins/personal-workflow-skills/skills/execute-milestone/SKILL.md",
+      "source_sha256": "e1c9ac6acc0e519ffd48dacc325736b2131dd3822bf3fc96f66d24d14e285ddb"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/execute-milestone/agents/openai.yaml",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/execute-milestone/agents/openai.yaml",
+      "destination_sha256": "00ab39a51368a53f498a590fe8b638972db87cb0806fe658cff453014afbde9d",
+      "reason": "Current controller-owned typed-capsule and architecture wording was retained and donor guidance was merged.",
+      "source_path": "plugins/personal-workflow-skills/skills/execute-milestone/agents/openai.yaml",
+      "source_sha256": "cbd3b1cb053704ff8a91f5e565832387e34c6e77155b6bb5574c010da4b263ff"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/fallback-upstream-audit/SKILL.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/fallback-upstream-audit/SKILL.md",
+      "destination_sha256": "fcf5f9ab191e39782ace51366aca8e3a46119b9d9dbb3cf03c2ff5bc1a033c68",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/fallback-upstream-audit/SKILL.md",
+      "source_sha256": "fcf5f9ab191e39782ace51366aca8e3a46119b9d9dbb3cf03c2ff5bc1a033c68"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/fallback-upstream-audit/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/fallback-upstream-audit/agents/openai.yaml",
+      "destination_sha256": "b33ea0de270532b627cae1473cff4688297c4b4e31ad2837abcec6ed5ebbe0e9",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/fallback-upstream-audit/agents/openai.yaml",
+      "source_sha256": "b33ea0de270532b627cae1473cff4688297c4b4e31ad2837abcec6ed5ebbe0e9"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/SKILL.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/SKILL.md",
+      "destination_sha256": "08fb4998b59e215a86a20116ba4347854f8f5bd31a1b51f58cb00eab93a5a1f9",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/SKILL.md",
+      "source_sha256": "08fb4998b59e215a86a20116ba4347854f8f5bd31a1b51f58cb00eab93a5a1f9"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/agents/openai.yaml",
+      "destination_sha256": "d8aedb3e88bcaed0ebe9d43a8635b911670eb490753f9a022b6a55d65a33e063",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/agents/openai.yaml",
+      "source_sha256": "d8aedb3e88bcaed0ebe9d43a8635b911670eb490753f9a022b6a55d65a33e063"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/scripts/find_indirect_attribute_access.py",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/scripts/find_indirect_attribute_access.py",
+      "destination_sha256": "ca76f418933ceedee96c71b747221c39fcd8c4d281fb8af9caf49d6a2a1587b1",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/indirect-attribute-access-audit/scripts/find_indirect_attribute_access.py",
+      "source_sha256": "ca76f418933ceedee96c71b747221c39fcd8c4d281fb8af9caf49d6a2a1587b1"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/overabstraction-audit/SKILL.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/overabstraction-audit/SKILL.md",
+      "destination_sha256": "c1a83b4b88dfef376d7e574ce6d9b01fdb287f4c1c4f70b4563e30ec6c1b443d",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/overabstraction-audit/SKILL.md",
+      "source_sha256": "c1a83b4b88dfef376d7e574ce6d9b01fdb287f4c1c4f70b4563e30ec6c1b443d"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/overabstraction-audit/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/overabstraction-audit/agents/openai.yaml",
+      "destination_sha256": "2c88daf916f88df87db0bb104f9e91e1fce3b2a693716686de5c5aa5005a6046",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/overabstraction-audit/agents/openai.yaml",
+      "source_sha256": "2c88daf916f88df87db0bb104f9e91e1fce3b2a693716686de5c5aa5005a6046"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/overabstraction-audit/references/rubric.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/overabstraction-audit/references/rubric.md",
+      "destination_sha256": "7412a66288e2c93a06d90ba478d7ce61385dfad0ab4883cb70283b60a7a93ca1",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/overabstraction-audit/references/rubric.md",
+      "source_sha256": "7412a66288e2c93a06d90ba478d7ce61385dfad0ab4883cb70283b60a7a93ca1"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/plan-work/SKILL.md",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/plan-work/SKILL.md",
+      "destination_sha256": "10ee67562b3fe1ef3e07afeaf8f6e02d25a4c262396f7934d25198b3e5922860",
+      "reason": "Current controller-owned typed-capsule and architecture wording was retained and donor guidance was merged.",
+      "source_path": "plugins/personal-workflow-skills/skills/plan-work/SKILL.md",
+      "source_sha256": "e6e0816f00002219477837a85e8abab8c98a7f514ce900c733c1c575fee6c1b0"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/plan-work/agents/openai.yaml",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/plan-work/agents/openai.yaml",
+      "destination_sha256": "a55cdc3e1428256415d07783ce29b3bbf7d1c1674c232d64d38750ef4e8fc3ab",
+      "reason": "Current controller-owned typed-capsule and architecture wording was retained and donor guidance was merged.",
+      "source_path": "plugins/personal-workflow-skills/skills/plan-work/agents/openai.yaml",
+      "source_sha256": "49bbb34f4b3f997db30883c723711e99f3d2474649a53082d9e12e1df2cf70d2"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/recover-milestone/SKILL.md",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/recover-milestone/SKILL.md",
+      "destination_sha256": "b040b34304772dfaa943fcf3f44192d659f5691b692abb00dfb49632e3ee8ccd",
+      "reason": "Donor cognitive role was adopted with explicit controller-only ownership wording.",
+      "source_path": "plugins/personal-workflow-skills/skills/recover-milestone/SKILL.md",
+      "source_sha256": "0cec3260a9b4fde77e5e87e280193d2ec38f56c048895a20112ee5fd61599f5a"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/recover-milestone/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/recover-milestone/agents/openai.yaml",
+      "destination_sha256": "6fd116fe5538afd3ae06508918133dff35ca9c9e29f07b01ff6ec98d9c572a08",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/recover-milestone/agents/openai.yaml",
+      "source_sha256": "6fd116fe5538afd3ae06508918133dff35ca9c9e29f07b01ff6ec98d9c572a08"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/review-work/SKILL.md",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/review-work/SKILL.md",
+      "destination_sha256": "54cdf495ef0822b6c5c4822d154c1ac9deaa72620f703fd0cda3177d6fcba052",
+      "reason": "Donor cognitive role was adopted with explicit controller-only ownership wording.",
+      "source_path": "plugins/personal-workflow-skills/skills/review-work/SKILL.md",
+      "source_sha256": "4aa78b6d57277edf0291c8dcd13e6eadfa7af4f62bcea78dba96f78853eb675a"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/review-work/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/review-work/agents/openai.yaml",
+      "destination_sha256": "8e4148a4a490303eaa7737fe42431af3c1e89137cecdae59ce79396ac456ac9f",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/review-work/agents/openai.yaml",
+      "source_sha256": "8e4148a4a490303eaa7737fe42431af3c1e89137cecdae59ce79396ac456ac9f"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/run-discovery-spike/SKILL.md",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/skills/run-discovery-spike/SKILL.md",
+      "destination_sha256": "f0695e6398aeded5dcee99da8add98233835324c2aa8199a28d11e00c00c2443",
+      "reason": "Donor cognitive role was adopted with explicit controller-only ownership wording.",
+      "source_path": "plugins/personal-workflow-skills/skills/run-discovery-spike/SKILL.md",
+      "source_sha256": "730e1ebfc952c5dca2b6a1d8363d21f7c0470c0c913c2c1af6b004c4c7245e20"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/run-discovery-spike/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/run-discovery-spike/agents/openai.yaml",
+      "destination_sha256": "0a64f01e0c4632d3511c74717ed61786cf72da84ea179db81a2be84d05258293",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/run-discovery-spike/agents/openai.yaml",
+      "source_sha256": "0a64f01e0c4632d3511c74717ed61786cf72da84ea179db81a2be84d05258293"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/strong-typing-audit/SKILL.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/strong-typing-audit/SKILL.md",
+      "destination_sha256": "ac68adf686a72a0232a465b744e12188a05156fe2009d97ee2008dcbcd459660",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/strong-typing-audit/SKILL.md",
+      "source_sha256": "ac68adf686a72a0232a465b744e12188a05156fe2009d97ee2008dcbcd459660"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/strong-typing-audit/agents/openai.yaml",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/strong-typing-audit/agents/openai.yaml",
+      "destination_sha256": "964c38317808593f857207a8159c31054c196706310b193f1d5c0aaf8ab3f26e",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/strong-typing-audit/agents/openai.yaml",
+      "source_sha256": "964c38317808593f857207a8159c31054c196706310b193f1d5c0aaf8ab3f26e"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/skills/strong-typing-audit/references/modeling-rubric.md",
+      "decision": "adopted",
+      "destination_path": "plugins/personal-workflow-skills/skills/strong-typing-audit/references/modeling-rubric.md",
+      "destination_sha256": "c8342d4623c08adfda793c363bf27bb5fc57172e72592b198d8500c55a7587ce",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "plugins/personal-workflow-skills/skills/strong-typing-audit/references/modeling-rubric.md",
+      "source_sha256": "c8342d4623c08adfda793c363bf27bb5fc57172e72592b198d8500c55a7587ce"
+    },
+    {
+      "capability": "schemas/capsule.schema.json",
+      "decision": "merged",
+      "destination_path": "schemas/capsule.schema.json",
+      "destination_sha256": "25f2fda9d9be914edb0845cd207c64eab989414318b0418fe693b22643725185",
+      "reason": "The donor contract was merged into the canonical forward-only typed capsule schema.",
+      "source_path": "schemas/capsule.schema.json",
+      "source_sha256": "0cb9882149ba624a8dd20e3ed32196ae2de46785fb6e059eac0645fc90777a81"
+    },
+    {
+      "capability": "schemas/evidence.schema.json",
+      "decision": "adopted",
+      "destination_path": "schemas/evidence.schema.json",
+      "destination_sha256": "c03430505c370141e4efeceec5a8be7c418c414e1347d25ed1018e6cab938c0e",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "schemas/evidence.schema.json",
+      "source_sha256": "c03430505c370141e4efeceec5a8be7c418c414e1347d25ed1018e6cab938c0e"
+    },
+    {
+      "capability": "schemas/finding.schema.json",
+      "decision": "adopted",
+      "destination_path": "schemas/finding.schema.json",
+      "destination_sha256": "40f584a25e721f8bd35764031e319cf6fe79f10faecec8a90618f9ee856f2824",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "schemas/finding.schema.json",
+      "source_sha256": "40f584a25e721f8bd35764031e319cf6fe79f10faecec8a90618f9ee856f2824"
+    },
+    {
+      "capability": "schemas/recovery.schema.json",
+      "decision": "adopted",
+      "destination_path": "schemas/recovery.schema.json",
+      "destination_sha256": "87f6bf2d213ff348500356fe2fd76f6196237c3881df826eca7ddc3da69d9a6d",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "schemas/recovery.schema.json",
+      "source_sha256": "87f6bf2d213ff348500356fe2fd76f6196237c3881df826eca7ddc3da69d9a6d"
+    },
+    {
+      "capability": "schemas/result.schema.json",
+      "decision": "merged",
+      "destination_path": "schemas/result.schema.json",
+      "destination_sha256": "2632cf3ff2dfd6173febdde3fa73af15b67924d7c3d4437d83970d11d06da0b5",
+      "reason": "The donor contract was merged into the canonical forward-only typed result schema.",
+      "source_path": "schemas/result.schema.json",
+      "source_sha256": "85fa2c863adc7dcad9b3c6e6c94de3433656205c9c15ca38afb332ec6755441b"
+    },
+    {
+      "capability": "schemas/review.schema.json",
+      "decision": "adopted",
+      "destination_path": "schemas/review.schema.json",
+      "destination_sha256": "2f01a00c6be9636ecfb9cf1cda233b232439254c8221f8a42d1569ad14cfab1e",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "schemas/review.schema.json",
+      "source_sha256": "2f01a00c6be9636ecfb9cf1cda233b232439254c8221f8a42d1569ad14cfab1e"
+    },
+    {
+      "capability": "schemas/visual-contract.schema.json",
+      "decision": "adopted",
+      "destination_path": "schemas/visual-contract.schema.json",
+      "destination_sha256": "e7a8cd2b69993df0f8989cd4a76a4057f557de69c8c4ae34fde1279871ee78cb",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "schemas/visual-contract.schema.json",
+      "source_sha256": "e7a8cd2b69993df0f8989cd4a76a4057f557de69c8c4ae34fde1279871ee78cb"
+    },
+    {
+      "capability": "templates/AGENTS.md",
+      "decision": "merged",
+      "destination_path": "templates/AGENTS.md",
+      "destination_sha256": "f3bb30aa52832b532e4bde665b15d630d7f4a036ee87adc81c8947cd45a71276",
+      "reason": "Current controller-owned typed-capsule and architecture wording was retained and donor guidance was merged.",
+      "source_path": "templates/AGENTS.md",
+      "source_sha256": "e1b720e9029b7f9883b69e7412250463bbc4aa4d9955609ca38979b93482aa1a"
+    },
+    {
+      "capability": "templates/AGENTS.workflow.md",
+      "decision": "merged",
+      "destination_path": "templates/AGENTS.workflow.md",
+      "destination_sha256": "8897df8f87e8f328df88ef05d5aa57163e192d180cbc2d3a01a7ca63abc6038e",
+      "reason": "Donor template was merged with the architecture-first milestone DAG and readiness policy.",
+      "source_path": "templates/AGENTS.workflow.md",
+      "source_sha256": "b0180b909e8ddbeefe16e6969bb8c1d0aaab06960e887f72d43e031c67b5f49d"
+    },
+    {
+      "capability": "config/workflow.toml.example",
+      "decision": "adopted",
+      "destination_path": "config/workflow.toml.example",
+      "destination_sha256": "924ed01921d5e53a18a3a99499f24a7af4023b0915215cafac77713e2f55d477",
+      "reason": "Donor capability was adopted unchanged into the semantic destination surface.",
+      "source_path": "config/workflow.toml.example",
+      "source_sha256": "924ed01921d5e53a18a3a99499f24a7af4023b0915215cafac77713e2f55d477"
+    },
+    {
+      "capability": "plugins/personal-workflow-skills/.codex-plugin/plugin.json",
+      "decision": "merged",
+      "destination_path": "plugins/personal-workflow-skills/.codex-plugin/plugin.json",
+      "destination_sha256": "9b3cb8117391d1880d957bb79c138d11b4f8bec2c50d844eeb75c2343e579979",
+      "reason": "Destination metadata was advanced once while preserving the local package identity and policy.",
+      "source_path": "plugins/personal-workflow-skills/.codex-plugin/plugin.json",
+      "source_sha256": "e79620486a1259132131e630c16bb379d6f0c89a2481e6c9e5e10d3fb8954f35"
+    },
+    {
+      "capability": ".agents/plugins/marketplace.json",
+      "decision": "merged",
+      "destination_path": ".agents/plugins/marketplace.json",
+      "destination_sha256": "db39d13c97745b8b00f0686a5f7c7635bf7aacadff891512be48f93dedcda482",
+      "reason": "Destination metadata was advanced once while preserving the local package identity and policy.",
+      "source_path": ".agents/plugins/marketplace.json",
+      "source_sha256": "a60d0d68bfd989fda94b65493c1f06c8c6acadda7aaae4315c54ee1bd501728a"
+    }
+  ],
+  "new_file_count": 22,
+  "partition_counts": {
+    "contracts": 54,
+    "controller": 349,
+    "integrations": 60,
+    "workers": 16,
+    "workflow-assets": 60
+  },
+  "review": {
+    "p0": 0,
+    "p1": 0
+  },
+  "schema": "codex-flow/workflow-skill-contracts/v1",
+  "status": "promoted",
+  "wheel": {
+    "asset_root": "codex_flow/workflow_assets",
+    "assets": [
+      "config/test-partitions.toml",
+      "config/workflow.toml.example",
+      "schemas/capsule.schema.json",
+      "schemas/evidence.schema.json",
+      "schemas/finding.schema.json",
+      "schemas/recovery.schema.json",
+      "schemas/result.schema.json",
+      "schemas/review.schema.json",
+      "schemas/visual-contract.schema.json",
+      "templates/AGENTS.workflow.md"
+    ],
+    "parity": true,
+    "path": "dist/structured-output-runtime/codex_flow-0.2.0-py3-none-any.whl",
+    "sha256": "fea94483f8c0a834ba139612603a223868a536a1837bdb03a02e20319780815a",
+    "size_bytes": 259769
+  }
+}

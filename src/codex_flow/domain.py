@@ -7,11 +7,15 @@ Codex process or importing the SDK in its domain code.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -22,6 +26,17 @@ JsonValue: TypeAlias = JsonScalar | dict[str, "JsonValue"] | list["JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]
 Schema: TypeAlias = Mapping[str, JsonValue]
 MAX_JSON_BYTES = 16 * 1_048_576
+
+# Live-worker diagnostics are deliberately small and non-authoritative.  The
+# ring stores redacted snippets and digests only; terminal lifecycle facts stay
+# in the queue/result tables.
+DIAGNOSTIC_RING_MAX_ENTRIES = 128
+DIAGNOSTIC_RING_MAX_BYTES = 64 * 1024
+DIAGNOSTIC_TEXT_MAX_BYTES = 8 * 1024
+STEER_TEXT_MAX_BYTES = 8 * 1024
+CONTROL_ACKNOWLEDGEMENT_TERMINAL_STATUSES = frozenset(
+    {"completed", "needs_decision", "external_blocked", "failed", "interrupted"}
+)
 
 
 class StrictJSONError(ValueError):
@@ -325,10 +340,32 @@ class SkillInput:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalImageInput:
+    """One validated repository-local image path for an SDK turn."""
+
+    path: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.path, str)
+            or not self.path
+            or len(os.fsencode(self.path)) > 4_096
+            or Path(self.path).is_absolute()
+            or self.path == "."
+            or ".." in Path(self.path).parts
+            or Path(self.path).as_posix() != self.path
+            or "\x00" in self.path
+        ):
+            raise ValueError("local image input path must be repository-relative")
+
+
+@dataclass(frozen=True, slots=True)
 class LifecycleEvent:
     sequence: int
     method: str
     turn_id: str | None = None
+    text: str | None = None
+    occurred_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +379,890 @@ class TurnObservation:
     error: str | None = None
 
 
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"(?i)(api[_ -]?key\s*[:=]\s*)[^\s,;]+"),
+    re.compile(r"(?i)(token\s*[:=]\s*)[^\s,;]+"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
+)
+
+
+def redact_diagnostic_text(value: str, *, limit: int = DIAGNOSTIC_TEXT_MAX_BYTES) -> str:
+    """Bound and redact provider text before it can enter durable evidence."""
+
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError("diagnostic text must be a string without NUL")
+    text = value
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(lambda match: f"{match.group(1)}[REDACTED]" if match.lastindex else "[REDACTED]", text)
+    encoded = text.encode("utf-8", errors="strict")
+    if len(encoded) > limit:
+        encoded = encoded[:limit]
+        text = encoded.decode("utf-8", errors="ignore")
+    return text
+
+
+def redact_control_text(value: str, *, limit: int = STEER_TEXT_MAX_BYTES) -> str:
+    """Redact bounded human control text before it crosses a durable boundary."""
+
+    if isinstance(value, str) and "\x00" not in value:
+        return redact_diagnostic_text(value, limit=limit)
+    raise ValueError("control text must be a string without NUL")
+
+
+# Conversation history is a read-only projection.  It deliberately has a
+# separate redactor because the diagnostic helper truncates, while history
+# must either return the complete redacted text or fail closed at its source
+# limits.
+CONVERSATION_MAX_TURNS = 4_096
+CONVERSATION_MAX_ITEMS = 65_536
+CONVERSATION_MAX_TEXT_BYTES = 16 * 1_048_576
+CONVERSATION_FRAGMENT_BYTES = 8 * 1_024
+CONVERSATION_PAGE_FRAGMENTS = 32
+CONVERSATION_PAGE_BYTES = 48 * 1_024
+CONVERSATION_MAX_CONCURRENT_READS = 4
+CONVERSATION_READ_DEADLINE_SECONDS = 5.0
+
+
+class ConversationSubjectKind(str, Enum):
+    WORKER = "worker"
+    CONTROLLER = "controller"
+
+
+class ConversationSpeaker(str, Enum):
+    USER = "user"
+    AGENT = "agent"
+
+
+class ConversationContentKind(str, Enum):
+    TEXT = "text"
+    IMAGE = "image"
+    AUDIO = "audio"
+    SKILL = "skill"
+    MENTION = "mention"
+
+
+class ConversationHistoryStatus(str, Enum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    DELETED = "deleted"
+    PERMISSION_DENIED = "permission_denied"
+    SOURCE_INCOMPLETE = "source_incomplete"
+    SOURCE_TOO_LARGE = "source_too_large"
+    STALE = "stale"
+    MALFORMED = "malformed"
+
+
+def redact_conversation_text(value: str) -> tuple[str, bool]:
+    """Redact known secrets without truncating conversation content."""
+
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError("conversation text must be a string without NUL")
+    text = value
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(lambda match: f"{match.group(1)}[REDACTED]" if match.lastindex else "[REDACTED]", text)
+    return text, text != value
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistoryRequest:
+    """One non-durable, identity-bound conversation page request."""
+
+    subject_kind: ConversationSubjectKind
+    subject_id: str
+    thread_id: ThreadIdentity
+    generation: int | None = None
+    attempt: int | None = None
+    revision: int | None = None
+    page_token: str | None = None
+    page_fragments: int = CONVERSATION_PAGE_FRAGMENTS
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.subject_kind, ConversationSubjectKind):
+            object.__setattr__(self, "subject_kind", ConversationSubjectKind(self.subject_kind))
+        if not isinstance(self.subject_id, str) or not self.subject_id or len(self.subject_id.encode("utf-8")) > 512:
+            raise ValueError("conversation subject identity is invalid")
+        if not isinstance(self.thread_id, ThreadIdentity):
+            object.__setattr__(self, "thread_id", ThreadIdentity(self.thread_id))
+        for name, value in (("generation", self.generation), ("attempt", self.attempt), ("revision", self.revision)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(f"conversation {name} is invalid")
+        if self.page_token is not None and (
+            not isinstance(self.page_token, str) or len(self.page_token.encode("utf-8")) > 1024
+        ):
+            raise ValueError("conversation page token is invalid")
+        if (
+            isinstance(self.page_fragments, bool)
+            or not isinstance(self.page_fragments, int)
+            or not 1 <= self.page_fragments <= CONVERSATION_PAGE_FRAGMENTS
+        ):
+            raise ValueError("conversation page size is invalid")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "subject_kind": self.subject_kind.value,
+            "subject_id": self.subject_id,
+            "thread_id": self.thread_id.id,
+            "generation": self.generation,
+            "attempt": self.attempt,
+            "revision": self.revision,
+            "page_token": self.page_token,
+            "page_fragments": self.page_fragments,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationContent:
+    kind: ConversationContentKind
+    text: str | None = None
+    redacted: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ConversationContentKind):
+            object.__setattr__(self, "kind", ConversationContentKind(self.kind))
+        if self.text is not None:
+            if not isinstance(self.text, str) or "\x00" in self.text:
+                raise ValueError("conversation content text is invalid")
+            if len(self.text.encode("utf-8")) > CONVERSATION_FRAGMENT_BYTES:
+                raise ValueError("conversation content fragment exceeds its byte limit")
+        if not isinstance(self.redacted, bool):
+            raise ValueError("conversation redaction flag is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationMessageFragment:
+    turn_id: str
+    item_id: str
+    speaker: ConversationSpeaker
+    content: ConversationContent
+    ordinal: int
+
+    def __post_init__(self) -> None:
+        for name, value in (("turn id", self.turn_id), ("item id", self.item_id)):
+            if (
+                not isinstance(value, str)
+                or not value
+                or any(character.isspace() for character in value)
+                or len(value.encode("utf-8")) > 512
+            ):
+                raise ValueError(f"conversation {name} is invalid")
+        if not isinstance(self.speaker, ConversationSpeaker):
+            object.__setattr__(self, "speaker", ConversationSpeaker(self.speaker))
+        if not isinstance(self.content, ConversationContent):
+            raise ValueError("conversation fragment content is not typed")
+        if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int) or self.ordinal < 0:
+            raise ValueError("conversation fragment ordinal is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationTurnSlice:
+    turn_id: str
+    ordinal: int
+    messages: tuple[ConversationMessageFragment, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.turn_id, str) or not self.turn_id:
+            raise ValueError("conversation turn identity is invalid")
+        if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int) or self.ordinal < 0:
+            raise ValueError("conversation turn ordinal is invalid")
+        messages = tuple(self.messages)
+        if not all(isinstance(message, ConversationMessageFragment) for message in messages):
+            raise ValueError("conversation turn messages are not typed")
+        object.__setattr__(self, "messages", messages)
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationHistoryPage:
+    subject_kind: ConversationSubjectKind
+    subject_id: str
+    thread_id: ThreadIdentity
+    status: ConversationHistoryStatus
+    snapshot_token: str | None
+    turns: tuple[ConversationTurnSlice, ...] = ()
+    older_token: str | None = None
+    redaction_count: int = 0
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.subject_kind, ConversationSubjectKind):
+            object.__setattr__(self, "subject_kind", ConversationSubjectKind(self.subject_kind))
+        if not isinstance(self.thread_id, ThreadIdentity):
+            object.__setattr__(self, "thread_id", ThreadIdentity(self.thread_id))
+        if not isinstance(self.status, ConversationHistoryStatus):
+            object.__setattr__(self, "status", ConversationHistoryStatus(self.status))
+        if not isinstance(self.subject_id, str) or not self.subject_id or len(self.subject_id.encode("utf-8")) > 512:
+            raise ValueError("conversation subject identity is invalid")
+        for name, value in (("snapshot", self.snapshot_token), ("older page", self.older_token)):
+            if value is not None and (not isinstance(value, str) or not value or len(value.encode("utf-8")) > 1024):
+                raise ValueError(f"conversation {name} token is invalid")
+        turns = tuple(self.turns)
+        if not all(isinstance(turn, ConversationTurnSlice) for turn in turns):
+            raise ValueError("conversation page turns are not typed")
+        if [turn.ordinal for turn in turns] != sorted({turn.ordinal for turn in turns}):
+            raise ValueError("conversation turns are out of order or duplicated")
+        if any(message.turn_id != turn.turn_id for turn in turns for message in turn.messages):
+            raise ValueError("conversation message is bound to the wrong turn")
+        message_ordinals = [message.ordinal for turn in turns for message in turn.messages]
+        if message_ordinals != sorted(set(message_ordinals)):
+            raise ValueError("conversation messages are out of order or duplicated")
+        object.__setattr__(self, "turns", turns)
+        if (
+            isinstance(self.redaction_count, bool)
+            or not isinstance(self.redaction_count, int)
+            or self.redaction_count < 0
+        ):
+            raise ValueError("conversation redaction count is invalid")
+        if not isinstance(self.reason, str) or len(self.reason.encode("utf-8")) > 512:
+            raise ValueError("conversation history reason is invalid")
+        if self.status is ConversationHistoryStatus.AVAILABLE:
+            if self.snapshot_token is None:
+                raise ValueError("available conversation page requires a snapshot token")
+        elif self.snapshot_token is not None or self.older_token is not None or turns:
+            raise ValueError("unavailable conversation page cannot carry transcript data")
+
+    @property
+    def complete(self) -> bool:
+        return self.status is ConversationHistoryStatus.AVAILABLE and self.older_token is None
+
+    def to_json(self) -> JsonObject:
+        return {
+            "subject_kind": self.subject_kind.value,
+            "subject_id": self.subject_id,
+            "thread_id": self.thread_id.id,
+            "status": self.status.value,
+            "snapshot_token": self.snapshot_token,
+            "turns": [
+                {
+                    "turn_id": turn.turn_id,
+                    "ordinal": turn.ordinal,
+                    "messages": [
+                        {
+                            "turn_id": message.turn_id,
+                            "item_id": message.item_id,
+                            "speaker": message.speaker.value,
+                            "ordinal": message.ordinal,
+                            "content": {
+                                "kind": message.content.kind.value,
+                                "text": message.content.text,
+                                "redacted": message.content.redacted,
+                            },
+                        }
+                        for message in turn.messages
+                    ],
+                }
+                for turn in self.turns
+            ],
+            "older_token": self.older_token,
+            "redaction_count": self.redaction_count,
+            "reason": self.reason,
+        }
+
+
+def conversation_history_page_from_json(value: object) -> ConversationHistoryPage:
+    """Decode the one closed, non-persisted conversation page envelope."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "subject_kind",
+        "subject_id",
+        "thread_id",
+        "status",
+        "snapshot_token",
+        "turns",
+        "older_token",
+        "redaction_count",
+        "reason",
+    }:
+        raise ValueError("conversation page shape is invalid")
+    turns_raw = value["turns"]
+    if not isinstance(turns_raw, list):
+        raise ValueError("conversation turns are invalid")
+    turns: list[ConversationTurnSlice] = []
+    for turn_raw in turns_raw:
+        if not isinstance(turn_raw, dict) or set(turn_raw) != {"turn_id", "ordinal", "messages"}:
+            raise ValueError("conversation turn shape is invalid")
+        messages_raw = turn_raw["messages"]
+        if not isinstance(messages_raw, list):
+            raise ValueError("conversation messages are invalid")
+        messages: list[ConversationMessageFragment] = []
+        for message_raw in messages_raw:
+            if not isinstance(message_raw, dict) or set(message_raw) != {
+                "turn_id",
+                "item_id",
+                "speaker",
+                "ordinal",
+                "content",
+            }:
+                raise ValueError("conversation message shape is invalid")
+            content_raw = message_raw["content"]
+            if not isinstance(content_raw, dict) or set(content_raw) != {"kind", "text", "redacted"}:
+                raise ValueError("conversation content shape is invalid")
+            messages.append(
+                ConversationMessageFragment(
+                    message_raw["turn_id"],  # type: ignore[arg-type]
+                    message_raw["item_id"],  # type: ignore[arg-type]
+                    ConversationSpeaker(message_raw["speaker"]),  # type: ignore[arg-type]
+                    ConversationContent(
+                        ConversationContentKind(content_raw["kind"]),  # type: ignore[arg-type]
+                        content_raw["text"],  # type: ignore[arg-type]
+                        content_raw["redacted"],  # type: ignore[arg-type]
+                    ),
+                    message_raw["ordinal"],  # type: ignore[arg-type]
+                )
+            )
+        turns.append(
+            ConversationTurnSlice(
+                turn_raw["turn_id"],  # type: ignore[arg-type]
+                turn_raw["ordinal"],  # type: ignore[arg-type]
+                tuple(messages),
+            )
+        )
+    return ConversationHistoryPage(
+        ConversationSubjectKind(value["subject_kind"]),  # type: ignore[arg-type]
+        value["subject_id"],  # type: ignore[arg-type]
+        ThreadIdentity(value["thread_id"]),  # type: ignore[arg-type]
+        ConversationHistoryStatus(value["status"]),  # type: ignore[arg-type]
+        value["snapshot_token"],  # type: ignore[arg-type]
+        tuple(turns),
+        value["older_token"],  # type: ignore[arg-type]
+        value["redaction_count"],  # type: ignore[arg-type]
+        value["reason"],  # type: ignore[arg-type]
+    )
+
+
+class RetryFailureClass(str, Enum):
+    """Closed failure classes used by durable live-worker retry policy."""
+
+    PRE_IDENTITY_TRANSPORT = "pre_identity_transport"
+    INVALID_RESPONSE_CHAIN = "invalid_response_chain"
+    SCHEMA_ENVELOPE = "schema_envelope"
+    POST_IDENTITY_LOSS = "post_identity_loss"
+    AUTHENTICATION = "authentication"
+    PERMISSION = "permission"
+    CAPABILITY = "capability"
+    PROFILE = "profile"
+    INTEGRITY = "integrity"
+    MALFORMED_INPUT = "malformed_input"
+    RESULT_TRANSPORT_AFTER_IDENTITY = "result_transport_after_identity"
+    REPLAY = "replay"
+    UNKNOWN = "unknown"
+
+
+class WorkerResultRejectionCode(str, Enum):
+    """Sanitized, typed reasons for rejecting a worker result at the IPC boundary."""
+
+    CAPABILITY_EXPIRED = "result_capability_expired"
+    CAPABILITY_STALE = "result_capability_stale"
+    MALFORMED_OUTPUT = "malformed_model_output"
+
+
+class RecoveryStrategy(str, Enum):
+    NONE = "none"
+    BACKOFF = "backoff"
+    FRESH_THREAD = "fresh_thread"
+    SAME_THREAD_SCHEMA_CORRECTION = "same_thread_schema_correction"
+    SAME_THREAD_CONTINUATION = "same_thread_continuation"
+    HUMAN_ATTENTION = "human_attention_required"
+
+
+class ControlCommandKind(str, Enum):
+    STEER = "steer"
+    INTERRUPT = "interrupt"
+
+
+class ControlCommandState(str, Enum):
+    PENDING = "pending"
+    SENT = "sent"
+    ACKNOWLEDGED = "acknowledged"
+    REJECTED = "rejected"
+    UNRESOLVED = "unresolved"
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticEvent:
+    """One bounded, redacted live-worker activity record."""
+
+    sequence: int
+    kind: str
+    occurred_at: str
+    text: str | None = None
+    payload_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
+            raise ValueError("diagnostic sequence must be a positive integer")
+        _required_text(self.kind, label="diagnostic kind", limit=128)
+        _required_text(self.occurred_at, label="diagnostic timestamp", limit=64)
+        if self.text is not None:
+            redacted = redact_diagnostic_text(self.text)
+            if redacted != self.text:
+                object.__setattr__(self, "text", redacted)
+            if len(redacted.encode("utf-8")) > DIAGNOSTIC_TEXT_MAX_BYTES:
+                raise ValueError("diagnostic text exceeds its byte limit")
+        if self.payload_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", self.payload_sha256) is None:
+            raise ValueError("diagnostic payload digest must be a lowercase SHA-256")
+
+    @property
+    def encoded_bytes(self) -> int:
+        return len(
+            json.dumps(self.to_json(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+
+    def to_json(self) -> JsonObject:
+        return {
+            "sequence": self.sequence,
+            "kind": self.kind,
+            "occurred_at": self.occurred_at,
+            "text": self.text,
+            "payload_sha256": self.payload_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicyFacts:
+    """Immutable retry budgets and the mutable counters they govern."""
+
+    revision: int = 0
+    policy_version: int = 1
+    pre_identity_budget: int = 5
+    invalid_chain_budget: int = 1
+    schema_envelope_budget: int = 2
+    post_identity_loss_budget: int = 1
+    pre_identity_used: int = 0
+    invalid_chain_used: int = 0
+    schema_envelope_used: int = 0
+    post_identity_loss_used: int = 0
+    last_failure: RetryFailureClass | None = None
+    strategy: RecoveryStrategy = RecoveryStrategy.NONE
+    next_eligible_at: str | None = None
+    prior_thread_id: str | None = None
+    prior_turn_id: str | None = None
+    human_attention_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("retry policy revision must be a non-negative integer")
+        if self.policy_version != 1 or isinstance(self.policy_version, bool):
+            raise ValueError("unsupported retry policy version")
+        for name in (
+            "pre_identity_budget",
+            "invalid_chain_budget",
+            "schema_envelope_budget",
+            "post_identity_loss_budget",
+            "pre_identity_used",
+            "invalid_chain_used",
+            "schema_envelope_used",
+            "post_identity_loss_used",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"retry policy {name} must be a non-negative integer")
+        if self.pre_identity_used > self.pre_identity_budget:
+            raise ValueError("pre-identity retry budget is consumed beyond its limit")
+        if self.invalid_chain_used > self.invalid_chain_budget:
+            raise ValueError("invalid-chain retry budget is consumed beyond its limit")
+        if self.schema_envelope_used > self.schema_envelope_budget:
+            raise ValueError("schema-envelope retry budget is consumed beyond its limit")
+        if self.post_identity_loss_used > self.post_identity_loss_budget:
+            raise ValueError("post-identity retry budget is consumed beyond its limit")
+        if self.last_failure is not None and not isinstance(self.last_failure, RetryFailureClass):
+            object.__setattr__(self, "last_failure", RetryFailureClass(self.last_failure))
+        if not isinstance(self.strategy, RecoveryStrategy):
+            object.__setattr__(self, "strategy", RecoveryStrategy(self.strategy))
+        for name in ("next_eligible_at", "prior_thread_id", "prior_turn_id", "human_attention_reason"):
+            value = getattr(self, name)
+            if value is not None:
+                _required_text(value, label=f"retry policy {name}", limit=512)
+
+    def budget_for(self, failure: RetryFailureClass | str) -> tuple[int, int]:
+        target = failure if isinstance(failure, RetryFailureClass) else RetryFailureClass(failure)
+        mapping = {
+            RetryFailureClass.PRE_IDENTITY_TRANSPORT: (self.pre_identity_budget, self.pre_identity_used),
+            RetryFailureClass.INVALID_RESPONSE_CHAIN: (self.invalid_chain_budget, self.invalid_chain_used),
+            RetryFailureClass.SCHEMA_ENVELOPE: (self.schema_envelope_budget, self.schema_envelope_used),
+            RetryFailureClass.POST_IDENTITY_LOSS: (self.post_identity_loss_budget, self.post_identity_loss_used),
+        }
+        return mapping.get(target, (0, 0))
+
+    def to_json(self) -> JsonObject:
+        return {
+            "revision": self.revision,
+            "policy_version": self.policy_version,
+            "pre_identity_budget": self.pre_identity_budget,
+            "invalid_chain_budget": self.invalid_chain_budget,
+            "schema_envelope_budget": self.schema_envelope_budget,
+            "post_identity_loss_budget": self.post_identity_loss_budget,
+            "pre_identity_used": self.pre_identity_used,
+            "invalid_chain_used": self.invalid_chain_used,
+            "schema_envelope_used": self.schema_envelope_used,
+            "post_identity_loss_used": self.post_identity_loss_used,
+            "last_failure": self.last_failure.value if self.last_failure is not None else None,
+            "strategy": self.strategy.value,
+            "next_eligible_at": self.next_eligible_at,
+            "prior_thread_id": self.prior_thread_id,
+            "prior_turn_id": self.prior_turn_id,
+            "human_attention_reason": self.human_attention_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ControlCommand:
+    """Capability-bound steer/interrupt command persisted by the supervisor."""
+
+    command_id: str
+    dispatch_id: DispatchId
+    generation: Generation
+    attempt: int
+    thread_id: ThreadIdentity
+    turn_id: str
+    kind: ControlCommandKind
+    payload: str | None
+    payload_sha256: str
+    submission_sequence: int = 1
+    state: ControlCommandState = ControlCommandState.PENDING
+    created_at: str = ""
+    sent_at: str | None = None
+    acknowledged_at: str | None = None
+    acknowledgement: str | None = None
+    acknowledgement_terminal_status: str | None = None
+
+    def __post_init__(self) -> None:
+        _required_text(self.command_id, label="control command id", limit=256)
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        if not isinstance(self.generation, Generation):
+            object.__setattr__(self, "generation", Generation(self.generation))
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or self.attempt < 1:
+            raise ValueError("control command attempt must be positive")
+        if not isinstance(self.thread_id, ThreadIdentity):
+            object.__setattr__(self, "thread_id", ThreadIdentity(self.thread_id))
+        _required_text(self.turn_id, label="control command turn id", limit=512)
+        if any(character.isspace() or ord(character) < 0x20 for character in self.turn_id):
+            raise ValueError("control command turn id is malformed")
+        if (
+            isinstance(self.submission_sequence, bool)
+            or not isinstance(self.submission_sequence, int)
+            or self.submission_sequence < 1
+        ):
+            raise ValueError("control command submission sequence must be positive")
+        if not isinstance(self.kind, ControlCommandKind):
+            object.__setattr__(self, "kind", ControlCommandKind(self.kind))
+        if self.kind is ControlCommandKind.STEER:
+            if (
+                not isinstance(self.payload, str)
+                or not self.payload.strip()
+                or len(self.payload.encode("utf-8")) > STEER_TEXT_MAX_BYTES
+            ):
+                raise ValueError("steer command text exceeds its byte limit")
+            redacted = redact_control_text(self.payload)
+            if redacted != self.payload:
+                object.__setattr__(self, "payload", redacted)
+        elif self.payload is not None:
+            raise ValueError("interrupt command cannot carry text")
+        if (
+            not isinstance(self.payload_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", self.payload_sha256) is None
+            or hashlib.sha256((self.payload or "").encode("utf-8")).hexdigest() != self.payload_sha256
+        ):
+            raise ValueError("control command payload digest is invalid")
+        if not isinstance(self.state, ControlCommandState):
+            object.__setattr__(self, "state", ControlCommandState(self.state))
+        if self.created_at:
+            _required_text(self.created_at, label="control command timestamp", limit=64)
+        if self.sent_at is not None:
+            _required_text(self.sent_at, label="control command sent timestamp", limit=64)
+        if self.acknowledged_at is not None:
+            _required_text(self.acknowledged_at, label="control command acknowledgement timestamp", limit=64)
+        if self.acknowledgement is not None:
+            _required_text(self.acknowledgement, label="control command acknowledgement", limit=4096)
+        if (
+            self.acknowledgement_terminal_status is not None
+            and self.acknowledgement_terminal_status not in CONTROL_ACKNOWLEDGEMENT_TERMINAL_STATUSES
+        ):
+            raise ValueError("control command acknowledgement terminal status is invalid")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "command_id": self.command_id,
+            "dispatch_id": str(self.dispatch_id),
+            "generation": int(self.generation),
+            "attempt": self.attempt,
+            "thread_id": self.thread_id.id,
+            "turn_id": self.turn_id,
+            "kind": self.kind.value,
+            "payload": self.payload,
+            "payload_sha256": self.payload_sha256,
+            "submission_sequence": self.submission_sequence,
+            "state": self.state.value,
+            "created_at": self.created_at,
+            "sent_at": self.sent_at,
+            "acknowledged_at": self.acknowledged_at,
+            "acknowledgement": self.acknowledgement,
+            "acknowledgement_terminal_status": self.acknowledgement_terminal_status,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ControlAcknowledgement:
+    """Typed acknowledgement returned for one immutable control command."""
+
+    command_id: str
+    dispatch_id: DispatchId
+    generation: Generation
+    attempt: int
+    thread_id: ThreadIdentity
+    turn_id: str
+    kind: ControlCommandKind
+    state: ControlCommandState
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        _required_text(self.command_id, label="control acknowledgement id", limit=256)
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        if not isinstance(self.generation, Generation):
+            object.__setattr__(self, "generation", Generation(self.generation))
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or self.attempt < 1:
+            raise ValueError("control acknowledgement attempt must be positive")
+        if not isinstance(self.thread_id, ThreadIdentity):
+            object.__setattr__(self, "thread_id", ThreadIdentity(self.thread_id))
+        _required_text(self.turn_id, label="control acknowledgement turn id", limit=512)
+        if not isinstance(self.kind, ControlCommandKind):
+            object.__setattr__(self, "kind", ControlCommandKind(self.kind))
+        if not isinstance(self.state, ControlCommandState):
+            object.__setattr__(self, "state", ControlCommandState(self.state))
+        if self.detail is not None:
+            _required_text(self.detail, label="control acknowledgement detail", limit=256)
+
+    def to_json(self) -> JsonObject:
+        return {
+            "command_id": self.command_id,
+            "dispatch_id": str(self.dispatch_id),
+            "generation": int(self.generation),
+            "attempt": self.attempt,
+            "thread_id": self.thread_id.id,
+            "turn_id": self.turn_id,
+            "kind": self.kind.value,
+            "state": self.state.value,
+            "detail": self.detail,
+        }
+
+
+class RecoveryActionKind(str, Enum):
+    """Authorized durable actions available on a live-worker dispatch."""
+
+    RETRY = "retry"
+    CANCEL = "cancel"
+    BUDGET_CHANGE = "budget_change"
+    COMPATIBILITY_REBIND = "compatibility_rebind"
+
+
+@dataclass(frozen=True, slots=True)
+class CompatibilityRebind:
+    """Exact queued installed-runtime identity authorized for bounded recovery."""
+
+    expected_compatibility_sha256: str
+    proposed_compatibility_sha256: str
+    expected_generation: int
+    expected_attempt: int
+    expected_profile_sha256: str | None = None
+    proposed_profile_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("expected compatibility digest", self.expected_compatibility_sha256),
+            ("proposed compatibility digest", self.proposed_compatibility_sha256),
+        ):
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"{name} is invalid")
+        profile_values = (self.expected_profile_sha256, self.proposed_profile_sha256)
+        if (profile_values[0] is None) != (profile_values[1] is None):
+            raise ValueError("compatibility rebind profile tuple is incomplete")
+        for name, value in (
+            ("expected profile digest", self.expected_profile_sha256),
+            ("proposed profile digest", self.proposed_profile_sha256),
+        ):
+            if value is not None and (not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None):
+                raise ValueError(f"{name} is invalid")
+        if self.expected_profile_sha256 is not None and (
+            self.expected_profile_sha256 == self.proposed_profile_sha256
+            and self.expected_compatibility_sha256 == self.proposed_compatibility_sha256
+        ):
+            raise ValueError("compatibility rebind requires an identity change")
+        if self.expected_profile_sha256 is None and (
+            self.expected_compatibility_sha256 == self.proposed_compatibility_sha256
+        ):
+            raise ValueError("compatibility rebind requires an identity change")
+        for name, value in (
+            ("generation", self.expected_generation),
+            ("attempt", self.expected_attempt),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"compatibility rebind {name} is invalid")
+
+    def to_json(self) -> JsonObject:
+        payload: JsonObject = {
+            "expected_compatibility_sha256": self.expected_compatibility_sha256,
+            "proposed_compatibility_sha256": self.proposed_compatibility_sha256,
+            "expected_generation": self.expected_generation,
+            "expected_attempt": self.expected_attempt,
+        }
+        # Four-field payloads are retained only to decode immutable v16
+        # receipts written before profile identity joined the recovery CAS.
+        if self.expected_profile_sha256 is not None:
+            payload["expected_profile_sha256"] = self.expected_profile_sha256
+            payload["proposed_profile_sha256"] = self.proposed_profile_sha256
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class RetryBudgetChange:
+    """Bounded absolute retry ceilings requested by an authorized action."""
+
+    pre_identity_budget: int
+    invalid_chain_budget: int
+    schema_envelope_budget: int
+    post_identity_loss_budget: int
+
+    def __post_init__(self) -> None:
+        limits = {
+            "pre_identity_budget": (self.pre_identity_budget, 5),
+            "invalid_chain_budget": (self.invalid_chain_budget, 1),
+            "schema_envelope_budget": (self.schema_envelope_budget, 2),
+            "post_identity_loss_budget": (self.post_identity_loss_budget, 1),
+        }
+        for name, (value, maximum) in limits.items():
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+                raise ValueError(f"{name} is outside its accepted ceiling")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "pre_identity_budget": self.pre_identity_budget,
+            "invalid_chain_budget": self.invalid_chain_budget,
+            "schema_envelope_budget": self.schema_envelope_budget,
+            "post_identity_loss_budget": self.post_identity_loss_budget,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryAction:
+    """Immutable record of one compare-and-swap recovery authorization."""
+
+    action_id: str
+    dispatch_id: DispatchId
+    expected_revision: int
+    action_kind: RecoveryActionKind
+    reason: str
+    requested_budget: RetryBudgetChange | None
+    compatibility_rebind: CompatibilityRebind | None
+    applied_revision: int
+    created_at: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.action_id, label="recovery action id", limit=256)
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        if (
+            isinstance(self.expected_revision, bool)
+            or not isinstance(self.expected_revision, int)
+            or self.expected_revision < 0
+        ):
+            raise ValueError("recovery action expected revision is invalid")
+        if not isinstance(self.action_kind, RecoveryActionKind):
+            object.__setattr__(self, "action_kind", RecoveryActionKind(self.action_kind))
+        _required_text(self.reason, label="recovery action reason", limit=512)
+        if self.action_kind is RecoveryActionKind.BUDGET_CHANGE and self.requested_budget is None:
+            raise ValueError("budget-change action requires requested budgets")
+        if self.action_kind is not RecoveryActionKind.BUDGET_CHANGE and self.requested_budget is not None:
+            raise ValueError("only budget-change action may carry requested budgets")
+        if self.action_kind is RecoveryActionKind.COMPATIBILITY_REBIND and self.compatibility_rebind is None:
+            raise ValueError("compatibility-rebind action requires exact compatibility facts")
+        if self.action_kind is not RecoveryActionKind.COMPATIBILITY_REBIND and self.compatibility_rebind is not None:
+            raise ValueError("only compatibility-rebind action may carry compatibility facts")
+        if (
+            isinstance(self.applied_revision, bool)
+            or not isinstance(self.applied_revision, int)
+            or self.applied_revision < 0
+        ):
+            raise ValueError("recovery action applied revision is invalid")
+        _required_text(self.created_at, label="recovery action timestamp", limit=64)
+
+    def to_json(self) -> JsonObject:
+        return {
+            "action_id": self.action_id,
+            "dispatch_id": str(self.dispatch_id),
+            "expected_revision": self.expected_revision,
+            "action_kind": self.action_kind.value,
+            "reason": self.reason,
+            "requested_budget": self.requested_budget.to_json() if self.requested_budget is not None else None,
+            "compatibility_rebind": (
+                self.compatibility_rebind.to_json() if self.compatibility_rebind is not None else None
+            ),
+            "applied_revision": self.applied_revision,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LiveWorkerActivity:
+    """Typed recent activity response from the supervisor control plane."""
+
+    dispatch_id: DispatchId
+    events: tuple[DiagnosticEvent, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        if not isinstance(self.events, tuple) or not all(isinstance(event, DiagnosticEvent) for event in self.events):
+            raise ValueError("live-worker activity must contain diagnostic events")
+
+    def to_json(self) -> JsonObject:
+        return {"dispatch_id": str(self.dispatch_id), "activity": [event.to_json() for event in self.events]}
+
+
+@dataclass(frozen=True, slots=True)
+class LiveWorkerStatus:
+    """Closed status projection consumed by clients and later TUI work."""
+
+    dispatch_id: DispatchId
+    state: str
+    generation: int
+    attempt: int
+    thread_id: ThreadIdentity | None
+    active_turn_id: str | None
+    retry_policy: RetryPolicyFacts
+    recent_activity: tuple[DiagnosticEvent, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        _required_text(self.state, label="live-worker state", limit=64)
+        for name, value in (("generation", self.generation), ("attempt", self.attempt)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"live-worker {name} is invalid")
+        if self.thread_id is not None and not isinstance(self.thread_id, ThreadIdentity):
+            object.__setattr__(self, "thread_id", ThreadIdentity(self.thread_id))
+        if self.active_turn_id is not None:
+            _required_text(self.active_turn_id, label="active turn id", limit=512)
+        if not isinstance(self.retry_policy, RetryPolicyFacts):
+            raise ValueError("live-worker status retry policy is not typed")
+        if not isinstance(self.recent_activity, tuple) or not all(
+            isinstance(event, DiagnosticEvent) for event in self.recent_activity
+        ):
+            raise ValueError("live-worker status activity is not typed")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "dispatch_id": str(self.dispatch_id),
+            "state": self.state,
+            "generation": self.generation,
+            "attempt": self.attempt,
+            "thread_id": self.thread_id.id if self.thread_id is not None else None,
+            "active_turn_id": self.active_turn_id,
+            "retry_policy": self.retry_policy.to_json(),
+            "recent_activity": [event.to_json() for event in self.recent_activity],
+        }
+
+
 class CodexFlowError(RuntimeError):
     """Base error for deterministic SDK-boundary failures."""
 
@@ -350,12 +1271,58 @@ class TransportFailureBeforeIdentity(CodexFlowError):
     """The SDK failed before a durable thread identity was returned."""
 
 
+class TransientFailureAfterIdentity(CodexFlowError):
+    """A pinned-SDK transient transport/overload failure after identity."""
+
+
+class TemporaryRateLimitAfterIdentity(TransientFailureAfterIdentity):
+    """A typed temporary usage limit with one explicit retry deadline."""
+
+    def __init__(self, message: str, *, retry_at: str) -> None:
+        try:
+            parsed = datetime.fromisoformat(retry_at.removesuffix("Z") + ("+00:00" if retry_at.endswith("Z") else ""))
+        except ValueError as exc:
+            raise ValueError("temporary rate-limit deadline is invalid") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("temporary rate-limit deadline must be timezone-aware")
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+class UnknownSdkFailureBeforeIdentity(TransportFailureBeforeIdentity):
+    """An unclassified pre-identity SDK failure, never retryable."""
+
+
 class TerminalFailureAfterIdentity(CodexFlowError):
     """The SDK reached a thread identity and then failed terminally."""
 
 
 class UnsupportedCapability(CodexFlowError):
     """A requested optional SDK capability is not exposed by the installed SDK."""
+
+
+class AuthenticationFailure(CodexFlowError):
+    """The SDK rejected authentication; this class is never retryable."""
+
+
+class PermissionFailure(CodexFlowError):
+    """The SDK or native profile rejected permission authority."""
+
+
+class ProfileFailure(CodexFlowError):
+    """The bound native profile was unavailable or incompatible."""
+
+
+class IntegrityFailure(CodexFlowError):
+    """A workspace or durable identity integrity check failed."""
+
+
+class MalformedInputFailure(CodexFlowError):
+    """The SDK rejected malformed input or an unknown non-transient error."""
+
+
+class UnknownSdkFailureAfterIdentity(TerminalFailureAfterIdentity):
+    """An unclassified post-identity SDK failure, never retryable."""
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +1501,7 @@ class RenderedEvidence:
     Rendered evidence is intentionally represented by a digest and bounded
     metadata rather than raw pixels.  The producer owns the actual artifact;
     reviewers receive this immutable identity and can never write through the
-    H4 controller callback.
+    Review workflow controller callback.
     """
 
     evidence_id: str
@@ -580,7 +1547,7 @@ class AuthorityAssignment:
 
 @dataclass(frozen=True, slots=True)
 class AuthorityPlan:
-    """The immutable routing decision for one H4 multi-authority run."""
+    """The immutable routing decision for one multi-authority review run."""
 
     assignments: tuple[AuthorityAssignment, ...]
 
@@ -588,10 +1555,10 @@ class AuthorityPlan:
         assignments = tuple(self.assignments)
         roles = [str(item.role) for item in assignments]
         if len(roles) != len(set(roles)):
-            raise ValueError("required H4 authorities must use distinct roles")
+            raise ValueError("required review authorities must use distinct roles")
         modes = [item.mode for item in assignments if item.mode is not None]
         if len(modes) != len(set(modes)):
-            raise ValueError("required H4 acceptance modes must use distinct authorities")
+            raise ValueError("required review acceptance modes must use distinct authorities")
         object.__setattr__(self, "assignments", assignments)
 
     def for_mode(self, mode: AcceptanceMode | str) -> AuthorityAssignment:
@@ -649,7 +1616,7 @@ class RecoveryOutcome(str, Enum):
 
 
 class LifecyclePhase(str, Enum):
-    """Durable H4 walking-skeleton phases."""
+    """Durable review workflow phases."""
 
     EXECUTION = "execution"
     REVIEW = "review"
@@ -930,7 +1897,7 @@ class RepairRecord:
         if not isinstance(self.owner_dispatch_id, DispatchId):
             object.__setattr__(self, "owner_dispatch_id", DispatchId(self.owner_dispatch_id))
         if self.same_owner is not True:
-            raise ValueError("H4-A repairs must remain with the durable owner")
+            raise ValueError("review repairs must remain with the durable owner")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1081,7 +2048,7 @@ class Budget:
 
 @dataclass(frozen=True, slots=True)
 class LifecycleRecord:
-    """One durable H4 fact projected from authoritative ledger events."""
+    """One durable review fact projected from authoritative ledger events."""
 
     phase: LifecyclePhase
     kind: str
@@ -1098,8 +2065,8 @@ class LifecycleRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class H4LifecycleResult:
-    """Observable terminal walking-skeleton result."""
+class ReviewLifecycleResult:
+    """Observable terminal review-workflow result."""
 
     status: LifecycleStatus | str
     accepted: bool
@@ -1117,7 +2084,7 @@ class H4LifecycleResult:
             try:
                 object.__setattr__(self, "status", LifecycleStatus(self.status))
             except ValueError as exc:
-                raise ValueError("unknown H4 lifecycle status") from exc
+                raise ValueError("unknown review lifecycle status") from exc
         object.__setattr__(self, "review_ids", tuple(self.review_ids))
         object.__setattr__(self, "finding_ids", tuple(self.finding_ids))
         object.__setattr__(self, "repair_ids", tuple(self.repair_ids))
@@ -1175,6 +2142,314 @@ class RecoveryFact:
     dispatch: DispatchClaim
     state: WorkflowState
     last_event: EventRecord
+
+
+# ---------------------------------------------------------------------------
+# H6-G controller decision and recovery contracts
+# ---------------------------------------------------------------------------
+
+
+class ControllerDecisionId(str):
+    """Stable identity of one durable controller wake decision."""
+
+    def __new__(cls, value: str) -> ControllerDecisionId:
+        if not isinstance(value, str) or not value.startswith("decision/"):
+            raise ValueError("controller decision id must start with decision/")
+        if len(value.encode("utf-8")) > 512 or any(c.isspace() or ord(c) < 0x20 for c in value):
+            raise ValueError("controller decision id is invalid")
+        return str.__new__(cls, value)
+
+
+class ControllerDecisionState(str, Enum):
+    PENDING_DELIVERY = "pending_delivery"
+    AWAITING_CLAIM = "awaiting_claim"
+    CLAIMED = "claimed"
+    ACTION_COMMITTED = "action_committed"
+    ACKNOWLEDGED = "acknowledged"
+    SUPERSEDED = "superseded"
+    HUMAN_ATTENTION_REQUIRED = "human_attention_required"
+    LEGACY_CLOSED = "legacy_closed"
+
+
+class ControllerClaimantKind(str, Enum):
+    MODEL = "model"
+    HUMAN = "human"
+
+
+class ControllerGenerationState(str, Enum):
+    PREPARED = "prepared"
+    DELIVERY_STARTING = "delivery_starting"
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    AMBIGUOUS = "ambiguous"
+    UNAVAILABLE = "unavailable"
+    SUPERSEDED = "superseded"
+
+
+class ControllerActionKind(str, Enum):
+    ACKNOWLEDGE_ONLY = "acknowledge_only"
+    REARM_CHECKPOINT = "rearm_checkpoint"
+    RETRY_DISPATCH = "retry_dispatch"
+    CANCEL_DISPATCH = "cancel_dispatch"
+    CHANGE_RETRY_BUDGET = "change_retry_budget"
+    REQUIRE_HUMAN_ATTENTION = "require_human_attention"
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerDecisionSummary:
+    """Bounded, secretless context presented to a controller generation."""
+
+    dispatch_id: DispatchId
+    kind: str
+    state: ControllerDecisionState
+    summary: str
+    source_thread_id: str | None = None
+    deadline: str | None = None
+    revision: int = 0
+    expected_successor_dispatch_ids: tuple[str, ...] = ()
+    dispatch_state: str = "unknown"
+    retry_policy_revision: int = 0
+    retry_strategy: RecoveryStrategy = RecoveryStrategy.NONE
+    last_failure: RetryFailureClass | None = None
+    human_attention_reason: str | None = None
+    prior_thread_id: ThreadIdentity | None = None
+    prior_turn_id: str | None = None
+    recovery_state: str = "none"
+    worker_exit_classification: str | None = None
+    worker_exit_code: int | None = None
+    recent_activity: tuple[DiagnosticEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        if self.kind not in {"checkpoint", "terminal"}:
+            raise ValueError("controller decision kind is invalid")
+        if not isinstance(self.state, ControllerDecisionState):
+            object.__setattr__(self, "state", ControllerDecisionState(self.state))
+        _required_text(self.summary, label="controller decision summary", limit=16_384)
+        if self.source_thread_id is not None:
+            ThreadIdentity(self.source_thread_id)
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("controller decision revision is invalid")
+        successors = tuple(self.expected_successor_dispatch_ids)
+        if len(successors) > 128 or len(set(successors)) != len(successors):
+            raise ValueError("controller successor snapshot is invalid")
+        for successor in successors:
+            DispatchId(successor)
+        object.__setattr__(self, "expected_successor_dispatch_ids", tuple(sorted(successors)))
+        _required_text(self.dispatch_state, label="controller dispatch state", limit=64)
+        if (
+            isinstance(self.retry_policy_revision, bool)
+            or not isinstance(self.retry_policy_revision, int)
+            or self.retry_policy_revision < 0
+        ):
+            raise ValueError("controller retry-policy revision is invalid")
+        if not isinstance(self.retry_strategy, RecoveryStrategy):
+            object.__setattr__(self, "retry_strategy", RecoveryStrategy(self.retry_strategy))
+        if self.last_failure is not None and not isinstance(self.last_failure, RetryFailureClass):
+            object.__setattr__(self, "last_failure", RetryFailureClass(self.last_failure))
+        if self.human_attention_reason is not None:
+            object.__setattr__(
+                self,
+                "human_attention_reason",
+                redact_control_text(self.human_attention_reason, limit=512),
+            )
+        if self.prior_thread_id is not None and not isinstance(self.prior_thread_id, ThreadIdentity):
+            object.__setattr__(self, "prior_thread_id", ThreadIdentity(self.prior_thread_id))
+        if self.prior_turn_id is not None:
+            _required_text(self.prior_turn_id, label="controller prior turn id", limit=512)
+        _required_text(self.recovery_state, label="controller recovery state", limit=64)
+        if self.worker_exit_classification is not None:
+            _required_text(
+                self.worker_exit_classification,
+                label="controller worker-exit classification",
+                limit=128,
+            )
+        if self.worker_exit_code is not None and (
+            isinstance(self.worker_exit_code, bool) or not isinstance(self.worker_exit_code, int)
+        ):
+            raise ValueError("controller worker-exit code is invalid")
+        activity = tuple(self.recent_activity)
+        if len(activity) > 8 or not all(isinstance(event, DiagnosticEvent) for event in activity):
+            raise ValueError("controller recent activity snapshot is invalid")
+        object.__setattr__(self, "recent_activity", activity)
+
+    def context_json(self) -> JsonObject:
+        """Return the bounded recovery facts a model needs for one CAS decision."""
+
+        return {
+            "dispatch_state": self.dispatch_state,
+            "retry_policy_revision": self.retry_policy_revision,
+            "retry_strategy": self.retry_strategy.value,
+            "last_failure": self.last_failure.value if self.last_failure is not None else None,
+            "human_attention_reason": self.human_attention_reason,
+            "prior_thread_id": self.prior_thread_id.id if self.prior_thread_id is not None else None,
+            "prior_turn_id": self.prior_turn_id,
+            "recovery_state": self.recovery_state,
+            "worker_exit_classification": self.worker_exit_classification,
+            "worker_exit_code": self.worker_exit_code,
+            "recent_activity": [event.to_json() for event in self.recent_activity],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerDecisionClaim:
+    decision_id: ControllerDecisionId
+    generation: Generation
+    claimant_kind: ControllerClaimantKind
+    claimant_id: str
+    revision: int
+    lease_expires_at: str
+    token: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision_id, ControllerDecisionId):
+            object.__setattr__(self, "decision_id", ControllerDecisionId(self.decision_id))
+        if not isinstance(self.generation, Generation):
+            object.__setattr__(self, "generation", Generation(self.generation))
+        if not isinstance(self.claimant_kind, ControllerClaimantKind):
+            object.__setattr__(self, "claimant_kind", ControllerClaimantKind(self.claimant_kind))
+        _required_text(self.claimant_id, label="controller claimant id", limit=256)
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("controller claim revision is invalid")
+        _required_text(self.lease_expires_at, label="controller claim lease", limit=64)
+        if self.token is not None:
+            _required_text(self.token, label="controller claim token", limit=256)
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerRecoveryInspectionClaim:
+    """The once-returned capability for one authoritative recovery read."""
+
+    decision_id: ControllerDecisionId
+    generation: Generation
+    revision: int
+    lease_expires_at: str
+    token: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision_id, ControllerDecisionId):
+            object.__setattr__(self, "decision_id", ControllerDecisionId(self.decision_id))
+        if not isinstance(self.generation, Generation):
+            object.__setattr__(self, "generation", Generation(self.generation))
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("controller inspection claim revision is invalid")
+        _required_text(self.lease_expires_at, label="controller inspection lease", limit=64)
+        _required_text(self.token, label="controller inspection token", limit=256)
+
+    @property
+    def inspection_token(self) -> str:
+        return self.token
+
+    @property
+    def expires_at(self) -> str:
+        return self.lease_expires_at
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerDecisionStatus:
+    decision_id: ControllerDecisionId
+    dispatch_id: DispatchId
+    kind: str
+    state: ControllerDecisionState
+    revision: int
+    current_generation: Generation
+    generation_budget: int
+    generation_used: int
+    claimant_kind: ControllerClaimantKind | None
+    claimant_id: str | None
+    claim_expires_at: str | None
+    action_id: str | None
+    action_sha256: str | None
+    deadline: str
+    summary: ControllerDecisionSummary
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision_id, ControllerDecisionId):
+            object.__setattr__(self, "decision_id", ControllerDecisionId(self.decision_id))
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        if not isinstance(self.state, ControllerDecisionState):
+            object.__setattr__(self, "state", ControllerDecisionState(self.state))
+        if not isinstance(self.current_generation, Generation):
+            object.__setattr__(self, "current_generation", Generation(self.current_generation))
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("controller decision revision is invalid")
+        if isinstance(self.generation_budget, bool) or not 1 <= self.generation_budget <= 2:
+            raise ValueError("controller generation budget is invalid")
+        if isinstance(self.generation_used, bool) or not 0 <= self.generation_used <= self.generation_budget:
+            raise ValueError("controller generation usage is invalid")
+        if self.claimant_kind is not None and not isinstance(self.claimant_kind, ControllerClaimantKind):
+            object.__setattr__(self, "claimant_kind", ControllerClaimantKind(self.claimant_kind))
+        if self.claimant_id is not None:
+            _required_text(self.claimant_id, label="controller claimant id", limit=256)
+        _required_text(self.deadline, label="controller decision deadline", limit=64)
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerGenerationStatus:
+    decision_id: ControllerDecisionId
+    generation: Generation
+    lineage_id: str
+    state: ControllerGenerationState
+    predecessor_generation: Generation | None = None
+    source_kind: str = "source_controller"
+    prompt_sha256: str | None = None
+    controller_thread_id: ThreadIdentity | None = None
+    controller_turn_id: str | None = None
+    inspection_outcome: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision_id, ControllerDecisionId):
+            object.__setattr__(self, "decision_id", ControllerDecisionId(self.decision_id))
+        if not isinstance(self.generation, Generation):
+            object.__setattr__(self, "generation", Generation(self.generation))
+        _required_text(self.lineage_id, label="controller lineage id", limit=256)
+        if not isinstance(self.state, ControllerGenerationState):
+            object.__setattr__(self, "state", ControllerGenerationState(self.state))
+        if self.predecessor_generation is not None and not isinstance(self.predecessor_generation, Generation):
+            object.__setattr__(self, "predecessor_generation", Generation(self.predecessor_generation))
+        if self.source_kind not in {"source_controller", "replacement_controller"}:
+            raise ValueError("controller generation source kind is invalid")
+        if self.prompt_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", self.prompt_sha256) is None:
+            raise ValueError("controller prompt digest is invalid")
+        if self.controller_thread_id is not None and not isinstance(self.controller_thread_id, ThreadIdentity):
+            object.__setattr__(self, "controller_thread_id", ThreadIdentity(self.controller_thread_id))
+        if self.controller_turn_id is not None:
+            _required_text(self.controller_turn_id, label="controller turn id", limit=512)
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerActionReceipt:
+    action_id: str
+    decision_id: ControllerDecisionId
+    generation: Generation
+    expected_revision: int
+    bundle_sha256: str
+    effect_receipt: JsonObject
+    state: str
+    committed_at: str
+    acknowledged_at: str | None = None
+
+    def __post_init__(self) -> None:
+        _required_text(self.action_id, label="controller action id", limit=256)
+        if not isinstance(self.decision_id, ControllerDecisionId):
+            object.__setattr__(self, "decision_id", ControllerDecisionId(self.decision_id))
+        if not isinstance(self.generation, Generation):
+            object.__setattr__(self, "generation", Generation(self.generation))
+        if (
+            isinstance(self.expected_revision, bool)
+            or not isinstance(self.expected_revision, int)
+            or self.expected_revision < 0
+        ):
+            raise ValueError("controller action revision is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", self.bundle_sha256) is None:
+            raise ValueError("controller bundle digest is invalid")
+        if self.state not in {"committed", "acknowledged"}:
+            raise ValueError("controller action receipt state is invalid")
+        _required_text(self.committed_at, label="controller action timestamp", limit=64)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1238,7 +2513,33 @@ class ValidationSpec:
 
 
 _SCHEMA_TYPES = frozenset({"object", "array", "string", "boolean", "number", "integer", "null"})
-_SCHEMA_KEYS = frozenset({"type", "properties", "required", "additionalProperties", "items"})
+_SCHEMA_METADATA_KEYS = frozenset({"$schema", "$id", "title", "description"})
+_SCHEMA_KEYS = _SCHEMA_METADATA_KEYS | frozenset(
+    {
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "propertyNames",
+        "items",
+        "const",
+        "enum",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "minProperties",
+        "maxProperties",
+        "multipleOf",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "oneOf",
+    }
+)
 MAX_OUTPUT_SCHEMA_DEPTH = 32
 MAX_OUTPUT_SCHEMA_PROPERTIES = 1_024
 MAX_OUTPUT_OBJECT_PROPERTIES = 128
@@ -1247,10 +2548,93 @@ MAX_OUTPUT_ARRAY_ITEMS = 1_024
 MAX_STRUCTURED_OUTPUT_BYTES = 1_048_576
 
 
+def _is_closed_constant_map(node: Mapping[str, object], properties: Mapping[str, object]) -> bool:
+    """Identify a bounded supported-key map whose values are fixed per key."""
+
+    return (
+        "required" not in node
+        and "minProperties" in node
+        and "maxProperties" in node
+        and bool(properties)
+        and all(isinstance(child, Mapping) and "const" in child for child in properties.values())
+    )
+
+
+def _is_finite_json_number(value: object) -> bool:
+    """Return whether a value is a finite JSON number without coercing integers."""
+
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def _json_schema_instance_equal(left: object, right: object) -> bool:
+    """Compare two JSON instances using Draft 2020-12 equality semantics."""
+
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if _is_finite_json_number(left) and _is_finite_json_number(right):
+        return left == right
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, str) or isinstance(right, str):
+        return isinstance(left, str) and isinstance(right, str) and left == right
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping) or set(left) != set(right):
+            return False
+        return all(isinstance(key, str) and _json_schema_instance_equal(left[key], right[key]) for key in left)
+    if isinstance(left, Sequence) or isinstance(right, Sequence):
+        if (
+            not isinstance(left, Sequence)
+            or not isinstance(right, Sequence)
+            or isinstance(left, str | bytes | bytearray)
+            or isinstance(right, str | bytes | bytearray)
+            or len(left) != len(right)
+        ):
+            return False
+        return all(
+            _json_schema_instance_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return False
+
+
 def validate_output_schema(schema: Mapping[str, object]) -> None:
     """Validate the one closed recursive schema contract accepted at every boundary."""
 
     properties_seen = 0
+
+    def bounded_integer(value: object, *, label: str, maximum: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > maximum:
+            raise ValueError(f"{label} must be a bounded non-negative integer")
+        return value
+
+    def value_matches_type(value: object, schema_type: str) -> bool:
+        if schema_type == "null":
+            return value is None
+        if schema_type == "boolean":
+            return isinstance(value, bool)
+        if schema_type == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if schema_type == "number":
+            return _is_finite_json_number(value)
+        if schema_type == "string":
+            return isinstance(value, str)
+        if schema_type == "array":
+            return isinstance(value, list | tuple)
+        return isinstance(value, Mapping)
+
+    def validate_metadata(node: Mapping[str, object]) -> None:
+        for key in _SCHEMA_METADATA_KEYS & set(node):
+            value = node[key]
+            if not isinstance(value, str) or not value or "\x00" in value or len(value.encode("utf-8")) > 16_384:
+                raise ValueError(f"output schema {key} must be a bounded non-empty string")
+        if "$schema" in node and node["$schema"] != "https://json-schema.org/draft/2020-12/schema":
+            raise ValueError("output schema $schema must identify Draft 2020-12")
+        if "description" in node and not {"$schema", "$id", "title"} <= set(node):
+            raise ValueError("output schema description is permitted only with canonical schema metadata")
 
     def validate_node(node: object, *, depth: int, root: bool) -> None:
         nonlocal properties_seen
@@ -1261,11 +2645,40 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
         unknown = set(node) - _SCHEMA_KEYS
         if unknown:
             raise ValueError(f"output schema contains unsupported keys: {sorted(map(str, unknown))!r}")
+        validate_metadata(node)
+        if "oneOf" in node:
+            branches = node["oneOf"]
+            if (
+                set(node) - _SCHEMA_METADATA_KEYS != {"oneOf"}
+                or not isinstance(branches, list | tuple)
+                or not (2 <= len(branches) <= (3 if root else 8))
+                or any(not isinstance(branch, Mapping) for branch in branches)
+            ):
+                raise ValueError("output schema oneOf must be a single bounded branch authority")
+            for branch in branches:
+                validate_node(branch, depth=depth + 1, root=root)
+            return
         raw_type = node.get("type")
         if isinstance(raw_type, str):
             schema_types = (raw_type,)
         elif isinstance(raw_type, list | tuple) and all(isinstance(item, str) for item in raw_type):
             schema_types = tuple(raw_type)
+        elif "const" in node:
+            constant = node["const"]
+            inferred = (
+                "null"
+                if constant is None
+                else "boolean"
+                if isinstance(constant, bool)
+                else "integer"
+                if isinstance(constant, int)
+                else "number"
+                if isinstance(constant, float) and math.isfinite(constant)
+                else "string"
+                if isinstance(constant, str)
+                else None
+            )
+            schema_types = (inferred,) if inferred is not None else ()
         else:
             schema_types = ()
         if (
@@ -1276,32 +2689,112 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
             raise ValueError("output schema type must be one of the supported JSON types")
         if root and schema_types != ("object",):
             raise ValueError("execution output schema must require an object")
+        structural_keys = set(node) - _SCHEMA_METADATA_KEYS - {"type", "const", "enum"}
+        if len(schema_types) > 1 and any(item in {"object", "array"} for item in schema_types):
+            raise ValueError("object and array schema types cannot be unions")
+
+        if "const" in node and not any(value_matches_type(node["const"], item) for item in schema_types):
+            raise ValueError("output schema const is incompatible with its declared type")
+        if "enum" in node:
+            enum = node["enum"]
+            if not isinstance(enum, list | tuple) or not enum:
+                raise ValueError("output schema enum must be a non-empty array")
+            if any(
+                _json_schema_instance_equal(left, right)
+                for index, left in enumerate(enum)
+                for right in enum[index + 1 :]
+            ) or any(not any(value_matches_type(value, item) for item in schema_types) for value in enum):
+                raise ValueError("output schema enum must contain unique values compatible with its declared type")
+
+        if "string" in schema_types:
+            allowed = {"minLength", "maxLength", "pattern"}
+            minimum = bounded_integer(node.get("minLength", 0), label="minLength", maximum=MAX_STRUCTURED_OUTPUT_BYTES)
+            maximum = bounded_integer(
+                node.get("maxLength", MAX_STRUCTURED_OUTPUT_BYTES),
+                label="maxLength",
+                maximum=MAX_STRUCTURED_OUTPUT_BYTES,
+            )
+            if minimum > maximum:
+                raise ValueError("output schema string bounds are inverted")
+            if "pattern" in node:
+                pattern = node["pattern"]
+                if not isinstance(pattern, str) or len(pattern.encode("utf-8")) > MAX_OUTPUT_PROPERTY_NAME_BYTES:
+                    raise ValueError("output schema pattern must be a bounded string")
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    raise ValueError("output schema pattern is invalid") from exc
+            structural_keys -= allowed
+
         if len(schema_types) > 1:
-            if set(node) != {"type"}:
-                raise ValueError("union schemas may contain only type")
+            if structural_keys:
+                raise ValueError("union schema constraints do not apply to a declared type")
             return
         schema_type = schema_types[0]
 
         if schema_type == "object":
-            if set(node) != {"type", "properties", "required", "additionalProperties"}:
-                raise ValueError("object schemas must declare properties, required, and additionalProperties")
-            properties = node["properties"]
-            required = node["required"]
-            if not isinstance(properties, Mapping):
-                raise ValueError("object schema properties must be an object")
-            if len(properties) > MAX_OUTPUT_OBJECT_PROPERTIES:
-                raise ValueError("object schema exceeds the per-object property limit")
+            minimum = bounded_integer(
+                node.get("minProperties", 0), label="minProperties", maximum=MAX_OUTPUT_OBJECT_PROPERTIES
+            )
+            maximum = bounded_integer(
+                node.get("maxProperties", MAX_OUTPUT_OBJECT_PROPERTIES),
+                label="maxProperties",
+                maximum=MAX_OUTPUT_OBJECT_PROPERTIES,
+            )
+            if minimum > maximum:
+                raise ValueError("output schema object bounds are inverted")
+            properties = node.get("properties")
+            required = node.get("required")
+            additional = node.get("additionalProperties")
+            property_names = node.get("propertyNames")
+            if isinstance(properties, Mapping):
+                if additional is not False or property_names is not None:
+                    raise ValueError("named object schemas must be closed")
+                constant_map = _is_closed_constant_map(node, properties)
+                if not constant_map:
+                    if not isinstance(required, list | tuple) or any(not isinstance(name, str) for name in required):
+                        raise ValueError("named object schema required must contain property names")
+                    required_names = set(required)
+                    if not required_names <= set(properties):
+                        raise ValueError("record schemas required names must be declared properties")
+                    optional = set(properties) - required_names
+                    version_property = properties.get("schema_version")
+                    is_optional_plugin_capsule = (
+                        optional == {"plugin_requirements"}
+                        and isinstance(version_property, Mapping)
+                        and version_property.get("const") == 3
+                        and "local_image_paths" in properties
+                    )
+                    if optional and not is_optional_plugin_capsule:
+                        raise ValueError("record schemas must require every declared property")
+                    if len(required) != len(set(required)):
+                        raise ValueError("record schema required names must be unique")
+                if constant_map:
+                    if minimum > len(properties) or maximum > len(properties):
+                        raise ValueError("constant-map schema bounds exceed its supported keys")
+                elif not minimum <= len(properties) <= maximum:
+                    raise ValueError("record schema properties violate declared bounds")
+            elif (
+                properties is None
+                and required is None
+                and isinstance(property_names, Mapping)
+                and isinstance(additional, Mapping)
+            ):
+                if "minProperties" not in node or "maxProperties" not in node:
+                    raise ValueError("semantic map schemas require explicit property-count bounds")
+                validate_node(property_names, depth=depth + 1, root=False)
+                property_name_type = property_names.get("type")
+                if property_name_type != "string":
+                    raise ValueError("semantic map propertyNames must declare a string schema")
+                validate_node(additional, depth=depth + 1, root=False)
+                return
+            else:
+                raise ValueError("object schema must be a closed record or bounded semantic map")
+            if structural_keys - {"properties", "required", "additionalProperties", "minProperties", "maxProperties"}:
+                raise ValueError("object schema contains inapplicable constraints")
             properties_seen += len(properties)
             if properties_seen > MAX_OUTPUT_SCHEMA_PROPERTIES:
                 raise ValueError("output schema exceeds the total property limit")
-            if not isinstance(required, list | tuple):
-                raise ValueError("object schema required must be an array")
-            if any(not isinstance(name, str) for name in required) or len(set(required)) != len(required):
-                raise ValueError("object schema required must contain unique strings")
-            if set(required) != set(properties):
-                raise ValueError("object schema must require every declared property exactly once")
-            if node["additionalProperties"] is not False:
-                raise ValueError("object schema additionalProperties must be explicitly false")
             for name, child in properties.items():
                 if (
                     not isinstance(name, str)
@@ -1314,18 +2807,215 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
             return
 
         if schema_type == "array":
-            if set(node) != {"type", "items"}:
-                raise ValueError("array schemas must contain exactly type and an explicit item schema")
+            if "items" not in node:
+                raise ValueError("array schemas require an explicit item schema")
+            minimum = bounded_integer(node.get("minItems", 0), label="minItems", maximum=MAX_OUTPUT_ARRAY_ITEMS)
+            maximum = bounded_integer(
+                node.get("maxItems", MAX_OUTPUT_ARRAY_ITEMS), label="maxItems", maximum=MAX_OUTPUT_ARRAY_ITEMS
+            )
+            if minimum > maximum or ("uniqueItems" in node and not isinstance(node["uniqueItems"], bool)):
+                raise ValueError("output schema array bounds or uniqueness are invalid")
+            if structural_keys - {"items", "minItems", "maxItems", "uniqueItems"}:
+                raise ValueError("array schema contains inapplicable constraints")
             validate_node(node["items"], depth=depth + 1, root=False)
             return
 
-        if set(node) != {"type"}:
-            raise ValueError(f"{schema_type} schemas may contain only type")
+        if schema_type in {"number", "integer"}:
+            numeric_keys = {"multipleOf", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}
+            for key in numeric_keys & set(node):
+                if not _is_finite_json_number(node[key]):
+                    raise ValueError(f"output schema {key} must be a finite JSON number")
+            multiple = node.get("multipleOf")
+            if multiple is not None and float(cast(int | float, multiple)) <= 0:
+                raise ValueError("output schema multipleOf must be positive")
+            minimum = node.get("minimum")
+            maximum = node.get("maximum")
+            exclusive_minimum = node.get("exclusiveMinimum")
+            exclusive_maximum = node.get("exclusiveMaximum")
+            lower = exclusive_minimum if exclusive_minimum is not None else minimum
+            upper = exclusive_maximum if exclusive_maximum is not None else maximum
+            if (
+                lower is not None
+                and upper is not None
+                and float(cast(int | float, lower)) > float(cast(int | float, upper))
+            ):
+                raise ValueError("output schema numeric bounds are inverted")
+            if structural_keys - numeric_keys:
+                raise ValueError(f"{schema_type} schema contains inapplicable constraints")
+            return
+
+        if structural_keys:
+            raise ValueError(f"{schema_type} schema contains inapplicable constraints")
 
     try:
         validate_node(schema, depth=1, root=True)
     except (KeyError, TypeError, RecursionError) as exc:
         raise ValueError("output schema is not a valid JSON schema mapping") from exc
+
+
+def validate_structured_output(value: object, schema: Mapping[str, object]) -> None:
+    """Validate decoded JSON with the same bounded schema authority used for acceptance."""
+
+    validate_output_schema(schema)
+    try:
+        encoded = json.dumps(
+            thaw_json(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("structured output is not interoperable JSON") from exc
+    if len(encoded.encode("utf-8")) > MAX_STRUCTURED_OUTPUT_BYTES:
+        raise ValueError("structured output exceeds the byte limit")
+
+    properties_seen = 0
+
+    def type_matches(item: object, schema_type: str) -> bool:
+        if schema_type == "null":
+            return item is None
+        if schema_type == "boolean":
+            return isinstance(item, bool)
+        if schema_type == "integer":
+            return isinstance(item, int) and not isinstance(item, bool)
+        if schema_type == "number":
+            return _is_finite_json_number(item)
+        if schema_type == "string":
+            return isinstance(item, str)
+        if schema_type == "array":
+            return isinstance(item, list | tuple)
+        return isinstance(item, Mapping)
+
+    def validate(item: object, node: Mapping[str, object], *, path: str, depth: int) -> None:
+        nonlocal properties_seen
+        if depth > MAX_OUTPUT_SCHEMA_DEPTH:
+            raise ValueError("structured output exceeds the depth limit")
+        branches = node.get("oneOf")
+        if isinstance(branches, Sequence) and not isinstance(branches, str | bytes | bytearray):
+            baseline = properties_seen
+            matches: list[int] = []
+            matched_properties = baseline
+            for index, branch in enumerate(branches):
+                properties_seen = baseline
+                try:
+                    validate(item, cast(Mapping[str, object], branch), path=path, depth=depth + 1)
+                except ValueError:
+                    continue
+                matches.append(index)
+                matched_properties = properties_seen
+            if len(matches) != 1:
+                properties_seen = baseline
+                raise ValueError(f"structured output field {path!r} must match exactly one oneOf branch")
+            properties_seen = matched_properties
+            return
+        raw_type = node.get("type")
+        if isinstance(raw_type, str):
+            schema_types = (raw_type,)
+        elif isinstance(raw_type, Sequence) and not isinstance(raw_type, str | bytes | bytearray):
+            schema_types = tuple(cast(Sequence[str], raw_type))
+        else:
+            constant = node.get("const")
+            inferred = (
+                "null"
+                if constant is None
+                else "boolean"
+                if isinstance(constant, bool)
+                else "integer"
+                if isinstance(constant, int)
+                else "number"
+                if isinstance(constant, float) and math.isfinite(constant)
+                else "string"
+                if isinstance(constant, str)
+                else ""
+            )
+            schema_types = (inferred,)
+        matching_types = tuple(schema_type for schema_type in schema_types if type_matches(item, schema_type))
+        if not matching_types:
+            raise ValueError(f"structured output field {path!r} has the wrong JSON type")
+        if "const" in node and not _json_schema_instance_equal(item, node["const"]):
+            raise ValueError(f"structured output field {path!r} violates const")
+        if "enum" in node and not any(
+            _json_schema_instance_equal(item, choice) for choice in cast(Sequence[object], node["enum"])
+        ):
+            raise ValueError(f"structured output field {path!r} is not in enum")
+        if item is None:
+            return
+        schema_type = matching_types[0]
+        if schema_type == "string":
+            text = cast(str, item)
+            if not node.get("minLength", 0) <= len(text) <= node.get("maxLength", MAX_STRUCTURED_OUTPUT_BYTES):
+                raise ValueError(f"structured output field {path!r} violates string bounds")
+            pattern = node.get("pattern")
+            if isinstance(pattern, str) and re.search(pattern, text) is None:
+                raise ValueError(f"structured output field {path!r} violates pattern")
+            return
+        if schema_type == "array":
+            items = cast(Sequence[object], item)
+            if not node.get("minItems", 0) <= len(items) <= node.get("maxItems", MAX_OUTPUT_ARRAY_ITEMS):
+                raise ValueError(f"structured output field {path!r} violates array bounds")
+            if node.get("uniqueItems", False) and any(
+                _json_schema_instance_equal(left, right)
+                for index, left in enumerate(items)
+                for right in items[index + 1 :]
+            ):
+                raise ValueError(f"structured output field {path!r} violates uniqueItems")
+            child_schema = cast(Mapping[str, object], node["items"])
+            for index, child in enumerate(items):
+                validate(child, child_schema, path=f"{path}[{index}]", depth=depth + 1)
+            return
+        if schema_type in {"number", "integer"}:
+            number = cast(int | float, item)
+            minimum = node.get("minimum")
+            maximum = node.get("maximum")
+            exclusive_minimum = node.get("exclusiveMinimum")
+            exclusive_maximum = node.get("exclusiveMaximum")
+            if minimum is not None and number < cast(int | float, minimum):
+                raise ValueError(f"structured output field {path!r} violates minimum")
+            if maximum is not None and number > cast(int | float, maximum):
+                raise ValueError(f"structured output field {path!r} violates maximum")
+            if exclusive_minimum is not None and number <= cast(int | float, exclusive_minimum):
+                raise ValueError(f"structured output field {path!r} violates exclusiveMinimum")
+            if exclusive_maximum is not None and number >= cast(int | float, exclusive_maximum):
+                raise ValueError(f"structured output field {path!r} violates exclusiveMaximum")
+            multiple = node.get("multipleOf")
+            if multiple is not None:
+                quotient = number / cast(int | float, multiple)
+                if not math.isclose(float(quotient), round(float(quotient)), rel_tol=1e-12, abs_tol=1e-12):
+                    raise ValueError(f"structured output field {path!r} violates multipleOf")
+            return
+        if schema_type != "object":
+            return
+        mapping = cast(Mapping[str, object], item)
+        if any(not isinstance(key, str) for key in mapping):
+            raise ValueError(f"structured output field {path!r} has a non-string object key")
+        if not node.get("minProperties", 0) <= len(mapping) <= node.get("maxProperties", MAX_OUTPUT_OBJECT_PROPERTIES):
+            raise ValueError(f"structured output field {path!r} violates object bounds")
+        properties_seen += len(mapping)
+        if properties_seen > MAX_OUTPUT_SCHEMA_PROPERTIES:
+            raise ValueError("structured output exceeds the total property limit")
+        properties = node.get("properties")
+        if isinstance(properties, Mapping):
+            expected = set(properties)
+            if _is_closed_constant_map(node, properties):
+                if not set(mapping) <= expected:
+                    raise ValueError(f"structured output field {path!r} contains an unsupported map key")
+            elif set(mapping) != expected:
+                raise ValueError(f"structured output field {path!r} does not match the closed record")
+            for key in mapping:
+                validate(
+                    mapping[key],
+                    cast(Mapping[str, object], properties[key]),
+                    path=f"{path}.{key}",
+                    depth=depth + 1,
+                )
+            return
+        name_schema = cast(Mapping[str, object], node["propertyNames"])
+        value_schema = cast(Mapping[str, object], node["additionalProperties"])
+        for key, child in mapping.items():
+            validate(key, name_schema, path=f"{path} property name", depth=depth + 1)
+            validate(child, value_schema, path=f"{path}.{key}", depth=depth + 1)
+
+    try:
+        validate(value, schema, path="output", depth=1)
+    except (KeyError, TypeError, RecursionError) as exc:
+        raise ValueError("structured output does not match the accepted schema") from exc
 
 
 def _relative_paths(values: tuple[str, ...], *, label: str) -> None:
@@ -1335,6 +3025,7 @@ def _relative_paths(values: tuple[str, ...], *, label: str) -> None:
         if (
             not value
             or value == "."
+            or "\x00" in value
             or path.is_absolute()
             or ".." in path.parts
             or path.as_posix() != value
@@ -1342,6 +3033,105 @@ def _relative_paths(values: tuple[str, ...], *, label: str) -> None:
         ):
             raise ValueError(f"{label} must contain unique repository-relative paths")
         seen.add(value)
+
+
+MAX_LOCAL_IMAGE_COUNT = 8
+MAX_LOCAL_IMAGE_PATH_BYTES = 4_096
+MAX_LOCAL_IMAGE_BYTES = 20 * 1_048_576
+_LOCAL_IMAGE_SIGNATURES: dict[str, tuple[bytes, ...]] = {
+    ".bmp": (b"BM",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".webp": (b"RIFF",),
+}
+
+
+def validate_local_image_inputs(paths: tuple[str, ...] | list[str], *, workspace: Path) -> tuple[LocalImageInput, ...]:
+    """Validate image topology and type without retaining image bytes.
+
+    Only a bounded signature prefix is read through a no-follow descriptor.
+    The returned values contain paths only; callers pass those values to the
+    official SDK input constructors, which own the later image read.
+    """
+
+    if not isinstance(paths, tuple | list):
+        raise ValueError("local image paths must be an array")
+    values = tuple(paths)
+    if not 1 <= len(values) <= MAX_LOCAL_IMAGE_COUNT or any(not isinstance(item, str) for item in values):
+        raise ValueError("local image paths must contain one to eight strings")
+    _relative_paths(values, label="local image paths")
+    if any("\x00" in value or len(os.fsencode(value)) > MAX_LOCAL_IMAGE_PATH_BYTES for value in values):
+        raise ValueError("local image path exceeds its byte limit")
+    try:
+        root = workspace.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("local image workspace is unavailable") from exc
+    if not root.is_dir():
+        raise ValueError("local image workspace is not a directory")
+
+    validated: list[LocalImageInput] = []
+    for relative in values:
+        relative_path = Path(relative)
+        candidate = root.joinpath(*relative_path.parts)
+        current = root
+        try:
+            for part in relative_path.parts:
+                current /= part
+                metadata = os.lstat(current)
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise ValueError("local image path contains a symlink")
+            metadata = os.lstat(candidate)
+        except FileNotFoundError as exc:
+            raise ValueError("local image path is missing") from exc
+        except OSError as exc:
+            raise ValueError("local image path cannot be inspected") from exc
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("local image path is not a regular file")
+        if metadata.st_nlink != 1:
+            raise ValueError("local image path must have one link")
+        if metadata.st_size > MAX_LOCAL_IMAGE_BYTES:
+            raise ValueError("local image file exceeds its byte limit")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("local image path cannot be resolved") from exc
+        if resolved != candidate or not resolved.is_relative_to(root):
+            raise ValueError("local image path escapes the workspace")
+        suffix = candidate.suffix.casefold()
+        signatures = _LOCAL_IMAGE_SIGNATURES.get(suffix)
+        if signatures is None:
+            raise ValueError("local image file type is unsupported")
+        descriptor = -1
+        try:
+            descriptor = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW)
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or opened.st_dev != metadata.st_dev
+                or opened.st_ino != metadata.st_ino
+                or opened.st_size != metadata.st_size
+            ):
+                raise ValueError("local image file changed during validation")
+            prefix = os.read(descriptor, 12)
+        except ValueError:
+            raise
+        except OSError as exc:
+            raise ValueError("local image file cannot be read") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if suffix == ".webp":
+            valid_signature = len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP"
+        else:
+            valid_signature = any(prefix.startswith(signature) for signature in signatures)
+        del prefix
+        if not valid_signature:
+            raise ValueError("local image file signature is unsupported")
+        validated.append(LocalImageInput(relative))
+    return tuple(validated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1364,11 +3154,13 @@ class ExecutionCapsule:
     output_schema: JsonObject
     permission_mode: NativePermissionMode = NativePermissionMode.INHERIT_NATIVE
     acceptance_modes: tuple[AcceptanceMode, ...] = (AcceptanceMode.OBJECTIVE,)
+    plugin_requirements: tuple[JsonObject, ...] = ()
+    local_image_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.capsule_version, bool) or not isinstance(self.capsule_version, int):
             raise ValueError("execution capsule version must be an integer")
-        if self.capsule_version != 2:
+        if self.capsule_version not in {2, 3}:
             raise ValueError("unsupported execution capsule version")
         try:
             repository_root = self.repository_root.resolve(strict=False)
@@ -1411,6 +3203,19 @@ class ExecutionCapsule:
         if not modes or len(modes) != len(set(modes)):
             raise ValueError("execution capsule acceptance modes must be non-empty and unique")
         object.__setattr__(self, "acceptance_modes", modes)
+        requirements = tuple(self.plugin_requirements)
+        if any(not isinstance(item, Mapping) for item in requirements):
+            raise ValueError("execution plugin requirements must be objects")
+        object.__setattr__(self, "plugin_requirements", tuple(dict(item) for item in requirements))
+        image_paths = tuple(self.local_image_paths)
+        if any(not isinstance(item, str) for item in image_paths):
+            raise ValueError("execution local image paths must be strings")
+        if self.capsule_version == 2 and image_paths:
+            raise ValueError("execution capsule version 2 cannot carry local images")
+        if self.capsule_version == 3 and not image_paths:
+            raise ValueError("execution capsule version 3 requires local images")
+        _relative_paths(image_paths, label="execution local image paths")
+        object.__setattr__(self, "local_image_paths", image_paths)
 
 
 def canonicalize_execution_capsule(capsule: ExecutionCapsule) -> ExecutionCapsule:
@@ -1440,6 +3245,8 @@ def canonicalize_execution_capsule(capsule: ExecutionCapsule) -> ExecutionCapsul
         capsule.output_schema,
         capsule.permission_mode,
         tuple(capsule.acceptance_modes),
+        tuple(capsule.plugin_requirements),
+        tuple(capsule.local_image_paths),
     )
 
 

@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "milestone": "complete-conversation-history",
+  "status": "implementation_complete_external_and_independent_gates_pending",
+  "handoff_authority": {
+    "plan_path": "docs/reviews/peer-thread-workflow.md",
+    "plan_sha256_at_handoff": "b70e0f61b66fa654ef345aae9f8412225769dafffa59920c05d004e7f80778a6",
+    "source_block_sha256": "fb7d2aaf67aa7ac84cbab787a7463bc8008da2630f5c76318f36ddcf8420b528",
+    "source_block_sha256_after_recovery": "1c0f204fc94d3bd48d38b9b791f14c3a067447fffa8fd2530071fbd9d83e4d18",
+    "policy": "The whole-plan digest is handoff provenance only. Runtime and regression tests bind typed capsule content, identities, and the exact source block rather than a mutable document-wide hash."
+  },
+  "candidate": {
+    "sha256": "9d17c6af5ba20de7ba4cf00a8ecfba049fe1ece04a173fb01fa87c6e04de40cf",
+    "framing": "18 sorted repository-relative UTF-8 paths, each followed by NUL and raw bytes; this evidence record and retained wheel are excluded",
+    "path_count": 18,
+    "new_durable_artifacts": 0
+  },
+  "architecture": {
+    "transcript_source": "official openai-codex 0.147.0 thread_read(thread_id, include_turns=True)",
+    "projection": "Persisted userMessage and agentMessage items only, in full SDK turn/item order; non-message provider activity and the diagnostic ring are never substituted.",
+    "active_worker": "The existing worker control loop reads through its current CodexSdkAdapter and SDK client.",
+    "inactive_and_controller": "The supervisor validates exact worker or controller identity and opens one read-only shared-session adapter.",
+    "paging": "Newest page first, explicit older-page token, stable redacted snapshot digest, stale-token rejection, 32 fragments and 48 KiB maximum per page.",
+    "limits": "4096 turns, 65536 items, 16 MiB redacted source text, four concurrent reads, five-second response deadline, unchanged 64 KiB authenticated IPC frame.",
+    "state_authority": "Conversation pages and pending reads exist only in process memory. SQLite, recovery, lifecycle, result, successor, diagnostic, App, and SDK-dispatch authority are unchanged.",
+    "privacy": "Known secrets are replaced before IPC; paths and URLs become typed presence markers; transcript text is absent from ledger, logs, results, recovery, and this evidence."
+  },
+  "observable_proof": {
+    "fixture_history": "Production-shaped full SDK turn items reconstruct ordered multi-turn user and agent messages, including an empty userMessage content list, multipart user content and attachment markers across every page. A long message split across pages reassembles as one visible message.",
+    "identity": "Worker reads bind dispatch, generation, attempt and thread; controller reads bind decision, generation, revision and source thread. Wrong, replaced, stale, malformed, and cross-turn pages fail before display.",
+    "loading": "The TUI loads the newest page on an explicit lifecycle refresh, loads older pages only on L, always shows current scroll position and bracket keys, and drops all cached pages on disconnect, reconnect identity change, or stale snapshot.",
+    "actions": "Steer, interrupt, claim, acknowledge, checkpoint re-arm, copy and open remain contextual; exact-turn or exact-decision confirmations remain in place.",
+    "privacy": "Read-only inactive broker tests leave the SQLite dump byte-for-byte unchanged. Slow reads are capped at four and return an unavailable state at the declared deadline.",
+    "real_sdk": {
+      "thread_id": "01a056a6-5a2c-7fa3-b05b-46b1c0cf52f2",
+      "status": "available",
+      "complete": true,
+      "pages": 1,
+      "turn_count": 0,
+      "message_item_count": 0,
+      "fragment_count": 0,
+      "sanitized_projection_digest": "a77c22dd0131d5cd6c4af5d94d54dd58231825c2c3e20b569062882a4a347bee",
+      "interpretation": "The official read boundary is reachable, but this authorized native task exposes no persisted turns through the shared SDK. It is not a real multi-turn acceptance proof. No provider call was made."
+    }
+  },
+  "renders": [
+    {
+      "path": "docs/reviews/evidence/human-terminal-ui/conversation-light-wide.svg",
+      "viewport": "120x40",
+      "theme": "light",
+      "sha256": "ee6a59e56ed28d42f0ffc3ba5138ad1d28d21bb402fbaaa19f97bf1d73972734",
+      "size": 67051
+    },
+    {
+      "path": "docs/reviews/evidence/human-terminal-ui/conversation-dark-wide.svg",
+      "viewport": "120x40",
+      "theme": "dark",
+      "sha256": "932fda33594a5d0b09429274ddd062c98d1698783cda3c7200eeb9ac4f9bcd3c",
+      "size": 66994
+    },
+    {
+      "path": "docs/reviews/evidence/human-terminal-ui/conversation-light-80x24.svg",
+      "viewport": "80x24",
+      "theme": "light",
+      "sha256": "1ac91fe8185ff94dcbdcab443fc1266818c94278b8986a1680c40e32d19c2284",
+      "size": 26397
+    },
+    {
+      "path": "docs/reviews/evidence/human-terminal-ui/conversation-no-color-80x24.svg",
+      "viewport": "80x24",
+      "theme": "no-color",
+      "sha256": "fc7fbd964b5f49fc5588cce406e66acfef3f99bb5c54a7196d0707ed3a4cfb30",
+      "size": 28869
+    }
+  ],
+  "visual_review": {
+    "self_review": "All four native-size renders were inspected. The two light renders were captured after the real D/theme transition and have a true light palette. Wide views show controller above worker conversations, six visible user and agent entries, and complete action labels. Exact 80x24 views retain non-zero hierarchy, conversation and action areas with an always-visible top/scroll cue plus Load older, Open and Details.",
+    "objective_sentinels": "Light, dark, and monochrome SVG dimensions and required labels are asserted by focused tests.",
+    "independent_sol_high": "pending"
+  },
+  "retained_wheel": {
+    "path": "dist/complete-conversation-history/codex_flow-0.2.0-py3-none-any.whl",
+    "sha256": "4c19f79230f894795ed18440c79ebd92eabe00e59c202dd34f4802ef92100d4e",
+    "size": 340822,
+    "reproducibility": "two fresh builds were byte-identical",
+    "archive_source_parity": "30 packaged Python source files and workflow.toml matched repository bytes",
+    "isolated_runtime": "Python 3.12.13, codex-flow 0.2.0, openai-codex 0.147.0, Textual 6.12.0; import and tui --help passed",
+    "provider_free_temporary_service": "passed"
+  },
+  "gates": {
+    "focused": "185 passed across installer, SDK adapter, TUI/headless, production wheel, workflow assets and plan discriminators",
+    "affected_partitions_direct": "697 passed: contracts 76, controller 405, workers 55, integrations 61, workflow assets 100",
+    "exact_wheel_service_and_render_smoke": "3 passed",
+    "workflow_assets_direct": "100 passed; exact historical reconciliation and H6-I retained artifacts present",
+    "ruff": "passed",
+    "ruff_format": "passed",
+    "compileall": "passed",
+    "pre_commit": "passed all hooks",
+    "git_diff_check": "passed",
+    "make_partitions": "all five semantic partitions passed",
+    "full_make_check": "passed: Ruff format/check, 697 tests, validator, compileall and all pre-commit hooks"
+  },
+  "causal_closure": {
+    "ARCH-RETENTION-001": "Exact historical evidence 2e6cf6d2c4804979... and wheel 1d6eaa14c6f6c5e5... were recovered locally and restored unchanged at their original paths; this successor uses descriptive evidence and wheel paths.",
+    "CONV-EMPTY-MESSAGE-001": "An empty SDK userMessage content list projects exactly one zero-length typed text fragment, retains ordinal and item identity through paging, and renders a blank body without invented text.",
+    "visual_light_palette": "Both light sentinels were regenerated after the real D/theme transition and inspected at native 1482x1026 and 994x636 sizes.",
+    "visual_responsive_actions": "Wide and exact 80x24 sentinels expose an always-visible View/scroll cue and complete Load older, Open and Details labels."
+  },
+  "residual_gates": [
+    "A readable existing shared-SDK thread with persisted multi-turn history is still required for the real observable multi-turn proof.",
+    "Independent Luna XHigh objective, Sol High visual, and Sol Medium architecture reviews remain controller-owned successors."
+  ],
+  "self_review": {
+    "p0": 0,
+    "p1": 0,
+    "notes": "No alternate lifecycle or persistence authority, provider call, App scrape, polling controller, transport, schema, module, CLI, migration, or packaging-source change was introduced."
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "schema": "codex-flow/plugin-capability-parity/v2",
+  "status": "implementation_complete_independent_reviews_pending",
+  "candidate": {
+    "candidate_sha256": "1ebba0ef7379b49c532ecac543839a9588df652c63d84e94cd7a2da48137f375",
+    "digest_scope": "17 sorted non-evidence mutable paths framed as repository-relative UTF-8 path bytes, NUL, then raw file bytes; this evidence record is excluded",
+    "digest_scope_count": 17,
+    "plan_sha256": "b80bbc29615c3d317d6c4ce4c30b41061c5528541378aed42c6b64c5e2d90355",
+    "capsule_source_block_sha256": "f84681a55520d45aeefe38ef15a8d170e81ed7eae67d9f3772fe85b55b970818",
+    "mutable_surface_count": 18,
+    "new_artifacts": 0,
+    "provider_calls": 0,
+    "app_calls": 0,
+    "global_or_plugin_state_mutation": false
+  },
+  "observable_outcome": {
+    "v1": "Historical closed schema-v1 omits plugin_requirements and marker-shaped text reaches the SDK byte-identically as ordinary str input.",
+    "v2": "Closed schema-v2 requires a non-empty typed requirement array; exactly one ready bundled skill becomes the existing typed SkillInput.",
+    "schema_authority": "Static and generated Draft 2020-12 schemas are byte-semantically equal and use one bounded two-branch oneOf accepted by the production validator.",
+    "filesystem_authority": "Flat, standard-cache and local-marketplace layouts use descriptor-relative O_NOFOLLOW traversal with identity/type/link/size checks and held skill descriptors.",
+    "detached_authority": "Supervisor enters and holds a fresh exact requirement, snapshot, digest, source and bundle binding before attempt capability issuance, private writes, starting state or Popen. Worker startup and terminal submission consume one shared exact closed private-capability shape, and terminal submission rejects substitution against the worker-start facts."
+  },
+  "bounds": {
+    "discovery_entries": 4096,
+    "candidate_bundles": 128,
+    "bundle_depth": 32,
+    "bundle_files": 8192,
+    "single_file_bytes": 16777216,
+    "bundle_bytes": 268435456,
+    "resolution_bytes": 268435456,
+    "config_bytes": 1048576,
+    "manifest_bytes": 1048576
+  },
+  "negative_sdk_boundary_counts": {
+    "direct_controller_bundle_drift_start_thread": 0,
+    "direct_controller_bundle_drift_run_turn": 0,
+    "supervisor_requirement_drift_popen": 0,
+    "supervisor_snapshot_drift_popen": 0,
+    "supervisor_capability_digest_drift_popen": 0,
+    "supervisor_source_drift_popen": 0,
+    "supervisor_fresh_bundle_drift_attempt_capabilities": 0,
+    "supervisor_fresh_bundle_drift_private_files": 0,
+    "supervisor_fresh_bundle_drift_queue_state_derivations": 0,
+    "supervisor_fresh_bundle_drift_popen": 0,
+    "worker_private_capability_drift_adapter_construction": 0,
+    "worker_submit_substitution_ipc": 0,
+    "worker_submit_unsupported_shape_ipc": 0
+  },
+  "validation": {
+    "named_discovery_adversaries": "20 passed: flat/cache/local layouts, missing/disabled/secret, total-entry, bundle-count, depth, file-count, single-file, bundle/resolution byte, symlink, hardlink, FIFO and held-descriptor rename/fresh-swap",
+    "named_detached_adversaries": "8 passed: four queued supervisor authority mutations, one fresh bundle drift with zero launch mutation, one worker capsule/private mismatch before adapter construction and two terminal-submit closed-shape/substitution rejections before IPC",
+    "direct_typed_sdk_input": "passed with fake adapter receiving SkillInput(name=demo.skill, path=/proc/self/fd/<held>)",
+    "marker_shaped_plain_strings": "passed for plugin-requirement and bundled-skill marker-shaped v1/v2 strings",
+    "contracts_partition": "64 passed",
+    "controller_partition": "402 passed",
+    "workers_partition": "38 passed",
+    "integrations_partition": "60 passed",
+    "workflow_assets_partition": "90 passed",
+    "production_detached_terminal_ipc": "passed with one real supervisor-launched subprocess accepting the generated plugin-bearing closed capability and committing one terminal result through production IPC; provider calls 0, App calls 0",
+    "full_make_check": "passed exact candidate: Ruff format/check, 654 tests, validator, compileall and all pre-commit hooks",
+    "git_diff_check": "passed",
+    "self_review": {"p0": 0, "p1": 0}
+  },
+  "exact_wheel": {
+    "package": "codex-flow",
+    "version": "0.2.0",
+    "python": "3.12.13",
+    "wheel_sha256": "1127163f04fd8544f3cc0fd9a5a4a76c8ea8b42323daa128694501b694fb036f",
+    "wheel_bytes": 325341,
+    "identical_repeated_builds": true,
+    "isolated_install_import": true,
+    "packaged_static_generated_schema_equal": true,
+    "production_oneof_validator": true,
+    "provider_free_temporary_service_restart": "passed from isolated installed wheel across process epochs 1 to 2 after lease expiry; provider calls 0, App calls 0",
+    "failed_closed_non_proof_attempts": "same-process reacquire correctly rejected live ownership; excluded from restart proof"
+  },
+  "retained_historical_wheel": {
+    "path": "dist/structured-output-runtime/codex_flow-0.2.0-py3-none-any.whl",
+    "sha256": "fea94483f8c0a834ba139612603a223868a536a1837bdb03a02e20319780815a",
+    "bytes": 259769,
+    "preserved": true
+  },
+  "protected_controller_authority": {
+    "src/codex_flow/config.py": "9d8f000ee593facaa0e10c7791cff1e72164aaed7358d777f592adf6dd398f4e",
+    "src/codex_flow/native_profile.py": "a243dfb8c64a177c4f2852e6807575cdeafac924c86ff7abaf41817beb729936",
+    "src/codex_flow/plan_capsule.py": "e3d17a23ec1699e7394ef7bccfa49713154b67d8e3ef8951a15be216609769de",
+    "src/codex_flow/ledger.py": "8edaeb30e1cf66510a6a74d501bc3629ccbe9470be9b729719f829eaef1da514",
+    "src/codex_flow/ipc.py": "ff8828e693dc24c2cc00d8d7878267d56e0d0ee14ee6c246eb92e473001fdd9a",
+    "src/codex_flow/service.py": "82ca431e092e66c3c148ac748be4e19342d81c17f80e2b3d02f594defbb9d53a",
+    "src/codex_flow/control_client.py": "90c36e7e5fe1652ddf5d04f6cb9e862ca6a71a30f88056ce9498dc5138c951b6",
+    "src/codex_flow/controller_recovery.py": "cbac49929dbb348ca49582fd794b2b8a05feef5bf144109bafa2d6622af2cf9e",
+    "src/codex_flow/app_native.py": "4eeefe47032ceb5ae920f5ae16981065f47a359b8216dfbd1a8f1b139dfc7d27"
+  },
+  "protected_terminal_ui": {
+    "candidate_sha256": "df3e0c16c7b93c3ff8b4483906fa1c4df7e9247cada42a7c5c7da8d37aaa6e32",
+    "inventory_matches_human_terminal_ui_evidence": true,
+    "src/codex_flow/cli.py": "dbbf72fea4432383903274e451d36ba87ef3cb3681d522333dc9dd037e27cbd7",
+    "src/codex_flow/tui.py": "b6eee36d501d62c70c6ac91ee592f38a5606af603a5214ef0c26463fc2a84caf",
+    "src/codex_flow/tui_client.py": "b76547d06c0882e623d8274b8a8ea43a03b65b97b1856f86ce5a0c307d40d48a",
+    "src/codex_flow/tui_models.py": "d91ebece567090893d15ec833fa90089a039e285f643a9200c634b1d8fe92ca6",
+    "docs/reviews/evidence/human-terminal-ui/dark-wide.svg": "19ce1a8065d0fa92a5d1453ae08dfa1f0fcab6fd7397277e8938e8cf9c5ec4cc",
+    "docs/reviews/evidence/human-terminal-ui/light-narrow.svg": "2177d550aec798106b51a6fc19323a9755ebc517d6a4583037793f1b7aa7f1ed",
+    "docs/reviews/evidence/human-terminal-ui/light-wide.svg": "9b09223dfe9cb38a970a5558e97036d10cf76f2f929c418c2c303da7e70720e5",
+    "docs/reviews/evidence/human-terminal-ui/no-color-narrow.svg": "35c6c19d856099da65cf8d62f9e525c7a9592bbba72ed21f7ed96da1f2160a3e"
+  },
+  "provider_sentinel": {
+    "attempted": false,
+    "consumed_delayed_steer_retried": false,
+    "connector_or_mcp_invoked": false
+  },
+  "reviews": {
+    "objective": "pending fresh independent Luna XHigh review",
+    "architecture": "pending independent Sol Medium architecture review"
+  },
+  "sanitized": true,
+  "secrets_or_raw_plugin_payloads_retained": false
+}

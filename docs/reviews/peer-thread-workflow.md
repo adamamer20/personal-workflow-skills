@@ -8,9 +8,11 @@ material decisions, Luna executes decision-ready milestones, and independent
 review gates promotion. The controller owns lifecycle state, idempotency,
 worktrees, routing, recovery, budgets, and durable results so that messages are
 notifications rather than the workflow source of truth. SDK-headless execution
-must start, recover and complete with the Codex App closed. When open, the App
-is only an optional projection for visible native workers and one terminal
-wake-up notification; it is never lifecycle, liveness or result authority.
+must start, recover and complete without depending on Codex App availability.
+The App may be open or closed; physical closure is an optional environment
+state, not a runtime or promotion prerequisite. When open, the App is only an
+optional projection for visible native workers and one terminal wake-up
+notification; it is never lifecycle, liveness or result authority.
 
 ## Current context
 
@@ -70,6 +72,110 @@ src/codex_flow/
 tests/
   controller/
 workflow.toml            # one routing and limit table
+```
+
+## Recovery design — supervisor-refresh-and-runtime-compatibility-recovery
+
+This bounded recovery supersedes the inactive `local-image-worker-input`
+dispatch after its first worker was terminated by a shared-tool supervisor
+refresh and its second attempt failed before SDK identity because the durable
+native compatibility snapshot no longer matched the intentionally updated
+plugin source.  The first attempt's implementation and green deterministic
+checks are preserved in the same dirty worktree.  The superseded dispatch must
+close resultlessly as cancelled before this owner starts; it is never retried
+or given an invented result.
+
+The recovery prevents a worker from updating or restarting the runtime that is
+currently supervising it.  Shared activation becomes controller-owned after
+the implementation worker has returned a terminal result.  A supervisor
+refresh first acquires a durable shutdown fence, refuses while a worker or
+controller child is active, stops through the existing authenticated IPC,
+waits for the old process birth identity and service state to disappear, and
+only then installs/reloads/starts and verifies the replacement.  Controller
+enqueue fails closed while the fence is set, closing the preflight-to-shutdown
+race without a new table, migration, daemon, transport or lifecycle owner.
+
+Native compatibility drift before SDK thread creation is a typed profile or
+configuration drift, never malformed model input.  It remains fail-closed and
+requires a controller-owned superseding dispatch bound to the current verified
+profile; immutable queue authority is not silently rewritten.  The current
+recovery dispatch is that authorized replacement.
+
+If the exact prior attempt reached human attention after its worker exit but
+left an unconsumed result capability, the same identity-rebind transaction may
+revoke only that exact generation/attempt capability after verifying durable
+exited liveness and the absence of an active worker/controller owner.  A
+consumed capability, missing exit proof or active lease still rejects the
+rebind.  This closes the rebind-before-retry deadlock without accepting an old
+result, fabricating completion or weakening capability identity.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Complete the local-image worker candidate and make shared codex-flow refresh safe, "
+        "non-self-terminating and recoverable under intentional runtime compatibility changes."
+    ),
+    decomposition=(
+        "Preserve and reconcile the existing image, CLI, diagnostics and parallel-START candidate without reimplementing already-green work.",
+        "Add one durable supervisor shutdown fence that rejects refresh while worker or controller children are active and blocks new enqueue during handoff.",
+        "Replace immediate systemctl restart with authenticated shutdown, bounded old-owner/service disappearance, install/reload/start and replacement health verification.",
+        "Classify pre-thread native compatibility mismatch as profile/configuration drift and require a newly bound superseding dispatch rather than malformed-input retry.",
+        "Prove the refresh race, active-worker deferral, enqueue fence, lease handoff, classification and resultless supersession with focused deterministic tests.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The blocked local-image dispatch is cancelled exactly once without result, restart, successor or fabricated terminal model output before the recovery owner starts.",
+        "An active worker or controller child makes shared bootstrap/refresh defer or fail before tool/plugin installation or supervisor termination; its SDK turn and durable identity remain intact.",
+        "With no active child, refresh sets one durable fence, prevents enqueue, requests authenticated shutdown, waits for the old PID birth identity and unit inactivity, then installs, reloads, starts and health-checks exactly one replacement supervisor.",
+        "Timeout, IPC failure, service failure or replacement-health failure is explicit and leaves no false ready claim; a subsequent bounded refresh can reconcile safely.",
+        "Native compatibility mismatch before SDK identity is recorded as profile/configuration drift with human attention and is never labelled malformed_input or automatically retried against rewritten authority.",
+        "The existing schema-v3 local-image input, cleaned CLI, conversation/tool summaries and same-turn disjoint START semantics remain intact; focused affected partitions and one full make check pass.",
+        "The worker does not install or refresh the shared tool during its own run; after its terminal result the controller may activate once and run the authorized disposable real image and Chromium/Playwright smoke.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/control_client.py",
+        "scripts/install_personal_workflow_skills.py",
+        "tests/test_controller_execution.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_service_lifecycle.py",
+        "tests/test_supervisor_recovery.py",
+        "tests/test_plugin_installation.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_production_pilots.py",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md after this capsule is frozen and AGENTS.md",
+        "schemas and persisted database schema or migrations",
+        "src/codex_flow/backends/codex_sdk.py image and provider projection except for verification",
+        "src/codex_flow/contracts.py and src/codex_flow/projection.py schema-v3 image contracts except for verification",
+        "src/codex_flow/ipc.py framing and 64 KiB ceiling",
+        "TUI modules, retained evidence and wheels, plugin manifests and unrelated plugin skills",
+        "Codex authentication, global configuration, App state, remotes, Git history and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use recover-milestone and execute-milestone as one Luna XHigh mutable owner for only "
+        "supervisor-refresh-and-runtime-compatibility-recovery in the existing dirty python-sdk-controller "
+        "worktree. Preserve the first local-image worker's candidate and green checks. Implement the frozen "
+        "shutdown-fence architecture without a new table, migration, daemon, transport or lifecycle owner. "
+        "Never install or refresh the shared tool while this worker is active; use fake/hermetic systemd and "
+        "process-identity discriminators, affected partitions and one full make check. Return one raw typed "
+        "terminal result to the controller, which alone owns later activation and real provider/browser smoke."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
 ```
 
 Per-repository run state is stored under `.codex-flow/` and excluded from Git:
@@ -166,6 +272,41 @@ unavailability or explicit context rollover.
 - One milestone has one mutable executor lease. Review is read-only. Repairs
   resume the same executor and lease unless an explicit rollover transition is
   recorded.
+- Every new or renamed durable path and code/contract identifier uses a stable,
+  descriptive capability, domain, responsibility or observable-behavior name.
+  This includes files, modules, classes, functions, methods, variables,
+  constants, tests, fixtures, CLI commands, public exports, evidence records and
+  generated artifacts. Temporary planning/control labels such as `h6_*`, `s1_*`
+  and `milestone-*` never become durable names. Runtime milestone identities
+  remain typed protocol data, not naming input.
+- A numbered historical path or persisted schema/protocol identifier is retained
+  only through an explicit exception recording the exact identifier, required
+  compatibility/provenance, immutable or versioned status, and a compatibility
+  check. Renames must update symbols, imports, packaging, commands, links,
+  fixtures and evidence references atomically; mechanical bulk renames are
+  prohibited.
+- Every substantial executable milestone freezes an implementation architecture
+  map before handoff. It lists exact production paths as
+  `create`/`modify`/`preserve`/`remove`, module responsibilities and dependency
+  direction, primary classes/protocols/public or persisted types/entrypoints,
+  state/error/serialization boundaries, and a justified new-artifact budget.
+  The executor may add private helpers within an owned module but may not create
+  an unplanned production module, public class, registry, runner, schema,
+  entrypoint or dependency edge without a bounded architecture replan.
+- After the architecture map is frozen, planning must attempt to factor the
+  program into independently closable vertical milestones with disjoint mutable
+  surfaces. The plan records a milestone dependency DAG and current readiness,
+  freezes shared schemas, public or persisted contracts, state authority and
+  production entrypoints before dependent fan-out, and gives every retained
+  serial edge one concrete reason: shared schema, state authority, entrypoint,
+  migration order or acceptance dependency. Milestone count is not an
+  optimization target; the planner minimizes the safe critical path without
+  inventing fake boundaries.
+- Every mutable milestone remains single-owner and normally single-context.
+  Parallelism is between ready milestones, not a required nested swarm or a
+  second controller inside a milestone. Read-only scouts and genuinely distinct
+  review authorities may run concurrently when they do not mutate shared
+  surfaces or duplicate a review lens.
 - Model and reasoning mappings live only in `workflow.toml`; the controller
   validates them against the runtime before dispatch and fails closed without
   silent substitution.
@@ -207,6 +348,35 @@ unavailability or explicit context rollover.
   apply here. SQLite remains the intentional controller ledger, and the Python
   baseline is selected for this repository and the stable SDK rather than
   inherited mechanically from SprintAct.
+
+### Proportional validation and stable test partitions
+
+Validation is change-sensitive by default. During implementation, run the
+smallest discriminating tests that cover the changed behavior and its direct
+consumers. At milestone closure, run every affected semantic partition plus
+the named integration, packaging, service or sentinel gates required by that
+capsule. Do not rerun the whole repository merely because a previous unrelated
+gate exists.
+
+The full `make check` gate is required when the capsule explicitly names it or
+when a change touches shared schemas/contracts, registries/runners, a
+production CLI/entrypoint, packaging/dependencies/lockfiles, test collection or
+configuration, broad cross-cutting behavior, or any surface whose impact cannot
+be bounded confidently. Documentation- or instruction-only work uses its
+applicable formatting, link, schema, skill-metadata and executable-example
+validators rather than full pytest. After a narrow repair, rerun only the gates
+made stale by that repair; broader evidence may be carried forward only with an
+exact changed-surface and candidate-digest justification. `git diff --check`
+and complete self-review of the owned diff remain universal. An explicit
+capsule gate always overrides these defaults.
+
+The workflow-skill reconciliation milestone introduces stable repository-root
+test partitions for `contracts`, `controller`, `workers`, `integrations` and
+`workflow-assets`, with semantic Make targets and a validator-owned partition
+manifest. Every collected repository test must belong to exactly one primary
+partition, stale paths must fail validation, and `make test` remains the full
+strict suite. These capability names, not milestone labels, are the durable
+selection interface.
 
 ## Program scope and non-goals
 
@@ -1512,12 +1682,13 @@ Notification happens after successor enqueue and cannot affect completion,
 review scheduling or recovery. The source controller is never required to call
 `wait_threads` or poll; notification is only a wake-up hint.
 
-#### Adapter boundaries and App-closed truth table
+#### Adapter boundaries and App-independent truth table
 
 - SDK-headless: start, execute, result submission, review/recovery successors,
-  terminal commit and status work with the Codex App never started, closed
-  before enqueue, or closed during execution. This is the mandatory production
-  route and must have a real App-closed sentinel.
+  terminal commit and status work without any App API/task dependency. The App
+  may be open, never started or closed during execution; its physical state is
+  recorded truthfully but is not a production or promotion gate. The mandatory
+  sentinel proves zero App lifecycle authority and zero App API/task calls.
 - App-native: the App is permitted only to create/display a visible native
   worker and to attempt the terminal notification. Binding identity does not
   grant it ledger authority. The worker submits directly to harness IPC. If the
@@ -1526,10 +1697,10 @@ review scheduling or recovery. The source controller is never required to call
   resume exists, H6-E must retain a recoverable nonterminal fact and report the
   exact App-native capability gap. It may not invent completion or substitute
   SDK-headless.
-- With the App closed it is impossible for codex-flow to create a new App UI
-  task, add/update sidebar or thread-visible content, wake a visible source
-  task, or deliver a native notification. These are optional UI projections,
-  never SDK-headless lifecycle or result requirements.
+- When the App is unavailable, codex-flow cannot create a new App UI task,
+  add/update sidebar or thread-visible content, wake a visible source task, or
+  deliver a native notification. These are optional UI projections, never
+  SDK-headless lifecycle or result requirements.
 
 #### Mutable ownership
 
@@ -1628,12 +1799,13 @@ one implementation owner; event-driven no-poll operation; capability-confined
 same-uid IPC; crash-atomic migration and transitions; explicit process and App
 failure semantics; no secret/token leakage; immutable terminal results; direct
 worker-to-harness raw result ownership; exact package/service identity; and
-truthful App-closed limitations. The objective reviewer independently confirms
-runtime behavior and regressions. Retained sanitized evidence must include
+truthful App-independent limitations. The objective reviewer independently
+confirms runtime behavior and regressions. Retained sanitized evidence must include
 process/service identity digests, queue/epoch transitions, worker/capability and
-raw-result digests (never secrets/raw sensitive text), App-absent proof,
-zero-poll/token counters, crash points, notification outcome, Git/workspace
-integrity and exact wheel identity.
+raw-result digests (never secrets/raw sensitive text), truthful App-presence
+state, zero App API/task calls, zero-poll/token counters, crash points,
+notification outcome, Git/workspace integrity and exact wheel identity. App
+evidence never relabels an App-present run as physically absent.
 
 After H6-E promotion, H6 resumes with one medium and one large parity pilot and
 the typed legacy-retirement decision. H6-E itself neither runs those pilots nor
@@ -1705,11 +1877,11 @@ pins, or legacy code; any cleanup remains a separately authorized follow-up.
   H6-D donor addresses exact ref normalization and strict raw envelopes. H6-E
   absorbs those changes while replacing App/source-thread lifecycle ownership
   with the detached supervisor and direct worker submission contract.
-- With the App closed, SDK-headless workflows must remain fully functional.
-  Creating/updating visible App UI threads and native notifications are
-  impossible and optional. Whether a bound App-native worker survives an App
-  close is an acceptance fact to measure, not a prerequisite for headless
-  correctness or authority to infer a result.
+- SDK-headless workflows remain fully functional without App lifecycle
+  authority. Creating/updating visible App UI threads and native notifications
+  is optional and unavailable whenever the App cannot serve those actions.
+  Whether a bound App-native worker survives an App close is a diagnostic fact,
+  not a prerequisite for headless correctness or authority to infer a result.
 - The supplied audit's underlying archive is not stored in this repository;
   its findings motivate the design but do not substitute for H1 captured
   evidence.
@@ -2218,6 +2390,197 @@ ModelFacingCapsule(
     prompt_budget_bytes=12_000,
 )
 ```
+## Queued TUI successor — active-session-filter-and-conversation-loading
+
+Readiness: `blocked_on=local-image-worker-input terminal reconciliation`.
+The dependency is serial because the current owner already changed the shared
+`domain.py` and `cli.py` contracts.  After that candidate closes, this is the
+sole next executable TUI milestone.  It requires no visual-quality review: the
+accepted behavior is objective and architecture-bounded, with headless Textual
+interaction proof at wide and 80x24 sizes.
+
+Architecture map and ownership:
+
+- modify `domain.py` only to add one bounded, redacted, non-secret
+  `task_summary` field to the existing ephemeral `LiveWorkerStatus` projection;
+- modify `supervisor.py` only to derive that summary from the already-durable
+  execution prompt in the queue capsule, without a ledger/schema write;
+- modify `control_client.py` only for the closed status decoder;
+- modify `tui_client.py` only for selection-bound newest-page loading, stale
+  discard and active-session filtering state;
+- modify `tui_models.py` only to render the typed task summary and exclude
+  empty diagnostic deltas from conversation fallback;
+- modify `tui.py` and the existing `tui` command in `cli.py` for automatic
+  selection loading, explicit loading/error states, `F` filtering and
+  `--active-only` startup behavior;
+- preserve `ledger.py`, `ipc.py`, the SDK adapter, worker execution, history
+  broker/source, schemas, packaging and every transcript persistence boundary.
+
+Dependency direction remains TUI -> typed control client -> authenticated
+supervisor -> existing queue/history authorities.  New production modules,
+public entrypoints, schemas, migrations, tables and retained artifacts: zero.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make the codex-flow TUI immediately show meaningful active worker sessions and their "
+        "real persisted conversations instead of opaque task labels and empty diagnostic deltas."
+    ),
+    decomposition=(
+        "Project one bounded redacted task summary from the existing durable execution capsule through the closed live-status API without new persistence.",
+        "Load the newest stable conversation page whenever worker or controller selection changes, with explicit loading, unavailable and stale states.",
+        "Add an Active only filter toggled by F and an optional tui --active-only startup flag while keeping attention decisions visible.",
+        "Use diagnostic activity only as a truthful fallback and never render empty streaming deltas as conversation messages.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Selecting any worker with an eligible SDK thread automatically renders its newest complete user/agent history without requiring L; L is offered only when an older token exists.",
+        "Rapid selection changes cannot display a late page for the wrong worker, reconnect clears ephemeral pages, and unavailable, stale or incomplete history is explicit rather than replaced by diagnostics.",
+        "Worker rows and headers show a bounded human task summary from the existing execution capsule instead of Current task, while technical identities remain secondary.",
+        "F toggles All sessions and Active only, tui --active-only starts filtered, completed/cancelled/attention workers are hidden in active mode, and the Needs your attention decision list remains visible.",
+        "Empty agent-message and command-output deltas never appear as chat entries; bounded redacted non-empty tool summaries may remain in the diagnostic fallback only.",
+        "Focused status-decoder, supervisor, TUI model, keyboard, selection-race, reconnect and exact 80x24 headless tests pass, followed by affected partitions, full make check, install/refresh and one live TUI smoke.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
+        "src/codex_flow/tui.py",
+        "src/codex_flow/cli.py",
+        "README.md",
+        "tests/test_live_worker_control.py",
+        "tests/test_workflow_control.py",
+        "tests/test_local_ipc.py",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md after this capsule is frozen",
+        "AGENTS.md and templates/AGENTS.workflow.md",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/contracts.py and src/codex_flow/projection.py",
+        "schemas, pyproject.toml, uv.lock and packaging",
+        "docs/reviews/evidence and retained wheels",
+        "plugin manifests, provider/App/global/auth/Git state and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only active-session-filter-and-conversation-loading after the "
+        "current local-image-worker-input owner is terminally reconciled. Preserve the dirty "
+        "candidate and every protected surface. Add one ephemeral typed task summary, selection-bound "
+        "automatic newest-history loading, explicit loading/error states, Active only filtering and "
+        "truthful non-empty diagnostic fallback through the existing supervisor/control/TUI path. "
+        "Do not add transcript persistence, polling, a second history source, a migration/schema, a "
+        "new production module or visual-review evidence. Run focused headless interaction tests, "
+        "affected partitions, full make check, reinstall/refresh and one live TUI smoke, then return "
+        "one raw ModelFacingResult to the controller."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+## Next execution — complete-conversation-history
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Render the complete persisted user/agent conversation available from the official shared "
+        "SDK for each eligible controller or worker thread, with safe loading and no alternate state authority."
+    ),
+    decomposition=(
+        "Project one stable complete-message snapshot from official SDK thread/read, distinguishing it from lossy non-message provider activity and the bounded diagnostic ring.",
+        "Carry exact controller/worker/thread/turn/message identity through bounded authenticated IPC pages, active-worker same-client reads and inactive read-only adapter reads.",
+        "Add explicit newest-page and load-older behavior with stable snapshot tokens, bounded memory/frames, fail-closed privacy and truthful unavailable/incomplete states.",
+        "Preserve the conversation-first hierarchy and safe actions while rendering a scrollable complete history at wide and exact 80x24 sentinels.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.VISUAL, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Every persisted user and agent message returned with full SDK turn items is reconstructible once, in SDK order, across bounded pages; diagnostic activity and lossy tool/provider events are never substituted.",
+        "Worker pages bind dispatch, generation, attempt and thread; controller pages bind decision revision, generation and controller thread; stale, replacement or changed-snapshot tokens fail before display.",
+        "Raw transcript text is never persisted or logged, known secrets are marked redacted before IPC, paths and URLs become typed presence markers, and unavailable, deleted, permission, incomplete, oversized and malformed sources remain explicit.",
+        "The TUI offers explicit load-older and scrolling without a timer or polling loop, retains safe steer/interrupt/decision confirmations, and reconnect discards ephemeral pages before a fresh stable load.",
+        "Wide light/dark and exact 80x24 light/no-color renders show controller above workers, multi-turn conversation, loading/scrolling and actions with no important zero-height text panel; independent visual review approves the exact candidate.",
+        "A real existing or separately authorized disposable shared-SDK multi-turn thread proves the production read boundary without App APIs; absence of that prerequisite is reported as the single external gate rather than replaced by a fixture claim.",
+        "Focused tests, affected semantic partitions, full make check, exact-wheel temporary-service proof, schema/format/compile/pre-commit/diff gates and objective/visual/architecture reviews close with zero open P0/P1.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py only for non-persisted conversation-history types and non-truncating secret redaction",
+        "src/codex_flow/backends/codex_sdk.py only for official thread/read conversation projection",
+        "src/codex_flow/supervisor.py only for exact subject validation, bounded ephemeral read broker and history IPC operation",
+        "src/codex_flow/worker.py only for active-turn same-client conversation reads through the existing control loop",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
+        "src/codex_flow/tui.py",
+        "tests/test_codex_sdk_adapter.py, tests/test_live_worker_control.py, tests/test_local_ipc.py, tests/test_workflow_control.py, tests/test_production_pilots.py and tests/test_plan_compilation.py",
+        "docs/reviews/evidence/complete-conversation-history.json and the existing conversation-first visual contract plus four conversation render sentinels",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md after this capsule is frozen and AGENTS.md",
+        "ledger persistence/schema, controller lifecycle/recovery, service and CLI entrypoints, projection/plan compilation, native profile and plugin capability authority",
+        "SDK start/resume/run/control/result/recovery behavior outside the precise read-only projection",
+        "IPC framing and 64 KiB ceiling, contracts.py, __init__.py exports, schemas, configuration, packaging, Makefile and lockfile",
+        "installer/plugin/skill/template surfaces, retained wheels, accepted unrelated evidence, provider sentinels, App/global/auth state and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.VISUAL, RoleId("visual-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone as the single Luna XHigh implementation owner for only complete-conversation-history in the existing dirty python-sdk-controller worktree. Preserve the completed conversation-first TUI and every unrelated byte. Implement the frozen zero-new-artifact architecture over official shared-SDK thread/read, bounded ephemeral supervisor/worker coordination and the existing typed IPC/control clients. Do not add transcript persistence, parse rollout files, scrape or poll App state, replay history for recovery, change lifecycle/ledger/dispatch authority, enlarge IPC, create a module/schema/CLI/transport, call a provider without separate authorization, or mutate global/Git/plugin state. Run focused checks, real full-size renders and the named closure gates; retain only sanitized evidence, self-review the exact owned diff and return one terminal result to the planning controller. Do not start installation or another milestone."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+Planning validation (2026-08-26): the exact capsule above instantiated and
+projected successfully against this checkout as
+`run_id=model-36d442572b67827298bb7dd891c780c3`,
+`milestone_id=milestone-8e374b232309f1f4cecfb4b6fa6c6010`,
+`workspace_mode=existing_worktree`, route `gpt-5.6-luna/xhigh`. Its 23 mutable
+and 14 protected surfaces are canonical repository-relative paths with zero
+overlap; the execution prompt is 919 bytes under its 12,000-byte cap. The
+independent routes remain `code-reviewer = Luna XHigh` and
+
+
+## Active recovery — ordinary-chat installation integration
+
+The user-selected recovery owner integrates the frozen complete-conversation-
+history candidate under `docs/reviews/evidence/complete-conversation-history.json`
+and `dist/complete-conversation-history/codex_flow-0.2.0-py3-none-any.whl`,
+projects canonical output schemas onto the documented
+provider Structured Outputs subset while retaining full local validation, and
+closes the single plugin/controller bootstrap. Historical retained evidence is
+never rewritten to bless successor bytes. The exact reconciliation wheel at
+`dist/structured-output-runtime/codex_flow-0.2.0-py3-none-any.whl` remains its
+historical authority. Exact H6-I evidence `2e6cf6d2c4804979...` and wheel
+`1d6eaa14c6f6c5e5...` were recovered from retained local closure artifacts and
+restored unchanged at their original `human-terminal-ui` paths; successor bytes
+never reuse those immutable authorities. The recovery also validates raw
+installer marketplace/plugin topology before path resolution, preserves empty
+SDK user messages as typed zero-length text fragments, and requires the native
+light/dark plus exact 80x24 render set to expose an always-visible scroll cue
+and unclipped Load older, Open and Details actions.
+
+Provider calls and the real two-turn SDK transcript sentinel remain outside
+this recovery. After provider-free repository, reproducible-wheel and isolated
+installer gates pass, the authorized shared-user activation installs
+`codex-flow 0.2.0` and `personal-workflow-skills
+0.1.7+codex.20260831000000` through the explicit bootstrap. The next actions
+after closure are independent objective, visual and architecture reviews of the
+integrated candidate plus the separately authorized real-provider transcript
+gate.
 
 Planning validation (2026-08-26): the exact capsule above instantiated and
 projected successfully against this checkout as
@@ -2556,213 +2919,221 @@ candidate must be frozen before the controller dispatches the Luna XHigh
 objective review and Sol Medium architecture review in parallel. The old H6-E-R
 capsule and queue are recovery inputs only, never parallel work.
 
-## H6-E-W architecture correction — harness-owned terminal wake-up
+## H6-E-W-R1 closure repair — credential-safe service start and bounded persisted-thread recovery
 
-The one-time H6-E-V bootstrap completed outside the supervisor because the
-installed predecessor could neither authenticate against the private
-`CODEX_HOME` nor cancel its stale queue. Task
-`01a03dd7-6f31-7e21-96d6-4dc6ddabbf66` returned one valid terminal
-`ModelFacingResult`, but the result remained in the manually owned `codex exec`
-process output until the planning controller reconciled that process. This was
-not a worker callback failure: the leaf prompt correctly prohibited peer
-messages and requested only the typed result. The failure was architectural:
-the manual bootstrap bypassed the supervisor-owned SDK worker, capability and
-IPC ingress, so no harness component owned terminal acquisition or source-task
-wake-up.
+The complete dirty H6-E-W/H6-E-V candidate at base
+`14106f3ee1e376f7c105d9e309292e9a742f0482` is retained as the donor and must
+not be discarded or reconstructed. Its SDK validator now correctly accepts the
+closed JSON-schema `type` union used by `ModelFacingResult.next_action`
+(`string|null`) and has a regression test; `make check` currently passes 365
+tests. `ModelFacingResult` is therefore not the unresolved boundary and this
+repair preserves that patch.
 
-The H6-E-V candidate is retained as an implementation donor, not promoted. It
-already supplies shared standard Codex authentication/session persistence,
-SDK/App-visible worker identity, leaf policy, resultless cancellation, direct
-worker-to-supervisor IPC, 341 passing tests and an exact wheel. The planning
-controller has also read the exact completed worker task through the App, so
-later App readability of the shared SDK task is now observed. The remaining
-promotion gap is the App-closed sentinel and a real harness-owned continuation
-path; objective and architecture reviews remain pending until that gap closes.
+The exact installed v6 user service is active, but dispatch
+`model-32bb32979a14c09afc0209304413a34a/milestone-c2550c4b687d019b026361a2b7563669/executor/1`
+is stale at `state=starting`, `attempt=93`, SDK thread
+`01a03e38-9530-7db2-b0cc-a9e6a1d52c85`: its worker exited and no
+`terminal_status` or `raw_result_sha256` was committed. The user manager lacked
+the profile-selected provider environment key. A temporary manager injection
+proved the next boundary and was removed. Once the key was available,
+`thread_resume` raised `openai_codex.InvalidRequestError` code `-32600` with the
+exact message `the thread already has an active writer`. These are retained
+failure facts, not permission to resume blindly, create a concurrent writer or
+rerun repository work.
 
-### Definitive callback and continuation model
+### Outcome, ownership and non-goals
 
-- Prompt prose never owns callback delivery, result ingress, successor
-  scheduling or notification. A worker receives only its bounded work prompt
-  and schema, and returns the schema-bounded result through its single-use IPC
-  capability. Direct `codex exec` is not a production or recovery execution
-  path unless a harness-owned wrapper binds and ingests its result before the
-  process is released.
-- The planner owns the typed capsule content but not its serialization. The
-  normal `plan-work` to `workflow-control` path passes only the canonical plan
-  path and exact milestone id. A closed, non-executing AST parser accepts one
-  exact `ModelFacingCapsule(...)` constructor from that active milestone,
-  rejects arbitrary Python, duplicate/ambiguous blocks and plan revision drift,
-  then the controller serializes the JSON projection below `.codex-flow` and
-  binds its digest. Models do not hand-author sidecar JSON, run ids, milestone
-  ids, workspace routes, source identity, permissions or callback facts.
-  `--capsule` remains only an explicit low-level/testing input; it is not the
-  normal plan-driven workflow.
-- `CODEX_THREAD_ID`, when present at `codex-flow control` enqueue, is captured
-  by the controller as a host-owned source identity. It is not authored in the
-  model-facing capsule, copied into a worker prompt or guessed from App state.
-  A missing source identity makes UI wake-up `not_applicable`, while durable
-  execution and already-authorized successors continue normally.
-- Leaf topology and filesystem/process authority are independent controls. At
-  enqueue the controller resolves the existing native permission profile and
-  binds its effective sandbox and approval authority into immutable route,
-  integrity and capability facts. The shared SDK worker must not hardcode
-  `workspace-write`: it receives `danger-full-access` when that is the source
-  controller's effective authority, and preserves `workspace-write` or
-  `read-only` when those are effective instead. Immediately before thread
-  creation the worker revalidates the shared native profile and takes the
-  monotonic meet; permission drift may narrow execution but can never broaden
-  it. No global profile is modified or copied into a private home.
-- Terminal result commit and eligibility of already-authorized successors are
-  one SQLite transaction. Dependency/DAG policy is fixed before dispatch;
-  neither the worker result nor a notification may invent a successor. Reviews
-  whose authorities are declared in the capsule are controller-owned successor
-  dispatches and may run in parallel only after the exact implementation
-  candidate is frozen.
-- A separate harness notification runner uses the official shared Codex SDK to
-  resume the recorded source thread by exact id with no private `CODEX_HOME`,
-  no model/effort/cwd/global-config override and no App dependency. It starts
-  exactly one new controller turn containing a bounded harness-authored terminal
-  envelope: delivery id, dispatch id, terminal label, durable ledger location
-  and result digest. Raw worker prose is never interpolated. The resumed
-  controller reads durable authority and continues; this consumes controller
-  tokens only after terminal delivery, never while work is running.
-- Delivery has its own immutable idempotency key and state machine. Failures
-  before a source turn identity may receive one bounded retry. Once the SDK
-  returns a source turn id, the outbox records that identity and never starts a
-  replacement turn. A crash in the ambiguous bind window is reconciled once by
-  exact source-thread history and delivery id; it is never resolved by App
-  polling, prompt inference or duplicate delivery. Notification remains
-  non-authoritative: result/successor closure never depends on it.
-- Enqueue may arm one durable controller-check deadline, 30 minutes by default.
-  If the dispatch is still nonterminal when it expires, the supervisor creates
-  one distinct `CHECKPOINT` wake-up for the source controller containing only
-  dispatch state, exact worker/thread/process identity, start time and last
-  harness-observed activity. It does not cancel, resume or duplicate the worker.
-  The controller performs one evidence-backed inspection and may explicitly
-  re-arm a later checkpoint; automatic recurring wake-ups are forbidden. A
-  terminal result cancels an undelivered checkpoint and triggers the immediate
-  terminal wake-up instead.
-- Worker liveness for that checkpoint is host-owned evidence, not model prose:
-  the supervisor persists the spawned PID plus process-birth identity and the
-  worker wrapper renews a bounded IPC lease independently of the model output.
-  Missing or stale liveness is reported to the controller but never converted
-  into completion. `wait_threads`, repeated status reads and an open controller
-  turn are not used; the durable timer/wake path remains correct when the App
-  and source turn are closed.
-- The notification runner is not a worker and does not weaken leaf enforcement.
-  Worker SDK threads keep `agents.enabled=false` and
-  `features.multi_agent=false`; the resumed source controller retains its own
-  stored controller configuration so it can schedule the next authorized work.
-- With the App closed, the SDK/app-server, supervisor, workers, result ingress,
-  successor scheduling and source-controller wake-up continue. Reopening the
-  App is only a projection: it must display the same worker thread and the
-  single terminal wake-up turn on the original controller task.
+Outcome: an exact-wheel user service starts with an explicit volatile credential
+handoff, and every worker exit leaves the dispatch in one durable actionable
+state. Recovery inspects the persisted SDK thread before any writer is created,
+ingests an already-terminal result when present, waits without model tokens for
+a genuine live writer, or runs one bounded continuation only after proving the
+thread idle. Ambiguity and exhausted budget close once as
+`human_attention_required`.
 
-### Persistence, failure and recovery contract
+The single implementation owner is `gpt-5.6-luna` with `xhigh` thinking in the
+saved existing checkout `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller`
+on branch `agent/python-sdk-controller` at the stated base. Mutable production
+surfaces are only `native_profile.py`, `service.py`, `ledger.py`,
+`supervisor.py`, `worker.py`, `backends/codex_sdk.py`, and the minimal CLI seam;
+their focused tests, compatibility note and H6-E evidence are owned with them.
+All other dirty candidate files are retained donors, not cleanup targets.
 
-The unpromoted v10 ledger is already present in local recovery state, so the
-correction uses one serialized crash-atomic v10-to-v11 migration rather than
-editing schema assumptions in place. The source thread identity is an immutable
-enqueue fact. A dedicated controller-wake outbox records delivery id, dispatch,
-source thread, wake kind (`checkpoint` or `terminal`), payload digest, state
-(`not_applicable`, `pending`, `starting`, `delivered`, `failed`, `ambiguous`),
-bounded attempt count, optional source turn id and timestamps. The queue also
-records the optional next controller-check deadline, worker PID/process-birth
-identity, last harness liveness time and the effective native permission facts
-plus their source-profile digest. Closed-schema validation rejects partial identities,
-conflicting payloads, terminal mutation, duplicate active delivery and a wake
-for resultless cancellation.
+Non-goals: H6-F live steer/interrupt/event/TUI control; Pydantic migration;
+periodic App/task polling; generic prose classification; unbounded retries;
+blind resume; concurrent writers; replay of repository implementation; a new
+transport or private `CODEX_HOME`; secret copies; and any new worktree, commit,
+push, merge, rebase, stash, discard, plugin/global-config mutation or later
+milestone implementation.
 
-Supervisor restart performs one bounded recovery snapshot. Pending pre-turn
-delivery may be retried within its budget; a recorded source turn is immutable;
-an ambiguous post-call delivery is reconciled once through the standard SDK
-session store. A source task that is currently running or cannot be resumed is
-recorded truthfully without reopening the completed dispatch or suppressing
-eligible successors. No `wait_threads`, `read_thread`, App action, controller
-model keepalive, periodic task polling, raw Desktop socket or authentication
-copy is introduced.
+### Secure service-start credential contract
 
-### Promotion proof and non-goals
+- The validated native profile remains the sole source of the selected provider
+  environment key *name*. Persist that name and its profile digest only; reject
+  malformed, conflicting or drifted names. Never persist, render or hash the
+  value in the unit, SQLite, JSON evidence, command arguments or logs.
+- The explicit service-start command verifies that the named value exists in
+  its invoking environment, transfers it to the user manager with
+  `systemctl --user import-environment <NAME>` (the subprocess arguments contain
+  the name only), and then starts the exact repository unit whose
+  `PassEnvironment=<NAME>` entry also contains only the name. Any failure before
+  confirmed start clears the imported manager entry where possible and returns
+  typed `credential_unavailable` or `service_start_failed` evidence without
+  echoing the value.
+- The manager copy is volatile, not durable. It survives service restarts only
+  while that user-manager instance retains it; manager restart/logout clears it,
+  and the authenticated explicit start command must be run again. Automatic
+  login/start without a newly available credential fails closed rather than
+  reading a secret file or copying authentication. Tests restore the manager's
+  pre-test environment state and never assert the value.
 
-The production pilot must start from a normal controller task, enqueue through
-the exact installed wheel/service, close the App before or during a real Luna
-leaf turn, and prove from durable facts that the worker submitted, terminalized
-and released its pre-authorized successors while no controller model was
-running. A delayed fixture must first produce exactly one 30-minute-equivalent
-checkpoint wake-up without a second worker or recurring controller turn; the
-controller explicitly re-arms or continues once. The detached notifier must
-then resume the exact source task once for the terminal outcome.
-After the App reopens, both the original worker thread and one source callback
-turn with the same delivery id must be readable/navigable. The pilot also
-injects pre-identity, post-identity and restart failures and proves no duplicate
-worker, result, successor, notification or controller turn.
+### Persisted-thread inspection and recovery state machine
 
-This milestone does not build a replacement UI, scrape the App, make App-native
-the production route, expose auth, copy a Codex home, accept worker-authored
-successors, or promise exactly-once external delivery where SDK evidence cannot
-disambiguate process death. It also does not repair unrelated pre-commit files:
-the previously reported `.agents/plugins/marketplace.json` blocker was a worker
-sandbox artifact; the file is writable and already newline-terminated outside
-that sandbox.
+The pinned SDK raw client exposes `thread_read(thread_id, include_turns=True)`
+without `thread_resume`; the high-level `Thread` object exists only after a
+resume. Add one narrow raw-client adapter boundary that performs exactly one
+read-only persisted-thread inspection per recovery decision and converts a
+closed, bounded snapshot into controller-owned facts. It must not create a turn,
+stream events indefinitely or expose transcript prose beyond the minimum typed
+terminal-result envelope.
 
-## Next execution — H6-E-W
+Only `openai_codex.InvalidRequestError` with structured code `-32600` and exact
+message `the thread already has an active writer` establishes `active_writer`.
+Arbitrary message substrings and unrelated `-32600` errors remain ambiguous.
+The transition model is:
+
+```text
+starting|running --worker exit--> recovery_inspection_pending
+recovery_inspection_pending --terminal raw result--> completed|failed
+recovery_inspection_pending --active writer--> recovery_retry_wait
+recovery_retry_wait --eligible--> recovery_inspection_pending
+recovery_inspection_pending --idle, dead owner, no result--> recovery_continuation_pending
+recovery_continuation_pending --bounded continuation--> completed|failed|recovery_inspection_pending
+any recovery state --ambiguous or budget exhausted--> human_attention_required
+```
+
+Worker-exit classification, recovery-budget consumption, next eligibility and
+the transition out of `starting`/`running` commit in one SQLite transaction.
+Each inspection outcome and its retry/continuation decision is likewise one
+transaction. Service restart may claim only the already-persisted eligible
+action; restart never resets `attempt`, inspection count or continuation budget.
+No dispatch can remain `starting` or `running` after its bound process exit is
+committed.
+
+If inspection finds one terminal raw agent result, validate the complete payload
+strictly as `ModelFacingResult` and ingest it through the existing capability,
+terminal-commit and successor authority; summaries or partial transcript state
+cannot substitute. If a writer is truly active, persist a bounded harness retry
+deadline without controller-model tokens. If the prior process is dead and the
+thread is idle with no usable result, the only resume prompt is a bounded
+envelope/recovery continuation that begins with inspect-before-mutate facts,
+forbids repeating already-observed repository work and asks only to recover or
+emit the missing typed terminal envelope.
+
+A fresh SDK thread is disabled by default. It is permitted only by an explicit
+typed `fresh_thread_after_idle` policy, after the same inspection proves no live
+writer and no usable result, within the shared durable budget. Its mandatory
+inspect-before-mutate preamble identifies the existing workspace and instructs
+the worker to examine the current diff/evidence before any mutation. Ambiguous
+ownership, malformed history, an unclassifiable SDK error, conflicting results
+or exhausted inspection/continuation budget transitions exactly once to
+`human_attention_required` with bounded sanitized actionable facts.
+
+### Persistence and migration decision
+
+The dirty candidate already owns crash-atomic schema v11 and a live v11 ledger,
+so H6-E-W-R1 adds one serialized v11-to-v12 migration. V12 stores the provider
+environment key name/profile digest, structured worker-exit classification,
+recovery state, inspection/continuation/fresh-thread policy and consumed budget,
+next eligibility, last inspected thread/turn facts and the terminal
+`human_attention_required` reason. It never stores provider values or unbounded
+thread content. Migration fault points prove rollback and idempotent reopen;
+shape validation rejects v11/v12 hybrids, a live queue with an exited bound
+process, budget regression, duplicate recovery ownership and terminal mutation.
+
+The stale attempt-93 dispatch is a required migration/recovery fixture. The
+implementation must inspect its persisted thread before any continuation. It
+may ingest a real terminal result, wait for the active writer to clear, or run
+the bounded continuation according to the facts above; it may not manufacture a
+result or reset the attempt. Any unavoidable destructive live-pilot prerequisite
+is returned as a typed checkpoint rather than inferred.
+
+### Acceptance, adversarial validation and promotion
+
+Objective acceptance requires all of the following:
+
+- focused tests cover missing credential, wrong key name, profile drift,
+  import/start failure, redaction, manager restart/login semantics and cleanup;
+- raw read distinguishes terminal result, exact structured active-writer error,
+  idle/no-result, malformed/ambiguous history and unrelated errors without
+  calling resume during inspection;
+- crash points at worker exit and every inspection decision prove atomic state,
+  monotonic budget, bounded eligibility, restart idempotency and no lingering
+  `starting`/`running` rows;
+- active writer never creates a concurrent writer; terminal result ingests once;
+  dead-idle recovery uses only the bounded continuation; fresh-thread policy is
+  off by default and its enabled path carries the inspect-before-mutate preamble;
+- ambiguity and exhaustion create exactly one sanitized
+  `human_attention_required` terminal fact and no successor/result invention;
+- `make check`, Ruff, `git diff --check`, exact dirty-baseline/protected-surface
+  checks and focused self-review pass with zero open P0/P1.
+
+Architecture acceptance additionally requires an exact built wheel installed
+into a disposable service root, with the user service started through the
+credential handoff while the App is closed. The pilot must prove from the v12
+ledger that a controlled worker exit reaches the correct recovery state, one
+read-only persisted-thread inspection precedes any recovery writer, and the run
+either ingests its existing result or closes through the bounded continuation
+without duplicate repository work, result, successor or writer. Evidence must
+record wheel/service/unit digests, key *name* and profile digest, dispatch/thread
+identity, transitions, budgets and terminal digest, but no credential value or
+raw transcript. Promotion then requires independent Luna XHigh objective and
+Sol Medium architecture reviews of the exact frozen candidate with P0=0/P1=0;
+those reviews are successors, not work for this executor.
+
+## Next execution — H6-E-W-R1
 
 ```python
 ModelFacingCapsule(
     schema_version=1,
     objective=(
-        "Make terminal acquisition, authorized successor scheduling and source-controller wake-up "
-        "fully harness-owned and App-independent, with no worker prompt callback responsibility."
+        "Close H6-E-W by adding credential-safe exact-service startup and bounded persisted-thread "
+        "recovery so worker exit can never strand a dispatch or create a concurrent writer."
     ),
     decomposition=(
-        "Add the crash-atomic v11 source-identity, worker-liveness, one-shot controller checkpoint and terminal-wake outbox contract with exact idempotency and restart reconciliation.",
-        "Connect plan-work to workflow-control through a closed harness-owned canonical-plan capsule compiler so models never copy or serialize runtime capsule JSON.",
-        "Capture the host-owned source thread and effective native permission authority at enqueue, preserve its monotonic sandbox/approval boundary in the shared leaf worker, and deliver one bounded terminal wake-up by resuming the exact standard SDK source thread.",
-        "Atomically release only pre-authorized successor and parallel review dispatches after terminal result commit, while workers remain capability-bound leaves.",
-        "Run exact-wheel/service, App-closed continuation and later App-visible callback pilots plus failure-injection gates before parallel independent reviews.",
+        "Implement the explicit volatile provider-credential handoff from the validated caller environment to the exact user service while persisting only the key name and profile digest.",
+        "Add the crash-atomic v12 recovery state and atomic worker-exit decision boundary with bounded inspection, continuation and fresh-thread policy budgets.",
+        "Inspect the persisted SDK thread once through raw thread_read before choosing terminal ingestion, active-writer wait, dead-idle bounded continuation or human attention.",
+        "Recover the stale attempt-93 fixture without concurrent writers, blind rerun, invented results or reset budgets, preserving the existing ModelFacingResult union fix.",
+        "Run adversarial migration/service/recovery tests and an exact-wheel App-closed service pilot, then freeze evidence for independent objective and architecture reviews.",
     ),
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
-        "Worker prompts contain no callback, peer-message, result-routing or successor responsibility; the production SDK worker submits exactly one schema-bounded result through capability-bound IPC and the harness durably closes it.",
-        "The normal workflow-control command accepts canonical plan path plus exact milestone id, compiles one closed typed ModelFacingCapsule without eval/exec or hand-authored JSON, and durably binds the plan revision and generated projection digest before enqueue.",
-        "The controller captures CODEX_THREAD_ID as a host-owned enqueue fact and a detached shared-session SDK notifier resumes that exact source task once, with no private home, App dependency, auth copy, or model/effort/cwd/global override.",
-        "The detached worker inherits the controller's effective native sandbox and approval authority instead of hardcoding workspace-write: danger-full-access remains available when natively granted, while profile drift or an explicitly narrower capsule can only reduce authority before thread creation.",
-        "A configurable one-shot controller checkpoint defaults to 30 minutes: while the dispatch remains nonterminal it wakes the source controller once with harness-owned liveness facts, never polls Codex tasks or mutates the worker, and repeats only after explicit controller re-arming.",
-        "Terminal commit atomically releases only successors authorized before execution, including disjoint objective and architecture review lanes; no worker or notification can invent, duplicate or suppress a successor.",
-        "The v10-to-v11 migration and wake outbox reject conflicting identity, payload, replay and cancellation facts and recover pre-identity, post-identity and crash-window outcomes without duplicate controller turns.",
-        "A real installed-wheel pilot completes with the App closed, uses zero controller-model tokens and zero lifecycle polling while the worker runs, then creates one source-controller wake-up turn and exposes both persisted tasks after the App reopens.",
-        "Focused adversarial tests, make check, Ruff, diff hygiene, exact wheel/service checks, protected hashes and sanitized evidence pass; the retained H6-E-V candidate remains intact except for owned integration changes.",
+        "Service start validates the profile-selected environment key, transfers only its value through volatile user-manager state, persists/logs only the name, and fails closed with typed actionable status when unavailable.",
+        "Restart/login semantics are proven: the credential survives only its user-manager lifetime and authenticated explicit start is required after manager restart without secret files or CODEX_HOME copies.",
+        "A worker exit atomically records classification, consumes bounded recovery budget, sets next eligibility and leaves starting/running; restart cannot reset or duplicate that decision.",
+        "One raw thread_read inspection precedes every recovery writer and strictly distinguishes terminal result, exact InvalidRequestError -32600 active-writer facts, idle/no-result and ambiguity without prose matching.",
+        "A terminal raw ModelFacingResult is strictly validated and ingested once; an active writer receives only bounded harness retry; a dead idle thread receives only the recovery continuation.",
+        "Fresh thread creation is disabled by default and, when explicitly enabled after proving no live writer, carries the inspect-before-mutate recovery preamble and shares the durable budget.",
+        "Ambiguous ownership/status or exhausted budget transitions exactly once to human_attention_required with sanitized actionable facts and no result, successor or writer invention.",
+        "The v11-to-v12 migration is crash-atomic and the stale attempt-93 dispatch is recovered according to persisted facts without resetting attempt or blindly rerunning repository work.",
+        "Focused adversarial tests, make check, Ruff, diff hygiene, exact wheel/service pilot, protected hashes and secret-negative evidence pass while the complete dirty donor remains intact.",
         "Independent Luna XHigh objective and Sol Medium architecture reviews of the exact combined candidate both report P0=0/P1=0 after at most one bounded concrete repair.",
     ),
     mutable_surfaces=(
         "src/codex_flow/ledger.py",
-        "src/codex_flow/controller.py",
         "src/codex_flow/cli.py",
         "src/codex_flow/supervisor.py",
         "src/codex_flow/worker.py",
-        "src/codex_flow/ipc.py",
         "src/codex_flow/service.py",
-        "src/codex_flow/plan_capsule.py",
         "src/codex_flow/backends/codex_sdk.py",
-        "src/codex_flow/contracts.py",
-        "src/codex_flow/config.py",
         "src/codex_flow/native_profile.py",
-        "pyproject.toml",
-        "uv.lock",
         "tests/test_h2_ledger.py",
-        "tests/test_h3_controller.py",
         "tests/test_codex_sdk_adapter.py",
-        "tests/test_h5_workflow_control.py",
-        "tests/test_h6_model_facing_projection.py",
         "tests/test_h6_supervisor.py",
         "tests/test_h6_service.py",
-        "tests/test_h6_ipc.py",
         "tests/test_h6_visible_sdk.py",
         "tests/test_h6_plan_capsule.py",
-        "plugins/personal-workflow-skills/skills/plan-work/SKILL.md",
-        "plugins/personal-workflow-skills/skills/plan-work/agents/openai.yaml",
-        "plugins/personal-workflow-skills/skills/workflow-control/SKILL.md",
-        "plugins/personal-workflow-skills/skills/workflow-control/agents/openai.yaml",
         "docs/reviews/codex-controller-compatibility.md",
         "docs/reviews/evidence/h6-e-detached-supervisor.json",
     ),
@@ -2771,10 +3142,19 @@ ModelFacingCapsule(
         "AGENTS.md",
         "workflow.toml",
         "src/codex_flow/domain.py",
+        "src/codex_flow/controller.py",
         "src/codex_flow/projection.py",
         "src/codex_flow/worktrees.py",
         "src/codex_flow/app_native.py",
         "src/codex_flow/h6_pilot.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/config.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/plan_capsule.py",
+        "pyproject.toml",
+        "uv.lock",
+        "plugins/personal-workflow-skills/skills/plan-work",
+        "plugins/personal-workflow-skills/skills/workflow-control",
         "plugins/personal-workflow-skills/skills/codex-thread-handoff",
         "skills",
         "docs/reviews/evidence/h1-sdk-sentinel.json",
@@ -2787,11 +3167,11 @@ ModelFacingCapsule(
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
     ),
     prompt=(
-        "Use execute-milestone and implement only H6-E-W from the canonical plan in the existing python-sdk-controller worktree. "
-        "Preserve the complete H6-E-V donor and committed plan. Remove all callback responsibility from worker prompts: result ingress, successor release and controller wake-up are harness-owned. "
-        "Add the closed canonical-plan capsule compiler plus v11 source identity, effective native permission binding, process/lease liveness, one-shot 30-minute controller checkpoint and terminal wake outbox; preserve danger-full-access when natively granted without ever broadening authority, resume the exact source controller through the shared standard SDK, and release only pre-authorized successors. "
-        "Keep workers leaf and create no subagents, peer tasks or reviews. Do not modify protected/global state, copy auth, use App polling or introduce another transport. "
-        "Run the bounded deterministic gates and prepare the exact installed-wheel App-closed/App-reopen pilot; if closing the App requires user action, return one precise pilot command/checkpoint rather than weakening or simulating the gate. "
+        "Use execute-milestone and implement only H6-E-W-R1 from the canonical plan in this exact existing checkout. Preserve the entire dirty H6-E-W/H6-E-V candidate, especially the ModelFacingResult union-validator fix and regression. "
+        "Implement the v12 atomic recovery state machine and secure explicit systemd user-service credential handoff exactly as designed. Inspect persisted threads read-only before any writer; never classify arbitrary prose, create a concurrent writer, blindly repeat repository work or reset attempt/budget. "
+        "Recover the stale attempt-93 fixture only according to persisted facts. Keep fresh-thread policy disabled unless the typed policy explicitly permits it after proving no live writer, and include the inspect-before-mutate preamble. "
+        "Do not modify protected surfaces, H6-F control/TUI work, Pydantic, global/plugin state or Git topology/history. Create no subagents, peers, reviews or progress callbacks. "
+        "Run the adversarial tests and exact-wheel App-closed service pilot; retain sanitized terminal evidence with no credential value. "
         "Return exactly one raw schema-v1 ModelFacingResult; objective and architecture reviews remain controller-owned and pending."
     ),
     recovery_policy="completion_biased",
@@ -2799,6 +3179,4682 @@ ModelFacingCapsule(
 )
 ```
 
-H6-E-W is the sole next executable implementation milestone. H6-E-V is its
-same-worktree donor, not a parallel owner. Freeze the combined candidate before
-the controller dispatches the objective and architecture reviews in parallel.
+H6-E-W-R1 is retained implementation evidence. H6-E-W/H6-E-V is its
+same-worktree donor, not a parallel owner.
+
+## Next execution — H6-E-W-R2
+
+The exact H6-E-W-R1 candidate digest
+`3387eff1e4ecb418768d06f5e14978f0a786c4b163190b7a8974c8138a820b6a`
+and wheel digest
+`b1f226c74aca64831c169e989a9c77213bbc166854515fe4742f121c57808ef6`
+passed the focused objective recheck and the real temporary user-service
+terminal-result route. The initial architecture pilot then reproduced one P1
+on the required idle/no-result route: `begin_recovery_continuation` consumes
+the continuation budget and leaves the dispatch claimed, but `_spawn_one`
+reuses generation/attempt `g1-a1`. Its fresh token conflicts with the immutable
+attempt capability and its capability/capsule/result files collide with the
+existing `O_EXCL` paths. The failed spawn leaves `state=claimed`,
+`recovery_state=none`, no live worker and no remaining continuation authority.
+H6-E-W-R1 is therefore not promoted; all later H6 milestones remain protected.
+
+The repair outcome is one crash-atomic continuation spawn identity that cannot
+reuse immutable capability or file authority and cannot strand a claimed queue
+row when process creation fails. This is an implementation-detail repair: it
+does not change public/model-facing contracts, persisted result authority,
+recovery budgets, successor semantics or the H6-F architecture.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make the bounded idle/no-result continuation executable exactly once with a unique "
+        "crash-atomic spawn identity and no claimed-without-worker failure window."
+    ),
+    decomposition=(
+        "Introduce the minimal monotonic continuation process/attempt identity needed by the existing v12 queue and capability authority.",
+        "Bind capability, capsule, result and liveness paths to that identity without weakening immutable-token or O_EXCL guarantees.",
+        "Make every failure before durable worker ownership restore one actionable bounded recovery state or terminal human attention without refunding consumed budget.",
+        "Exercise the real _spawn_one continuation path, restart/fault windows and an exact-wheel App-absent service pilot through terminal closure.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "idle_no_result followed by begin_recovery_continuation and the production _spawn_one path starts exactly one continuation with a new immutable capability and non-colliding files.",
+        "The continuation retains the same logical dispatch/thread recovery authority and consumed budget while its process attempt identity advances monotonically and survives restart.",
+        "Failure before or during spawn cannot leave claimed/recovery_state=none without a live bound worker; retry/restart cannot duplicate a writer, result, successor or capability.",
+        "Focused adversarial tests call the real spawn boundary and prove capability/token immutability, O_EXCL identity, crash atomicity, exhaustion and terminal immutability.",
+        "An exact installed wheel runs a temporary real user service with the Codex App physically absent through worker exit, idle_no_result inspection, bounded continuation and terminal result, retaining secret-negative and deduplication evidence.",
+        "make check, Ruff, git diff --check, protected-surface hashes and self-review pass with zero open P0/P1; independent objective and architecture rechecks of the exact candidate both return P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "tests/test_h6_supervisor.py",
+        "docs/reviews/evidence/h6-e-detached-supervisor.json",
+        "docs/reviews/codex-controller-compatibility.md",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "workflow.toml",
+        "all other src/codex_flow production modules",
+        "all other tests and accepted evidence",
+        "plugins and global Codex state",
+        "H6-F through H6-J surfaces",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone and implement only H6-E-W-R2 in the existing dirty python-sdk-controller worktree. Preserve every donor and concurrent change. Repair the reproduced continuation identity and spawn-failure atomicity defect without changing public contracts or later H6 surfaces. Add production-shaped tests that execute _spawn_one, then run the exact-wheel real user-service idle-continuation pilot with the Codex App physically absent. Do not create peers, callbacks, commits, worktrees or global mutations. Return one terminal schema-v1 ModelFacingResult."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=8_000,
+)
+```
+
+H6-E-W-R2 is retained implementation evidence but is not promoted. Its exact
+candidate passed the architecture code boundary except for the physically
+App-closed pilot, while objective review reproduced a same-class spawn-failure
+atomicity defect: `_close_failed_spawn` swallows a failed terminal cleanup
+commit, leaving `starting/recovery_state=none`, no liveness, and a same-epoch
+queue row that `recover_once` skips. The continuation identity repair itself
+remains accepted input to the bounded Sol Medium continuation below.
+
+## Next execution — H6-E-W-R3
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make failed-spawn terminalization durably recoverable even when its first ledger commit "
+        "fails, so no same-epoch or restarted supervisor can strand a queue row."
+    ),
+    decomposition=(
+        "Remove the swallowed LedgerError boundary and preserve one explicit detectable recovery obligation when failed-spawn terminalization cannot commit.",
+        "Make same-epoch and restart reconciliation reclaim or terminalize a starting/claimed row with no live process or liveness without launching duplicate work.",
+        "Keep invocation-owned artifact cleanup ordered behind durable authority so a commit fault cannot erase the facts needed for recovery.",
+        "Inject commit, artifact-cleanup, process-launch and restart faults at the real _spawn_one boundary and retain exact evidence.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A failed-spawn cleanup commit error is never swallowed or reported as successful terminalization.",
+        "After any injected cleanup-commit failure the queue is either durably human_attention_required or remains in an explicitly reclaimable state that the same supervisor epoch and a restarted supervisor both reconcile exactly once.",
+        "No fault window can leave starting/claimed plus recovery_state=none and no live process/liveness permanently skipped by recover_once.",
+        "Recovery never creates a duplicate SDK writer, capability, result, successor or notification and never refunds continuation budget or reuses an immutable attempt identity.",
+        "Production-shaped focused tests execute _spawn_one and same-epoch/restart recovery across commit and cleanup faults; make check, Ruff, diff hygiene and protected hashes pass.",
+        "Independent objective and architecture rechecks of the exact repaired candidate return P0=0/P1=0 before the unchanged App-closed exact-wheel continuation pilot is attempted.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "tests/test_h6_supervisor.py",
+        "docs/reviews/evidence/h6-e-detached-supervisor.json",
+        "docs/reviews/codex-controller-compatibility.md",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "workflow.toml",
+        "all other src/codex_flow production modules",
+        "all other tests and accepted evidence",
+        "plugins, templates and global Codex state",
+        "descriptive naming gate and H6-F through H6-J surfaces",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone and implement only H6-E-W-R3 in the existing dirty python-sdk-controller worktree as the Sol Medium same-class recovery authority. Preserve the accepted R2 monotonic attempt/capability repair and every concurrent naming/plan change. Repair the swallowed cleanup-commit fault and same-epoch recovery skip without changing public or persisted contracts, budgets or later surfaces. Add production-shaped real _spawn_one and restart fault tests. Do not run the App-closed pilot until code review passes, and do not create peers, callbacks, commits, worktrees or global mutations. Return one terminal schema-v1 ModelFacingResult."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=8_000,
+)
+```
+
+H6-E-W-R3 is the sole executable milestone. One fresh Sol Medium implementation
+owner receives the current diff, R2 validations and both open findings. It may
+change implementation strategy inside the listed surfaces but may not change a
+public/persisted contract, recovery budget, scope or acceptance gate. After it
+freezes a new candidate, one focused Luna XHigh objective recheck and one Sol
+Medium architecture recheck decide code promotion. The later user-owned gate
+change below removes physical App closure as an external prerequisite.
+
+H6-E-W-R3 is promoted at exact dirty candidate
+`6e51b3eee12ff7cbf49c1dca7192dbce49e5af008cb298558017fcd67a73c448`.
+Its Luna XHigh objective and Sol Medium architecture reviews both returned
+`APPROVED`, P0=0/P1=0/P2=0, and all 19 protected hashes matched. The exact
+wheel `a26ea6dbaf416917531f32004144a90e7c6ac15c3abe41ffff8dcf1065862bb6`
+(206374 bytes) completed the detached idle-continuation service pilot with
+attempt 1 to 2, one continuation, no duplicate writer/result/successor or
+notification, no App API/task call, and complete service, credential and
+temporary-artifact cleanup.
+
+On 2026-08-27 the user explicitly removed physical App closure from this
+promotion gate after two coordinator-only exit-sentinel failures. The retained
+runtime proof is therefore App-present and App-independent at the API/task
+boundary; it does not claim that the App was physically absent. The harness
+architecture remains App-optional, and later integrated work may exercise
+App-closed behavior when it is naturally available, but physical App closure
+is no longer a blocking prerequisite. The retained evidence records this
+limitation and user-owned gate change without relabelling `app_closed` as true.
+
+## Descriptive naming cutover gate
+
+This gate does not interrupt or expand H6-E-W-R3. It starts only after R3
+promotion and closes before live-control implementation takes ownership of the
+shared CLI, ledger and supervisor surfaces. Its outcome is descriptive stable
+names for every still-mutable durable path and code/contract identifier. Public
+source names use a forward-only atomic cutover: migrate all repository callers,
+prove zero replacement reachability, then delete the old modules, identifiers
+and commands without aliases or shims. Persisted protocol and immutable
+provenance keep only the exact exceptions below. New artifacts in all later
+milestones already use semantic names.
+
+The work is grouped by compatibility boundary rather than by blind pattern:
+
+1. A bounded private/test-path pass renames milestone-coupled test modules to
+   capability names, including ledger integrity, controller worktrees, review
+   lifecycle, multi-authority review, workflow control, App-native dispatch,
+   local IPC, model-facing projection, plan compilation, production pilots,
+   service lifecycle, supervisor recovery and shared SDK visibility. It also
+   renames private schema-detection locals such as `has_h3`, `has_h6e`,
+   `has_h6w` and `has_h6r` to the capabilities they detect. Pytest discovery,
+   plan/evidence links, changed-path inventories and direct-suite labels update
+   atomically; full pytest, `make check`, packaging and link checks must pass.
+2. A public forward-only cutover introduces semantic canonical names for the
+   review lifecycle and production-pilot APIs: `review_workflow`,
+   `ReviewLifecycleResult`, `write_review_artifact`, lifecycle record methods,
+   `PilotError`, `build_visible_worker_capsule`, `run_production_pilots`,
+   `write_production_evidence`, `run_review_pilot`,
+   `run_multi_authority_review_pilot` and `run_workflow_control_pilot`. Semantic
+   CLI commands replace the numbered commands, and old public imports, modules,
+   identifiers and commands are deleted after current callers migrate and a
+   zero-reachability test passes. README, compatibility docs, exports, fixtures,
+   `--help` and wheel behavior update together. No persisted value is rewritten
+   in place and no deprecated alias or compatibility shim remains.
+3. Add a new-name validator covering paths and Python/public identifiers. It
+   rejects temporary milestone/task prefixes for additions while using an
+   explicit allowlist for the protocol/provenance exceptions below. The
+   validator evaluates the changed-name set, so it does not force a mechanical
+   rewrite of immutable history.
+
+The first pass is bounded/mechanical Luna High work. The second changes public
+surfaces with a forward-only cutover and uses Luna XHigh with objective and architecture
+acceptance. They run sequentially because both update shared references and
+tests. Neither runs in parallel with an implementation owner touching the same
+files. Historical evidence inventories keep their original filenames as
+immutable provenance; link and naming validation distinguish those records
+from current canonical names rather than rewriting accepted evidence.
+
+## Next execution — private-semantic-naming
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Replace still-mutable milestone-coupled private and test identifiers with stable "
+        "capability and behavior names, and enforce the descriptive-name rule for additions."
+    ),
+    decomposition=(
+        "Rename the current test modules to ledger, controller, review, workflow-control, App dispatch, IPC, projection, plan compilation, production-pilot, service, supervisor and SDK-visibility capability names.",
+        "Rename private ledger schema-detection locals to the table or recovery capability they detect.",
+        "Add a changed-name validator for paths and Python identifiers with explicit protocol/provenance exceptions.",
+        "Update current pytest, plan, compatibility and validation references while leaving retained historical evidence bytes unchanged.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE,),
+    acceptance_criteria=(
+        "No newly canonical test path, private identifier or validator-owned addition uses a milestone, task, thread, model or sequence label.",
+        "Every renamed test is collected exactly once and preserves its prior behavioral coverage; imports, direct-suite commands, package checks and current documentation links resolve.",
+        "The validator rejects representative h-number, s-number, milestone, task, thread and model coupling in files and Python identifiers while accepting documented persisted-protocol and immutable-provenance exceptions.",
+        "Public pilot modules, imports, classes, functions, CLI commands, persisted values and retained evidence remain unchanged for the separate forward-only cutover pass.",
+        "Focused validator/collection tests, full pytest, make check, packaging, git diff --check and self-review pass; one Luna XHigh objective review of the exact candidate returns P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "still-mutable tests/test_h*_*.py files and their current non-historical references",
+        "private capability-detection locals in src/codex_flow/ledger.py",
+        "one semantically named descriptive-name validator and its focused tests",
+        "Makefile, pyproject.toml or .pre-commit-config.yaml only where required to run that validator",
+        "current compatibility documentation references owned by this pass",
+    ),
+    protected_surfaces=(
+        "all public production modules, imports, exports, classes, functions and CLI commands",
+        "persisted ledger/schema/event/projection identities and runtime layouts",
+        "docs/reviews/evidence including the promoted detached-supervisor evidence",
+        "canonical plan and AGENTS.md except for planning-controller updates",
+        "global Codex/plugin state, Git topology/history and unrelated worktrees",
+        "H6-F through H6-J production surfaces",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only the private semantic naming pass in the existing dirty python-sdk-controller worktree. Preserve every donor and concurrent change. Perform reference-aware renames, not blind substitution; keep public and persisted compatibility surfaces plus retained evidence byte-stable. Add the validator and tests, run the full gates, self-review the exact diff, and return one terminal schema-v1 ModelFacingResult."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=8_000,
+)
+```
+
+This private semantic naming capsule is now the sole executable milestone. Its
+Luna High implementation owner owns the listed mutable surfaces; after the
+exact result is frozen, one Luna XHigh objective review decides promotion.
+
+The private semantic naming pass is promoted at exact dirty candidate
+`dc35d203596d3eebbd5759f69351a20cdf169230a7ebe4c23335d9241617b4c2`.
+It renamed all 13 still-mutable test modules, private ledger capability probes
+and the changed-name validation surface. The single objective review found one
+P1 regression in real wheel-content coverage; the one bounded repair restored
+the temporary wheel build and exact packaged `workflow.toml` byte comparison.
+The final Luna XHigh recheck returned `APPROVED`, P0=0/P1=0/P2=0, with 405
+tests, packaging, validation, Ruff, compile, pre-commit and diff hygiene green.
+
+## Next execution — public-api-semantic-cutover
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Replace milestone-coupled or generic public module, class, API and CLI names with stable "
+        "semantic names through one forward-only atomic cutover."
+    ),
+    decomposition=(
+        "Move review, workflow-control, production-pilot and SDK/controller sentinel implementations into semantically named modules, migrate every current caller and delete the old module paths.",
+        "Replace public review lifecycle classes, controller and ledger methods, artifact writers and production-pilot functions with semantic names; delete the old identifiers after zero-reachability proof.",
+        "Replace numbered or superseded CLI commands with semantic commands and remove the old command registrations after current documentation and callers migrate.",
+        "Replace mutable pilot-internal run, scenario, fixture, path and private type names with capability or observable-behavior names while retaining persisted schema/event values and historical evidence unchanged.",
+        "Update exports, current callers, README, compatibility documentation, tests, wheel contents and descriptive-name validation together.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Production imports use review_pilots, workflow_control_pilot, production_pilots, sdk_compatibility_sentinel and controller_recovery_sentinel; the old module paths are absent from source and wheel.",
+        "Canonical public identifiers include ReviewWorkflow, review_workflow, ReviewLifecycleResult, write_review_artifact, semantic lifecycle ledger methods, PilotError, build_visible_worker_capsule, run_review_pilot, run_multi_authority_review_pilot, run_workflow_control_pilot, run_production_pilots and write_production_evidence.",
+        "Semantic CLI commands are documented and primary; old numbered commands and old public imports fail as removed surfaces and have no alias, shim or duplicate registration.",
+        "No new or canonical module, class, function, method, variable, constant, test, fixture, command, export, scenario id or generated path couples to a milestone/task/thread/model/sequence label.",
+        "Persisted ledger schema identities, event kinds, envelopes, model/milestone ids, runtime layouts and immutable H1-H6 evidence bytes are unchanged; migration tests prove old persisted values remain readable without preserving removed source names.",
+        "Focused cutover/reachability/validator tests, full pytest, make check, exact wheel/import/help checks, Ruff and diff hygiene pass; independent Luna XHigh objective and Sol Medium architecture reviews of the exact candidate both return P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/review_pilots.py and deletion of src/codex_flow/h4_pilot.py",
+        "src/codex_flow/workflow_control_pilot.py and deletion of src/codex_flow/h5_pilot.py",
+        "src/codex_flow/production_pilots.py and deletion of src/codex_flow/h6_pilot.py",
+        "src/codex_flow/sdk_compatibility_sentinel.py and deletion of src/codex_flow/sentinel.py",
+        "src/codex_flow/controller_recovery_sentinel.py and deletion of src/codex_flow/controller_sentinel.py",
+        "src/codex_flow/controller.py, domain.py, artifacts.py, ledger.py and cli.py only for semantic replacement APIs and removal of old source names",
+        "public exports, focused current tests, README.md and docs/reviews/codex-controller-compatibility.md",
+        "src/codex_flow/descriptive_naming.py and scripts/validate.py only for canonical public-identifier enforcement and explicit compatibility exceptions",
+    ),
+    protected_surfaces=(
+        "persisted schema identities, migrations, event values, envelopes, dispatch identities and runtime layouts",
+        "detached supervisor recovery behavior, SDK transport semantics, IPC, service and worker lifecycle",
+        "docs/reviews/evidence and all immutable historical evidence bytes",
+        "canonical plan and AGENTS.md except for planning-controller updates",
+        "global Codex/plugin state, Git topology/history and unrelated worktrees",
+        "H6-F through H6-J production surfaces beyond compatibility-only references",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only the public API semantic cutover in the existing dirty python-sdk-controller worktree. Preserve every donor and concurrent change. Migrate all current callers to one semantic implementation per capability, prove zero reachability, delete the old public modules, identifiers and commands, and create no alias or shim. Never rewrite persisted protocol or retained evidence. Update callers/docs/exports/validator atomically, run the full objective and packaging gates, self-review, and return one terminal schema-v1 ModelFacingResult. Do not start live-control or later milestones."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=8_000,
+)
+```
+
+This public semantic cutover capsule is now the sole executable milestone. One
+Luna XHigh owner controls every shared module, export, CLI and cutover surface
+in the listed surfaces. No parallel writer may touch those references;
+after implementation freezes, objective and architecture reviews may run in
+parallel because both are read-only.
+
+Successor routing decision: after this cutover is promoted, the planning
+controller starts the live-worker-control implementation through exactly one
+`$codex-thread-handoff` native `START`, not a child/subagent. The handoff reuses
+the existing worktree `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller`
+on branch `agent/python-sdk-controller` at the then-current saved checkout,
+requests the AGENTS-authorized exact pair `model=gpt-5.6-luna` and
+`thinking=xhigh`, and captures the native thread/host identity plus the exact
+controller callback route. It performs no create retry, fallback transport,
+new worktree or routine polling. Dispatch is not completion; later progression
+requires the peer's one terminal callback and the planning controller's gate
+reconciliation.
+
+Explicit exceptions:
+
+- Generated `model-*`/`milestone-*` identities, `--milestone-id` and the
+  `.codex-flow/.../milestones/<id>` layout are persisted controller protocol;
+  projection, ledger foreign-key and compatibility tests retain them.
+- Ledger schema identities through v12, the `__h4`/`codex-flow/h4/v1` envelope,
+  H4 sidecar namespace and existing H6 event kinds are versioned persisted
+  protocol. A future schema migration may introduce a semantic successor
+  version, but never rewrites or aliases the old values.
+- Published H1/H3/H4/H5 evidence, schema strings and sentinel identifiers are
+  immutable historical provenance. The current H6-E evidence path, keys and
+  schema are the same kind of frozen exception after R3 promotion; current test
+  paths have already completed the private naming cutover.
+- Existing numbered public pilot commands and imports are forward-only removal
+  inputs. The public cutover migrates current callers and documentation, proves
+  zero reachability and deletes them without aliases or shims.
+
+Future retained evidence paths are already reserved as
+`live-worker-control.json`, `controller-turn-recovery.json`,
+`plugin-capability-parity.json`, `human-terminal-ui.json` and
+`integrated-control.json`; no later capsule may reintroduce milestone-coupled
+filenames, symbols, commands or evidence keys.
+
+## Post-detached-supervisor control plane — live workers, recoverable controller and human UI
+
+The work below starts only after H6-E-W-R3 and the descriptive naming gate reach
+truthful terminal results, their exact candidates are frozen and their required
+promotion gates close. App-native is not a production fallback: production
+workers and controller turns use the shared standard SDK session, while the App
+is an optional transcript projection.
+
+The next program sequence is:
+
+```text
+H6-E-W-R3 failed-spawn recovery and wake-up
+                  |
+                  v
+descriptive naming compatibility
+                  |
+                  v
+H6-F live worker observation, control and bounded recovery
+                  |
+                  v
+workflow skill and validation contract reconciliation
+                  |
+                  v
+H6-G transactional controller-turn recovery
+                  |
+                  +-------------------+
+                  v                   v
+H6-H plugin capability parity     H6-I human TUI
+                  +-------------------+
+                              |
+                              v
+                  H6-J integrated promotion
+```
+
+H6-F, workflow-skill reconciliation and H6-G are deliberately sequential. H6-F
+and H6-G both own the durable ledger/supervisor/SDK control boundary, while the
+intermediate reconciliation owns shared instructions, controller-facing
+contracts and test selection that H6-G must consume. After H6-G freezes that
+boundary, H6-H and H6-I may execute in parallel: plugin parity owns native
+discovery and capsule capability binding, while the TUI consumes the
+already-frozen control client without modifying the supervisor, ledger or SDK
+adapter. H6-J freezes the combined candidate and runs one parallel
+objective/architecture promotion wave; it does not reopen broad implementation
+unless a concrete P0/P1 finding requires one bounded repair.
+
+### Shared outcome and invariants
+
+The harness, not an App task or prompt, owns worker lifecycle, recent activity,
+control commands, terminal results, controller decisions and recovery. A human
+can inspect and steer work without spending model tokens. A controller model is
+an episodic decision authority that can disappear and be restarted; it is never
+the durable queue or callback receiver.
+
+- `codex-flowd` plus SQLite remain the only lifecycle and result authority.
+- Worker event streams are diagnostic evidence, never completion authority.
+  Retain a bounded redacted ring rather than copying full Codex transcripts.
+- Reading, steering and interruption are capability-bound to one dispatch,
+  generation, attempt, SDK thread and active turn. A command can never be
+  replayed against a replacement turn merely because text looks equivalent.
+- App closure, TUI closure and controller-turn failure do not stop workers,
+  erase results, suppress pre-authorized successors or mutate terminal facts.
+- The App remains optional and may show SDK-created worker/controller threads
+  after reopening. No production path uses App-native creation, App polling,
+  private Desktop sockets or App-owned callback prose.
+- The standard shared `CODEX_HOME` is used without copying authentication.
+  Plugin availability is proven and bound explicitly; catalog presence or App
+  installation alone is not treated as runtime capability.
+- The controller and TUI use the same typed control API. TUI actions perform no
+  model call unless the human explicitly requests a controller-model decision.
+- No milestone installs/trusts/uninstalls plugins, changes global Codex config,
+  broadens permissions, pushes, rebases, merges, stashes or discards user work.
+
+### H6-F — Live worker observation, control and bounded recovery
+
+Outcome: while an SDK worker is alive, the supervisor and authorized clients
+can read bounded recent activity and submit exactly ordered steer or interrupt
+commands without App dependency, task polling or controller-model keepalive;
+when a worker or turn fails, the harness applies a durable error-specific retry
+policy rather than stopping after every recoverable defect or looping without a
+budget.
+
+Architecture and persistence:
+
+- Extend the SDK boundary to retain the live `TurnHandle`, consume its event
+  stream and expose the installed SDK's `Thread.read`, `TurnHandle.steer` and
+  `TurnHandle.interrupt` capabilities through typed adapter methods. Persisted
+  thread reads are recovery diagnostics; the live SDK stream is the normal
+  activity source.
+- Add one crash-atomic schema migration after H6-E-W. Store a bounded per-
+  dispatch diagnostic ring with monotonic sequence, event kind, timestamp,
+  optional bounded redacted agent text and payload digest. Default bounds are
+  128 entries, 64 KiB total and 8 KiB per text item; oldest diagnostic entries
+  are evicted transactionally without touching authoritative lifecycle facts.
+- In the same migration add immutable retry-policy facts and mutable recovery
+  state per dispatch: policy version, bounded budgets by failure class,
+  consumed count, last typed failure, recovery strategy, next eligible time,
+  prior thread/turn identity and terminal `human_attention_required` reason.
+  `attempt` remains process-attempt identity and is never interpreted as a
+  retry budget. Every failure and its retry decision commit atomically before
+  another process or SDK turn may start, so supervisor restart cannot reset a
+  budget or duplicate a recovery.
+- Classify failures at their owning boundary without matching arbitrary prose.
+  Pre-identity transient transport/runtime failures use bounded exponential
+  backoff with jitter; the default budget is five. One structured
+  `Invalid previous_response_id` may retire the unusable continuation and
+  start one fresh SDK thread in the same workspace. A schema-invalid terminal
+  result may request at most two correction turns on the same thread, carrying
+  only the validator-owned field/type violations and the unchanged output
+  schema. Worker process loss after a bound identity may resume once only when
+  persisted SDK evidence makes continuation safe. Authentication, permission,
+  native-profile, capability, workspace-integrity, malformed-input and replay
+  failures are non-retryable and fail closed.
+- Recovery never reruns completed repository work blindly. Same-thread schema
+  repair asks only for a corrected terminal envelope; fresh-thread recovery
+  receives a harness-authored bounded recovery preamble identifying the
+  existing workspace and requiring inspection before mutation. Successful
+  result commit clears pending retry eligibility atomically. Exhausted budgets,
+  repeated same-class failure, conflicting identity or an ambiguous external
+  side effect transition the dispatch to `human_attention_required`, enqueue
+  one durable controller/human decision and stop automatic execution.
+- Expose retry class, budget/consumption, last failure, next retry time and
+  recovery strategy through the typed control client and CLI/TUI-facing status.
+  Permit an authorized controller or human to retry, cancel or change a budget
+  only through a compare-and-swap action with an explicit reason; never by
+  editing SQLite, restarting the service or resetting `attempt`.
+- Add a durable control-command outbox with immutable command id, dispatch,
+  generation, attempt, thread/turn identity, kind (`steer` or `interrupt`),
+  bounded payload digest, state and timestamps. Steer text is at most 8 KiB.
+- Upgrade authenticated local IPC to a bidirectional live-worker control
+  channel. The supervisor pushes commands; the worker sends lifecycle/activity
+  events and command acknowledgements. IPC loss never fabricates command
+  application or terminal status.
+- A worker restart may resume its bound SDK thread only under the durable
+  typed recovery policy. An unacknowledged steer from a lost turn becomes
+  `unresolved` and is never applied to a new turn. Interrupt is confirmed only
+  by SDK terminal evidence; process termination alone is reported separately.
+- Expose a stable typed control client plus noninteractive CLI operations for
+  status, recent activity, steer and interrupt. The controller and later TUI
+  consume that client rather than reading SQLite tables or App tasks directly.
+
+Non-goals: no unbounded or service-restart-reset retry, generic retry of
+integrity/auth/permission failures, TUI, plugin policy, controller-decision
+retry, full transcript archive, recurring status poller, App-native worker or
+remote-network control plane.
+
+Mutable owner:
+
+- `src/codex_flow/domain.py`, `src/codex_flow/contracts.py`,
+  `src/codex_flow/ledger.py`, `src/codex_flow/supervisor.py`,
+  `src/codex_flow/worker.py`, `src/codex_flow/ipc.py`,
+  `src/codex_flow/service.py`, `src/codex_flow/backends/codex_sdk.py`,
+  `src/codex_flow/control_client.py`, `src/codex_flow/cli.py`;
+- focused adapter, ledger, IPC, worker, supervisor, service and CLI tests; and
+- `docs/reviews/evidence/live-worker-control.json`.
+
+Protected surfaces: the canonical plan and `AGENTS.md`; H6-E-W retained
+evidence; `src/codex_flow/native_profile.py`, plan/capsule projection,
+App-native compatibility, plugin sources/caches/config, future TUI modules,
+accepted H1-H5 evidence, global Codex state and unrelated worktrees.
+
+Acceptance modes: `objective` and `architecture`.
+
+Acceptance and validation:
+
+- A real delayed SDK worker emits activity visible through the control client
+  without any App API/task dependency, and one steer changes its subsequent
+  observable response through the same live turn. The App may be open or
+  closed and its physical state is recorded truthfully rather than gated.
+- One interrupt reaches the exact live turn and closes with truthful SDK
+  terminal evidence; replay, stale generation, wrong attempt/turn, oversized
+  text, malformed IPC and post-terminal commands fail before mutation.
+- Supervisor/worker restart and IPC failure injection produce no duplicate
+  event sequence, steer, interrupt, worker, result, successor or callback.
+- Failure-matrix tests prove exact durable budgets and strategies: five
+  backoff-gated pre-identity retries, one invalid-chain fresh-thread rollover,
+  two same-thread schema-envelope corrections and zero automatic retries for
+  auth, permission, capability, profile or integrity failures. Restart between
+  failure and retry neither resets nor double-consumes a budget; success on any
+  allowed retry produces one terminal result and suppresses all later work.
+- Exhaustion and ambiguous post-identity cases produce one observable
+  `human_attention_required` decision containing only bounded sanitized facts.
+  Historical H6-E attempts with inflated process counts migrate without being
+  mistaken for consumed typed retry budget.
+- The diagnostic ring proves byte/count eviction, redaction and separation from
+  terminal authority at 0/1/128/129 entries and boundary payload sizes.
+- Focused adversarial tests, `make check`, Ruff, diff hygiene, exact wheel and
+  temporary service checks pass. Self-review reports zero open P0/P1; integrated
+  independent promotion is deferred to H6-J.
+
+Residual boundary: after loss of the process that owns an active SDK
+`TurnHandle`, the harness may read persisted history but cannot claim it can
+steer that exact in-flight handle. It reports the command unresolved and uses
+the existing fail-closed recovery policy.
+
+### Workflow skill and validation contract reconciliation
+
+Outcome: reconcile the previously exported workflow instruction/schema package
+with the newer typed controller so repository-owned skills, templates, routing
+examples and test selection describe one forward-only production workflow. The
+dirty checkout `/home/adam/personal-workflow-skills` is read-only source input,
+not an authority to copy blindly. Its exported behavior is compared file by
+file with this worktree; current typed-capsule, naming and controller ownership
+improvements win wherever the export is older.
+
+The reconciliation delivers these semantic capability surfaces:
+
+- retain and merge, rather than replace, the current `plan-work` and
+  `execute-milestone` skills;
+- add `review-work` and `recover-milestone` for independent findings-first
+  review and completion-biased bounded recovery;
+- add `collect-evidence`, `run-discovery-spike` and
+  `define-visual-contract` with their matching skill metadata;
+- add the Draft 2020-12 capsule, evidence, finding, recovery, result, review
+  and visual-contract schemas under `schemas/`;
+- add `templates/AGENTS.workflow.md`, integrate it through
+  `templates/AGENTS.md`, and add `config/workflow.toml.example` without
+  introducing a second active plan, router or runtime entrypoint;
+- update root `AGENTS.md`, the general template and every applicable workflow
+  skill with the descriptive durable-naming invariant and proportional
+  validation policy plus the decision-ready implementation architecture-map
+  and bounded new-artifact-budget invariant; and
+- add semantic `test-contracts`, `test-controller`, `test-workers`,
+  `test-integrations` and `test-workflow-assets` Make targets backed by
+  `config/test-partitions.toml`, while preserving `make test` as the complete
+  strict suite and `make check` as the explicit broad gate.
+
+The skills remain cognitive roles around the controller. They may define typed
+intent, acceptance, evidence or findings, but may not own durable dispatch,
+callbacks, successor scheduling, retry loops, worktree invention or direct
+ledger mutation. `workflow-control` and the closed capsule compiler remain the
+only normal model-to-controller entrypoint. No deprecated alias, compatibility
+shim or milestone-labelled duplicate is introduced.
+
+Implementation architecture map:
+
+- `modify AGENTS.md`, `modify templates/AGENTS.md`, `modify
+  plugins/personal-workflow-skills/skills/{plan-work,execute-milestone}/SKILL.md`
+  and their existing `agents/openai.yaml`: merge controller ownership,
+  descriptive naming, proportional validation and the frozen architecture-map
+  contract without losing stronger current wording.
+- `create plugins/personal-workflow-skills/skills/{review-work,recover-milestone,
+  collect-evidence,run-discovery-spike,define-visual-contract}/{SKILL.md,
+  agents/openai.yaml}`: five independently discoverable cognitive roles. They
+  depend only on canonical instructions and typed schemas, never on native task
+  transport, the ledger or one another.
+- `create schemas/{capsule,evidence,finding,recovery,result,review,
+  visual-contract}.schema.json`: seven closed Draft 2020-12 contracts with
+  stable semantic `$id` and title values. The typed Python contracts remain the
+  serialization authority; schemas validate projections and never generate a
+  second runtime model.
+- `create templates/AGENTS.workflow.md`, `create
+  config/workflow.toml.example`, and `create config/test-partitions.toml`:
+  declarative includes, role-class routing example and the single primary test
+  membership registry. These assets have no side effects and no model ids leak
+  into skills.
+- `modify scripts/validate.py`: remain the one repository workflow-asset
+  validator and partition selector. It validates schemas through Draft 2020-12,
+  skill/front-matter metadata, Markdown fences, template/config resolution,
+  naming, architecture-map fixtures and exact one-partition membership; invalid
+  or stale input fails before pytest dispatch.
+- `modify Makefile`: expose only the five semantic test targets and delegate
+  membership resolution to `scripts/validate.py`; keep `test` and `check`
+  unchanged as the full gates. No second test manifest or shell-maintained file
+  list is allowed.
+- `modify pyproject.toml`, `modify uv.lock`, `modify
+  plugins/personal-workflow-skills/.codex-plugin/plugin.json`, and `modify
+  .agents/plugins/marketplace.json`: add `jsonschema` as a dev-only validator
+  dependency, package the schemas plus workflow template/config example into
+  the wheel's read-only `codex_flow/workflow_assets/` tree, and advance matching
+  plugin metadata exactly once. No runtime dependency or installed plugin state
+  changes.
+- `create tests/test_workflow_assets.py` and `modify
+  tests/fixtures/prompt-input/plan-work.json`: one parameterized semantic test
+  module owns positive/negative schema fixtures,
+  skill/template/config/package checks, architecture-map rejection and
+  partition-union adversaries, while the existing prompt fixture records the
+  new planning contract. Do not create a fixture file per example.
+- `create docs/reviews/evidence/workflow-skill-contracts.json`: sanitized
+  source/destination digest inventory, adopted/merged/superseded decisions,
+  partition counts and exact-wheel asset proof. It contains no prompt bodies or
+  secrets.
+- `preserve src/codex_flow/**` except the wheel force-included read-only assets;
+  `preserve` all existing audit skills, `codex-thread-handoff`,
+  `workflow-control`, hooks and runtime entrypoints; `remove` nothing in this
+  milestone.
+
+Primary durable identifiers are the seven schema `$id` values, the seven
+workflow skill names, the five partition names and Make targets, and evidence
+schema `codex-flow/workflow-skill-contracts/v1`. Dependency direction is
+schemas/templates/config -> validator/tests -> Make targets; plugin cognitive
+skills may reference schemas/instructions, while controller/runtime production
+modules never import plugin or test assets. Error handling is fail-closed at
+schema, naming, metadata, include, packaging and partition boundaries. The
+new-artifact budget is 22 files: ten files for five skill packages, seven
+schemas, three declarative template/config files, one semantic test module and
+one evidence record. The executor must report the exact final count and request
+a bounded replan before exceeding 22 total new files.
+
+Mutable owner:
+
+- `AGENTS.md`, `templates/AGENTS.md`, `templates/AGENTS.workflow.md` and
+  `config/workflow.toml.example`;
+- `plugins/personal-workflow-skills/skills/{plan-work,execute-milestone,review-work,recover-milestone,collect-evidence,run-discovery-spike,define-visual-contract}`
+  including their `agents/openai.yaml` metadata;
+- the seven semantic JSON schemas under `schemas/`, plugin packaging/validation
+  metadata required to ship them, `Makefile`, `config/test-partitions.toml` and
+  the repository validator/tests for these assets; and
+- `docs/reviews/evidence/workflow-skill-contracts.json`.
+
+Protected surfaces: the frozen live-worker ledger, SDK, supervisor, IPC,
+service, worker, control-client and CLI behavior; controller-turn recovery;
+plugin capability discovery; TUI implementation; App-native compatibility;
+installed plugin/cache/global Codex state; accepted immutable evidence and
+unrelated worktrees. The source export checkout is read-only and receives no
+mutation.
+
+Acceptance modes: `objective` and `architecture`.
+
+Acceptance and validation:
+
+- A source/destination digest inventory accounts for every exported capability
+  and records whether it was adopted, merged or superseded with a concrete
+  reason; no current improvement in `plan-work` or `execute-milestone` is lost.
+- All seven schemas validate against Draft 2020-12, their positive/negative
+  fixtures exercise required fields and closed boundaries, and typed controller
+  projections agree with the applicable schema without creating a second
+  serialization authority.
+- Every new skill has valid front matter and metadata, balanced Markdown fences,
+  bounded examples and explicit non-ownership of callbacks, routing, retries,
+  successor scheduling and ledger mutation. Template includes and TOML examples
+  resolve from a packaged wheel as well as from the repository.
+- The naming validator accepts the new semantic artifacts and rejects
+  milestone/task/thread/model/sequence coupling in durable paths and code or
+  contract identifiers, including classes, functions, fixtures, schema titles,
+  evidence keys and example-generated filenames. There are no aliases or shims.
+- Planning skill fixtures prove that a substantial capsule names its expected
+  production paths, module responsibilities/dependencies, primary durable
+  identifiers and bounded new-artifact budget; a capsule that delegates module,
+  file or public-class topology to the executor fails workflow-asset validation.
+- Every collected `tests/test_*.py` file belongs to exactly one primary semantic
+  partition; duplicate entries, missing tests and stale manifest paths fail
+  validation. Each partition runs independently from the repository root and
+  their union equals the full collected suite.
+- Skill/schema/template-only edit loops use `test-workflow-assets` plus the
+  relevant validators. Because this milestone changes shared contracts, test
+  collection and packaging, closure runs all five partitions, full `make check`,
+  exact-wheel asset inspection, `git diff --check` and complete self-review.
+- One independent Luna XHigh objective review and one Sol Medium architecture
+  review of the exact candidate both return P0=0/P1=0 before H6-G starts.
+
+This reconciliation becomes the next executable milestone only after
+live-worker-control freezes and passes its declared objective and architecture
+promotion. It is sequential with controller-turn recovery because both the
+recovered controller role and later plugin/TUI work consume these instruction,
+schema and validation contracts.
+
+## Next execution — workflow-skill-and-validation-contract-reconciliation
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Reconcile the exported workflow skills and schemas into one forward-only controller-owned "
+        "instruction, packaging and proportional-test contract without changing runtime control behavior."
+    ),
+    decomposition=(
+        "Inventory every donor skill/schema/template/config capability and record adopted, merged or superseded status by digest.",
+        "Implement the fixed 22-file architecture map: five semantic skill packages, seven closed schemas, three declarative assets, one semantic test module and one sanitized evidence record.",
+        "Merge current plan/execute improvements and enforce descriptive naming, implementation architecture maps and proportional validation across instructions and fixtures.",
+        "Make scripts/validate.py the sole schema/skill/naming/partition selector and expose five semantic Make test targets from one TOML membership registry.",
+        "Package read-only workflow schemas/template/config assets into the exact wheel, update local plugin metadata once and prove repository/wheel parity without installation."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Every donor capability has source/destination digests and a concrete adopted, merged or superseded reason; no stronger current plan-work or execute-milestone behavior is lost.",
+        "Seven Draft 2020-12 schemas and positive/negative projections are closed, while typed Python contracts remain the only serialization authority.",
+        "Seven cognitive workflow skills have valid metadata and own no dispatch, callback, retry, successor, worktree or ledger behavior.",
+        "Planning rejects executor-invented module/file/public-class topology and requires the frozen architecture map plus bounded artifact budget; all durable names are semantic and no alias exists.",
+        "Every collected test has exactly one contracts/controller/workers/integrations/workflow-assets membership; each target runs independently and their union equals full collection.",
+        "All five partitions, one full make check, exact-wheel asset parity, plugin validation, git diff hygiene and complete self-review pass with zero open P0/P1."
+    ),
+    mutable_surfaces=(
+        "the exact create/modify paths in the workflow-skill implementation architecture map",
+        "pyproject.toml and uv.lock only for dev-only Draft 2020-12 validation and wheel force-includes",
+        "plugins/personal-workflow-skills/.codex-plugin/plugin.json and .agents/plugins/marketplace.json for one matching local package version",
+        "tests/fixtures/prompt-input/plan-work.json",
+        "docs/reviews/evidence/workflow-skill-contracts.json"
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "src/codex_flow production Python modules and every live-worker/controller runtime behavior",
+        "existing audit skills, codex-thread-handoff, workflow-control and plugin hooks",
+        "controller recovery, plugin parity, TUI and integrated-promotion successor surfaces",
+        "source export checkout /home/adam/personal-workflow-skills, installed plugin/cache/global Codex state and unrelated worktrees"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt=(
+        "Use execute-milestone for only workflow-skill-and-validation-contract-reconciliation in the existing dirty python-sdk-controller worktree. Follow the exact architecture map and 22-file budget; request a bounded replan before adding any unplanned module, file, public class, schema, runner, registry or entrypoint. Treat /home/adam/personal-workflow-skills as read-only donor input and merge rather than overwrite stronger current plan/execute contracts. Use semantic forward-only names and no aliases. Run test-workflow-assets and validators during implementation, then the five partitions, one full make check and exact-wheel/plugin/package gates once at closure. Preserve all runtime code and accepted evidence, create no peers/subagents/worktrees/commits, perform no install/global/App mutation, and send one terminal callback to the planning controller. Do not start controller recovery, plugin parity, TUI or integrated promotion."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+Candidate `9efce3f4040a70ad4052846b9afa8ebaedd37e2aa5475e629cc00003157db625`
+and exact wheel
+`578a9464ccbe248642650dae159b72bdb6b8b90f015c83283e7a7cde39e9251c`
+passed the independent objective review with P0/P1/P2 zero. The architecture
+review rejected promotion with one P1 and one P2. The P1 found that
+`templates/AGENTS.md` and its validator made `$codex-thread-handoff` the normal
+execution route, contradicting the controller-only boundary and the explicit
+legacy-only handoff contract. The P2 found that schema tests used hand-authored
+capsule/result dictionaries rather than durable regressions over the real typed
+`to_json()` projections, although a targeted read-only comparison showed the
+current projections already validate.
+
+## Next execution — controller-entrypoint-and-schema-projection-closure
+
+The first bounded four-path repair completed as candidate
+`0086815cb3fcd72c73f720832cbd03a183deee2a009328540bd787268a9abaf0`:
+normal execution now selects `$workflow-control`, the legacy handoff wording is
+rejected, and real typed capsule/result projections validate their schemas.
+Before promotion, the user added one planning-contract requirement: maximize
+safe milestone-level parallelism after architecture is frozen, without adding a
+nested swarm/controller layer. The same repair owner therefore continues under
+this bounded replan; no second writer is created.
+
+The expanded repair stays inside the existing workflow-asset architecture and
+changes no new file, runtime production module, schema, dependency, runner,
+registry, entrypoint or public class:
+
+- `modify AGENTS.md`: require the planner to derive a dependency DAG/readiness
+  map after freezing architecture; freeze shared schemas/contracts/state
+  authority/entrypoints before fan-out; require a concrete reason for every
+  serial edge; keep each milestone single-owner and reject nested orchestration
+  as the default.
+- `modify templates/AGENTS.md`: normal execution invokes `$workflow-control`
+  with the canonical plan path and exact milestone id. The planner does not
+  create a peer or serialize a sidecar capsule. `$codex-thread-handoff` remains
+  named only as an explicit legacy compatibility or deliberate comparison
+  route and is never silently selected or combined with workflow-control.
+- `modify templates/AGENTS.workflow.md`: add the reusable compact form of the
+  same architecture-first DAG, readiness, serial-edge and single-owner policy.
+- `modify plugins/personal-workflow-skills/skills/plan-work/SKILL.md`: after the
+  architecture map is fixed, require decomposition into independently closable
+  vertical milestones, explicit dependency/readiness facts, shared-authority
+  freeze before fan-out, and critical-path minimization without fake splits or
+  nested milestone controllers.
+- `modify plugins/personal-workflow-skills/skills/plan-work/agents/openai.yaml`:
+  make the default planning prompt request the architecture map and dependency
+  DAG/readiness projection, without adding routing or transport ownership.
+- `modify scripts/validate.py`: replace the conflicting normal fresh-peer
+  requirements with fail-closed requirements for the packaged workflow-control
+  entrypoint, canonical plan path, exact milestone id and explicit legacy-only
+  handoff distinction; validate the architecture-first DAG and single-owner
+  parallelism contract in the skill and instruction templates. A template that
+  restores direct handoff as the ordinary execution path or recommends a nested
+  swarm/controller as the default must fail validation.
+- `modify tests/fixtures/prompt-input/plan-work.json`: extend the semantic plan
+  fixture with a dependency DAG/readiness example whose independent lanes have
+  disjoint ownership and whose serial edge names a permitted concrete reason.
+- `modify tests/test_workflow_assets.py`: retain the schema fixture tests and
+  add durable assertions that real `ModelFacingCapsule.to_json()` and
+  `ModelFacingResult.to_json()` objects validate their respective Draft
+  2020-12 schemas, including closed unknown-field rejection at the projection
+  boundary; add focused positive and negative coverage for DAG/readiness,
+  serial-edge reasons, disjoint mutable ownership and the no-nested-controller
+  invariant.
+- `modify docs/reviews/evidence/workflow-skill-contracts.json`: recompute the
+  exact owned-path candidate digest and record the focused repair gates. The
+  new-file count remains exactly 22. Because packaged templates and the
+  `plan-work` skill now change, rebuild and verify the exact wheel instead of
+  carrying forward the previous artifact.
+
+Mutable ownership is limited to those nine paths. All schemas, other skills,
+config, `Makefile`, `pyproject.toml`, `uv.lock`, plugin metadata, runtime
+production code and successor milestones are protected. The repair has one
+owner because its validator, templates, skill contract, fixture and evidence are
+one shared policy boundary; splitting writers would create cross-file drift.
+
+The planning contract models program work as a DAG rather than a two-level
+swarm. A shared-authority foundation node precedes dependent vertical lanes;
+ready lanes with disjoint mutable surfaces may then execute in parallel. Each
+lane closes independently under one owner. Read-only scouts and distinct
+promotion authorities may overlap, but no milestone worker becomes a lifecycle
+controller and no nested multi-agent topology is required. The planner records
+why any lane remains serial using exactly the relevant dependency class instead
+of defaulting all work to a sequence or maximizing milestone count.
+
+Acceptance requires the workflow asset validator to reject the old conflicting
+entrypoint template and policy variants that omit the DAG/readiness facts,
+permit overlapping mutable lanes, leave serial edges unexplained, or prescribe
+nested controllers as the normal route. The real typed projections must still
+validate the schemas. Run `test-workflow-assets`, the direct validator, the
+package/workflow-asset wheel parity checks made stale by the packaged changes,
+and `git diff --check`; self-review must report P0/P1 zero. Carry forward the
+unaffected contracts/controller/workers/integrations partitions and the prior
+488-test broad gate; do not rerun the whole suite merely for instruction and
+validator changes.
+
+The new requirement expands the accepted candidate beyond the four-path repair,
+so neither prior review carries forward. After the repaired candidate freezes,
+run one Luna XHigh objective review and one Sol Medium architecture review of
+that exact digest; promotion requires P0=0/P1=0 from both.
+
+Candidate `6d837cb3a2fc64c97b6d7b15e5ab33b9a44fa2b95d97a6ebd1eaab6fb0c73c7d`
+and exact wheel
+`08dcdeb133eec47f175a99940e311b8f8eb5f9705e00ccd97f76428b76d181bc`
+passed the focused 38-test workflow-asset gate, direct validator, exact ten-
+asset wheel parity and diff hygiene. The independent Luna XHigh objective
+review returned `DO_NOT_PROMOTE`, P0=0/P1=1/P2=0; the Sol Medium architecture
+review returned `DO_NOT_PROMOTE`, P0=0/P1=2/P2=0. The three unique P1 findings
+are one shared workflow-contract boundary:
+
+- `capsule.schema.json` and `result.schema.json` accept alternate cognitive
+  shapes that their authoritative `ModelFacingCapsule.from_json()` and
+  `ModelFacingResult.from_json()` parsers reject, creating a second
+  serialization contract despite the controller-only boundary;
+- the plugin manifest default prompt still offers direct peer handoff as an
+  ordinary workflow choice rather than an explicitly requested legacy or
+  comparison route; and
+- the top-level descriptive-name gate validates changed paths but does not
+  validate architecture identifiers or identifier-bearing content. Milestone-
+  coupled fixture ids and primary identifiers therefore pass despite the
+  forward-only naming invariant.
+
+## Next execution — workflow-contract-authority-closure
+
+Outcome: close all three exact-candidate P1 findings with one forward-only
+controller-facing schema, one normal workflow-control entrypoint and one
+promotion-reachable descriptive-name gate. No compatibility alias, alternate
+schema branch or second runtime/cognitive serialization model is retained.
+
+Implementation architecture map:
+
+- `modify schemas/capsule.schema.json`: make it the exact closed JSON Schema
+  projection of `ModelFacingCapsule`. Accept exactly the keys and value domains
+  parsed by `ModelFacingCapsule.from_json()`; remove the alternate
+  program/milestone/workspace/routing/review-policy branch and its unused
+  properties. `schema_version` is integer `1`, not a string compatibility form.
+- `modify schemas/result.schema.json`: make it the exact closed projection of
+  `ModelFacingResult`. Accept exactly its status, summary, changed surfaces,
+  typed validations, durable status and nullable-string next action; remove the
+  milestone/validation/findings branch, unused finding definition and every
+  field the parser discards or rejects.
+- `modify plugins/personal-workflow-skills/.codex-plugin/plugin.json`: the
+  default prompt selects planning or normal `$workflow-control` execution;
+  direct peer handoff is named only as an explicitly requested legacy
+  compatibility or deliberate comparison route. Metadata remains semantic and
+  version/source identity does not change in this repair.
+- `modify scripts/validate.py`: validate the manifest entrypoint distinction;
+  prove both authoritative typed projections validate their schemas and that
+  representative schema-valid values round-trip through the exact `from_json`
+  parsers; reject any schema-valid value outside the typed boundary. Integrate
+  descriptive identifier validation into the top-level gate for architecture
+  primary identifiers, milestone ids, owners and identifier-bearing Python,
+  fixture, schema, evidence-key and generated-filename fields. Use explicit
+  persisted-protocol/immutable-provenance exceptions only; never scan arbitrary
+  prose or silently exempt a mutable evidence key.
+- `modify tests/test_workflow_assets.py`: replace hand-authored alternate
+  capsule/result positives with real typed projections, add bidirectional
+  schema/parser closure negatives, manifest normal-route adversaries and
+  top-level naming-gate bypass regressions.
+- `modify tests/test_descriptive_naming.py`: add focused class, function, test,
+  fixture id, schema title, evidence key and generated-filename adversaries plus
+  explicit protocol/provenance positives. Reuse the existing semantic naming
+  module; do not add another validator or broaden its public API unless a
+  compile-time dependency proves unavoidable.
+- `modify docs/reviews/evidence/workflow-skill-contracts.json`: record the
+  repaired exact 34-path digest, focused gates, updated workflow-asset count and
+  rebuilt exact wheel identity. This evidence record remains excluded from its
+  own candidate digest.
+
+Dependency direction is fixed:
+`src/codex_flow/contracts.py` and `src/codex_flow/descriptive_naming.py`
+authorities (preserved) -> exact schemas/manifest -> validator -> focused tests
+-> rebuilt packaged assets/evidence. No reverse import from runtime production
+code into plugin metadata is introduced. New durable artifact budget is zero;
+new production modules, classes, public functions, schemas, runners,
+registries, entrypoints, aliases and shims are prohibited.
+
+Mutable ownership is limited to those seven paths under the same repair owner.
+`src/codex_flow/contracts.py`, `src/codex_flow/descriptive_naming.py`, all other
+schemas/skills/templates/config, plan fixture, partition manifest, marketplace
+metadata, `AGENTS.md`, runtime controller/ledger/supervisor/SDK/CLI code,
+`Makefile`, `pyproject.toml`, `uv.lock`, accepted evidence and H6-G onward are
+protected. A material need to change a typed runtime contract, add a schema or
+retain an alternate cognitive shape returns to planning before mutation.
+
+Acceptance modes are `objective` and `architecture`. Acceptance requires:
+
+- every value accepted by the capsule/result schemas parses through the exact
+  authoritative `from_json` boundary for the exercised combinatorial domains,
+  every typed `to_json` projection validates, extra/alternate/wrongly typed
+  values fail both boundaries, and no `anyOf` compatibility branch remains;
+- the packaged manifest cannot silently select direct peer handoff for normal
+  execution, while explicit legacy/comparison reachability remains truthful;
+- the repository top-level validator rejects representative milestone/task/
+  thread/model/sequence coupling in changed paths, Python class/function/test/
+  fixture identifiers, architecture graph ids/owners/primary identifiers,
+  schema titles/ids, mutable evidence keys and generated filenames, while the
+  documented persisted-protocol and immutable-provenance exceptions still
+  pass;
+- during implementation run only the smallest discriminating workflow-asset
+  tests and direct validator. At closure run `make test-workflow-assets`, exact
+  rebuilt-wheel ten-asset parity, JSON/plugin metadata validation,
+  `git diff --check` and complete seven-path self-review. Carry forward the
+  unaffected contracts/controller/workers/integrations partitions and prior
+  488-test broad gate; do not rerun the full suite or provider sentinel; and
+- self-review and one subsequent Luna XHigh objective recheck plus one Sol
+  Medium architecture recheck of the same repaired digest each report
+  P0=0/P1=0 before H6-G becomes ready.
+
+This repair is the sole mutable milestone. The pending successor dependency is
+an `acceptance dependency`: H6-G consumes the promoted controller-facing
+schema, routing and naming contracts. Read-only reviewer contexts may run in
+parallel only after the repaired digest freezes.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close the exact workflow schema authority, plugin entrypoint and descriptive-name "
+        "gate findings without adding a parallel contract, alias or runtime surface."
+    ),
+    decomposition=(
+        "Make capsule and result schemas exact closed projections of their authoritative typed parsers.",
+        "Make the plugin manifest select workflow-control normally and handoff only when explicitly requested for legacy comparison.",
+        "Connect semantic identifier and content-name checks to the promotion validator with focused adversarial proof.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Schema acceptance and typed parser acceptance are bidirectionally aligned with no alternate branch.",
+        "The plugin default prompt exposes one normal controller entrypoint and an explicit-only legacy handoff route.",
+        "The top-level gate rejects prohibited durable identifiers and preserves only documented protocol/provenance exceptions.",
+        "Focused workflow assets, direct validation, rebuilt exact-wheel parity, diff hygiene and self-review pass with P0/P1 zero.",
+    ),
+    mutable_surfaces=(
+        "schemas/capsule.schema.json and schemas/result.schema.json",
+        "plugins/personal-workflow-skills/.codex-plugin/plugin.json",
+        "scripts/validate.py",
+        "tests/test_workflow_assets.py and tests/test_descriptive_naming.py",
+        "docs/reviews/evidence/workflow-skill-contracts.json",
+    ),
+    protected_surfaces=(
+        "typed runtime contracts and descriptive naming implementation",
+        "all other schemas, skills, templates, fixtures, configuration and metadata",
+        "runtime controller, ledger, supervisor, SDK, worker, IPC, service and CLI",
+        "canonical plan and AGENTS instructions",
+        "H6-G and later milestones, global Codex/App state and unrelated dirty changes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only workflow-contract-authority-closure in the existing dirty "
+        "python-sdk-controller worktree. Preserve unrelated changes. Implement the fixed seven-path "
+        "forward-only architecture and close the three exact-candidate P1 findings. Use no aliases, "
+        "alternate schema branches, new artifacts, peers/subagents/worktrees/commits, App/global mutation "
+        "or provider sentinel. Run proportional focused and exact-wheel gates, retain sanitized evidence, "
+        "self-review the complete owned diff and send one terminal callback to the planning controller."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+Candidate `69f8f10b0558c400bb8ff524f21c32000df20be811a79862ec83b27dd52e68d9`
+and wheel `a1b954b5ecce5a1d1988daa5a0388ab62c46197bb9dcd9247af1d7a5c181fe13`
+closed the alternate top-level branches, current manifest wording and first
+naming bypasses, but both exact-candidate rechecks returned `DO_NOT_PROMOTE`.
+Objective found two P1 and architecture found four P1. The unique surviving
+classes are: non-expressible cross-field schema/parser differences plus local
+string/count mismatches; a contradictory manifest prompt that defeats substring
+checks; hard-coded/incomplete Python, graph and evidence naming coverage; and a
+candidate digest omitting `tests/test_descriptive_naming.py`.
+
+This is same-class non-convergence after the Luna implementation and repair
+cycle. The bounded continuation routes to one fresh Sol Medium recovery owner
+and changes implementation shape without weakening ownership, routing, naming,
+privacy or acceptance outcomes.
+
+## Retained execution — typed-workflow-boundary-convergence
+
+Outcome: replace the cross-field JSON projection with one locally enforceable,
+forward-only shape so static schemas, Python parsers, generated SDK schemas and
+controller projection accept exactly the same values. No deprecated key,
+old-shape alias, compatibility branch or second cognitive schema survives.
+
+The recovery owner reproduced one protected-boundary conflict before creating
+controller state: the existing `validate_output_schema` vocabulary rejects the
+bounded Draft constraints required by the exact canonical generated result
+schema. A metadata/constraint-stripping SDK projection would recreate the
+forbidden second schema authority. This bounded replan therefore adds the
+existing domain validator and its focused `ExecutionCapsule` tests to the same
+mutable owner; it does not change the frozen serialization shape or authorize a
+general JSON Schema engine.
+
+Frozen serialized capsule shape (shown as an indented data example so the
+active plan section retains exactly one Python capsule fence):
+
+    {
+      "schema_version": 1,
+      "objective": "...",
+      "decomposition": ["..."],
+      "acceptance_criteria": ["..."],
+      "surfaces": {"src/example.py": "mutable", "src/stable.py": "protected"},
+      "acceptance": {"objective": "code-reviewer", "architecture": "architecture-reviewer"},
+      "prompt": "...",
+      "recovery_policy": "completion_biased"
+    }
+
+Architecture decisions:
+
+- `surfaces` is one closed object of bounded semantic surface keys with values
+  `mutable` or `protected`; object-key uniqueness makes overlap
+  unrepresentable. The total map is bounded to 128. The Python type may retain
+  ergonomic internal mutable/protected tuples, but JSON uses only this map.
+- `acceptance` is one closed object keyed by the three supported modes. Each
+  property has its canonical configured role (`code-reviewer`,
+  `visual-reviewer`, `architecture-reviewer`). Separate serialized
+  `acceptance_modes` and `authorities` disappear, making missing coverage and
+  duplicate roles unrepresentable. The internal type rejects noncanonical role
+  mappings before projection.
+- `prompt_budget_bytes` is removed from model-authored JSON. The plan/compiler
+  still bounds measured prompt bytes, while runtime/transport budgets remain
+  controller-owned. The schema applies one fixed prompt-length bound and the
+  raw decoder retains its byte ceiling, so no schema-valid value is rejected
+  because of a model-selected cross-field budget.
+- Every serialized text and text array uses one identical non-empty,
+  non-whitespace, NUL-free and maximum-length predicate in Python and schema.
+  Arrays use the same uniqueness and 128-item maximum. Result validations use
+  that same maximum. Regexes cannot use the permissive `$` anchor.
+- Static `schemas/{capsule,result}.schema.json` and generated
+  `model_facing_{capsule,result}_schema()` are structurally equal after JSON
+  decoding. CLI/SDK output schema, packaged assets and parsers therefore expose
+  one contract without a new generated file.
+- `src/codex_flow/domain.py::validate_output_schema` remains the single
+  execution-boundary validator and accepts the exact bounded Draft 2020-12
+  vocabulary used by those canonical schemas. The supported vocabulary is
+  limited to schema metadata (`$schema`, `$id`, `title`, and `description` when
+  emitted by the canonical generator), `type`, `properties`, `required`,
+  `additionalProperties`, `propertyNames`, `items`, `const`, `enum`,
+  `minLength`, `maxLength`, `pattern`, `minItems`, `maxItems`, `uniqueItems`,
+  `minProperties`, and `maxProperties`. It is not a general permissive schema
+  engine: unknown keywords and composition/reference keywords fail closed.
+- The validator recursively checks each keyword's JSON type, bounds,
+  applicability and child schema. Explicit record objects still require every
+  declared property and set `additionalProperties` to false. Bounded semantic
+  maps may instead combine a validated `propertyNames` schema with a validated
+  schema-valued `additionalProperties` and explicit property-count bounds;
+  `additionalProperties: true` and otherwise open object shapes remain
+  invalid. Arrays require an item schema and enforce their declared bounded
+  count/uniqueness constraints. Scalar `const`, `enum`, string bounds/patterns
+  and nullable unions must remain compatible with the declared type.
+- `ExecutionCapsule` accepts the exact generated result schema through that
+  validator before any controller state is created. There is no metadata- or
+  constraint-stripping transport projection: the same schema bytes/structure
+  reach the SDK/controller output-schema boundary.
+
+Implementation architecture map:
+
+- `modify src/codex_flow/contracts.py`: exact forward-only JSON projection,
+  canonical acceptance mapping, aligned string/item bounds and validation count.
+- `modify src/codex_flow/projection.py`: accept only the new keys, preserve
+  controller-owned budgets and consume canonical typed authorities without a
+  second role mapping contract.
+- `modify src/codex_flow/domain.py`: extend the one closed recursive
+  `validate_output_schema` authority only with the bounded canonical Draft
+  vocabulary above; preserve depth/property/byte limits and fail-closed
+  `ExecutionCapsule` construction before state mutation.
+- `modify schemas/capsule.schema.json` and `schemas/result.schema.json`: encode
+  exactly the shape and bounds above with stable semantic schema ids.
+- `modify plugins/personal-workflow-skills/.codex-plugin/plugin.json`: retain
+  correct route intent using one validator-owned canonical default prompt.
+- `modify scripts/validate.py`: compare manifest prompt by exact canonical
+  equality; compare static/generated schemas structurally; exercise a bounded
+  per-field adversarial round-trip matrix; AST-scan every changed repository
+  Python file; validate every graph identity projection (`id`, `owner`,
+  dependencies, `current_readiness` keys, serial-edge endpoints, parallel
+  groups, `critical_path`, `fan_out_after`, primary identifiers and path
+  owners); scan every changed evidence JSON unless it is in an explicit
+  immutable accepted-evidence allowlist; and validate mutable evidence paths,
+  keys and generated filenames without arbitrary prose scanning or a second
+  naming implementation.
+- `modify tests/test_model_facing_projection.py` and
+  `tests/test_workflow_control.py`: migrate callers to the forward-only JSON
+  shape and prove low-level controller/CLI rejection is mutation-free.
+- `modify tests/test_controller_execution.py`: prove `ExecutionCapsule`
+  accepts the exact generated canonical result schema, rejects malformed
+  keyword types, unsupported keywords and open objects before state creation,
+  and preserves recursive metadata, property-name, enum/const, string,
+  object-bound and array-bound constraints without a reduced projection.
+- `modify tests/test_workflow_assets.py` and
+  `tests/test_descriptive_naming.py`: cover exact bidirectional constraints,
+  contradictory manifest text, every graph identity position, arbitrary
+  changed Python, mutable evidence/provenance and generated names.
+- `modify docs/reviews/evidence/workflow-skill-contracts.json`: update exact
+  candidate scope, gates and wheel identity; remain self-excluded.
+
+`RECONCILIATION_CANDIDATE_PATHS` expands from 34 to exactly 41 paths by adding
+`src/codex_flow/contracts.py`, `src/codex_flow/projection.py`,
+`tests/test_model_facing_projection.py`, `tests/test_workflow_control.py` and
+`tests/test_descriptive_naming.py`, plus `src/codex_flow/domain.py` and
+`tests/test_controller_execution.py`. Every mutable implementation/test path
+is therefore frozen by the same sorted path-NUL-bytes digest.
+
+Mutable ownership is limited to those thirteen paths under the existing Sol
+Medium recovery owner. All other runtime modules, schemas,
+skills/templates/config, partition manifest, plan fixture, marketplace
+metadata, canonical plan/`AGENTS.md`, accepted evidence, H6-G onward, global
+Codex/App state and unrelated changes are protected. New durable artifact
+budget is zero. `ExecutionCapsule` construction may change only through the
+bounded validator extension above; changing its persisted/public shape,
+ledger/controller persistence, public CLI commands or schema ids, or adding an
+alias/module/class/runner/registry/entrypoint requires bounded replanning.
+
+Acceptance modes are `objective` and `architecture`. Acceptance requires:
+
+- a bounded adversarial matrix proves both directions for every capsule/result
+  field: every schema-valid value parses/re-projects identically, typed
+  projections validate, and wrong types/bounds, NUL/whitespace, extra/old keys,
+  noncanonical acceptance mappings and invalid statuses fail;
+- overlap, duplicate authority roles and prompt-budget disagreement are
+  unrepresentable in JSON while controller ownership and byte budgets remain;
+- exact manifest equality prevents contradictory direct-handoff defaults while
+  the dedicated legacy/comparison route remains truthful;
+- the top-level validator rejects coupled names in any changed Python/test,
+  every graph identity position, every new/mutable evidence path/key/generated
+  filename and schema metadata, with only explicit immutable/protocol exceptions;
+- canonical generated capsule/result schemas pass the bounded output-schema
+  validator unchanged, including recursive metadata, `propertyNames`,
+  enum/const, bounds, patterns and array constraints; malformed keyword types,
+  unsupported keywords and open objects fail before any controller state;
+- changing any implementation or regression proof changes the 41-path digest;
+- implementation uses focused tests, then closure runs affected `contracts`,
+  `controller` and `workflow-assets` partitions and one full `make check`
+  because shared contracts/schemas/CLI schema/packaging change. Rebuild/install
+  the exact wheel in fresh Python 3.12, prove generated/static schema and ten-
+  asset parity, validate plugin/JSON, run `git diff --check`, and self-review the
+  thirteen-path diff with P0/P1 zero. The provider sentinel is not rerun; and
+- subsequent Luna XHigh objective and Sol Medium architecture rechecks of the
+  same digest both return P0=0/P1=0 before H6-G becomes ready.
+
+The dependency to H6-G is an `acceptance dependency`. This is the sole mutable
+milestone; the two later reviews may run in parallel read-only after freeze.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Converge the typed, schema, routing and naming boundary with one locally "
+        "enforceable forward-only projection and complete candidate identity."
+    ),
+    decomposition=(
+        "Replace cross-field capsule JSON with canonical acceptance and surface maps while retaining controller-owned budgets.",
+        "Make static schemas, generated SDK schemas and typed parsers bidirectionally exact.",
+        "Extend the single execution output-schema validator with only the bounded canonical Draft vocabulary and prove unchanged SDK reachability.",
+        "Make manifest and naming gates canonical and complete the candidate digest.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The adversarial matrix proves schema/parser equality and the old JSON shape is unreachable without aliases.",
+        "ExecutionCapsule accepts the exact generated result schema while unsupported or open schemas fail before state creation.",
+        "One canonical manifest prompt and one naming authority close every reproduced bypass.",
+        "The 41-path digest includes every implementation and test surface except self-excluded evidence.",
+        "Affected partitions, full make check, exact-wheel gates and self-review pass with P0/P1 zero.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/contracts.py, src/codex_flow/projection.py and src/codex_flow/domain.py",
+        "schemas/capsule.schema.json and schemas/result.schema.json",
+        "plugins/personal-workflow-skills/.codex-plugin/plugin.json and scripts/validate.py",
+        "tests/test_model_facing_projection.py, tests/test_workflow_control.py, tests/test_controller_execution.py, tests/test_workflow_assets.py and tests/test_descriptive_naming.py",
+        "docs/reviews/evidence/workflow-skill-contracts.json",
+    ),
+    protected_surfaces=(
+        "all other runtime, schema, skill, template, config, fixture and metadata paths",
+        "ExecutionCapsule persisted/public shape, ledger/controller persistence and public CLI commands",
+        "canonical plan and AGENTS instructions",
+        "accepted evidence, H6-G onward, global Codex/App state and unrelated changes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only typed-workflow-boundary-convergence in the existing dirty "
+        "python-sdk-controller worktree as the existing Sol Medium recovery owner. Implement the fixed "
+        "thirteen-path forward-only redesign including the bounded canonical output-schema validator, "
+        "preserve unrelated changes, add no aliases or artifacts, "
+        "run proportional then required shared-contract gates, retain sanitized evidence and send one callback."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+Candidate `63af585f760b29b0a53f079101a61d11d5282b136d096e9ac9533c7f8b0fb267`
+and exact wheel
+`cd8d747638f7c8f849622596619990f09063a94c5bc70f9829a5f394b1620512`
+passed 46 contract tests, 347 controller tests, 56 workflow-asset tests and one
+525-test `make check`. The independent Luna XHigh objective review nevertheless
+returned `DO_NOT_PROMOTE`, P0=0/P1=4/P2=0. It proved that bounded property
+counts could make named record properties optional; the SDK decoded only a
+reduced subset of the accepted schema vocabulary and crashed on semantic maps;
+the top-level naming gate scanned a fixed candidate list and blanket-exempted
+mutable evidence; and the active plan section contained a non-Python fence that
+made normal canonical-plan compilation unreachable. The non-Python fence is a
+controller-owned plan defect and is already removed. This candidate remains
+retained evidence and is not promotable.
+
+## Retained execution — structured-output-runtime-and-naming-closure
+
+Outcome: one bounded schema authority validates both the accepted schema and
+the decoded JSON instance at the production SDK boundary, every changed durable
+identifier is promotion-gate reachable, and the exact canonical plan capsule is
+compilable through normal `workflow-control`. No reduced decoder, alternate
+schema, compatibility branch or milestone-coupled artifact survives.
+
+Current promotion state: previous candidate
+`ecd7bcd4a75dcc4694c14c371d28ba0c87b73b28b545f1b0c25ea4ec116a1119`
+was `DO_NOT_PROMOTE` because of nullable-scalar constraint bypass,
+serialized-text equality and an unavailable exact wheel. Those findings are
+repaired in candidate
+`278cea0530ca43acba00e3cc7ba1b232f2f749f89706e3e632e45d7ed0d0933e`,
+whose objective recheck then found one large-integer `math.isfinite()` P1. The
+one Sol High escalation has closed that finding in candidate
+`fd9331c855d8352febc84ad56df142aec1bc7864f07fcd07d0b582321860996d`.
+Its exact nonsymlinked 259769-byte wheel is retained at
+`dist/structured-output-runtime/codex_flow-0.2.0-py3-none-any.whl` with SHA-256
+`fea94483f8c0a834ba139612603a223868a536a1837bdb03a02e20319780815a`.
+Promotion state: `PROMOTED` for exactly candidate
+`fd9331c855d8352febc84ad56df142aec1bc7864f07fcd07d0b582321860996d`
+and retained wheel
+`fea94483f8c0a834ba139612603a223868a536a1837bdb03a02e20319780815a`.
+The final independent Luna XHigh objective and Sol Medium architecture reviews
+both returned `APPROVED` with P0=0/P1=0/P2=0. This closes the structured-output,
+runtime-schema, naming and workflow-contract authority prerequisite and unlocks
+only `outcome-evidence-priority-contract`; H6-G remains behind that dependency.
+
+Architecture map and dependency direction:
+
+- `modify src/codex_flow/domain.py`: `validate_output_schema` remains the only
+  bounded Draft schema-vocabulary authority and named records always require
+  exactly every declared property, irrespective of property-count bounds. Add
+  one private `_json_schema_instance_equal(left, right)` predicate shared by
+  schema enum-uniqueness and instance `const`/`enum`/`uniqueItems` checks. It
+  follows Draft 2020-12 instance equality recursively: booleans remain distinct
+  from numbers, mathematically equal finite integers/floats such as `1` and
+  `1.0` compare equal, arrays compare positionally and objects compare by the
+  same string keys and recursively equal values independent of member order;
+  serialized-text fingerprints are forbidden. Keep the semantic
+  `validate_structured_output(value, schema)` function as the single instance
+  authority: it first validates the schema and then recursively enforces the
+  same `type`, `const`, `enum`, string pattern/bounds, object bounds,
+  explicit-record,
+  `propertyNames`, schema-valued `additionalProperties`, array bounds and
+  `uniqueItems` rules against decoded JSON. For scalar unions it selects the
+  matching declared type and continues through that type's applicable
+  constraints; `null` short-circuits only when the actual value is null, so a
+  nullable string still enforces `minLength`, `maxLength` and `pattern` for its
+  string instances. Preserve existing depth, property, item and byte ceilings.
+  This module imports no SDK, `jsonschema` runtime dependency or model-facing
+  contract.
+- `modify src/codex_flow/backends/codex_sdk.py`: remove the private reduced
+  `_type_matches`/`_validate_decoded_schema` interpretation and call
+  `validate_structured_output` after strict bounded JSON decoding. The adapter
+  remains the raw SDK conversion boundary and returns the unchanged decoded
+  object; it does not define schema semantics or a second result model.
+- `modify src/codex_flow/descriptive_naming.py`: remove the directory-wide
+  evidence exemption. `validate_path_name` and `validate_changed_names` accept
+  only caller-supplied exact immutable/protocol exceptions; ordinary mutable
+  evidence paths use the same semantic naming rules as every other durable
+  artifact.
+- `modify src/codex_flow/contracts.py`: delete the noncanonical public
+  `ModelCapsule` and `ModelResult` assignments and exports. The only public
+  model-facing serialization types are `ModelFacingCapsule` and
+  `ModelFacingResult`; add no alias, shim or compatibility branch.
+- `modify scripts/validate.py`: keep the exact immutable accepted-evidence
+  allowlist at the top-level repository policy boundary, pass it explicitly to
+  the naming authority and feed the complete `changed_paths_from_git()` result
+  to structured-content validation. `RECONCILIATION_CANDIDATE_PATHS` identifies
+  candidate bytes only; it is never a scan allowlist.
+- `modify tests/test_controller_execution.py`: reject named optional records
+  before any controller state, retain valid bounded records/maps, reject
+  numeric-equivalent duplicate enum members and prove boolean/number values
+  remain distinct under the domain equality predicate.
+- `modify tests/test_codex_sdk_adapter.py`: exercise every supported canonical
+  keyword against decoded values, including invalid result const/enum/text and
+  duplicate arrays, plus positive and negative bounded semantic maps. Add a
+  focused table checked against the development-only `Draft202012Validator`
+  covering nullable string bounds/pattern, numeric `const`, numeric enum
+  membership, `uniqueItems`, boolean-versus-number and nested array/object
+  equality. Prove the removed private reduced decoder has no remaining call
+  path; production code does not import the oracle library.
+- `modify tests/test_descriptive_naming.py`: drive the top-level gate with
+  arbitrary changed Python and mutable evidence paths; prove only exact
+  immutable/protocol exceptions survive and arbitrary prose is still ignored.
+- `modify tests/test_plan_compilation.py`: compile this exact active milestone
+  from the real canonical plan and reject an injected non-Python fence.
+- `modify tests/test_model_facing_projection.py`: prove the removed aliases are
+  absent from module attributes and `__all__`, cannot be imported and are not
+  present in the exact installed wheel, while canonical model-facing imports
+  remain usable.
+- `modify docs/reviews/evidence/workflow-skill-contracts.json`: retain sanitized
+  exact candidate, focused/broad gates and wheel facts; remain self-excluded.
+  Record one repository-local ignored retention path
+  `dist/structured-output-runtime/codex_flow-0.2.0-py3-none-any.whl`, its exact
+  SHA-256 and byte size. The retained artifact must remain present and
+  byte-identical through both independent reviews; a temporary build/install
+  path or another wheel with the same filename is not acceptable evidence.
+
+Preserve `projection.py`, both canonical static schemas, `plan_capsule.py`,
+controller/ledger/supervisor/worker/IPC/service/CLI,
+plugin/skill/template/config surfaces, accepted evidence, H6-G onward and all
+unrelated dirty changes. Dependency direction is
+`domain schema/value authority -> SDK adapter -> typed result consumer`; the
+naming authority flows into the repository validator, never back into runtime.
+No production module, public canonical class, schema, registry, runner or
+entrypoint is created or removed. The two noncanonical aliases are removed
+forward-only. New tracked durable artifact budget is zero. The one ignored
+wheel retained below `dist/structured-output-runtime/` is review evidence, not
+a new production path or serialization authority. Existing stale wheels are
+protected: do not delete, overwrite, install, inspect as a substitute or report
+them as candidate artifacts.
+
+The candidate digest expands from 41 to exactly 45 sorted path-NUL-bytes paths
+by adding `src/codex_flow/backends/codex_sdk.py`,
+`src/codex_flow/descriptive_naming.py`, `tests/test_codex_sdk_adapter.py` and
+`tests/test_plan_compilation.py`. `src/codex_flow/contracts.py` and
+`tests/test_model_facing_projection.py` were already members of the original
+41-path boundary, so the digest remains exactly 45 paths. Every mutable
+implementation/test path is therefore frozen; the evidence record remains the
+only self-exclusion.
+
+Current Sol High escalation ownership overrides the historical eleven-path
+implementation map for this final repair. The first focused implementation
+proved that the protected plan-compilation test still asserted the historical
+eleven-path ownership, so the controller authorizes that one necessary contract
+update. Mutable ownership is exactly four paths:
+
+- `modify src/codex_flow/domain.py`: add the private semantic predicate
+  `_is_finite_json_number(value)`. It rejects booleans and non-numbers, accepts
+  every Python `int` without converting it to float, and calls
+  `math.isfinite()` only for `float`. Reuse it in
+  `_json_schema_instance_equal`, schema `value_matches_type` and instance
+  `type_matches`; no direct `math.isfinite()` call remains on an `int | float`
+  union. Do not invent a numeric magnitude limit: the existing strict JSON,
+  schema depth/cardinality and one-megabyte structured-output bounds remain the
+  resource authority.
+- `modify tests/test_codex_sdk_adapter.py`: add a 400-digit integer under a
+  bounded `type: number` record and prove `Draft202012Validator`,
+  `validate_structured_output` and `_decode_schema_output` all accept the exact
+  value without coercion. Add the same magnitude to `const`/`enum` equality and
+  retain boolean/number separation; no provider call is permitted.
+- `modify tests/test_plan_compilation.py`: update only
+  `test_active_structured_output_closure_capsule_compiles_from_canonical_plan`
+  so it asserts the authoritative four-path escalation capsule and its exact
+  ordered surfaces instead of the obsolete length `11`. Preserve every other
+  plan-compiler adversary and do not weaken the one-active-capsule contract.
+- `modify docs/reviews/evidence/workflow-skill-contracts.json`: update the exact
+  candidate, proportional gates and retained-wheel path/hash/size; remain the
+  sole self-exclusion.
+
+The other seven formerly mutable implementation/test paths are now protected
+frozen candidate bytes. The retained wheel path is milestone-owned and may be
+atomically replaced only by the fresh wheel for the repaired candidate after
+its bytes pass verification; the protected stale root wheel/sdist remain
+untouched. New tracked artifact budget remains zero and the candidate identity
+still frames the same 45 paths.
+
+Acceptance modes are `objective` and `architecture`. Acceptance requires:
+
+- named record `required` keys equal declared `properties` exactly even when
+  object bounds are present; bounded semantic maps remain independently valid;
+- every schema accepted by `validate_output_schema` has all supported
+  constraints enforced against decoded SDK JSON by the same domain authority,
+  and invalid values fail terminally before typed result ingestion or durable
+  result mutation;
+- nullable scalar unions enforce every applicable constraint on the selected
+  non-null type, and Draft instance equality—not JSON text identity—governs
+  schema enum uniqueness plus instance `const`, `enum` and `uniqueItems`;
+- arbitrary JSON integers accepted within the existing byte bound satisfy
+  `integer` and `number` without float conversion or `OverflowError`, retain
+  their exact value through the SDK boundary and participate in Draft equality;
+- canonical capsule/result schemas and normal SDK structured output pass
+  unchanged, without stripping metadata/constraints or introducing another
+  schema/value decoder;
+- `ModelCapsule` and `ModelResult` are absent from module attributes, `__all__`,
+  imports and the exact installed wheel; no deprecated alias or compatibility
+  shim replaces them;
+- arbitrary changed Python identifiers, mutable evidence paths/keys/generated
+  filenames and all graph/schema identities fail the naming gate when coupled;
+  only exact documented immutable/protocol exceptions remain;
+- `compile_canonical_plan(...,
+  "structured-output-runtime-and-naming-closure")` succeeds on this plan and
+  the section contains exactly one Python capsule fence;
+- one fresh Python 3.12 wheel is built directly into and retained at
+  `dist/structured-output-runtime/codex_flow-0.2.0-py3-none-any.whl`; evidence
+  records its exact path/hash/size, an install uses that exact byte artifact,
+  canonical imports/assets/schemas match, removed aliases remain absent, and
+  both independent reviewers can hash and inspect the same retained file;
+- implementation uses only focused discriminating tests while repairing. At
+  closure run the focused large-integer/Draft discriminator, the contracts
+  partition and the controller output-schema selection only. Carry the prior
+  538-test broad gate and unaffected partitions forward because this repair
+  changes one private number predicate and one focused test; rerun a broad gate
+  only if the actual diff escapes those four owned paths or a focused failure
+  proves wider impact. Build/install the retained exact fresh Python 3.12 wheel,
+  verify the packaged schemas/assets and SDK import path, run `git diff --check`, and
+  self-review the four current mutable paths plus the complete eleven-path
+  milestone boundary with P0/P1 zero. Do not rerun the
+  consumed provider sentinel; and
+- one subsequent Luna XHigh objective and one independent Sol Medium
+  architecture recheck of the same 45-path digest both return P0=0/P1=0 before
+  H6-G becomes ready.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close the structured-output runtime and durable-naming boundary so one bounded "
+        "authority governs schema acceptance, decoded values and exact promotion reachability."
+    ),
+    decomposition=(
+        "Use one domain schema-instance authority and remove the SDK's reduced decoder.",
+        "Require exact named records while preserving bounded semantic-map behavior.",
+        "Apply nullable scalar constraints to the selected type and use exact Draft JSON instance equality.",
+        "Accept bounded arbitrary-size JSON integers without float conversion or numeric coercion.",
+        "Make descriptive-name enforcement follow every real changed durable surface with explicit exceptions only.",
+        "Remove the noncanonical model-facing aliases without a compatibility shim.",
+        "Prove the exact canonical plan compiles through the normal controller entrypoint.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Every accepted canonical schema constraint is enforced on decoded SDK JSON before typed or durable ingestion.",
+        "Named records cannot become optional through bounds, and semantic maps no longer crash or bypass validation.",
+        "Nullable strings and numeric-equivalent JSON instances match Draft 2020-12 behavior at schema and SDK boundaries.",
+        "A 400-digit integer remains an exact valid number through schema validation, SDK decoding, const and enum checks.",
+        "Every real changed Python and mutable evidence identifier reaches the naming gate with exact exceptions only.",
+        "Only ModelFacingCapsule and ModelFacingResult remain as public model-facing serialization types.",
+        "The exact retained wheel remains available at its semantic evidence path for both independent reviews.",
+        "The active capsule compiles, the 45-path digest is exact, required gates pass and self-review has P0/P1 zero.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_plan_compilation.py",
+        "docs/reviews/evidence/workflow-skill-contracts.json",
+    ),
+    protected_surfaces=(
+        "the other seven frozen milestone implementation and test paths",
+        "SDK adapter, contracts, projection, schemas, naming authority, validator and plan compiler",
+        "ledger, controller, supervisor, worker, IPC, service, CLI and public entrypoints",
+        "plugins, skills, templates, configuration and accepted evidence outside the owned record",
+        "canonical plan outside this controller-owned repair section, H6-G onward and unrelated dirty changes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only structured-output-runtime-and-naming-closure in the existing dirty "
+        "python-sdk-controller worktree. This is the one Sol High non-convergence escalation. Modify exactly domain.py, "
+        "test_codex_sdk_adapter.py, the one stale plan-compilation assertion and the reconciliation evidence. Add "
+        "_is_finite_json_number so ints never pass through "
+        "math.isfinite, floats remain finite-only and Draft equality/type checks preserve a 400-digit integer exactly. Add "
+        "the frozen provider-free oracle regression. Run focused discriminators, the contracts partition and controller "
+        "output-schema selection; carry broad/unaffected gates unless the actual diff proves wider impact. Atomically replace "
+        "only the retained semantic wheel with the verified repaired wheel and leave stale root artifacts untouched. Preserve "
+        "every other dirty byte, add no artifact or alias, do not rerun the provider sentinel or start the follow-up/H6-G. "
+        "Retain sanitized evidence, self-review the four-path delta and complete milestone boundary with P0/P1 zero, then "
+        "send one terminal callback to the planning controller."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+## Retained execution — outcome-evidence-priority-contract
+
+Outcome: planning, execution and review skills preserve the accepted behavior,
+safety/integrity guarantees and observable proof when optimizing secondary
+metrics. A line, file, duration, token, coverage, complexity, score or inventory
+target remains subordinate to the outcome it is intended to support.
+
+This follow-up is an `acceptance dependency` after
+`structured-output-runtime-and-naming-closure`: the exact candidate digest under
+review includes the skill/template paths, so changing them earlier would
+invalidate its promotion evidence. It precedes H6-G so later executors consume
+the corrected decision rule. It is a separate requirement added after the
+first green workflow-contract gate and is not folded into the runtime repair.
+Its `Next queued execution` heading is intentionally non-compilable by the
+single-active-capsule compiler. After the outstanding objective approval, the
+controller changes the promoted closure heading to `Retained execution` and
+this heading to `Next execution` before handoff; there is never more than one
+compiler-active capsule.
+
+Frozen decision hierarchy:
+
+1. accepted observable outcome and user intent;
+2. safety, integrity, lineage, isolation, recovery and production-proof
+   guarantees required for that outcome;
+3. explicit external hard constraints such as a legal, protocol,
+   compatibility or deployment ceiling; and
+4. optimization targets and proxy metrics such as line/file counts, duration,
+   tokens, coverage percentages, scores or inventory counts.
+
+A lower-priority item never authorizes weakening a higher-priority item. A
+numeric target is an optimization target unless the user or accepted plan
+explicitly marks it as a hard external constraint and records the resolution
+policy for conflict. Even a hard constraint does not authorize silent deletion
+of required validation or evidence: when the two cannot coexist, stop that
+implementation approach and return a bounded replan or genuine decision
+request. Do not report success merely because the proxy target is exact.
+
+Implementation architecture map:
+
+- `modify plugins/personal-workflow-skills/skills/plan-work/SKILL.md`: require
+  every plan to distinguish primary outcome/guarantees, hard external
+  constraints and secondary optimization metrics; record which verification
+  gates are non-negotiable and the conflict policy for every hard cap.
+- `modify plugins/personal-workflow-skills/skills/execute-milestone/SKILL.md`:
+  forbid deleting or weakening required production, persisted-artifact,
+  lineage, isolation, recovery or independent-proof checks to meet a proxy;
+  require proof-preserving replacement before removing a check and replan when
+  a hard target conflicts with acceptance.
+- `modify plugins/personal-workflow-skills/skills/review-work/SKILL.md`: treat
+  proxy-target success accompanied by lost semantic proof as a
+  promotion-blocking outcome regression, and challenge disproportionate proxy
+  constraints without weakening the primary guarantee.
+- `modify templates/AGENTS.md`: publish the same compact outcome/evidence
+  priority invariant for repositories consuming the workflow template.
+- `modify tests/test_workflow_assets.py`: verify the three packaged skills and
+  template expose one consistent priority contract. Add the descriptive tests
+  `test_outcome_evidence_priority_contract_is_consistent` and
+  `test_hard_line_cap_requires_proof_preservation_or_replan`; do not create a
+  wording-only second policy implementation or pretend these non-wheel plugin
+  assets are part of the Python wheel.
+- `modify scripts/validate.py`: make the reconciliation record an explicitly
+  historical promoted-evidence contract. A `promoted` record validates its
+  closed shape, digest syntax, inventory structure and repository-relative
+  required paths, recorded review facts, and the retained wheel's current
+  path/type/hash/size/asset proof, but never compares its historical candidate
+  or inventory digests to successor source bytes. Reject unsupported statuses,
+  open keys, malformed digests, unsafe/missing inventory paths and stale or
+  missing wheel evidence. Do not create a second evidence schema, compatibility
+  alias, mutable digest snapshot or general migration framework.
+- `modify docs/reviews/evidence/workflow-skill-contracts.json`: change only the
+  lifecycle status from `passed` to `promoted`. Preserve the promoted candidate
+  digest, digest scope, inventory hashes, partition counts, review result and
+  retained-wheel facts exactly; this record must not be rewritten to claim the
+  successor skill bytes were part of the already reviewed runtime candidate.
+
+All production runtime, schemas, controller state, runners, registries,
+entrypoints, other skills, fixtures, other evidence and retained artifacts are
+protected. New artifact budget is zero. The initial five-path implementation is
+retained, but its validator failure exposed an architecture-significant
+evidence-lifecycle defect: promoted historical bytes were incorrectly required
+to equal all future source bytes. The bounded repair therefore has one fresh
+Sol Medium owner and exactly seven mutable paths, with no second evidence
+authority. Use focused workflow-asset and promoted-evidence adversaries during
+the repair, then the affected workflow-assets partition, direct validator and
+`git diff --check`. These seven paths do not change Python runtime, packaging
+metadata or declared wheel assets, so carry the exact-wheel and broad repository
+gates forward without rebuilding/rerunning them unless the actual diff proves
+that assumption false. One independent objective forward-test receives a
+realistic hard line-cap scenario with mandatory persisted-artifact,
+role-binding and typed-case checks and must preserve those guarantees or return
+a truthful replan instead of optimizing the cap. One independent architecture
+review must also confirm that promoted evidence remains historical, current
+source validation remains separate, and no mutable parallel digest authority
+was introduced. Promotion requires both authorities to return P0=0/P1=0.
+
+First implementation state: `DO_NOT_PROMOTE`. The frozen candidate SHA-256
+`07f291c0fbea2cad995f7bac9233f25784942ebc97083807e388fcae9cbd9e49`
+over exactly the seven sorted repository-relative mutable paths above, framed
+as path UTF-8 + NUL + raw bytes. The historical reconciliation record is part
+of this seven-path candidate; its embedded
+`fd9331c855d8352febc84ad56df142aec1bc7864f07fcd07d0b582321860996d`
+digest remains the distinct promoted runtime candidate and must not be updated
+to the successor digest. Focused implementation evidence is 17 adversaries,
+77 workflow-assets tests, direct validator, focused Ruff and diff hygiene all
+passing. Its fresh Luna XHigh objective review returned P0=0/P1=2: the
+9,120-versus-8,900 test computed a local arithmetic answer without exercising
+an enforceable workflow decision boundary, and promoted evidence accepted a
+truncated or valid-digest-substituted inventory because it had no immutable
+inventory commitment. The architecture review was deliberately not dispatched;
+it cannot override objective blockers. H6-G remains locked.
+
+One bounded repair retains the same seven-path ownership and changes only the
+smallest necessary validator/test bytes unless the proof requires another owned
+asset adjustment:
+
+- `scripts/validate.py` owns one private structured outcome/evidence decision
+  boundary used by the top-level repository gate. It consumes a typed hard-cap
+  case with ordered named proof obligations and returns only proof-preserving
+  continuation, bounded replan, or promotion-blocking loss. Success is
+  impossible when any required obligation is absent, even when the numeric cap
+  is met; a 9,120-line case under a hard 8,900-line cap without a verified
+  proof-preserving replacement returns bounded replan. The validator reads the
+  canonical priority block from planning, execution, review and repository
+  assets and requires the same ordered policy, so the executable decision is a
+  promotion gate for those instructions rather than a disconnected test-only
+  arithmetic branch or second runtime model.
+- The same validator freezes the promoted 49-entry inventory with canonical
+  JSON commitment SHA-256
+  `18ab3d341f5920691d42c2f6d6a2ae6571cd09aed9017599a918774d439594c3`.
+  It verifies both exact cardinality and commitment after closed-shape, digest
+  and safe-path checks. This detects deletion, reordering or valid-digest
+  substitution without comparing any historical source/destination hash to
+  successor file bytes. The evidence record itself stays unchanged.
+- `tests/test_workflow_assets.py` drives the actual validator decision boundary
+  with the named persisted-DOCX reopening/recomputation, rendered-page
+  artifact-role binding and typed/validated `HarnessCase`
+  corpus/prompt/region obligations. It proves 9,120/8,900 yields bounded replan,
+  an explicit proof-preserving alternative may continue, and a missing-proof
+  negative can never return success. Separate inventory adversaries delete an
+  entry and substitute a syntactically valid digest; both must fail the exact
+  immutable commitment while legitimate successor source edits still pass.
+
+After repair, freeze a new seven-path digest and rerun one fresh Luna XHigh
+objective review. Only an objective approval permits the independent Sol Medium
+architecture review of those identical bytes. Any byte change invalidates the
+review identity.
+
+Bounded repair state: `COMPLETED`, pending fresh objective review. The new exact
+seven-path path-UTF-8 + NUL + raw-bytes candidate is SHA-256
+`b0c431c383bd8a3978957adf21c0e3f5bbeef3109f6f83a8077b921eb7cfd5a9`.
+Only `scripts/validate.py` and `tests/test_workflow_assets.py` changed relative
+to the rejected candidate; the other five owned files, historical evidence and
+retained wheel remain byte-identical. Focused repair evidence is 19 adversaries,
+79 workflow-assets tests, direct validator, focused Ruff/format and diff hygiene
+all passing with self-review P0=0/P1=0. This evidence authorizes review, not
+promotion. The fresh objective authority must independently discriminate both
+former P1s on these exact bytes before architecture review may begin.
+
+Objective promotion state: `APPROVED` for exactly candidate
+`b0c431c383bd8a3978957adf21c0e3f5bbeef3109f6f83a8077b921eb7cfd5a9`.
+The fresh Luna XHigh review returned P0=0/P1=0/P2=0 and independently closed
+both the structured hard-cap decision and immutable 49-entry inventory
+commitment findings. The only remaining promotion gate is one independent Sol
+Medium architecture review of these identical seven-path bytes. This objective
+approval alone does not promote the milestone or unlock H6-G.
+
+Architecture promotion state: `DO_NOT_PROMOTE` for candidate
+`b0c431c383bd8a3978957adf21c0e3f5bbeef3109f6f83a8077b921eb7cfd5a9`.
+The independent Sol Medium review returned P0=0/P1=2: the validator anchored
+the 49-entry inventory but accepted substitution of the enclosing promoted
+`candidate_sha256`, and proof-preserving continuation accepted a replacement
+line count without replacement-bound proof obligations. This invalidates the
+objective approval for any repaired bytes. H6-G remains locked.
+
+This is the second unsuccessful Sol Medium repair cycle on the same evidence
+immutability/proof-preservation boundary, so one fresh Sol High recovery owner
+now performs the final bounded strategy correction on the same seven owned
+paths:
+
+- Add one exact immutable promoted candidate constant
+  `fd9331c855d8352febc84ad56df142aec1bc7864f07fcd07d0b582321860996d`
+  and one exact SHA-256 commitment
+  `03c422680ae42c37b1e5367a1d3d53a41f2d5dd535d2b39d5c4a9ee811b1cb9c`
+  for the frozen 576-byte UTF-8 `candidate_digest_scope`. Validation compares
+  both fields to those anchors after syntax/shape checks. Syntactically valid
+  substitution of either field fails, while historical inventory hashes remain
+  independent of successor source bytes. The evidence file stays unchanged.
+- Split the typed hard-cap case into current-artifact proof obligations and
+  optional replacement-bound proof obligations. A replacement line count alone
+  never authorizes continuation. `proof_preserving_continuation` requires an
+  at-or-below-cap replacement plus its own exact ordered three obligations all
+  verified; missing, reordered or false replacement proofs return
+  `promotion_blocking_loss`. An over-cap current artifact with no replacement
+  still returns `bounded_replan` when its current proofs are intact.
+- Add direct top-level adversaries for valid promoted-candidate and frozen-scope
+  substitution, plus a replacement count carrying only current-artifact proofs
+  and replacement proofs that are missing, reordered or false. Preserve the
+  already green no-replacement, missing-current-proof and fully verified
+  replacement cases.
+
+No new public type, schema, artifact, evidence version, compatibility path or
+runtime policy is permitted. After this escalation, freeze a new seven-path
+digest and require fresh Luna XHigh objective plus Sol Medium architecture
+reviews. If Sol High cannot close these exact facts, return a truthful terminal
+failure rather than weakening or repeating the approach.
+
+Sol High repair state: `COMPLETED`, pending fresh promotion reviews. The new
+exact seven-path path-UTF-8 + NUL + raw-bytes candidate is SHA-256
+`eb9a28add5c2d0f9a961c54042c1891fc06cf2b57a94f095a8c0fb4d85553e88`.
+Only `scripts/validate.py` and `tests/test_workflow_assets.py` changed relative
+to the rejected architecture candidate; the other five owned paths, promoted
+historical evidence and retained wheel remain byte-identical. Focused evidence
+is 9 new adversaries, 87 workflow-assets tests, direct validator, focused
+Ruff/format and diff hygiene all passing with self-review P0=0/P1=0. Freeze
+these bytes for one fresh Luna XHigh objective review followed, only on
+approval, by one independent Sol Medium architecture review. Any byte change
+invalidates both authorities; H6-G remains locked meanwhile.
+
+Final objective promotion state: `APPROVED` for exactly candidate
+`eb9a28add5c2d0f9a961c54042c1891fc06cf2b57a94f095a8c0fb4d85553e88`.
+The fresh Luna XHigh authority returned P0=0/P1=0/P2=0 and independently
+reproduced complete historical identity pinning plus replacement-bound proof
+decisions. The only remaining promotion gate is one fresh independent Sol
+Medium architecture review of these identical seven-path bytes. H6-G remains
+locked until that authority also returns P0=0/P1=0.
+
+Final architecture promotion state: `APPROVED` for exactly the same candidate
+`eb9a28add5c2d0f9a961c54042c1891fc06cf2b57a94f095a8c0fb4d85553e88`.
+The fresh independent Sol Medium authority returned P0=0/P1=0/P2=0. The
+outcome/evidence priority contract is therefore `PROMOTED`; any byte change to
+its seven paths invalidates that promotion identity. This unlocks only the
+controller-turn-recovery architecture phase. No successor code has started.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make outcome, safety and observable proof explicitly outrank proxy optimization targets "
+        "across planning, execution, review and repository workflow instructions."
+    ),
+    decomposition=(
+        "Classify accepted outcomes, non-negotiable guarantees, hard external constraints and secondary metrics.",
+        "Require proof-preserving replacement before removing any validation or evidence gate.",
+        "Return a bounded replan when a hard cap conflicts with required behavior or proof.",
+        "Prove the contract with a realistic line-cap regression and consistent packaged workflow wording.",
+        "Exercise one structured promotion-gate decision boundary rather than a vacuous local arithmetic assertion.",
+        "Freeze the promoted historical inventory with an immutable cardinality and canonical commitment.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "No line, file, duration, token, coverage, complexity, score or inventory target can silently weaken a higher-priority outcome or guarantee.",
+        "A hard external cap records its conflict policy and produces replan rather than false success when required proof cannot fit.",
+        "The 8900-line scenario preserves persisted-artifact reopening, artifact-role binding and the typed case contract, or returns a truthful replan.",
+        "A missing required proof obligation cannot produce success even when a proxy cap is met, while a verified proof-preserving replacement may continue.",
+        "Replacement continuation is authorized only by replacement-bound ordered proof obligations, never by a replacement metric plus current-artifact proof.",
+        "Promoted reconciliation evidence remains bound to its reviewed historical candidate while legitimate successor source edits pass current validation.",
+        "The exact promoted candidate digest and frozen digest-scope commitment reject syntactically valid identity substitution.",
+        "Malformed or open evidence, truncated or substituted inventory, unsafe or missing paths, unsupported status and stale retained-wheel facts fail closed.",
+        "Exactly seven owned paths change, zero artifacts are added, focused gates pass and independent objective plus architecture reviews have P0/P1 zero.",
+    ),
+    mutable_surfaces=(
+        "plugins/personal-workflow-skills/skills/plan-work/SKILL.md",
+        "plugins/personal-workflow-skills/skills/execute-milestone/SKILL.md",
+        "plugins/personal-workflow-skills/skills/review-work/SKILL.md",
+        "templates/AGENTS.md",
+        "tests/test_workflow_assets.py",
+        "scripts/validate.py",
+        "docs/reviews/evidence/workflow-skill-contracts.json",
+    ),
+    protected_surfaces=(
+        "all Python runtime, schemas, controller state, runners, registries and entrypoints",
+        "all other skills, templates, fixtures, validators, packaging metadata and evidence",
+        "the exact promoted structured-output wheel and every unrelated dirty change",
+        "H6-G and every later milestone",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only outcome-evidence-priority-contract in the existing dirty "
+        "python-sdk-controller worktree. This is the one Sol High escalation after two unsuccessful Sol Medium cycles. "
+        "Repair candidate b0c431c3... on exactly the same seven frozen paths and add no artifact. Preserve the existing "
+        "skill contract and promoted evidence bytes. Keep one consistent "
+        "priority hierarchy: accepted outcome, required safety/integrity/proof, explicit hard external constraints, then "
+        "secondary metrics. Replace the vacuous line-cap arithmetic test with one private typed validator decision boundary "
+        "used by the top-level gate. Drive 9120/8900 through it with the three named proof obligations; require bounded "
+        "replan without a proof-preserving replacement and forbid success when any proof is missing. Freeze the historical "
+        "49-entry inventory using canonical JSON commitment 18ab3d341f5920691d42c2f6d6a2ae6571cd09aed9017599a918774d439594c3; "
+        "reject deletion and valid-digest substitution without comparing historical hashes to successor source bytes. "
+        "Anchor promoted candidate fd9331c855d8352febc84ad56df142aec1bc7864f07fcd07d0b582321860996d and the "
+        "576-byte scope commitment 03c422680ae42c37b1e5367a1d3d53a41f2d5dd535d2b39d5c4a9ee811b1cb9c. "
+        "Reject valid identity/scope substitution without current-source comparisons. Split current and replacement-bound "
+        "proof obligations: a replacement count alone or missing/reordered/false replacement proof must never continue; "
+        "only an at-cap verified replacement may. Retain existing evidence/wheel/path adversaries. Run only the focused workflow-assets partition, direct "
+        "validator and diff hygiene unless actual impact invalidates carried gates. Do not rebuild the wheel, rerun the "
+        "provider sentinel or start H6-G. Self-review with P0/P1 zero and send one terminal callback to the planning controller."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=8_000,
+)
+```
+
+## Program successors
+
+## Retained execution — controller-turn-recovery
+
+Legacy plan label: H6-G. This section retains the accepted implementation
+architecture and original capsule; implementation, bounded correctness and
+native-profile closure are complete and the exact promotion record appears
+below. The accepted outcome is unchanged: every controller callback is a
+durable decision whose effective actions and final acknowledgement survive a
+failed, interrupted, unavailable or replaced controller turn without losing
+work, duplicating effects or making the App lifecycle authority.
+
+The outcome/evidence priority rule is binding. Observable recovery correctness
+and the required integrity, idempotency, lineage, isolation and retained proof
+outrank file counts, test counts, duration or other proxies. The separate real
+SDK delayed-steer sentinel already consumed by live-worker-control remains
+`EXTERNAL_BLOCKED`; this milestone neither retries it nor treats deterministic
+controller recovery as evidence that the provider gate passed.
+
+The exact accepted inputs are frozen: outcome-evidence-priority-contract
+candidate `eb9a28add5c2d0f9a961c54042c1891fc06cf2b57a94f095a8c0fb4d85553e88`
+is `PROMOTED` with objective and architecture P0=0/P1=0/P2=0; deterministic
+live-worker/control candidate
+`b49e8da8debe577c4b3bb661bd0c1aa8ac6cab46a5161cabdd5d8b2195c15bb5`
+and exact wheel
+`44dbeaa82538c8b08e6a2210cd7e51c20591c3e94685656724f311e3aeb63603`
+have objective and architecture P0=0/P1=0/P2=0. Any change to those promoted
+surfaces is outside this capsule. Plugin parity, the human TUI and integrated
+promotion remain protected successors.
+
+### Frozen boundary decisions
+
+- SQLite remains the only durable workflow and decision authority. Wake
+  delivery, controller generation state, exclusive claim, action commit and
+  acknowledgement are distinct facts. A successful SDK call or CLI response
+  never implies a later fact.
+- The source controller and any replacement use the official shared-session
+  SDK. They never use App task APIs, App state, a private `CODEX_HOME`, copied
+  authentication, task polling or transcript prose as authority.
+- The controller model chooses intent only through one closed typed action
+  bundle. The harness claims, snapshots, validates, commits and acknowledges;
+  the model cannot write SQLite, invent a successor, create a worktree or own a
+  callback.
+- Existing terminal result closure already releases every pre-authorized
+  successor atomically in `Ledger._finalize_queue_result_in_transaction`.
+  Controller recovery preserves that invariant. It validates the immutable
+  authorized/released successor snapshot and rejects any bundle that names a
+  new, unreleased or conflicting successor; it does not add a second successor
+  scheduler or delay terminal closure behind a model turn.
+- One decision permits at most two model generations by default: the initial
+  source-controller generation and one bounded recovery/replacement generation.
+  A human claim consumes no model generation. Budget exhaustion, unverifiable
+  ownership or source-controller ambiguity closes once as
+  `human_attention_required` and cannot become an automatic approval.
+- Claims use a random capability returned only over authenticated same-UID
+  local IPC. SQLite stores its SHA-256, never the token. Model and human claims
+  use the same CAS boundary; exactly one unexpired claimant wins.
+
+### Production architecture map and artifact budget
+
+One implementation owner owns every `modify` and `create` path below. Allowed
+dependency direction is
+`domain/contracts -> ledger -> control client -> controller recovery runner ->
+supervisor/CLI`; the SDK adapter is an outer transport boundary used only by
+the runner/supervisor. Neither contracts nor the ledger import SDK, service,
+CLI or process code. The later TUI imports only the typed control client and
+domain models.
+
+- `modify src/codex_flow/domain.py`: own durable semantic identifiers, enums
+  and immutable service models. Add `ControllerDecisionId`,
+  `ControllerDecisionState`, `ControllerClaimantKind`,
+  `ControllerGenerationState`, `ControllerActionKind`,
+  `ControllerDecisionSummary`, `ControllerDecisionClaim`,
+  `ControllerDecisionStatus`, `ControllerGenerationStatus` and
+  `ControllerActionReceipt`. These types validate bounded identifiers,
+  revisions, generations, deadlines, digests and claimant state; they contain
+  no raw IPC dictionaries or transcript text.
+- `modify src/codex_flow/contracts.py`: own the model serialization boundary.
+  Add the closed schema-v1 `ModelFacingControllerAction` discriminated union,
+  `ModelFacingControllerActionBundle`, strict JSON parser/projector and
+  `model_facing_controller_action_schema()`. The bundle fields are exactly
+  `schema_version`, `decision_id`, `generation`, `action_id`,
+  `expected_revision`, `expected_successor_dispatch_ids`, `actions` and
+  `rationale`; it contains one to eight closed actions and is bounded to 32
+  KiB. No free-form fallback or second schema file is created.
+- `modify src/codex_flow/ledger.py`: remain the only SQLite/migration/state
+  writer. Add the forward-only v14-to-v15 migration, exact v15 DDL/shape and
+  row validation, decision creation/claim/lease/commit/ack/recovery methods and
+  a single transaction that validates and applies an action bundle. The ledger
+  imports no SDK/process code and performs no external side effect.
+- `modify src/codex_flow/backends/codex_sdk.py`: remain the sole raw SDK
+  envelope boundary. Add `ControllerThreadInspectionKind`,
+  `ControllerThreadInspection` and one bounded `inspect_controller_thread`
+  read. It reads the authoritative thread exactly once per persisted recovery
+  decision, returns only typed turn identity/status plus an optional strictly
+  decoded action bundle, and never returns raw transcript prose. Add the
+  supported shared-session start/resume turn seam used by the runner; exact SDK
+  not-found/failed/interrupted facts are typed, and every unknown envelope or
+  RPC remains ambiguous.
+- `create src/codex_flow/controller_recovery.py`: one responsibility only:
+  execute one bounded controller generation around the typed control client and
+  shared SDK. `ControllerGenerationRunner` claims the exact decision, reads the
+  closed durable status/activity/successor snapshot, builds a bounded prompt,
+  runs one schema-bound turn, submits its bundle and acknowledges the committed
+  receipt. `ControllerGenerationRecovery` performs one persisted-thread
+  inspection and returns one deterministic next step; it owns no SQLite access,
+  App API, polling loop, worker lifecycle or successor scheduling.
+- `modify src/codex_flow/control_client.py`: generalize the existing local
+  client without exposing wire/SQLite shapes. Keep `LiveWorkerControlClient`
+  compatible and add `ControllerDecisionClient` with typed `pending`, `status`,
+  `claim`, `renew_claim`, `submit_actions`, `acknowledge` and
+  `request_recovery` operations. The same API is the only later TUI mutation
+  boundary.
+- `modify src/codex_flow/supervisor.py`: remain the single service-time owner.
+  Convert each newly created checkpoint/terminal wake into one decision, drive
+  decision deadlines from the existing select/lease loop, spawn at most one
+  `controller-generation` subprocess per persisted generation, reap it without
+  inferring completion, expose the closed IPC operations and invoke one
+  recovery inspection only when a persisted deadline/startup fact is due.
+  Worker child/control ownership remains byte-for-byte semantically unchanged.
+- `modify src/codex_flow/cli.py`: add the semantic `controller-decision`
+  command group. Human-facing `list`, `status`, `claim`, `submit`, `acknowledge`
+  and `recover` commands call only `ControllerDecisionClient`; the private
+  `controller-generation` service entrypoint calls the runner. JSON output is
+  the typed public projection. No command accepts a ledger path or raw SQL.
+- `modify config/test-partitions.toml`: place the one new semantic recovery
+  test module in the `controller` partition and preserve exact one-partition
+  ownership.
+- `modify tests/test_ledger_integrity.py`,
+  `tests/test_codex_sdk_adapter.py`, `tests/test_supervisor_recovery.py`,
+  `tests/test_live_worker_control.py`, `tests/test_workflow_control.py` and
+  `tests/test_public_api_semantic_cutover.py`: extend existing owners only for
+  v15 migration, SDK inspection, supervisor/IPC/client/CLI integration and
+  semantic-name/public-reachability regression coverage.
+- `modify tests/test_plan_compilation.py`: replace its stale active-capsule
+  assertion with exact compilation of `controller-turn-recovery`, including
+  objective/architecture authorities, surfaces and the one-Python-fence rule.
+- `create tests/test_controller_turn_recovery.py`: one production-shaped
+  provider-free state-machine/fault/restart matrix. Do not split each fault
+  into a new fixture module.
+- `create docs/reviews/evidence/controller-turn-recovery.json`: one sanitized
+  retained record for exact candidate/wheel/service identity, migration and
+  recovery matrices, idempotency/lineage/isolation proof, affected/full gate
+  results, provider-gate separation and self-review.
+- `preserve src/codex_flow/controller.py`, `src/codex_flow/service.py`,
+  `src/codex_flow/worker.py`, `src/codex_flow/ipc.py`,
+  `src/codex_flow/native_profile.py`, `src/codex_flow/plan_capsule.py`,
+  `src/codex_flow/projection.py`, `src/codex_flow/config.py`,
+  `src/codex_flow/app_native.py`, every plugin/skill/schema/template,
+  `pyproject.toml`, `uv.lock`, `Makefile`, `AGENTS.md`, all accepted evidence
+  and every unrelated dirty byte. Existing IPC framing and the systemd unit
+  already host the supervisor and require no new production path or dependency.
+- `remove` nothing.
+
+The new-artifact budget is exactly three files: one production module, one test
+module and one evidence record. This is a secondary cap, not permission to
+collapse a required type or proof boundary. Exceeding it requires a bounded
+architecture replan with the missing guarantee identified. No new runtime
+dependency, public registry, runner, schema file, service unit or entrypoint
+outside the paths above is authorized.
+
+### SQLite v15 persistence and compatibility
+
+V15 is a serialized, crash-atomic, forward-only migration from exact v14. It
+creates `controller_decisions`, `controller_decision_generations` and
+`controller_action_outbox`, then rebuilds `wake_outbox` with one non-null unique
+`decision_id` foreign key. It updates schema version/identity and migration
+marker only after all rows and indexes are complete. Migration fault injection
+before/after every create, copy, drop and metadata update must roll back to an
+exact reopenable v14 database; reopening an exact v15 database is idempotent.
+Downgrade is unsupported: pre-v15 binaries fail on the newer schema marker and
+no down migration rewrites durable authority.
+
+`controller_decisions` is the current decision/CAS authority:
+
+- `decision_id TEXT PRIMARY KEY`, deterministically
+  `decision/<wake delivery id>`; `dispatch_id` foreign key; `kind` is
+  `checkpoint` or `terminal`; `(dispatch_id, kind)` and `decision_id` are
+  unique, preserving the existing one-wake-per-kind rule;
+- canonical bounded `summary_json` plus `summary_sha256`; source thread id;
+  state in `pending_delivery`, `awaiting_claim`, `claimed`,
+  `action_committed`, `acknowledged`, `superseded`,
+  `human_attention_required` or `legacy_closed`; monotonic `revision >= 0`;
+  `current_generation > 0`;
+  `generation_budget` in 1..2 and `generation_used` within that budget;
+- `claimant_kind` (`model` or `human`), claimant id, claim-token SHA-256 and
+  claim timestamp are all-null before first claim or all-present and immutable
+  afterwards for audit. Claim lease expiry is present only while the claim is
+  live and is cleared by a committed/acknowledged/superseded/attention
+  transition. Expiry alone never steals an active or ambiguous model
+  generation; it only makes a terminally inspected generation eligible for the
+  recovery decision below;
+- committed `action_id`, canonical action bundle JSON/SHA-256 and commit time
+  are all-null or all-present; acknowledgment time exists only after commit;
+  `superseded_at` is present only when a terminal result makes an outstanding
+  checkpoint decision obsolete; `deadline`, bounded human-attention reason and
+  created/updated timestamps are mandatory where their state requires them.
+
+`controller_decision_generations` preserves lineage rather than overwriting it:
+
+- primary key `(decision_id, generation)`, generation 1..2, stable
+  `lineage_id`, optional predecessor generation and source kind
+  (`source_controller` or `replacement_controller`);
+- state in `prepared`, `delivery_starting`, `active`, `completed`, `failed`,
+  `interrupted`, `ambiguous`, `unavailable` or `superseded`; canonical prompt
+  digest; controller thread/turn ids all-null before identity and immutable
+  afterwards; unique non-null `(controller_thread_id, controller_turn_id)`;
+- one `inspection_started_at`/`inspection_completed_at` pair and typed
+  inspection outcome. A uniqueness/check constraint makes a second read for
+  the same recovery decision impossible. Start, terminal and replacement
+  timestamps must agree with the state.
+
+`controller_action_outbox` is the immutable effect/ack audit:
+
+- `action_id` primary key, `decision_id` unique foreign key, generation,
+  expected decision revision, claimant kind/id, canonical bundle JSON and
+  SHA-256, exact effect receipt JSON/SHA-256, state `committed` or
+  `acknowledged`, committed/acknowledged timestamps and a unique
+  `(decision_id, bundle_sha256)` identity;
+- the row is inserted only in the same transaction as every effective ledger
+  mutation and the decision transition to `action_committed`. A crash cannot
+  persist an effect without its digest/receipt or an outbox row without its
+  effect. Acknowledgment is a later CAS transaction.
+
+The rebuilt `wake_outbox` retains every v14 delivery field and delivery-state
+meaning, adds `decision_id`, and adds one `suppressed` state for an undelivered
+wake pre-empted by an exact human claim. A suppressed wake has no source turn,
+is never deliverable and retains its source route only as audit. Delivery
+attempt state never doubles as a decision claim or acknowledgement. Migration
+creates a decision for every existing wake without SDK activity: pending
+delivery remains `pending_delivery`; an exhausted `failed` delivery becomes
+`human_attention_required`; delivered/not-applicable delivery becomes
+`awaiting_claim`; starting/ambiguous delivery becomes
+`human_attention_required` because the external identity window cannot be
+reconstructed; an already terminal, fully closed historical dispatch may use
+`legacy_closed`. Migration never fabricates an action, claim, controller turn
+or successor. Existing v14 ledgers without wakes receive no decision row.
+
+Required indexes are: decisions by `(state, deadline, decision_id)` and
+`(dispatch_id, kind)`; generations by `(state, decision_id, generation)` plus
+the unique non-null controller thread/turn identity; action outbox by
+`(state, committed_at, action_id)`; and the existing wake
+`UNIQUE(dispatch_id, kind)` plus new `UNIQUE(decision_id)`. All three new tables
+foreign-key to their owning dispatch/decision with `ON DELETE CASCADE`; no row
+may point outside the queue or lineage.
+
+### Transactional state machine, CAS and idempotency
+
+    pending_delivery --wake identity committed--> awaiting_claim
+    awaiting_claim --claim(decision revision)--> claimed
+    claimed --validated action bundle + all effects--> action_committed
+    action_committed --ack(action id + digest + revision)--> acknowledged
+
+    pending_delivery --typed pre-identity failure within delivery budget--> pending_delivery
+    delivery_starting --identity lost/ambiguous--> human_attention_required
+    awaiting_claim|claimed --one terminal inspection: completed bundle--> action_committed
+    awaiting_claim|claimed --one terminal failed/interrupted inspection + budget--> next generation
+    awaiting_claim|claimed --active inspection--> unchanged and not replaceable
+    awaiting_claim|claimed --ambiguous/malformed/exhausted inspection--> human_attention_required
+    any non-acknowledged state --one valid human CAS claim--> claimed
+    pending_delivery --human CAS claim / suppress wake--> claimed
+    outstanding checkpoint decision --dispatch terminal commit--> superseded
+
+- Decision creation is part of the same transaction that creates/rearms a wake.
+  Terminal finalization still commits result, authorized successor release,
+  wake and decision together. Checkpoint claiming still disarms the checkpoint
+  and creates its wake/decision together.
+- Claim requires decision id, generation, claimant kind/id, expected revision,
+  unexpired decision deadline and no committed action. A first claim increments
+  revision and returns the secret capability once. Repeating the exact claimant
+  request with the token is idempotent; a different claimant/token, stale
+  revision, expired claim or terminal decision is rejected without mutation.
+  A human claim may win directly from `pending_delivery`; the same transaction
+  marks the still-undelivered wake `suppressed`. Wake delivery may start only
+  while the decision remains `pending_delivery`, so model delivery and human
+  claim cannot both win.
+- Claim renewal is bounded by the original decision deadline, requires the
+  exact token and revision, increments revision and cannot revive a terminally
+  inspected, committed or acknowledged decision.
+- An expired human claim with no committed action is released back to
+  `awaiting_claim` by one supervisor CAS lease-reap; the expired token cannot be
+  replayed. An expired model claim is never released by the clock alone: its
+  persisted generation must first receive the one authoritative inspection.
+- Bundle submission requires the current decision/generation, unexpired exact
+  claim token, expected decision revision and action id. The canonical digest
+  binds every field including the sorted exact
+  `expected_successor_dispatch_ids`. Same action id plus same digest returns the
+  prior receipt; same id or decision with a different digest is a conflict.
+- Allowed action variants are exactly `acknowledge_only`,
+  `rearm_checkpoint`, `retry_dispatch`, `cancel_dispatch`,
+  `change_retry_budget` and `require_human_attention`. Retry/cancel/budget
+  actions also carry their existing recovery action id and expected
+  retry-policy revision. `acknowledge_only` is the sole action in its bundle;
+  re-arm cannot mix with cancel/human-attention; duplicate or contradictory
+  actions fail. No action may mutate a different dispatch.
+- `expected_successor_dispatch_ids` must equal the ledger's exact sorted
+  authorized/released successor set at commit. A requested new successor,
+  missing released successor or changed set makes the whole bundle stale. This
+  binds approval context without transferring successor authority to the
+  controller.
+- The action transaction revalidates queue terminal state, decision deadline,
+  claim, decision revision, retry revision, checkpoint arm and successor facts
+  before any write. It either applies all actions, inserts the immutable outbox
+  receipt and increments the decision revision, or applies nothing.
+- Acknowledgment requires action id, bundle digest, committed revision and
+  claim token. It changes both outbox and decision to acknowledged in one
+  transaction. Exact replay returns the acknowledged receipt; any other digest,
+  claimant, stale revision or later action fails. Acknowledgment suppresses all
+  future generation/recovery work.
+- Terminal queue mutation after summary/claim but before commit makes the
+  bundle stale unless it is the exact terminal `acknowledge_only` snapshot.
+  Post-terminal retry, cancel, budget change or checkpoint re-arm is rejected.
+  Terminal result closure atomically marks any outstanding checkpoint decision
+  `superseded` before removing its checkpoint wake; no orphan decision, claim,
+  generation or action outbox remains claimable.
+  Existing live-worker control command replay remains governed by the frozen
+  H6-F command id/submission-sequence contract and is not reimplemented here.
+
+Crash expectations are exact: before turn identity a typed SDK failure may
+reuse the same prepared generation only within the two-attempt wake-delivery
+budget; after identity it is persisted before any model output is accepted;
+before claim no claimant exists; after claim lease/token facts survive; before
+commit no action/outbox/effect exists; after commit replay returns the one
+receipt; after acknowledgment every later attempt is a no-op receipt. A crash
+in the uncommitted identity window is ambiguous and requires human attention,
+never speculative redelivery.
+
+### Shared-SDK controller generation recovery
+
+`ControllerGenerationRecovery` performs no routine status polling. The
+supervisor invokes it once at startup for a due nonterminal generation, once at
+a persisted decision/claim deadline, or on an explicit authenticated recovery
+request. The ledger CAS-reserves that inspection before the SDK read, so a
+restart cannot perform it twice.
+
+- The adapter reads exactly one authoritative thread snapshot for the persisted
+  controller thread/generation. It considers only the latest turn, validates
+  bounded thread/turn identity and status, and decodes a completed output only
+  as `ModelFacingControllerActionBundle` with the exact decision id,
+  generation, action id and revision. Older bundles and summaries are never
+  authority.
+- A valid completed unacknowledged bundle is submitted through the same CAS
+  path and then acknowledged. Completed output without one exact valid bundle,
+  conflicting output or malformed history closes as human attention; it is not
+  regenerated from prose.
+- Exact terminal `failed` or `interrupted` evidence with no committed action
+  and an expired/unclaimed claim may atomically supersede the generation and
+  create the next generation with the same decision id, incremented generation
+  and revision. At most one such rollover exists.
+- Exact structured active-writer proof leaves the generation active and creates
+  no replacement. A latest-turn active status without that proof is ambiguous:
+  it is left alone and is not replaceable. Other ambiguous ownership,
+  identity, multiple-candidate or unknown RPC facts fail closed to human
+  attention and create no writer.
+- Source-controller unavailability is recognized only by the adapter's exact
+  typed not-found/unavailable SDK fact. Within the remaining generation budget,
+  the next generation starts one shared-session replacement thread in the same
+  lineage and selected repository cwd with the same-or-narrower effective
+  native authority. It receives only decision id, canonical bounded summary,
+  decision revision, action schema and exact callback/service route. No raw
+  transcript, credential, worker prompt/result body or App state is copied.
+- If source unavailability is not proven, the generation budget is exhausted,
+  replacement start is ambiguous, the source route lacks required permission,
+  or the controller process disappears again, the decision becomes
+  `human_attention_required`. The existing terminal wake delivers that status
+  once; no open model turn, repeated checkpoint or recursive controller is
+  created.
+
+Worker prompts remain capability-bound leaves. They submit only one raw typed
+result to the harness and never receive decision ids, claim tokens, callback
+instructions, scheduling authority or controller recovery responsibilities.
+
+### Security, privacy, permissions and non-goals
+
+- Persist only canonical bounded summaries, type/status identifiers, digests,
+  revisions and sanitized reasons. Never persist claim tokens, provider values,
+  auth material, raw prompts, raw worker results, transcript prose, SDK raw
+  envelopes or environment values. Diagnostic/activity input remains redacted
+  and count/byte bounded under the promoted H6-F policy.
+- Same-UID private UNIX IPC, bounded frames/deadlines and the existing
+  supervisor lease are mandatory for every mutation. CLI JSON files are parsed
+  with no symlink following, bounded bytes and exact closed schemas. No shell
+  interpolation, `eval`, `exec` or direct database option is introduced.
+- Controller generations inherit the source controller's effective native
+  sandbox/approval authority and may only narrow it. Permission/profile drift
+  fails before thread creation. `danger-full-access` is preserved when it is
+  the validated native grant; `workspace-write` is never hardcoded as a
+  detached default.
+- Non-goals are a persistent controller-model process, App task polling,
+  background TUI polling, plugin capability work, a second transport, automatic
+  planning, new successor authorization, repair-capsule invention, unbounded
+  retry, replay of prose, remote/multi-user administration, direct SQLite/TUI
+  coupling, provider sentinel retry, App/native global mutation, service
+  installation, worktree creation or Git history mutation.
+
+### Provider-free validation, evidence and promotion
+
+The deterministic implementation matrix must cover:
+
+- exact v14 creation, every v14-to-v15 migration fault point, v15 reopen,
+  legacy pending/delivered/not-applicable/starting/ambiguous/terminal wake
+  classification, foreign keys/indexes/checks, hybrid/corrupt rows and
+  forward-only old-binary rejection;
+- wake/decision atomicity, two concurrent model/human claimants, claim renewal
+  and expiry, stale revision/token/generation, action-id replay/conflict,
+  bundle digest/canonicalization, conflict matrix, retry-policy CAS, successor
+  snapshot drift, terminal mutation, commit/ack replay and cleanup;
+- process/SDK faults before identity, after identity, before/after claim,
+  before/after action commit and before/after acknowledgment, plus supervisor
+  crash/restart at every persisted state. Every schedule proves at most one
+  effective action, one outbox receipt and one acknowledgment;
+- one-read active, completed-valid, completed-malformed, failed, interrupted,
+  unavailable, missing, multiple-turn and ambiguous SDK snapshots; exact
+  initial-plus-one replacement lineage; source permission/profile drift;
+  human closure with zero model invocation; and no App API/task or polling;
+- typed client/CLI round trips and negatives with no raw dict/SQLite leakage;
+  unchanged live-worker steer/interrupt/cancel/retry/budget behavior; worker
+  leaf prompts; bounded privacy/redaction; 0/1/many workers and decision
+  cleanup.
+
+During implementation run the smallest discriminating tests. Closure requires
+the affected `contracts`, `controller` and `workers` semantic partitions, the
+integration service-lifecycle regression, direct validator/compile checks and
+one full `make check` because the SQLite schema, public contracts and CLI are
+shared. Then run Ruff, `git diff --check`, exact-wheel build/install/import/help
+checks and a provider-free temporary foreground service using the installed
+wheel, fake SDK and disposable repository. It must recover one failed
+controller generation and one human-claimed decision across service restart
+without App/provider calls or persistent service/global mutation. Do not run
+the real SDK delayed-steer sentinel.
+
+The retained evidence record is schema
+`codex-flow/controller-turn-recovery/v1` and includes exact candidate digest and
+sorted digest scope, wheel SHA-256/size, Python/SDK/package versions, v14/v15
+schema identities, migration/restart/fault matrix counts, decision/action ids
+and digests, generation/claim/lease/revision/ack facts, replacement lineage,
+successor and worker-isolation results, affected/full gate commands/counts,
+exact-wheel/service cleanup, protected-surface hashes, secret-negative scan and
+self-review counts. The prior real SDK delayed-steer gate is recorded only as
+`external_blocked` with its retained evidence identity and
+`attempt_reused=false`; no new provider outcome is claimed.
+
+Acceptance modes are `objective` and `architecture`. Implementation self-review
+must report P0=0/P1=0. Freeze one exact candidate and evidence record, then run
+one independent Luna XHigh objective review and one independent Sol Medium
+architecture-conformance review, both read-only against the same digest.
+Promotion requires both P0=0/P1=0; tests, wheel/service facts and inventory
+counts cannot override an observable recovery or integrity finding. H6-J later
+owns integrated independent promotion, but this milestone must first close its
+own objective and architecture gates.
+
+### Dependency DAG and ownership
+
+    PROMOTED outcome-evidence-priority-contract
+                  +
+    PROMOTED deterministic live-worker/control boundary
+                  |
+                  v  acceptance dependency
+    controller-turn-recovery implementation + objective/architecture promotion
+                  |
+                  +--------------------+
+                  |                    |
+                  v                    v
+    plugin-capability-parity      human-terminal-ui
+                  \                    /
+                   +------------------+
+                             |
+                             v
+                  integrated-control promotion
+
+No safe internal implementation fan-out is retained. The persisted v15 schema,
+decision state authority, typed public control API and supervisor entrypoint
+form one vertical observable recovery path; splitting them would create serial
+scaffolding and multiple owners for shared schema, state authority and
+entrypoint surfaces. Read-only objective and architecture reviews may run in
+parallel only after the candidate freezes. The outgoing edges to plugin parity
+and the TUI are `acceptance dependency` edges: both consume the promoted public
+contracts, while their mutable production surfaces are disjoint. H6-I may not
+consume or reimplement this API before controller-turn-recovery promotion.
+H6-J remains serial by `acceptance dependency` on all promoted component
+candidates.
+
+Unresolved decisions: none. Ordinary implementation choices inside one owned
+module are Luna-owned; any change to the persisted/public contract, ownership,
+security/privacy/permission boundary, provider authority, destructive behavior,
+successor semantics, artifact budget or acceptance gate requires a bounded Sol
+plan update.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make every controller callback a durable exclusively claimed decision whose bounded "
+        "actions and acknowledgement recover exactly once across controller failure or replacement."
+    ),
+    decomposition=(
+        "Add the forward-only SQLite v15 decision, generation and action-outbox authority while keeping wake delivery a separate fact.",
+        "Implement closed model-facing controller actions and one typed local decision client reusable by the later human TUI.",
+        "Run one shared-SDK controller generation and one-read bounded recovery path without App lifecycle authority, polling or transcript replay.",
+        "Commit action bundles and acknowledgements with revision-bound CAS, idempotency, lineage and existing successor/worker isolation.",
+        "Prove migration, crash/restart, model/human claim, replacement, privacy and exact-wheel service behavior with sanitized retained evidence.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "V14 migrates crash-atomically and forward-only to exact v15 decision/generation/action-outbox and decision-bound wake schemas; reopen, corruption and legacy-wake classifications are deterministic.",
+        "Wake delivery, claim, action commit and acknowledgement remain distinct; every injected failure window produces at most one effective action, immutable receipt and acknowledgement.",
+        "Model and human claimants share one typed CAS boundary with bounded leases, secretless persisted tokens, stale/conflicting/replayed/terminal rejection and no raw IPC or SQLite coupling.",
+        "A completed valid controller bundle is recovered once; active turns are left alone; ambiguous facts fail closed; only failed/interrupted unacknowledged generations or exact source unavailability permit the single bounded rollover lineage.",
+        "Controller actions cannot invent or release successors outside the existing atomic authorization, mutate another dispatch, bypass retry revisions, rearm terminal work or weaken leaf-worker ownership.",
+        "The App, TUI and source controller process may be absent; one human claim closes without a model and one shared-SDK replacement recovers without polling, private CODEX_HOME, copied auth or widened permission.",
+        "Affected contracts/controller/workers partitions, service regression, full make check, Ruff, validator/compile, diff hygiene and exact-wheel provider-free service gates pass with sanitized evidence and protected hashes.",
+        "The consumed real SDK delayed-steer sentinel is not retried and remains separately external_blocked; self-review and independent objective plus architecture reviews of one exact candidate report P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/controller_recovery.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/cli.py",
+        "config/test-partitions.toml",
+        "tests/test_ledger_integrity.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_supervisor_recovery.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_workflow_control.py",
+        "tests/test_public_api_semantic_cutover.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_controller_turn_recovery.py",
+        "docs/reviews/evidence/controller-turn-recovery.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md",
+        "src/codex_flow/controller.py, service.py, worker.py, ipc.py, native_profile.py, plan_capsule.py, projection.py, config.py and app_native.py",
+        "pyproject.toml, uv.lock, Makefile and every plugin, skill, schema and template",
+        "promoted live-worker control behavior and its separately external-blocked consumed provider sentinel",
+        "accepted evidence except the new controller-turn-recovery record",
+        "H6-H plugin parity, H6-I TUI, H6-J integration, global Codex/App/plugin state, Git topology/history and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only controller-turn-recovery in the existing deliberately dirty "
+        "python-sdk-controller worktree. Implement the frozen v15 schema, typed controller decision API, "
+        "shared-SDK generation runner and one-read recovery state machine exactly as designed. Preserve "
+        "terminal successor release, live-worker control and leaf-worker ownership; create no second scheduler, "
+        "raw SQLite/TUI boundary or App authority. Run focused tests while iterating, then every named affected/full, "
+        "exact-wheel and provider-free temporary-service gate. Do not retry the consumed real SDK sentinel, run a "
+        "provider, install a service/plugin, create peers/subagents/worktrees/commits, mutate Git/global state or start "
+        "plugin parity, TUI or integration. Retain one sanitized semantic evidence record, self-review the complete "
+        "owned diff and return exactly one raw schema-v1 ModelFacingResult with independent reviews pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+This was the sole implementation capsule. Its architecture and ownership are
+retained for provenance; it is no longer executable.
+
+## Retained execution — controller-turn-recovery-correctness-closure
+
+The exact `controller-turn-recovery` candidate
+`884c1edde3bb5d32cff662bbeb60e6457c783d0311a4f86d1376da76fac7f41d`
+is retained rejected evidence. Its independent Luna XHigh objective review
+returned `DO_NOT_PROMOTE`, P0=0/P1=10/P2=0. Architecture review did not start.
+One bounded correctness closure owns all ten findings because they share the
+same unpromoted v15 decision/generation/action authority and supervisor/SDK
+recovery path. No accepted outcome, public intent, worker authority, successor
+semantics, provider gate or later milestone changes.
+
+The rejected v15 schema has no compatibility authority. Amend its exact
+v14-to-v15 migration and fresh definition in place; do not introduce v16 or a
+compatibility path for a database created only by the rejected candidate. Add
+one private persisted inspection receipt to each generation: a once-returned
+claim capability stored only by digest, a bounded lease expiry, and optional
+canonical inspected-bundle JSON plus SHA-256. Add the semantic typed
+`ControllerRecoveryInspectionClaim` returned only by the reserve operation.
+Completion requires its exact live token. A completed outcome requires and
+atomically stores one exact validated bundle; every other outcome requires no
+bundle. Recovered submission accepts the decision identity and loads the
+persisted bundle itself, so caller-supplied or reconstructed actions can never
+cross the boundary. A restart after completed inspection commits and
+acknowledges that persisted bundle without another SDK read. A crash after
+reservation but before durable completion never rereads: while the lease is
+live it remains owned, and after expiry one CAS records ambiguous human
+attention and clears the lost claim.
+
+Make the generation state and inspection outcome identical whenever inspection
+is complete. Bind decision action JSON/digest/identity exactly to its sole
+outbox row and receipt. Reject terminal or human-attention claim replay before
+any token-idempotency branch. Bind every pre-identity prepare/reset to the exact
+decision revision, claimant identity and claim capability that owned the
+launch. A synchronous `Popen` failure performs that exact reset; an orphaned
+`delivery_starting` fact reached only after restart is ambiguous and becomes
+human attention rather than spawning another process or clearing a newer human
+claim.
+
+`require_human_attention` is an effective action with a committed/acknowledged
+outbox receipt while the decision remains `human_attention_required`; its
+reason, action fields and acknowledgement are valid together, and the decision
+cannot be reclaimed. Other actions retain the ordinary
+`action_committed`-then-`acknowledged` transition. The SDK inspection accepts
+exactly one closed controller `agentMessage` item for a completed action turn;
+missing, unknown, extra or malformed item shapes fail closed.
+
+Checkpoint re-arm creates a new immutable decision/wake cycle instead of
+rewriting or returning the prior audit row. Correct v15 adds a positive bounded
+cycle sequence to decision and wake identities, uses uniqueness on
+`(dispatch_id, kind, sequence)`, preserves terminal wake single-shot behavior,
+and caps checkpoint cycles at 64 per dispatch. V14 migration assigns sequence
+one to every retained wake/decision. Re-arm rejects an active latest cycle;
+after an inactive or acknowledged cycle it arms the binding, and the next due
+claim atomically creates the next sequence with a distinct delivery/decision
+identity. Prior decision, generation, action and acknowledgement rows remain
+immutable.
+
+No new file, module, registry, runner, public entrypoint or durable artifact is
+allowed. Existing production modules keep their frozen responsibilities:
+`ledger.py` is the only schema/CAS/effect authority; `controller_recovery.py`
+owns generation and one-read recovery orchestration; `supervisor.py` owns child
+launch/reap; `codex_sdk.py` owns closed SDK conversion; `control_client.py`
+owns typed IPC projection; domain/contracts own only the named semantic types.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close every exact objective-review defect in controller-turn recovery so inspected "
+        "actions, claims, launch/reset, human attention and checkpoint re-arm remain durable and exactly once."
+    ),
+    decomposition=(
+        "Amend unpromoted v15 with lease/token-bound inspection receipts, persisted exact bundles and sequenced immutable decision/wake cycles.",
+        "Make claim, inspection, action/outbox, human-attention and pre-identity reset transitions exact cross-field CAS authorities.",
+        "Recover completed inspections from their durable bundle, expire lost reservations fail-closed and contain every supervisor launch orphan.",
+        "Close SDK item conversion and prove all ten predecessor discriminators plus migration, restart, concurrency, re-arm and unchanged-worker behavior.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Recovered commit can apply only the exact canonical bundle persisted by the completed one-read inspection; invented or substituted actions fail before mutation.",
+        "Inspection reservation has a once-returned token and bounded lease: live ownership is untouched, expired incomplete ownership becomes durable human attention without a second SDK read, and completed persisted output resumes after restart.",
+        "Human-attention actions commit and acknowledge one receipt without corrupting or reclaiming the attention decision; every other terminal, stale-token and replay claim fails before idempotency.",
+        "Pre-identity reset requires the exact launch revision/claimant/capability; Popen failure resets safely, restart or ownership drift fails closed, and no newer human claim is cleared.",
+        "Generation inspection/state and decision/outbox JSON, digest, action and acknowledgement facts are cross-bound and reopen rejects every hybrid or substituted row.",
+        "Completed SDK inspection rejects missing, unknown, extra or malformed items and accepts exactly one matching closed agentMessage action bundle.",
+        "Explicit checkpoint re-arm produces a distinct bounded immutable decision/wake sequence, never returns or rewrites the old wake, and remains single-shot while a cycle is active.",
+        "The ten independent predecessor probes fail at the rejected candidate and pass at closure; affected partitions, full make check, exact wheel/service, Ruff, validator, compile and diff gates pass with self-review P0=0/P1=0.",
+        "The consumed real SDK sentinel remains external_blocked and is not retried; one fresh Luna XHigh objective review and then one Sol Medium architecture review of the same repaired digest both report P0=0/P1=0 before promotion or successors."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/controller_recovery.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/supervisor.py",
+        "tests/test_ledger_integrity.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_supervisor_recovery.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_workflow_control.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_controller_turn_recovery.py",
+        "tests/test_controller_execution.py only for corrected v15 migration and exact plan/capsule assertions",
+        "docs/reviews/evidence/controller-turn-recovery.json",
+    ),
+    protected_surfaces=(
+        "AGENTS.md and the canonical plan outside this planning-owned closure section",
+        "src/codex_flow/controller.py, service.py, worker.py, ipc.py, native_profile.py, plan_capsule.py, projection.py, config.py, app_native.py and cli.py",
+        "pyproject.toml, uv.lock, Makefile, plugins, skills, schemas, templates and accepted evidence",
+        "promoted live-worker behavior and its consumed external-blocked provider sentinel",
+        "H6-H plugin parity, H6-I TUI, H6-J integration, App/global/plugin state, Git topology/history and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only controller-turn-recovery-correctness-closure in the existing dirty "
+        "python-sdk-controller worktree. Implement the fixed corrected-v15 design and close all ten exact P1s; "
+        "do not invent v16, a rejected-v15 compatibility path, another module/class beyond the named inspection "
+        "claim, or another authority. Run predecessor discriminators during repair, then affected semantic "
+        "partitions, full make check and exact-wheel/provider-free restart gates. Do not run providers, App APIs, "
+        "reviews or successors, create tasks/worktrees/commits, or mutate global/Git state. Refresh the single "
+        "sanitized evidence record, self-review P0/P1 and return one terminal callback to planning."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+This repair had one mutable owner and no internal fan-out. It is retained
+rejected-candidate and repair provenance and is no longer executable.
+
+## Retained execution — native-profile-runtime-compatibility-closure
+
+The repaired `controller-turn-recovery` implementation remains unpromoted
+because its sole full-gate failure is the active read-only native-profile
+projection. The pinned Codex runtime accepts the current native config without
+empty `agents`, `hooks` or `shell_environment_policy` tables, while
+`NativeProfileProjection` currently requires all three. The same valid config
+also contains `service_tier`, an execution-selection field rather than durable
+provider, permission or discovery authority. This bounded compatibility
+closure precedes both H6-G reviews and changes no recovery semantics.
+
+Keep one fail-closed projection authority in `native_profile.py`. Split its
+preserved top-level allowlist into required and optional-preserved surfaces.
+Provider selection and definitions, `model_catalog_json`, `approval_policy`,
+`sandbox_mode`, `approvals_reviewer`, `mcp_servers`, and every other previously
+required preserved surface remain required. Only `agents`, `hooks` and
+`shell_environment_policy` may be absent; when present each must be a table and
+must pass the existing bounded clone, secret rejection and TOML rendering
+rules. Preserve an optional table only when present and never synthesize an
+empty/default value, so omission and explicit configuration have distinct
+digests. Recognize `service_tier` alongside model/reasoning selections as
+controller-owned execution policy and exclude it from the child projection.
+No other new top-level field is allowed.
+
+The existing provider shape, model-catalog file identity, permission enums,
+complete MCP inventory and secret-to-ephemeral-environment conversion remain
+unchanged. Missing or malformed required authority fails before projection;
+unknown top-level fields, unknown fields inside the existing closed provider/MCP
+shapes, and literal secret-bearing fields still fail closed. The active source
+config is read-only: a temporary parser-proof home must load the projection
+through the bundled pinned `codex doctor --json`, expose every active MCP server
+and leave the source bytes unchanged. This does not change the shared-session
+production topology. Temporary fixtures must prove
+absent optional tables succeed, present optional tables are preserved, each
+required provider/catalog/permission/MCP surface cannot be omitted, and
+unknown or secret-bearing substitutions are rejected without mutation.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Accept the pinned runtime's valid omission of empty native policy tables while preserving "
+        "all provider, catalog, permission and MCP authority fail-closed."
+    ),
+    decomposition=(
+        "Separate required preserved native surfaces from the three optional policy tables and omit absent optionals without defaults.",
+        "Classify service_tier as controller-owned execution selection while retaining closed rejection of every unknown or secret-bearing surface.",
+        "Prove the active read-only profile and adversarial temporary profiles through the pinned parser, then close the full H6-G gate and evidence.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The active native config projects every MCP server and passes bundled codex doctor --json in a temporary parser-proof home without changing source bytes or production topology.",
+        "Absent agents, hooks and shell_environment_policy tables are valid and omitted from projected TOML; present tables are type-checked, sanitized and preserved without invented defaults.",
+        "Provider/model-catalog/approval/sandbox/MCP and all other required preserved surfaces remain mandatory, exact under the existing secret-safe projection, and digest-bound.",
+        "service_tier is recognized only as non-projected controller-owned execution selection; every other unknown top-level field, closed-shape provider/MCP field and literal secret-bearing field fails before mutation.",
+        "Focused active-profile and temporary adversaries, the affected controller/native-profile tests, full make check, validator, Ruff, compile and diff hygiene pass; recovery semantics and the consumed provider sentinel remain unchanged.",
+        "One new exact candidate and evidence record are self-reviewed P0=0/P1=0, then fresh Luna XHigh objective and Sol Medium architecture reviews both approve the same bytes before H6-G promotion or successors.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/native_profile.py",
+        "tests/test_controller_execution.py",
+        "tests/test_plan_compilation.py",
+        "docs/reviews/evidence/controller-turn-recovery.json",
+    ),
+    protected_surfaces=(
+        "AGENTS.md and docs/reviews/peer-thread-workflow.md outside this planning-owned section",
+        "all controller-turn-recovery production and test surfaces except native_profile.py and the two explicitly owned focused test files",
+        "the active ~/.codex config, authentication, plugins, MCP processes, model catalog, discovery directories and all App/global state",
+        "packaging, schemas, workflow assets, accepted evidence, Git topology/history and unrelated dirty bytes",
+        "the consumed external-blocked provider sentinel and H6-H, H6-I and H6-J successor work",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only native-profile-runtime-compatibility-closure in the existing dirty "
+        "python-sdk-controller worktree. Preserve absent optional tables by omission, classify service_tier "
+        "as controller-owned and keep required authority plus unknown/secret rejection fail-closed. Touch only "
+        "the four mutable surfaces; do not run providers or mutate source config, App/global/Git state, recovery "
+        "semantics or successors. Run focused adversaries, the pinned doctor proof and full make check, refresh "
+        "the single evidence record, self-review P0/P1 and return one terminal callback to planning."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+This was the final bounded closure before H6-G review. It added no module,
+public type, schema, registry, runner, entrypoint or durable artifact. Its exact
+bytes and evidence were frozen for the objective and architecture reviews
+recorded below; it is no longer executable.
+
+Controller-turn recovery is promoted at exact candidate
+`58a67173a2f4139692976c1ad64d65967b6dec27885140685d1ebe02daccd59b`.
+Its exact temporary candidate wheel was
+`518f2567002a01bce9aba0cfa0bf5a0a5b12f1092e0f81ed33f64200e33397b1`
+(303694 bytes); the protected historical retained wheel remains
+`fea94483f8c0a834ba139612603a223868a536a1837bdb03a02e20319780815a`
+(259769 bytes). One fresh Luna XHigh objective/code review and one fresh Sol
+Medium architecture-conformance review independently returned `APPROVED`,
+P0=0/P1=0/P2=0 on the exact candidate. The 613-test full gate and exact-wheel
+provider-free restart proof remain green. The consumed delayed-steer provider
+sentinel remains separately `EXTERNAL_BLOCKED` and is not retried by either
+successor.
+
+H6-G therefore closes the shared schema/state/API acceptance dependency. The
+two sections below are simultaneously `ready`: their exact mutable path sets
+are disjoint, neither may amend the frozen H6-G ledger/control API, and H6-J
+remains blocked until both independently promote. `src/codex_flow/cli.py` is
+owned only by the TUI lane. Plugin parity enters through the existing
+plan-driven production controller and has no CLI registration surface.
+
+## Next execution — plugin-capability-parity
+
+Legacy plan label: H6-H. Outcome: SDK workers and controller turns can use an
+explicitly required installed Codex plugin capability when the shared-session
+runtime genuinely supports it, with no App dependency and no ambient, guessed
+or secret-bearing authority.
+
+The implementation architecture is frozen:
+
+- `contracts.py` owns the closed typed `PluginRequirement` and
+  `PluginCapabilitySnapshot` serialization boundary. The model-facing capsule
+  gains one compatible next version with explicit required-plugin facts;
+  schema-v1 capsules remain readable and cannot imply plugin requirements.
+- `schemas/capsule.schema.json`, `scripts/validate.py` and the existing
+  workflow-asset tests remain the one static/generated parity gate for that
+  compatible contract; no plugin-specific schema file or validator is added.
+- `plugin_capabilities.py` is the only new production module. It performs
+  bounded no-follow discovery from the inherited standard Codex home, binds
+  canonical plugin id, version/source, enabled state, bundle digest, bundled
+  skill ids, declared MCP/connectors and readiness (`ready`,
+  `setup_required`, `unsupported` or `unknown`), and emits only sanitized
+  immutable facts. Tokens, OAuth material, headers and secret environment
+  values are never persisted or echoed.
+- `config.py`, `native_profile.py`, `plan_capsule.py`, `projection.py` and
+  `controller.py` carry the single requirement from typed authoring through
+  enqueue and revalidate the exact capability snapshot immediately before SDK
+  thread creation. Missing, disabled, changed, setup-required or incompatible
+  requirements fail before model/tool mutation. Optional ambient plugins never
+  satisfy a required one.
+- `codex_sdk.py` remains the sole transport boundary and exposes only the
+  installed SDK's verified bundled-skill invocation surface. It does not
+  interpret plugin catalogs, install anything or add a connector transport.
+  `cli.py` is preserved: the existing plan-driven controller entrypoint is the
+  only production caller.
+
+Dependency direction is `contracts/config -> plugin capability authority and
+native profile -> plan projection/controller -> SDK adapter`. No plugin module
+imports controller, CLI, ledger, supervisor or TUI code. SQLite v15, decision
+recovery, worker control, process ownership and the human UI remain frozen.
+New-artifact budget is exactly two files: the semantic production module and
+one sanitized evidence record. Existing focused test modules and the canonical
+capsule schema absorb all coverage; no new test module, plugin-specific schema
+file, registry, runner, command or public entrypoint is permitted.
+
+Non-goals are installing, trusting, enabling, disabling or authenticating a
+plugin; copying App credentials; changing global Codex configuration or plugin
+bytes; treating marketplace/catalog presence as readiness; automatically
+granting ambient tools; claiming App-only UI headlessly; or invoking a
+connector/MCP that lacks separately proven read-only readiness and explicit
+authorization.
+
+Acceptance modes are `objective` and `architecture`. Luna XHigh at the app's
+configured fast speed is the implementation and objective/code-review route;
+Sol Medium is the independent architecture-conformance route. One real
+shared-session bundled-skill sentinel is authorized only after deterministic
+and exact-wheel gates: it uses an already installed, enabled, ready capability,
+one bounded provider attempt and a disposable read-only repository, makes zero
+App API/task calls, performs no install/auth/trust/config mutation and records
+only sanitized identities/digests. If no installed capability is genuinely
+ready, the result is truthful `EXTERNAL_BLOCKED`; no substitute or setup action
+is allowed. No connector/MCP provider sentinel is authorized by this capsule.
+
+Promotion requires exact v1 compatibility and v2 requirement projection;
+enqueue/start drift rejection; disabled/missing/setup-required/App-only and
+secret-negative adversaries; the observable bundled-skill result through the
+existing production entrypoint; affected contracts/controller/integration
+partitions; full `make check` because shared contracts and projection change;
+exact-wheel install/import/runtime proof; validator, Ruff, compile and diff
+hygiene; protected H6-G/TUI hashes; one sanitized evidence record; complete
+self-review P0=0/P1=0; and fresh independent Luna XHigh objective plus Sol
+Medium architecture reviews of one exact candidate with P0=0/P1=0.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Bind explicitly required installed plugin capabilities to the shared-session controller "
+        "and prove one real bundled-skill outcome without App, ambient or secret-bearing authority."
+    ),
+    decomposition=(
+        "Add one typed plugin requirement/snapshot contract and one bounded secretless capability discovery authority.",
+        "Carry compatible capsule requirements through plan projection and revalidate exact capability immediately before SDK start.",
+        "Expose only the verified bundled-skill SDK seam and keep the existing plan-driven controller as the sole production entrypoint.",
+        "Run closed drift, compatibility, exact-wheel and one authorized read-only bundled-skill sentinel before independent promotion reviews.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Schema-v1 capsules remain readable and imply no plugin authority; the next compatible capsule version binds explicit canonical requirements and sanitized capability snapshots.",
+        "Missing, disabled, changed, setup-required, unsupported, App-only or secret-bearing requirements fail before model/tool mutation and without changing plugin or global state.",
+        "The same exact capability digest is bound at enqueue and revalidated before SDK thread creation; optional ambient plugins cannot satisfy a required capability.",
+        "One already-ready installed bundled skill changes the observable result through the exact-wheel production controller in a disposable read-only repository with zero App calls and no install, trust, auth or config mutation.",
+        "Connector and MCP readiness remain separately classified and no connector/provider sentinel runs without distinct authorization.",
+        "Affected partitions, full make check, exact-wheel, validator, Ruff, compile, diff and protected-hash gates pass; sanitized evidence and self-review report P0/P1 zero.",
+        "Fresh independent Luna XHigh objective and Sol Medium architecture reviews approve the same exact candidate with P0/P1 zero before H6-J can consume it.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/config.py",
+        "src/codex_flow/native_profile.py",
+        "src/codex_flow/plan_capsule.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/plugin_capabilities.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "schemas/capsule.schema.json",
+        "scripts/validate.py",
+        "tests/test_model_facing_projection.py",
+        "tests/test_controller_execution.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_shared_sdk_visibility.py",
+        "tests/test_workflow_assets.py",
+        "docs/reviews/evidence/plugin-capability-parity.json",
+    ),
+    protected_surfaces=(
+        "AGENTS.md and docs/reviews/peer-thread-workflow.md",
+        "src/codex_flow/domain.py, ledger.py, supervisor.py, worker.py, ipc.py, service.py, control_client.py, controller_recovery.py, app_native.py and cli.py",
+        "src/codex_flow/tui.py, src/codex_flow/tui_client.py and src/codex_flow/tui_models.py",
+        "pyproject.toml, uv.lock, tests/test_live_worker_control.py and tests/test_workflow_control.py",
+        "docs/reviews/evidence/human-terminal-ui and docs/reviews/evidence/human-terminal-ui.json",
+        "plugin bundles, caches, trust/auth state, global Codex configuration, accepted evidence and unrelated dirty bytes",
+        "the consumed external-blocked delayed-steer sentinel and H6-J integrated promotion",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only plugin-capability-parity in the existing dirty python-sdk-controller worktree. "
+        "Run as the single Luna XHigh mutable owner using the app-configured fast Luna speed. Implement the frozen two-artifact architecture without touching CLI, TUI, ledger, supervisor, controller recovery or plugin/global state. Preserve v1 capsules, add one compatible explicit requirement path, bind and revalidate secretless capability facts, and use the existing production controller for exactly one already-ready bundled-skill sentinel after deterministic and wheel gates. Do not install, enable, trust or authenticate plugins; do not run a connector/MCP sentinel or retry the consumed delayed-steer sentinel. Run the named gates, retain sanitized evidence, self-review P0/P1 and return one terminal callback with independent reviews pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+This capsule is ready and independent of `human-terminal-ui`. It owns no TUI,
+dependency-lock or CLI-registration byte.
+
+The implementation candidate produced from that capsule is rejected and is no
+longer executable. Its exact 50-path identity was
+`538271925eaf5c31a210d087fd185a48e4b2d3ca71c03d7d579801d305f921ac`
+and its sanitized evidence record was
+`e7ede7921bc4365fabc64a1df42e053cd9d3c32b5be6af7b3eae2708b0fde581`.
+The independent objective review approved those bytes, but the independent Sol
+Medium architecture review returned `DO_NOT_PROMOTE`, P0=0/P1=4: prompt magic
+could still create SDK skill authority, the detached supervisor/worker did not
+revalidate the durable plugin binding immediately before SDK creation,
+discovery lost marketplace identity and lacked complete no-follow bounds, and
+the static schema rejected a closed historical v1 capsule. No prior approval
+or carried green gate overrides those blockers.
+
+## Next execution — plugin-capability-authority-closure
+
+Legacy plan label: H6-H bounded repair. Outcome: close the rejected plugin
+capability authority end to end so only a typed schema-v2 requirement can
+select one verified bundled skill, while every schema-v1 prompt remains plain
+text and the detached production worker fails closed on any identity, byte,
+readiness or filesystem drift before creating an SDK thread.
+
+This repair changes no accepted outcome or public controller API. It replaces
+the disproven implementation detail with one production path and freezes the
+following architecture map:
+
+- **Create:** nothing. The cumulative milestone artifact budget remains exactly
+  two already-present paths, `src/codex_flow/plugin_capabilities.py` and
+  `docs/reviews/evidence/plugin-capability-parity.json`; this repair may not add
+  another module, test file, schema, registry, runner, command or evidence
+  record.
+- **Modify — schema authority:** `contracts.py` emits and parses two closed
+  versions. V1 has exactly the historical base keys and omits
+  `plugin_requirements`; v2 requires a non-empty `plugin_requirements` array.
+  `model_facing_capsule_schema()` expresses those two closed records with one
+  bounded `oneOf`. `domain.py` adds only the corresponding bounded Draft
+  `oneOf` schema/instance validation: a finite branch count, recursive existing
+  depth/cardinality ceilings and exactly one matching branch. It adds no second
+  schema model or reduced decoder.
+- **Modify — projection and direct controller:** `projection.py` deletes prompt
+  marker emission and leaves prompt bytes unchanged for both versions.
+  `controller.py` keeps requirements/snapshots as typed, canonical route facts,
+  rejects every App-native plugin route, and for its direct SDK seam resolves
+  exactly one verified bundled-skill binding into `SkillInput`; it never
+  prepends or parses control prose. V2 execution supports exactly one plugin
+  requirement with exactly one bundled skill and no MCP/connector invocation;
+  zero, multiple, connector-only or multi-skill execution requirements fail
+  before SDK mutation rather than selecting an ambient default.
+- **Modify — discovery authority:** `plugin_capabilities.py` is the sole reader
+  of plugin layout, manifests, config, bundles and skill paths. Flat
+  `plugins/<id>` remains `id` with source `bundled`; both
+  `plugins/cache/<marketplace>/<name>/<version>` and
+  `local-marketplaces/<marketplace>/plugins/<name>` become canonical
+  `<name>@<marketplace>` with source `<marketplace>`. One resolution examines
+  at most 4,096 directory entries and 128 candidate bundles; each bundle is at
+  most depth 32, 8,192 regular single-link files, 16 MiB per file and 256 MiB
+  total, and the whole resolution reads at most 256 MiB. Config and manifest
+  limits remain 1 MiB each. Exceeding any bound is a typed fail-closed
+  capability error.
+- **Modify — filesystem and typed SDK boundary:** every authoritative directory
+  and file traversal uses descriptor-relative `os.open` with `O_NOFOLLOW` (and
+  `O_DIRECTORY` for directories), `fstat` identity/type/link/size checks before
+  and after bounded reads, and descriptor-based enumeration. No authoritative
+  `Path.resolve`, `exists`, `is_dir`, `iterdir` or `read_bytes` result may bridge
+  validation and use. The verified bundled-skill resolver retains the opened
+  skill-directory descriptor for the SDK input lifetime and exposes only a
+  private context-managed binding whose public transport value is the existing
+  typed `SkillInput`; the SDK receives the held descriptor path, never an
+  unchecked plugin pathname.
+- **Modify — detached boundary:** `supervisor.py` parses the queued capsule and
+  route into existing `PluginRequirement` and `PluginCapabilitySnapshot`
+  records, rereads the standard inherited Codex home, and requires exact ordered
+  requirement, snapshot and capability-digest equality before it writes the
+  private worker capability or calls `Popen`. It serializes those same
+  secretless closed facts into the attempt capability; no token, manifest body
+  or environment value is added. `worker.py` cross-checks the private capability
+  against the capsule, reloads the same native profile/home, rereads the exact
+  plugin bundle through the descriptor authority immediately before
+  `CodexSdkAdapter.start_thread`, and keeps the verified skill binding alive
+  through the bounded turn. Any mismatch exits through the existing capability
+  or integrity failure path before SDK identity. Recovery continuations repeat
+  the complete check; they cannot reuse a prior descriptor or snapshot.
+- **Modify — SDK adapter:** `codex_sdk.py` accepts only ordinary `str` or typed
+  `SkillInput`. `_wire_input` never recognizes JSON, a prefix or any other magic
+  inside a string, removes the legacy bundled-skill marker branch, and forwards
+  the typed skill name/held descriptor path only when the installed SDK exposes
+  `SkillInput`.
+- **Preserve:** `config.py`, `native_profile.py`, `plan_capsule.py`, the SQLite
+  v15 ledger, live-control and controller-recovery public/persisted contracts,
+  IPC/service/control clients, CLI and every TUI module/dependency/rendered
+  artifact remain byte-protected. H6-I source and rendered outcomes are not
+  repaired or regenerated here. Plugin bundles, caches, auth/trust/config,
+  global Codex/App state, accepted evidence and unrelated dirty bytes remain
+  read-only.
+
+Dependency direction is `domain bounded schema -> contracts -> plugin
+capability authority -> projection/controller and supervisor/worker -> SDK
+adapter`. `supervisor.py` and `worker.py` may import the contracts and plugin
+authority; the plugin module may import only domain/contracts and standard
+library code. It may not import controller, supervisor, worker, ledger, IPC,
+service, CLI or TUI. Neither the SDK adapter nor prompt projection discovers
+plugins. SQLite remains the sole dispatch authority; the private attempt file
+is a capability-bound serialization copy, not a new state authority.
+
+State and error boundaries are closed. Enqueue binds typed requirement and
+snapshot facts. Supervisor launch authorizes those facts against a fresh
+descriptor read. Worker start authorizes them again and owns the live
+descriptor. Only then may adapter thread creation occur. Missing, disabled,
+setup-required, unsupported, ambiguous, oversized, symlinked, hardlinked,
+renamed, reordered or byte-drifted inputs terminate before SDK identity through
+the existing sanitized capability/integrity classification. Provider or SDK
+failures after identity remain the existing worker lifecycle authority; plugin
+code never rewrites them. V1 always follows the plain-string path and cannot
+acquire capability from marker-shaped user text.
+
+Acceptance modes are `objective` and `architecture`. The implementation and
+objective/code review route is Luna XHigh using the app-configured fast speed;
+the independent architecture-conformance route is Sol Medium. The repair is
+provider-free: it must not run or retry the consumed delayed-steer sentinel,
+the rejected bundled-skill provider attempt or any connector/MCP/provider
+sentinel.
+
+Promotion requires all of the following on one exact candidate:
+
+- a Draft 2020-12 oracle plus the production parser prove a closed v1 payload
+  without `plugin_requirements` is valid, v1 with that field is rejected, v2
+  without it or with an empty array is rejected, and a closed non-empty v2 is
+  valid; static/generated schema bytes remain equal and the bounded production
+  schema validator accepts the exact two-branch schema;
+- marker-shaped v1 and v2 prompt strings remain byte-identical ordinary SDK
+  strings; the removed marker helpers/exports and adapter parser are absent,
+  while a valid v2 path reaches the fake SDK as an actual `SkillInput`;
+- direct-controller and detached-supervisor/worker adversaries mutate each of
+  requirement, snapshot, capability digest, marketplace/source identity,
+  manifest, bundle byte and skill directory before SDK creation and observe
+  zero `start_thread`/`run_turn` calls; recovery continuation repeats the same
+  rejection;
+- real-layout provider-free fixtures cover flat, standard-cache and local
+  marketplace discovery plus missing/disabled/setup/App-only, ambiguity,
+  secret-negative, total-entry, bundle-count, depth, file-count, single-file,
+  total-byte, symlink, hardlink, FIFO and descriptor rename/swap cases;
+- the exact frozen H6-G API/state behavior and all H6-I production/rendered
+  bytes are unchanged; no App, plugin, auth, trust, config or global mutation
+  occurs;
+- focused schema/projection/discovery/adapter/controller/supervisor-worker
+  discriminators, contracts/controller/workers/integrations/workflow-assets
+  partitions, full `make check`, exact-wheel build/install/import and a
+  provider-free temporary-service restart proof pass; validator, Ruff,
+  compileall, pre-commit and `git diff --check` pass;
+- the one sanitized evidence record is refreshed with exact candidate, plan,
+  capsule and wheel identities, negative SDK-call counts and protected H6-G/H6-I
+  hashes; complete self-review reports P0=0/P1=0; and one fresh independent Luna
+  XHigh objective review and one fresh Sol Medium architecture review both
+  return P0=0/P1=0 before promotion.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close plugin capability authority so schema-v1 text can never select an SDK skill and "
+        "one explicit schema-v2 bundled-skill requirement is revalidated by the detached worker "
+        "through a held no-follow descriptor before SDK identity."
+    ),
+    decomposition=(
+        "Make the generated/static capsule schema a bounded closed v1-or-v2 contract and remove every prompt marker authority.",
+        "Replace path-based plugin discovery with canonical marketplace identity, complete traversal bounds and descriptor-held bundle/skill reads.",
+        "Carry exact typed requirement and snapshot facts through queue, supervisor capability and worker revalidation into one typed SDK SkillInput.",
+        "Prove direct and detached pre-SDK drift rejection, v1 compatibility, exact-wheel behavior and preserved H6-G/H6-I bytes before independent reviews.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Closed historical schema-v1 capsules omit plugin_requirements and always execute their exact prompt as plain text; closed schema-v2 capsules require one explicit non-empty typed requirement array.",
+        "Only one requirement with exactly one bundled skill can become a typed SkillInput; prompt markers, ambient plugins, multiple skills and connector or MCP requirements cannot create SDK authority.",
+        "Standard-cache and local-marketplace bundles retain exact name@marketplace identity and source under finite total, depth, bundle, file and byte bounds.",
+        "Supervisor and worker independently cross-check the exact queued requirement, capability snapshot and bundle immediately before SDK thread creation using identity-checked O_NOFOLLOW descriptors held through input consumption.",
+        "Every drift, race, unsafe file type, missing readiness or closed-shape violation fails before SDK identity without plugin, App, auth, trust, config, controller-state or global mutation.",
+        "Focused adversaries, affected partitions, full make check, exact-wheel and provider-free restart gates pass with preserved H6-G/H6-I bytes, sanitized evidence and self-review P0/P1 zero.",
+        "Fresh independent Luna XHigh objective and Sol Medium architecture reviews approve the same exact candidate with P0/P1 zero before H6-H promotion or H6-J execution.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/plugin_capabilities.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "schemas/capsule.schema.json",
+        "scripts/validate.py",
+        "tests/test_model_facing_projection.py",
+        "tests/test_controller_execution.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_shared_sdk_visibility.py",
+        "tests/test_supervisor_recovery.py",
+        "tests/test_workflow_assets.py",
+        "docs/reviews/evidence/plugin-capability-parity.json",
+    ),
+    protected_surfaces=(
+        "AGENTS.md and docs/reviews/peer-thread-workflow.md",
+        "src/codex_flow/config.py, native_profile.py and plan_capsule.py",
+        "src/codex_flow/ledger.py, ipc.py, service.py, control_client.py, controller_recovery.py and app_native.py",
+        "src/codex_flow/cli.py, tui.py, tui_client.py and tui_models.py",
+        "pyproject.toml, uv.lock, tests/test_live_worker_control.py and tests/test_workflow_control.py",
+        "docs/reviews/evidence/human-terminal-ui and docs/reviews/evidence/human-terminal-ui.json",
+        "all other tests, schemas, plugins, skills, templates, packaging and accepted evidence",
+        "plugin bundles, caches, trust/auth state, global Codex/App state, the consumed provider sentinel, H6-J and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only plugin-capability-authority-closure in the existing dirty "
+        "python-sdk-controller worktree as the single Luna XHigh mutable owner at the app-configured "
+        "fast speed. Modify only the exact eighteen surfaces. Do not add artifacts or touch the frozen "
+        "H6-G API, H6-I source/renders, CLI, packaging, plugin/global/App state or H6-J. Implement the "
+        "closed v1/v2 schema, remove all prompt marker authority, replace discovery with the frozen "
+        "bounded descriptor design, and make supervisor plus worker revalidate exact typed facts before "
+        "one held-descriptor SkillInput reaches the SDK. Run every named provider-free, partition, full, "
+        "wheel and protected-byte gate; refresh only the sanitized parity evidence, self-review P0/P1 and "
+        "return one terminal callback with independent reviews pending. Do not run any provider sentinel."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+Plugin-capability authority closure is promoted at exact plan SHA-256
+`b80bbc29615c3d317d6c4ce4c30b41061c5528541378aed42c6b64c5e2d90355`,
+capsule source-block SHA-256
+`f84681a55520d45aeefe38ef15a8d170e81ed7eae67d9f3772fe85b55b970818`,
+17-path non-evidence candidate SHA-256
+`1ebba0ef7379b49c532ecac543839a9588df652c63d84e94cd7a2da48137f375`,
+evidence SHA-256
+`70cdb7f615b8907166a5b37b10cdcad94b5a2493eb1721a5838e4a34beb65ef3`
+and reproducible exact-candidate wheel SHA-256
+`1127163f04fd8544f3cc0fd9a5a4a76c8ea8b42323daa128694501b694fb036f`
+(325341 bytes). The one bounded repair moved supervisor verification before
+all attempt/state/file derivation and made worker startup/result submission use
+one exact closed capability parser. Fresh independent Luna XHigh objective and
+Sol Medium architecture reviews both returned `APPROVED`, P0=0/P1=0; 654 tests,
+exact-wheel isolated install and provider-free restart evidence are green. No
+provider or App call was part of promotion.
+
+The objective reviewer recorded one non-blocking P2 for a future bounded
+`plugin-requirement-schema-parity` follow-up: the static requirement schema is
+looser than the typed parser for canonical-id syntax/length and empty bundled
+skill arrays. Runtime parsing and execution fail closed, so this does not block
+H6-J and is not authority to change H6-H bytes during the H6-I repair.
+
+Appending the next bounded repair changes the current canonical plan identity.
+The promoted H6-H record above remains a closed historical identity. The
+plan-bound candidate/evidence identities previously recorded for H6-I are not
+promotable; its source and four rendered sentinels may be carried only if the
+final independent visual authority rechecks their exact bytes with the final
+post-repair candidate. H6-J remains locked until H6-I promotes.
+
+## Next execution — human-terminal-ui
+
+Legacy plan label: H6-I. Outcome: a human can observe runs and workers and issue
+bounded control or controller-decision actions from a terminal without keeping
+the Codex App or any model turn open.
+
+The implementation architecture is frozen:
+
+- `tui_client.py` is a thin async façade over the already frozen
+  `LiveWorkerControlClient` and `ControllerDecisionClient`. It owns connection,
+  bounded refresh-on-explicit-event, last-snapshot offline fallback and typed
+  command results; it never imports or reads SQLite and does not poll after UI
+  exit.
+- `tui_models.py` owns immutable presentation-only view models derived from
+  typed control API models: queue/dependency state, dispatch/generation/attempt,
+  SDK thread/turn, route, elapsed/lease/activity, bounded recent diagnostics,
+  retry state, pending decisions and terminal evidence. It creates no workflow
+  or plugin capability authority.
+- `tui.py` owns the Textual application, screens, widgets, keyboard bindings,
+  command palette, confirmation dialogs and deterministic light/dark/no-color
+  plus 80x24/120x40 rendering. Framework state stays behind those view models;
+  closing or crashing the TUI has no lifecycle side effect.
+- `cli.py` owns only registration of `codex-flow tui` and safe exact-argument
+  launch/print handling for `codex resume <thread-id>`. The selected id is
+  validated and passed as an argv element without shell interpolation. Resume
+  is a transcript handoff, never authority over another live `TurnHandle`.
+- `pyproject.toml` and `uv.lock` pin Textual as the sole new runtime dependency.
+  Existing workflow-control and live-worker test modules own deterministic
+  headless-driver, action-binding, offline, keyboard and packaging coverage.
+
+Dependency direction is `domain/control_client -> tui_client -> tui_models ->
+tui -> cli registration`; Textual never flows into ledger, supervisor, SDK,
+controller recovery or plugin capability code. New-artifact budget is exactly
+eight files: three semantic TUI modules, four fixed rendered SVG sentinels and
+one sanitized evidence record. Existing test modules absorb coverage; no new
+test module, schema, service, runner, registry or alternate entrypoint is
+allowed.
+
+Non-goals are embedding a model; cloning the Codex composer or transcript;
+replacing App transcripts; owning or launching workers; direct database writes;
+background polling after exit; remote/multi-user administration; displaying or
+mutating plugin readiness; or changing any H6-G control contract. Offline mode
+is read-only and truthful; every mutation requires an authenticated live
+supervisor connection.
+
+Acceptance modes are `objective` and `visual`. Sol Medium is the render-aware
+implementation owner. Luna XHigh at the app's configured fast speed is the
+independent objective/code authority. Because the fixed full-size sentinel
+inspection is this milestone's final qualitative promotion review, the
+repository default selects one independent Sol High visual authority. No
+provider call is authorized: the delayed-worker/service exercise is
+production-shaped and provider-free, and the consumed delayed-steer sentinel
+is not retried.
+
+Promotion requires a real detached provider-free worker/service that remains
+observable and steerable through the TUI while App calls remain zero; exact
+identity binding and confirmation for steer, interrupt, checkpoint re-arm,
+human claim and acknowledge; TUI close/reopen and crash with no lifecycle or
+duplicate effect; authenticated-live versus offline behavior; safe exact SDK
+resume argv; deterministic keyboard-only navigation, labels and feedback;
+full-size independent inspection of the four fixed SVG sentinels; focused
+headless-driver tests; affected workers/integrations partitions; full
+`make check` because CLI/packaging/dependencies change; exact-wheel entrypoint,
+validator, Ruff, compile, diff and protected hashes; one sanitized evidence
+record; self-review P0=0/P1=0; and fresh Luna XHigh objective plus Sol High
+visual approvals of one exact candidate with P0=0/P1=0.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Deliver a deterministic accessible terminal UI over the frozen worker-control and "
+        "controller-decision APIs without becoming lifecycle, transcript or database authority."
+    ),
+    decomposition=(
+        "Add typed presentation models and one async TUI client over the existing authenticated control clients.",
+        "Build the Textual status, activity, control and human-decision surface with explicit confirmation and safe SDK transcript handoff.",
+        "Prove offline and close/crash isolation, exact action identity, keyboard accessibility and deterministic bounded rendering.",
+        "Freeze four full-size visual sentinels, exact-wheel behavior and provider-free detached-service evidence for independent promotion reviews.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.VISUAL),
+    acceptance_criteria=(
+        "Every displayed fact derives from the typed control clients and every mutation binds the exact visible dispatch, generation, attempt, turn or decision revision with truthful confirmation feedback.",
+        "A provider-free detached worker remains observable and steerable with zero App calls; TUI close, crash and reopen neither interrupt, duplicate nor own work.",
+        "Offline mode is a truthful read-only last snapshot and rejects mutation until an authenticated live supervisor connection returns.",
+        "The SDK transcript handoff validates one selected thread id and executes or prints exact argv without shell interpolation or claiming live-turn authority.",
+        "Keyboard-only navigation and deterministic light, dark, no-color, 80x24 and 120x40 states remain legible, labelled and bounded in the four fixed rendered sentinels.",
+        "Focused headless-driver tests, affected partitions, full make check, exact-wheel entrypoint, validator, Ruff, compile, diff and protected-hash gates pass; sanitized evidence and self-review report P0/P1 zero.",
+        "Fresh independent Luna XHigh objective and Sol High visual reviews approve the same exact candidate with P0/P1 zero before H6-J can consume it.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/tui.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
+        "src/codex_flow/cli.py",
+        "pyproject.toml",
+        "uv.lock",
+        "tests/test_live_worker_control.py",
+        "tests/test_workflow_control.py",
+        "docs/reviews/evidence/human-terminal-ui/light-wide.svg",
+        "docs/reviews/evidence/human-terminal-ui/dark-wide.svg",
+        "docs/reviews/evidence/human-terminal-ui/light-narrow.svg",
+        "docs/reviews/evidence/human-terminal-ui/no-color-narrow.svg",
+        "docs/reviews/evidence/human-terminal-ui.json",
+    ),
+    protected_surfaces=(
+        "AGENTS.md and docs/reviews/peer-thread-workflow.md",
+        "src/codex_flow/domain.py, contracts.py, config.py, native_profile.py, plan_capsule.py, projection.py, controller.py and backends/codex_sdk.py",
+        "src/codex_flow/ledger.py, supervisor.py, worker.py, ipc.py, service.py, control_client.py, controller_recovery.py and app_native.py",
+        "src/codex_flow/plugin_capabilities.py and docs/reviews/evidence/plugin-capability-parity.json",
+        "schemas/capsule.schema.json, scripts/validate.py and tests/test_workflow_assets.py",
+        "tests/test_model_facing_projection.py, tests/test_controller_execution.py, tests/test_codex_sdk_adapter.py, tests/test_plan_compilation.py and tests/test_shared_sdk_visibility.py",
+        "plugin bundles, caches, trust/auth state, global Codex configuration, accepted evidence and unrelated dirty bytes",
+        "the consumed external-blocked delayed-steer sentinel and H6-J integrated promotion",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.VISUAL, RoleId("visual-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only human-terminal-ui in the existing dirty python-sdk-controller worktree as the single Sol Medium render-aware mutable owner. Implement the frozen eight-artifact Textual architecture over the existing typed control clients. Own only TUI modules, CLI registration, Textual dependency/lock, two existing test modules, four rendered sentinels and the evidence record; do not touch contracts, config, native profile, controller, SDK, ledger, supervisor, plugin parity or global/App state. Run provider-free detached-service and headless-driver gates, inspect deterministic renders during iteration, retain sanitized evidence and return one terminal callback with independent Luna objective and Sol High visual reviews pending. Do not retry the consumed provider sentinel."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+This capsule is ready and independent of `plugin-capability-parity`. It owns
+`cli.py`, packaging/dependency locks and TUI artifacts exclusively; it consumes
+only frozen H6-G typed control APIs and does not consume H6-H plugin facts.
+
+The implementation candidate from that capsule is rejected and no longer
+executable. Its 12-path non-evidence identity was
+`df3e0c16c7b93c3ff8b4483906fa1c4df7e9247cada42a7c5c7da8d37aaa6e32`,
+its evidence record currently hashes
+`6c4df36da4e34caac6c15198453d505332fb16a9ff1bd060dc27e5f48edd92e8`,
+and its retained wheel is
+`dist/human-terminal-ui/codex_flow-0.2.0-py3-none-any.whl`, SHA-256
+`eeb1d2355448a6a5270508206b885c112c3f3181164578ff8f76e609490cc342`
+(322793 bytes). The fresh independent Luna XHigh objective review returned
+`DO_NOT_PROMOTE`, P0=0/P1=2: decision-selected resume could execute without a
+typed inactive-turn proof, and ambiguous steer/interrupt transport failures
+were labelled rejected while a retry could allocate a new command id after the
+supervisor had already committed the first. The fixed SVGs remain usable visual
+evidence, not objective correctness proof.
+
+## Next execution — human-terminal-control-correctness-closure
+
+Legacy plan label: H6-I bounded repair. Outcome: preserve the accepted terminal
+UI and rendered result while making transcript open and live control truthful:
+a decision source thread opens only with a current typed inactive-turn proof,
+and every steer/interrupt owns one caller-retained idempotent command identity
+that is durably reconciled before any retry.
+
+The repair architecture is frozen and adds no artifact:
+
+- **Create:** nothing. The cumulative H6-I artifact budget remains the existing
+  three TUI modules, four fixed SVG sentinels and one evidence record. No new
+  module, schema, test file, database table, durable record, service, runner,
+  registry, command or entrypoint is permitted.
+- **Modify — resume proof:** `tui_client.py` owns one private lookup over the
+  latest connected typed snapshot. For a selected worker, the existing
+  `LiveWorkerStatus.thread_id` plus `active_turn_id is None` is the sole inactive
+  proof. For a selected decision, `ControllerDecisionSummary.source_thread_id`
+  must match exactly one current `LiveWorkerStatus.thread_id` whose
+  `active_turn_id` is `None`; zero matches, multiple matches, an active match,
+  an offline/stale snapshot or a changed decision revision fails closed.
+  `tui.py` asks this client boundary before `action_open_resume` calls the
+  existing exact-argv resume handler. It never infers inactivity from decision
+  state, missing data or App visibility. Copying an inert command string remains
+  non-executing; only Open crosses the inactive-turn gate.
+- **Modify — canonical command API:** `ControlCommand` and the existing ledger
+  row remain the only durable command model and state authority. `supervisor.py`
+  adds one closed read-only `control_status` IPC operation taking exactly one
+  bounded `command_id` and returning either the existing canonical command or
+  explicit `None`; it performs no mutation and exposes no list/poll loop.
+  `control_client.py` adds the matching typed `command_status(command_id)`
+  decoder and two error classes that distinguish an explicit supervisor
+  rejection from an ambiguous post-send transport failure. No ledger/domain
+  schema or command creation semantics change.
+- **Modify — retained identity and reconciliation:** `tui_client.py` generates
+  and retains one command id before the first steer/interrupt send, keyed by the
+  exact dispatch, generation, attempt, thread, turn, kind and payload digest,
+  then always supplies it to `LiveWorkerControlClient`. An explicit negative
+  response becomes `rejected`. A transport exception becomes
+  `post_send_uncertain`, never rejected: before any resend the client queries
+  `control_status` with the same retained id. An exact matching durable command
+  returns its canonical state without resending; a different command under the
+  id is an integrity failure; explicit absence permits at most one resend with
+  the same id; an unavailable or ambiguous reconciliation returns
+  `post_send_uncertain` and preserves the id for the next explicit user action.
+  No path allocates a new id while that semantic request is unresolved.
+- **Modify — truthful UI result:** `TerminalUiCommandResult` gains one closed
+  presentation outcome (`accepted`, `rejected` or `post_send_uncertain`) without
+  becoming a second command state model. `tui.py` renders those outcomes
+  distinctly and never labels uncertainty rejected or reports success before
+  the canonical command is observed. Refresh remains explicit/event-driven;
+  reconciliation is a single command-id read, not polling.
+- **Modify — tests/evidence:** the existing live-control and workflow-control
+  modules own all new adversaries. `test_plan_compilation.py` updates only the
+  active plan identity/capsule ownership assertion made stale by this planning
+  change. `human-terminal-ui.json` is the sole refreshed record. The four SVGs,
+  `tui_models.py`, CLI, dependency files and packaging remain byte-preserved.
+
+Dependency direction is unchanged except for the already accepted control API
+extension: `domain ControlCommand/LiveWorkerStatus -> ledger/supervisor
+read-only status -> control_client -> tui_client -> tui`. TUI code never imports
+ledger, IPC internals or SDK/App code. The supervisor does not retain UI state,
+and `control_status` never creates, sends, acknowledges, rejects or retries a
+command. Resume proof uses only current typed control-client facts; no App poll,
+direct SQLite read, worker handle or lifecycle ownership is introduced.
+
+State and error transitions are exact. Before send, the caller owns `command_id`
+and exact semantic facts. A decoded positive response is accepted. A decoded
+negative response is rejected. A missing/closed transport response is
+post-send uncertain until `control_status(command_id)` proves exact presence or
+explicit absence. Exact presence returns the durable `pending`, `sent`,
+`acknowledged`, `rejected` or `unresolved` state without resend. Explicit
+absence authorizes one same-id resend. Any status mismatch or second ambiguous
+transport remains fail-closed and cannot create another command. Existing
+ledger uniqueness, exact dispatch/generation/attempt/thread/turn binding,
+supervisor commit-before-reply behavior and worker acknowledgement authority
+remain unchanged.
+
+Acceptance modes remain `objective` and `visual`. Sol Medium is the repair
+implementation owner because it modifies terminal feedback behavior. Luna
+XHigh at the app-configured fast speed is the independent objective/code
+authority. One independent Sol High visual authority must recheck the exact
+final TUI bytes and the four full-size sentinels. If the repair changes a
+baseline rendered state, implementation must stop for a bounded plan update
+before regenerating any SVG; no silent visual rebaseline is allowed.
+
+Promotion requires all of the following on one exact candidate:
+
+- decision-selected Open is rejected for offline/stale data, no matching source
+  thread, multiple matches and an active match, while one exact connected typed
+  inactive match passes the unchanged validated argv element to the resume
+  handler; no App, database or SDK read occurs;
+- steer and interrupt generate their id before send and preserve it across a
+  reply-loss-after-commit discriminator; exact durable reconciliation observes
+  one command and zero duplicate rows/worker applications, while command-id
+  substitution or semantic mismatch fails closed;
+- an explicit supervisor rejection renders `rejected`; a lost response plus
+  failed reconciliation renders `post_send_uncertain`; explicit durable absence
+  permits one resend with the same id and never a new id; repeated ambiguity
+  creates no second command;
+- the real provider-free Supervisor UNIX-socket path proves commit-before-lost-
+  reply reconciliation, same-id replay and terminal acknowledgement through the
+  canonical `ControlCommand`; close/crash/offline tests retain zero lifecycle or
+  duplicate effect and provider/App call counts remain zero;
+- focused TUI/control API/IPC/headless-driver tests, workers and integrations
+  partitions, full `make check`, exact-wheel build/install/CLI and provider-free
+  supervisor proof, validator, Ruff, compileall, pre-commit and diff hygiene
+  pass; the H6-G/H6-H production authority and all protected H6-I hashes match;
+- the four SVGs remain byte-identical and receive a fresh full-size Sol High
+  visual recheck unless a prior bounded plan update explicitly authorizes a
+  deterministic rerender; the one sanitized evidence record and complete
+  self-review report P0/P1=0; and fresh independent Luna XHigh objective plus
+  Sol High visual reviews approve the same exact candidate before H6-J starts.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close terminal control correctness so transcript open requires typed inactive-turn proof "
+        "and every steer or interrupt retains one command identity through durable reconciliation."
+    ),
+    decomposition=(
+        "Gate decision-selected transcript open on an exact connected LiveWorkerStatus match with no active turn.",
+        "Expose one read-only command-id status query over the canonical supervisor and ControlCommand authority.",
+        "Retain one caller-generated command id across send ambiguity, exact reconciliation and any single safe same-id resend.",
+        "Prove truthful rejected-versus-uncertain feedback, zero duplicates, unchanged renders and exact-wheel provider-free behavior before independent reviews.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.VISUAL),
+    acceptance_criteria=(
+        "Decision-selected resume Open fails closed without exactly one current typed source-thread match proving active_turn_id is absent; it uses no App poll, direct database read or lifecycle authority.",
+        "Steer and interrupt allocate one caller-retained id before send and never allocate another while the exact semantic request is unresolved.",
+        "Explicit rejection, exact durable command state and post-send uncertainty are distinct; ambiguous transport is reconciled by the retained id before any same-id retry.",
+        "Lost replies, command substitution, repeated ambiguity, stale turn identity and close/crash adversaries produce at most one durable command and one worker application.",
+        "The existing ControlCommand, ledger and supervisor remain sole command authority; H6-G/H6-H behavior, TUI lifecycle isolation and provider/App call counts remain unchanged.",
+        "Focused tests, affected partitions, full make check, exact-wheel provider-free supervisor, validator/Ruff/compile/diff and protected-hash gates pass with sanitized evidence and self-review P0/P1 zero.",
+        "The unchanged four full-size SVGs receive a fresh Sol High visual recheck, and independent Luna XHigh objective plus Sol High visual reviews approve the same exact candidate before H6-J starts.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_workflow_control.py",
+        "tests/test_plan_compilation.py",
+        "docs/reviews/evidence/human-terminal-ui.json",
+    ),
+    protected_surfaces=(
+        "AGENTS.md and docs/reviews/peer-thread-workflow.md",
+        "src/codex_flow/domain.py, contracts.py, ledger.py, worker.py, ipc.py, service.py and controller_recovery.py",
+        "src/codex_flow/config.py, native_profile.py, plan_capsule.py, projection.py, controller.py and backends/codex_sdk.py",
+        "src/codex_flow/plugin_capabilities.py and docs/reviews/evidence/plugin-capability-parity.json",
+        "src/codex_flow/tui_models.py, cli.py, pyproject.toml and uv.lock",
+        "docs/reviews/evidence/human-terminal-ui/light-wide.svg, dark-wide.svg, light-narrow.svg and no-color-narrow.svg",
+        "all other tests, schemas, plugins, skills, templates, packaging, accepted evidence and unrelated dirty bytes",
+        "plugin/auth/global Codex/App state, the consumed provider sentinel, deferred plugin schema parity and H6-J",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.VISUAL, RoleId("visual-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only human-terminal-control-correctness-closure in the existing "
+        "dirty python-sdk-controller worktree as the single Sol Medium mutable owner. Modify only the "
+        "exact eight surfaces. Add no artifact and do not touch domain, ledger, worker, IPC, CLI, "
+        "packaging, plugin authority, SVGs, App/global state or H6-J. Implement one read-only canonical "
+        "command-id status query, caller-retained same-id reconciliation with truthful rejected versus "
+        "post-send-uncertain outcomes, and typed inactive-turn proof for decision-selected Open. Run all "
+        "named provider-free, partition, full, wheel and protected-byte gates; refresh only the H6-I "
+        "evidence, self-review P0/P1 and return one terminal callback with independent objective and "
+        "visual reviews pending. Do not run any provider sentinel or silently rerender visual evidence."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+This repair is the sole ready execution milestone. H6-J remains locked. The
+deferred plugin schema-parity P2 is a later bounded follow-up and does not enter
+this owner.
+
+### Human-terminal-ui promotion
+
+H6-I is promoted on exact plan
+`ee92d605dbc453cdf46d0062bea38c59e3626b4348d08e508c87b329b3bf3875`,
+capsule `65fb555193f21df60bbace155f945605e7767b2e8ba7e0c4a499773f8a519578`,
+candidate `7da3f1e6491470da73ea5ff05870d52ce8fe458a88b817e0d3a9bcd84f52f7e0`
+and evidence
+`2e6cf6d2c480497919f9a6852666a6bcb9309a5a97aee7a2fa2c2cd4e748efcb`.
+The retained wheel is
+`dist/human-terminal-ui/codex_flow-0.2.0-py3-none-any.whl`, 328062 bytes,
+SHA-256 `1d6eaa14c6f6c5e56f110950eb64d8e0f7513cdfb19d7243defdd058d66beea2`.
+Independent Luna XHigh objective review and the internal Sol High visual
+fallback both approved the exact candidate with P0=0/P1=0/P2=0. The unchanged
+four fixed SVGs are the accepted visual evidence. Native visual task
+`01a05307-7c3c-7352-becb-053c96cfda6d` remains suspended on an unnecessary
+approval and is neither an outstanding authority nor retry authorization; it
+must not be approved, retried, duplicated or mutated. H6-J may now consume the
+promoted H6-G, H6-H and H6-I authorities.
+
+## Next execution — integrated-control
+
+Legacy plan label: H6-J. Outcome: prove through one exact retained-wheel and
+temporary-service candidate that detached execution, live control, controller
+recovery, required plugin capability and the human terminal UI operate together
+without App lifecycle authority. The provider-free integrated path is ready;
+final promotion also requires one real bundled-plugin/provider sentinel and is
+therefore `EXTERNAL_BLOCKED` until its external prerequisite exists.
+
+### Frozen architecture and ownership
+
+One integrated verification owner controls exactly five mutable surfaces:
+
+- **Modify `tests/test_production_pilots.py`:** own the sole provider-free
+  integrated temporary-service harness, disposable repositories, strict plugin
+  fixture, typed fake SDK seam, fault injection, cleanup assertions and fixed
+  H6-I visual hash assertions. This test module may consume production APIs but
+  may not add a second controller, ledger, transport, plugin-discovery authority
+  or UI lifecycle path.
+- **Modify `tests/test_plan_compilation.py`:** assert this exact active capsule,
+  ordered ownership and frozen plan revision. It owns no behavior policy.
+- **Modify `docs/reviews/codex-controller-compatibility.md`:** record the
+  integrated controller/service/recovery observations, negative controller-token
+  facts, optional App transcript status and cleanup boundary.
+- **Modify `docs/reviews/codex-sdk-compatibility.md`:** record exact-wheel SDK,
+  plugin-discovery, connector-readiness and real-sentinel prerequisite facts
+  without claiming a provider call that did not occur.
+- **Create `docs/reviews/evidence/integrated-control.json`:** the one sanitized,
+  closed evidence record for candidate, wheel, protected hashes, provider-free
+  gates, real-sentinel status and final promotion status. This is the only new
+  artifact; new-artifact budget is exactly one.
+
+All production modules are **preserve**: `domain.py`, `contracts.py`,
+`ledger.py`, `controller.py`, `controller_recovery.py`, `control_client.py`,
+`supervisor.py`, `service.py`, `worker.py`, `ipc.py`, `tui.py`, `tui_client.py`,
+`tui_models.py`, `plugin_capabilities.py`, `cli.py`, `native_profile.py`,
+`plan_capsule.py`, `projection.py`, `config.py` and `backends/codex_sdk.py`.
+Packaging, schemas, plugin/skill/template sources and production entrypoints are
+also preserve. **Create** applies only to the evidence record; **remove** is
+empty. Any observed production defect stops this owner and returns a separate
+bounded repair capsule rather than changing a production or promoted focused-
+test surface.
+
+Dependency direction is retained wheel/service entrypoint -> canonical
+controller, supervisor and typed control client -> SQLite ledger/recovery and
+shared SDK adapter, with the TUI and strict plugin discovery as typed consumers.
+The test harness observes these authorities through public or existing focused
+test seams only. SQLite remains sole durable state authority; the supervisor is
+sole detached lifecycle owner; `CodexSdkAdapter` is sole provider transport;
+`plugin_capabilities.py` is sole plugin-discovery authority; the TUI owns no
+lifecycle, ledger or SDK reads. Serialization remains in the existing typed
+contracts and the evidence record is observation, not runtime state.
+
+The integrated state sequence is: create disposable roots -> start exact
+retained-wheel service -> dispatch dependency-aware workers -> observe bounded
+activity -> apply one exact behavior-changing steer and one exact interrupt ->
+inject controller failure before decision commit and after commit/before
+acknowledgement -> restart -> recover or human-claim exactly one action ->
+verify zero duplicate successor -> stop service -> prove cleanup and immutable
+protected bytes. Replay, stale identity, permission drift, plugin drift,
+ambiguous recovery or cleanup residue fails closed. The activity ring is
+diagnostic and bounded; it never becomes state authority. Optional App
+transcript visibility is recorded as `not_observed` when not externally
+supplied and never causes App polling.
+
+The provider-free strict plugin fixture and typed fake SDK prove mechanism only.
+They cannot satisfy the real bundled-plugin sentinel. Current standard-home
+discovery is blocked because the shared cache contains symlinked bundles and
+strict discovery fails before a selected ready plugin can be classified; no
+provider call is authorized during planning. The smallest prerequisite is an
+externally supplied standard shared Codex home/environment with one already
+installed, enabled and ready required bundled plugin that passes strict
+no-symlink discovery, plus explicit authorization for exactly one bounded real
+provider attempt. The program must not mutate plugin installation, enablement,
+trust, authentication, caches or global Codex/App state, and must not substitute
+a private `CODEX_HOME`, fake plugin or catalog presence.
+
+### Milestone DAG, gates and closure
+
+The serial edge from H6-G/H6-H/H6-I to this milestone is an acceptance
+dependency on their frozen state, plugin and human-control authorities. Inside
+H6-J, provider-free integration is ready and independently closable as evidence;
+the real sentinel follows only after the external prerequisite. Objective and
+architecture reviews follow one exact candidate only after both integration
+branches pass. There is no mutable fan-out because the pilot, compatibility
+notes and evidence share one candidate identity. This is the final program
+milestone; no later milestone may consume a promoted result until it closes.
+
+Acceptance modes are `objective` and `architecture`. Promotion requires:
+
+- exact retained-wheel/service execution with zero App API/task dependency,
+  at least two dependency-aware workers and the 0/1/many-worker matrix;
+- a bounded activity ring, one behavior-changing exact-turn steer, one exact
+  interrupt and zero controller-model tokens while workers merely run;
+- failure before decision commit and after commit/before acknowledgement,
+  followed after restart by exactly one recovered or human-claimed action and
+  no duplicate action, successor, notification or worker application;
+- provider-free strict-plugin and typed-SDK mechanism proof, truthful connector
+  readiness without invoking MCP/connectors, plus one later real bounded
+  bundled-plugin/provider sentinel using the external prerequisite;
+- replay, stale identity, ring count/byte bounds, permission/plugin drift,
+  secret-negative, 0/1/many-worker, service restart and cleanup adversaries;
+- stopped service, no child process/socket/lease, no temporary plugin/worktree/
+  controller state outside disposable roots, and byte-identical retained wheel,
+  promoted evidence, H6-I SVGs and protected checkout surfaces;
+- focused pilot and plan tests, affected partitions, full `make check`, exact
+  retained-wheel/service proof, validator, Ruff, compileall, pre-commit and diff
+  hygiene, with complete self-review P0/P1=0;
+- a closed `integrated-control.json` whose provider-free status is
+  `passed`/`failed`, real sentinel status is `external_blocked`/`passed`, and
+  final status remains `external_blocked` until the real sentinel passes; and
+- fresh independent Luna XHigh objective and Sol Medium architecture reviews
+  approve the same exact final candidate with P0=0/P1=0.
+
+No line, file, duration or test-count proxy may weaken the observable outcome,
+isolation, recovery, exact-wheel or independent-proof requirements. If a hard
+external constraint conflicts with them, use proof-preserving replacement or
+return bounded replan. Residual risk is explicit: the provider-free branch can
+complete now, but H6-J and the program cannot promote while the real sentinel
+is `external_blocked`.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Prove one exact retained-wheel service integrates detached execution, live control, "
+        "controller recovery, required plugin capability and the human TUI without App lifecycle authority."
+    ),
+    decomposition=(
+        "Run one disposable provider-free retained-wheel service across dependency-aware 0/1/many-worker cases, bounded activity, exact steer and interrupt.",
+        "Inject controller failures on both sides of decision commit and prove restart yields exactly one recovered or human-claimed action with no duplicate successor.",
+        "Exercise strict plugin and typed SDK mechanisms provider-free, classify connector and optional App visibility truthfully, and preserve promoted visual and runtime bytes.",
+        "Close sanitized evidence and all deterministic gates, while retaining external_blocked until one authorized real bundled-plugin sentinel can pass.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The exact retained-wheel service proves detached dependency-aware execution, bounded live activity, one behavior-changing exact steer, one exact interrupt and zero idle controller-model tokens without App lifecycle calls.",
+        "Before-commit and after-commit-before-ack failures recover or human-claim exactly one action after restart and create no duplicate action, successor, notification or worker application.",
+        "Provider-free strict-plugin and typed-SDK fixtures prove mechanisms only; connector readiness and optional App visibility are truthful and cause no connector or App polling.",
+        "Replay, stale identity, ring bounds, permission/plugin drift, secret-negative, worker-count and cleanup adversaries fail closed with no state outside disposable roots.",
+        "The retained wheel, promoted H6-G/H6-H/H6-I evidence, four fixed SVGs and every protected production surface remain byte-identical.",
+        "Focused and affected tests, full make check, exact-wheel/service, validator, Ruff, compile, pre-commit and diff gates pass with sanitized evidence and self-review P0/P1 zero.",
+        "Final status remains external_blocked until an externally ready strict bundled plugin and authorization permit one real provider attempt that passes.",
+        "Independent Luna XHigh objective and Sol Medium architecture reviews approve the same final candidate with P0/P1 zero before program promotion.",
+    ),
+    mutable_surfaces=(
+        "tests/test_production_pilots.py",
+        "tests/test_plan_compilation.py",
+        "docs/reviews/codex-controller-compatibility.md",
+        "docs/reviews/codex-sdk-compatibility.md",
+        "docs/reviews/evidence/integrated-control.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md, AGENTS.md and every production module under src/codex_flow",
+        "all promoted H6-G/H6-H/H6-I evidence and docs/reviews/evidence/human-terminal-ui/*.svg",
+        "all focused production tests other than tests/test_production_pilots.py and tests/test_plan_compilation.py",
+        "schemas, packaging, plugins, skills, templates, Makefile, pyproject.toml and uv.lock",
+        "the retained wheels, canonical entrypoints and unrelated dirty or untracked bytes",
+        "plugin installation/cache/trust/auth state, global Codex/App state, Git history and provider execution without explicit authorization",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only integrated-control in the existing dirty python-sdk-controller "
+        "worktree as one Luna XHigh mutable owner at app-configured fast speed. Modify only the exact "
+        "five surfaces and create only integrated-control.json. Add no production repair, alternate "
+        "authority or plugin/global/App/Git mutation. Build the single provider-free retained-wheel "
+        "temporary-service pilot with dependency-aware workers, bounded activity, exact steer/interrupt, "
+        "two controller failure windows, strict plugin and typed fake SDK mechanisms, truthful connector "
+        "and optional App status, adversarial restart/replay/drift/cleanup and protected-byte proof. Run "
+        "all named gates and return one terminal result. If the standard shared home still fails strict "
+        "plugin discovery or no one-attempt provider authorization exists, record the real sentinel and "
+        "final milestone as external_blocked; do not mutate or substitute the environment. Any production "
+        "defect requires a separate bounded repair capsule. Independent reviews remain pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+H6-E-W-R3 is closed under the explicitly recorded App-present runtime gate, the
+private semantic naming pass is promoted, and the forward-only public semantic
+cutover is promoted at exact candidate
+`f7e86be6d6ae1d20cb9d431cbc173b526690af1172595c6266d10b4124b9fee8`.
+The cutover removed old modules, identifiers and commands without aliases or
+shims. Its single P1 was a stale active `AGENTS.md` command; the bounded repair
+changed it to `sdk-compatibility-sentinel`. Final Luna XHigh objective and Sol
+Medium architecture rechecks both returned `APPROVED`, P0=0/P1=0/P2=0, with
+408 tests and exact wheel/import/help/absence gates green.
+
+## Live-worker-control implementation candidate
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Expose bounded live worker activity, exact-turn steer and interrupt, and durable "
+        "error-specific recovery through the harness control plane without App authority."
+    ),
+    decomposition=(
+        "Extend the typed SDK adapter and worker boundary to retain live turn identity, stream bounded redacted activity and apply exact-turn steer or interrupt commands.",
+        "Add one crash-atomic ledger migration for the diagnostic ring, typed retry policy and capability-bound control-command outbox.",
+        "Upgrade authenticated local IPC and the supervisor so events, commands, acknowledgements, restart and loss windows remain exactly-once and fail closed.",
+        "Expose one typed control client plus semantic noninteractive CLI operations for status, recent activity, steer, interrupt and bounded retry decisions.",
+        "Exercise real delayed SDK behavior, fault/replay/budget matrices, exact wheel/service behavior and secret-negative cleanup evidence.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A real delayed SDK worker emits bounded recent activity through the production control client, and one exact-turn steer changes its subsequent observable response without App API/task calls.",
+        "One interrupt reaches only the bound live turn and closes with truthful SDK terminal evidence; stale generation, wrong attempt/turn, replay, oversized payload, malformed IPC and post-terminal commands fail before mutation.",
+        "Durable retry policy proves five backoff-gated pre-identity retries, one invalid-chain fresh-thread rollover, two same-thread schema-envelope corrections and zero automatic retries for auth, permission, capability, profile or integrity failures.",
+        "Restart between failure and retry neither resets nor double-consumes budget; exhaustion or ambiguous post-identity state produces one sanitized human_attention_required decision and no duplicate writer/result/successor/notification.",
+        "The diagnostic ring enforces count and byte eviction plus redaction while remaining non-authoritative; control commands bind dispatch, generation, attempt, thread and turn identity with exactly-once acknowledgement semantics.",
+        "Focused adversarial migration/adapter/IPC/worker/supervisor/client/CLI tests, make check, Ruff, exact wheel and temporary service checks pass with zero self-review P0/P1; independent objective and architecture promotion is deferred until the exact implementation candidate freezes.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/cli.py",
+        "focused semantic adapter, ledger, IPC, worker, supervisor, service, client and CLI tests",
+        "docs/reviews/evidence/live-worker-control.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md",
+        "promoted detached-supervisor and naming evidence/diff semantics",
+        "src/codex_flow/native_profile.py, plan compilation/projection and App-native compatibility",
+        "plugin sources, caches, configuration and future TUI modules",
+        "accepted historical evidence, global Codex state and unrelated worktrees",
+        "controller-turn recovery, plugin parity, TUI and integrated-promotion successor surfaces",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only live-worker-control in the existing dirty python-sdk-controller worktree. Preserve every donor and promoted cutover change. Implement the decision-ready H6-F architecture already specified in this plan with one owner for ledger, supervisor, SDK, IPC, service, control client and CLI. Keep App optional, workers leaf-bound, credentials secretless and every command/retry capability- and budget-bound. Create no subagents, callbacks, worktrees, commits or global mutations. Run adversarial and exact-wheel/service gates, self-review, retain sanitized live-worker-control evidence, and send exactly one terminal callback to the planning controller. Do not start controller recovery, plugin parity, TUI or integration."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=8_000,
+)
+```
+
+This capsule produced implementation candidate
+`78aae2667fc08d1bfcab86cab83606f2286acc7075db86df88995123633ec743`
+and exact wheel
+`b1150bf92db515e6927a40d72bff61022926f5bc662299182a6cfaa92489bf42`.
+The implementation owner reported 416 tests, full `make check`, a 61-test
+focused post-fix suite, exact-wheel install/help/import/service checks and clean
+diff hygiene. Independent review rejected promotion, so this capsule is retained
+implementation evidence and is no longer executable.
+
+### Live-worker-control promotion findings and repair architecture
+
+The exact candidate received `DO_NOT_PROMOTE` from both required authorities.
+The Sol Medium architecture review found four P1s: worker exit and retry
+classification were separate commits; command order depended on timestamp and
+client id; the exported client returned unchecked dictionaries; and reasoned
+CAS recovery exposed retry but not cancel or budget change. The Luna XHigh
+objective review found five additional P1s and one P2: broad SDK exception
+wrapping made non-transient failures retryable; `UnsupportedCapability` escaped
+to an unclassified exit that became post-identity retry; one lost diagnostic
+event permanently blocked later activity; non-string command ids were coerced;
+the real delayed SDK/control-client steer gate was unproven; and a partial-frame
+same-uid IPC client could block the supervisor event loop.
+
+One bounded repair owns all ten findings because they converge on the same
+ledger/SDK/worker/IPC/control-client contract. It does not begin controller-turn
+recovery or change accepted retry ceilings, terminal-result authority, App
+policy, permissions, plugin behavior or later TUI scope.
+
+The repair design is fixed:
+
+- Add one forward migration after schema v13. The control outbox receives a
+  server-allocated per-dispatch monotonic submission sequence and every claim,
+  list and delivery orders by that sequence, never wall clock or client id.
+  Retry policy receives a monotonic revision. A semantic recovery-control audit
+  record binds action id, dispatch, expected revision, action kind, bounded
+  reason, requested budget fact and applied revision. Existing v13 rows migrate
+  deterministically in current creation order and remain readable; no alias or
+  parallel schema path is retained.
+- Replace separate worker-exit and retry writes with one idempotent ledger
+  transaction that validates the live process identity, records exit
+  classification and consumes or rejects the typed retry decision together.
+  Any ledger failure retains in-memory child ownership for retry in the same
+  supervisor epoch. No failure is swallowed and no child is forgotten before
+  the durable transaction commits.
+- At the SDK boundary, allow automatic transient retry only for the pinned
+  SDK's typed `TransportClosedError` or `is_retryable_error` result. Typed
+  capability, authentication, permission, profile, integrity, malformed-input
+  and all unknown SDK/RPC failures are explicit non-retryable outcomes; message
+  text never selects retry. Worker exit codes carry these closed classes, and an
+  unknown exit fails closed rather than becoming post-identity continuation.
+- Make diagnostic delivery idempotent across a lost acknowledgement. The
+  supervisor returns the next durable stream position when a turn binds; the
+  worker advances only after acknowledgement and retries the same bounded event
+  identity before later events. Exact duplicate delivery returns the prior
+  record, conflicting replay fails closed, and a new process/turn resumes from
+  the durable position. Diagnostic loss never becomes terminal authority or
+  prevents later activity.
+- Replace public `dict[str, object]` client responses with closed semantic
+  status, activity, control-command, retry-policy and recovery-action models.
+  Each decoder rejects missing, extra or wrongly typed fields. Keep raw request
+  decoding private to the IPC adapter so H6-G and the TUI cannot depend on
+  SQLite/wire shapes.
+- Expose authorized retry, cancel and budget-change through those typed models.
+  Every mutation requires an action id, expected policy revision and bounded
+  reason. Budget changes remain within the accepted absolute ceilings, cannot
+  fall below consumed counts or reset them, and atomically advance revision;
+  stale, replayed, conflicting or terminal actions fail before mutation.
+- Validate command id as a bounded non-empty string before conversion or
+  persistence. Never coerce booleans, integers, containers, whitespace/control
+  text or other malformed IPC values into an identifier.
+- Apply a bounded server-side deadline immediately after accepting a UNIX
+  connection and before reading its header/body. Timeout, fragmented, oversized
+  or stalled frames close only that client and return control to lease renewal,
+  recovery and other workers.
+- Add a semantic opt-in `live-control-sentinel` that runs the exact installed
+  wheel and production supervisor/worker/control client against one disposable
+  Git repository with SDK `Sandbox.read_only`. It waits for a real bound delayed
+  turn, submits one exact-turn steer through the control client, proves the
+  steered marker in the terminal response and retained activity, compares
+  before/after repository bytes, records zero App API/task calls and truthfully
+  records App presence. It uses one bounded provider attempt, cleans every
+  temporary service/runtime artifact, archives only its own SDK thread after
+  proof and updates `live-worker-control.json` without secrets or raw prompts.
+
+## Next execution — live-worker-control-conformance-repair
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close every objective and architecture promotion finding on the frozen live-worker "
+        "control boundary, including the real read-only steer outcome, without expanding later milestones."
+    ),
+    decomposition=(
+        "Make worker-exit classification and retry policy one idempotent crash-atomic transaction, and allow automatic retry only for typed transient SDK failures.",
+        "Migrate command ordering, diagnostic acknowledgement recovery and reasoned retry/cancel/budget controls to server-owned sequences and revision-bound CAS records.",
+        "Replace raw control-client dictionaries with closed semantic models and reject malformed identifiers or wire shapes before mutation.",
+        "Bound accepted IPC connections with a server-side frame deadline so a partial same-uid peer cannot stall supervisor liveness.",
+        "Run one opt-in exact-wheel real SDK delayed-turn steer sentinel in a disposable read-only repository and retain sanitized outcome evidence.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Injected failure between exit observation and retry decision cannot persist either fact alone; ledger error retains child ownership and restart consumes each typed budget at most once.",
+        "Only pinned-SDK typed transient transport/overload errors are retryable; capability, authentication, permission, profile, integrity, malformed and unknown failures consume zero automatic retry budget and produce one truthful fail-closed decision.",
+        "Concurrent same-timestamp control submissions receive unique monotonic server sequence and are delivered exactly in submission order; stale/replayed/conflicting commands and non-string or malformed ids fail before mutation.",
+        "Lost diagnostic request or acknowledgement can be retried idempotently and later activity remains visible after reconnect/restart without duplicate durable sequence or terminal implication.",
+        "The public control client returns only closed status/activity/command/retry/recovery models, and reasoned retry, cancel and bounded budget change require action id plus expected revision with stale and terminal CAS rejection.",
+        "A partial-frame same-uid IPC client exceeds the bounded server deadline without delaying lease renewal, recovery or a second valid client.",
+        "One real exact-wheel SDK worker in a disposable read-only Git repository is observed and steered through the production control client; the final marker changes observably, repository bytes remain identical, App calls are zero and sanitized evidence records actual App presence.",
+        "Focused fault/migration/adapter/worker/IPC/supervisor/client/CLI/sentinel tests, full make check, exact-wheel install/service/sentinel gates, diff hygiene and self-review pass with zero open P0/P1.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/live_control_sentinel.py",
+        "src/codex_flow/__init__.py only for closed semantic client model exports",
+        "focused semantic migration, adapter, worker, IPC, supervisor, client, CLI and sentinel tests",
+        "docs/reviews/evidence/live-worker-control.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md",
+        "promoted detached-supervisor and naming/cutover behavior outside direct regression repair",
+        "src/codex_flow/native_profile.py, plan compilation/projection and App-native compatibility",
+        "plugin sources, templates, schemas, configuration and future TUI modules",
+        "controller-turn recovery, plugin parity and integrated-promotion successor surfaces",
+        "accepted historical evidence, global Codex state and unrelated worktrees",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only live-worker-control-conformance-repair in the existing dirty python-sdk-controller worktree. Preserve all unrelated donor and concurrent plan changes. Implement the fixed repair architecture and close all nine P1 plus the IPC P2 from the two exact-candidate reviews. Use descriptive forward-only names and no aliases. Run focused gates during development, then the required shared-contract full gate, exact wheel/service checks and exactly one opt-in real SDK read-only steer sentinel; physical App closure is not required and App APIs/tasks are forbidden. Retain sanitized evidence, self-review the full repair diff, create no subagents/worktrees/commits/global mutations, and send one terminal callback to the planning controller. Do not start skill reconciliation, controller recovery, plugin parity, TUI or integration."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+This repair capsule produced frozen candidate
+`3457b99128d2af84f93e69f343215a2f7e6a94d4013e607121cc93ef4c6d3ff9`
+and exact wheel
+`7a3ea21543f511c863013b9f193b8361fdd5c53bfcf0e0a4dc333dfb5eb397b7`.
+The implementation owner reported 417 tests, full `make check`, exact-wheel and
+temporary-service checks. Its one authorized real SDK sentinel attempt failed
+after thread identity with an unknown non-transient SDK failure, so that
+observable production gate remains `EXTERNAL_BLOCKED` and may not be retried
+without fresh authority. Independent objective and architecture review matched
+both frozen identities but rejected code promotion. This capsule is retained
+implementation evidence and is no longer executable.
+
+### Live-worker ownership and protocol-closure continuation
+
+The exact repaired candidate received `DO_NOT_PROMOTE` with seven unique P1s
+and one P2. The architecture review found that reasoned cancellation could
+terminalize SQLite state and delete capability/liveness while the owned worker
+continued running, and that the public command decoder discarded malformed
+digest or acknowledgement facts. The objective review additionally found a
+transport-before-identity exit path that deletes liveness before
+`mark_worker_exit` reads it; retry strategy transitions that do not advance CAS
+revision; cancellation unavailable from `human_attention_required`; a
+post-rejection `BrokenPipeError` that can escape the foreground supervisor;
+worker turn binding that accepts control/whitespace ids and boolean counters;
+invalid-chain outcomes that incorrectly become human attention instead of the
+single authorized fresh-thread rollover; and a P2 open top-level response
+envelope.
+
+These findings share one durable ledger/supervisor/public-control ownership
+boundary. A cancellation repair and the retry/CAS repairs must therefore have
+one writer. Because the cancellation/recovery class reopened after the Luna
+implementation and repair cycle, the bounded continuation routes once to a
+fresh Sol Medium recovery owner. It does not change accepted retry ceilings,
+public intent, App policy, permissions, sentinel authority or any successor
+milestone.
+
+The continuation design is fixed:
+
+- Make live cancellation a supervisor-owned stop protocol. Record a reasoned,
+  revision-bound cancellation request without terminalizing the queue or
+  deleting capability/liveness, interrupt or terminate the exact owned child
+  under a bounded deadline, retain process and durable liveness ownership until
+  exit acknowledgement, then atomically terminalize cancellation. A crash or
+  failure before acknowledgement leaves enough durable ownership for recovery;
+  no cancelled worker may continue repository work behind a terminal row.
+- Permit the same reasoned cancellation protocol from
+  `human_attention_required`. Retry, cancel and budget actions remain
+  idempotent CAS operations, and every inspection, human-attention,
+  continuation-budget or fresh-thread-budget strategy transition increments
+  the monotonic retry-policy revision in the same transaction.
+- Repair transport-before-identity exit processing so the one atomic
+  exit/retry transaction never deletes a liveness row before its return value
+  is built. The supervisor contains every ledger failure, retains child
+  ownership until a durable decision commits and never raises an untyped
+  `AttributeError` from the reap loop.
+- Preserve the single typed invalid-chain fresh-thread budget for empty-history
+  and latest-failed-turn provider outcomes. Persisted inspection distinguishes
+  those normal invalid-chain facts from truly ambiguous identity/integrity
+  evidence; no text heuristic or additional retry class is introduced.
+- Validate the complete worker identity before mutating `_active_turns`:
+  generation and attempt reject booleans, and turn ids reject empty,
+  whitespace, control, oversized or otherwise malformed text. A failed
+  rejection response, including `BrokenPipeError`, closes only that peer and
+  cannot escape the supervisor loop.
+- Close the public response and command envelopes. Reject all extra top-level
+  fields, require a valid lower-case 64-hex payload digest, and accept only the
+  exact bounded acknowledgement object shape before semantic projection. No
+  malformed wire fact may be silently discarded.
+
+## Next execution — live-worker-ownership-and-protocol-closure
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close the exact live-worker ownership, retry/CAS and typed protocol findings on the "
+        "frozen repaired boundary without retrying the externally blocked SDK sentinel or starting successors."
+    ),
+    decomposition=(
+        "Make reasoned cancellation a bounded supervisor-owned stop-and-ack protocol that retains durable and process ownership until terminalization.",
+        "Repair exit/retry atomicity, revision advancement, human-attention cancellation and invalid-chain fresh-thread classification.",
+        "Reject malformed worker identities and contain failed rejection writes before they can affect supervisor liveness.",
+        "Close public response, command digest and acknowledgement envelopes before semantic projection.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A running cancellation cannot produce a terminal cancelled row until the exact child exits and durable acknowledgement commits; crash/failure retains recoverable ownership and the worker cannot continue behind terminal authority.",
+        "Reasoned cancel works from human-attention state, every retry-strategy mutation advances revision, and stale retry/cancel/budget actions fail CAS before mutation.",
+        "Transport-before-identity exit and retry commit atomically without missing-row exceptions or forgotten child ownership; each typed budget is consumed at most once.",
+        "Empty-history and latest-failed-turn invalid-chain outcomes use at most the one authorized fresh-thread rollover, while ambiguous integrity evidence remains fail-closed.",
+        "Malformed turn ids, boolean counters, broken rejection peers, extra response keys, invalid command digests and non-exact acknowledgement objects are rejected before durable or in-memory mutation.",
+        "Focused ledger/supervisor/IPC/client/SDK tests pass during repair; because shared ledger and public control contracts change, closure runs affected semantic partitions and one full make check, exact-wheel/service checks, diff hygiene and complete self-review.",
+        "The consumed real SDK sentinel is not rerun; evidence continues to report its production gate separately as external_blocked.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py and contracts.py only when the stop protocol needs an existing semantic type extension",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/backends/codex_sdk.py only for typed invalid-chain classification",
+        "src/codex_flow/control_client.py",
+        "focused live-worker ledger, supervisor, IPC, control-client and SDK tests",
+        "docs/reviews/evidence/live-worker-control.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md",
+        "worker, IPC, service, CLI and sentinel behavior except a direct regression repair proven necessary by a finding",
+        "promoted detached-supervisor, naming and public-cutover behavior outside the listed findings",
+        "workflow skills, schemas, templates, test partitions, controller recovery, plugin parity, TUI and integrated promotion",
+        "the consumed provider attempt, accepted historical evidence, global Codex/App state and unrelated worktrees",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only live-worker-ownership-and-protocol-closure in the existing dirty python-sdk-controller worktree. Preserve all unrelated and concurrent changes. Implement the fixed Sol Medium continuation design and close the seven unique P1 plus one P2 from the exact-candidate reviews. Use descriptive forward-only identifiers and no aliases. During implementation run only focused discriminating tests; at closure run the affected partitions and one required full make check plus exact-wheel/service and diff-hygiene gates. Do not retry the provider sentinel, call App/task APIs, create peers/subagents/worktrees/commits, mutate global state or start later milestones. Retain sanitized evidence and send one terminal callback to the planning controller."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+This continuation is the sole executable milestone. One fresh Sol Medium owner
+implements, tests and self-reviews it in the existing worktree. After a frozen
+candidate is returned, one Luna XHigh objective recheck and one independent Sol
+Medium architecture recheck of that exact digest decide code promotion. Only
+the still-blocked production sentinel may remain separate; no broader review
+wave or second speculative repair is authorized before the controller
+reevaluates the milestone and routing policy.
+
+The continuation produced candidate
+`8ea819175f6525234901b1bc22956d0873fe42555c7694d45412f282a20b3a48`
+and exact wheel
+`cc3e44b6bb0362e84c5bda971bded92b5161ea1229f716937299ba16ab9c42a7`.
+Its architecture recheck approved with P0/P1/P2 zero, but the objective recheck
+reproduced two P1 ownership races. First, worker authentication renewed durable
+liveness before strict counter/turn validation, and the event path accepted
+`generation=True` as generation one. Second, a worker result could terminalize
+the queue after a cancellation request but before stop acknowledgement, leaving
+the pending cancellation action, exited child and liveness permanently owned by
+the reaper. This candidate is retained evidence and is not promoted.
+
+## Retained execution — strict-worker-identity-and-cancellation-race-closure
+
+One final bounded repair in the current Sol Medium recovery cycle owns only
+these two findings:
+
+- Split non-mutating capability lookup from liveness renewal. Validate the
+  complete worker generation, attempt, thread and turn identity first for every
+  worker event, bind, poll and acknowledgement operation; reject booleans,
+  numeric lookalikes and malformed turn ids before any durable or in-memory
+  write. Renew liveness only after the exact operation envelope and identity
+  are closed.
+- Give a pending cancellation precedence over result terminalization. A result
+  racing after the cancellation CAS is either rejected before terminal
+  mutation or retained as bounded non-authoritative evidence until the exact
+  stop/exit acknowledgement atomically resolves cancellation. Reaping an
+  already-exited child is idempotent across restart and can never strand a
+  pending action, child ownership or liveness row behind a completed queue.
+
+Mutable surfaces are limited to `src/codex_flow/ledger.py`,
+`src/codex_flow/supervisor.py`, the smallest necessary semantic domain/contract
+extension if unavoidable, focused live-worker/supervisor tests and
+`docs/reviews/evidence/live-worker-control.json`. The canonical plan,
+instructions, SDK adapter, worker, IPC, service, client, CLI, sentinel and all
+successor milestones are protected unless a direct compile/test repair proves
+an exact dependency. No alias or milestone-coupled identifier is allowed.
+
+Acceptance requires adversarial proof that malformed bool/lookalike identities
+leave liveness, activity and `_active_turns` byte-for-byte unchanged; and that
+both cancel-before-result and result-before-cancel schedules reach one truthful
+terminal owner without a live/unreaped child, stranded liveness or pending
+action. During implementation run only the smallest discriminating tests. At
+closure run the affected live-worker/supervisor semantic tests, then one broad
+gate only if the shared contract impact cannot be bounded; rebuild and inspect
+the exact wheel only for gates made stale by the repair, run `git diff --check`
+and self-review the complete owned diff. The consumed provider sentinel is not
+rerun and remains a separate external gate.
+
+After the repaired digest freezes, one Luna XHigh objective recheck is the only
+stale promotion authority. The prior exact-candidate architecture approval may
+be carried forward only if the repair stays inside this fixed design and the
+reviewer confirms no architecture surface changed; otherwise run one fresh Sol
+Medium architecture recheck. A surviving same-class finding after this repair
+triggers the repository's Sol High escalation rather than another Sol Medium
+cycle.
+
+The final repair produced candidate
+`b49e8da8debe577c4b3bb661bd0c1aa8ac6cab46a5161cabdd5d8b2195c15bb5`
+and wheel
+`44dbeaa82538c8b08e6a2210cd7e51c20591c3e94685656724f311e3aeb63603`.
+The authorized Luna XHigh recheck returned `APPROVED`, P0=0/P1=0/P2=0 after
+52 focused identity/race tests and confirmed the exact architecture approval
+carried forward. Live-worker deterministic code and architecture promotion is
+therefore complete. The consumed real SDK delayed-steer sentinel remains the
+only separate `EXTERNAL_BLOCKED` production gate and is not retried by any
+successor milestone.
+
+## Plugin and controller installation architecture
+
+The installed Codex plugin intentionally contains skills and trusted lifecycle
+hooks, while the Python `codex-flow` executable is an independently installed
+tool. The accepted user outcome is nevertheless one explicit repository command
+that installs or upgrades both from the same checkout and proves that a new task
+can call the matching controller and TUI outside this worktree. Codex does not
+provide a plugin `OnInstall` event for arbitrary binary installation, so no
+session hook may mutate `~/.local`, install Python, or silently bootstrap the
+controller.
+
+One bounded repository bootstrap owns the operation. It uses only the Python
+standard library for orchestration and invokes the supported `uv tool install`,
+`codex plugin marketplace add`, and `codex plugin add` commands with argument
+vectors, never a shell. It resolves the repository root from its own path,
+requires the standard inherited Codex home, installs the current checkout with
+CPython 3.12, registers that checkout as `adam-workflows`, installs and enables
+`personal-workflow-skills`, then verifies the installed CLI, `tui` command,
+manifest/version, regular single-link bundle files, and byte parity. A repeated
+run converges safely. Failure reports the completed phase and exits nonzero; it
+does not invent transactional rollback across two external installers.
+
+Architecture map and ownership:
+
+- `scripts/install_personal_workflow_skills.py` — create; sole bootstrap
+  orchestrator and verification owner. It owns no provider, controller, ledger,
+  App, authentication, configuration format, or plugin-discovery semantics.
+- `Makefile` and `README.md` — modify; expose and document one canonical
+  `make install-personal-workflow-skills` entrypoint plus its explicit global
+  effects and new-task requirement.
+- `plugins/personal-workflow-skills/skills/workflow-control/SKILL.md` — modify;
+  perform a non-mutating CLI/TUI preflight and point a missing or incompatible
+  installation to the canonical bootstrap instead of attempting installation.
+- `.agents/plugins/marketplace.json` and
+  `plugins/personal-workflow-skills/.codex-plugin/plugin.json` — modify together
+  only for one forward plugin version increment; their version remains a single
+  exact authority pair.
+- `tests/test_plugin_installation.py` — create; fake-command and filesystem
+  integration tests for argument safety, ordering, idempotence, parity,
+  incompatible CLI, symlink rejection and truthful partial failure without
+  touching the real shared home.
+- `tests/test_plan_compilation.py` — modify only to bind this canonical-plan
+  revision and compile the exact new capsule.
+- `docs/reviews/evidence/plugin-and-controller-installation.json` — create;
+  sanitized closure evidence for candidate, tests and the final explicit shared-
+  home installation performed only after code promotion.
+
+Dependency direction is bootstrap -> external `uv`/`codex` CLIs -> installed
+tool/plugin facts. Plugin skills may diagnose the bootstrap result but never
+invoke or own it. Production `src/codex_flow/**`, hooks, schemas, controller
+state, retained wheels, accepted evidence and provider sentinels remain
+protected. New durable-artifact budget is three: installer, focused test module,
+and evidence record. There is one vertical milestone and no useful internal
+fan-out because version authority, command ordering and end-to-end verification
+share one ownership boundary. No unresolved design decision remains.
+
+## Next execution — plugin-and-controller-installation-schema-compatible
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Provide one explicit, idempotent repository command that installs or upgrades both "
+        "personal-workflow-skills and the matching codex-flow CLI into the standard shared user environment."
+    ),
+    decomposition=(
+        "Create one standard-library bootstrap that validates prerequisites and invokes uv and Codex plugin installation with closed argument vectors.",
+        "Verify the installed Python 3.12 tool exposes the current controller and TUI and that the enabled plugin bundle is regular, single-link and byte-identical to source.",
+        "Expose the bootstrap through Makefile and README, add a non-mutating workflow-control preflight, and advance the plugin manifest/marketplace version together.",
+        "Prove success, safe repeat, fail-closed partial failure and symlink or version drift rejection without mutating the real shared home during tests.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "From any clean checkout, one documented make target installs the checkout as the CPython 3.12 codex-flow uv tool and installs/enables personal-workflow-skills from the same local adam-workflows marketplace.",
+        "A successful run proves codex-flow is on PATH, reports version 0.2.0, exposes the tui command, and the installed plugin manifest/version and every bundle byte match the source with no symlink, special file or multi-link regular file.",
+        "Running the command again converges without duplicate marketplace/plugin authority; a failed external phase exits nonzero with truthful completed-phase context and never reports success or mutates AGENTS.md.",
+        "The bootstrap rejects private CODEX_HOME, incompatible Python/tool output, mismatched manifest/marketplace versions, path substitution and unsafe installed bundle topology before declaring readiness.",
+        "The workflow-control skill diagnoses a missing or stale CLI and names the canonical bootstrap but performs no installation or global mutation itself.",
+        "Focused installer tests, workflow asset validation, affected plan/plugin partitions, one full make check, Ruff, compileall, diff hygiene and complete self-review pass with zero open P0/P1; no provider, App, connector or real SDK sentinel runs.",
+    ),
+    mutable_surfaces=(
+        "scripts/install_personal_workflow_skills.py",
+        "Makefile",
+        "README.md",
+        "plugins/personal-workflow-skills/skills/workflow-control/SKILL.md",
+        "plugins/personal-workflow-skills/.codex-plugin/plugin.json",
+        ".agents/plugins/marketplace.json",
+        "tests/test_plugin_installation.py",
+        "tests/test_plan_compilation.py",
+        "docs/reviews/evidence/plugin-and-controller-installation.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md after this capsule is frozen and repository/global AGENTS.md",
+        "src/codex_flow production modules, schemas, hooks and every other plugin skill",
+        "retained wheels and previously accepted evidence or visual artifacts",
+        "provider sentinels, Codex authentication, App state, remotes, Git history and unrelated dirty worktree bytes",
+        "the real shared Codex home during implementation tests; final activation belongs to the planning owner after promotion",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Schema-compatible recovery continuation: use execute-milestone for only plugin-and-controller-installation in the existing dirty python-sdk-controller worktree after the superseded dispatch reached the real SDK but its provider wire schema was rejected. The installed adapter now projects the provider-supported schema while preserving complete local validation. Implement the frozen bounded bootstrap architecture without changing other production codex_flow modules, hooks, schemas, retained wheels, accepted evidence, provider state or unrelated bytes. Use the exact mutable surfaces and three-artifact budget; do not add an automatic install hook, alternate package manager, rollback framework, second installer or new public runtime abstraction. Tests use fake commands and an isolated standard-home fixture only; do not mutate the real shared home or call providers/App/connectors. Run focused checks while implementing, then the named affected partitions and one full make check because plugin contracts, Makefile and plan compilation change. Retain sanitized evidence, self-review the exact diff with P0/P1 zero, and return one terminal result to the controller. Do not start another milestone."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+## Next execution — local-image-worker-input
+
+This user-authorized post-install follow-up adds one typed, repository-local
+image-input path to the existing controller and SDK worker.  It does not add a
+transport, persistence authority, browser runtime, TUI bitmap renderer, remote
+URL fetcher or alternate lifecycle owner.  Model-facing capsule schema v3
+extends the established prompt with a bounded non-empty tuple of
+repository-relative image paths and may carry the existing plugin requirements;
+schema v1 and v2 remain byte- and behavior-compatible.  The internal execution
+capsule carries the same paths, and the worker validates each path as a bounded
+single-link regular image below the selected workspace immediately before the
+external turn.  The adapter then projects one official SDK `TextInput` or
+`SkillInput` followed by official `LocalImageInput` values.  Image bytes never
+enter SQLite, IPC, evidence, logs or the TUI transcript projection.
+
+The same bounded owner also closes two directly observed usability defects.
+First, `supervisor install` and `supervisor start` can bind different native
+profile snapshots when the App updates its configuration between processes.
+One explicit `supervisor refresh` operation must load one profile once, install
+the exact unit, reload the user manager, and restart the repository-scoped
+supervisor with that same credential/profile authority.  The repository
+bootstrap may invoke this operation after installing the current tool, so one
+documented command leaves both the plugin/controller and an already-installed
+repository supervisor current.  It never installs a supervisor implicitly for
+a repository that has no existing unit.
+
+Second, the legacy native handoff wording is clarified: "one bounded handoff"
+is a per-peer/per-milestone idempotency rule, not a global per-turn concurrency
+cap.  A planning/controller turn may issue multiple START operations in the
+same turn when every milestone is ready, each has one owner, mutable surfaces
+are disjoint, and each peer is started exactly once.  Serial dependencies and
+shared mutable ownership still prohibit parallel STARTs.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Let a codex-flow SDK worker receive bounded local screenshots and other image files "
+        "as official typed Codex turn inputs while preserving the existing controller authority."
+    ),
+    decomposition=(
+        "Version the model-facing and execution capsule contracts with repository-relative local image paths while preserving v1/v2.",
+        "Validate image topology, type, size and workspace containment before the provider boundary.",
+        "Project prompt or verified skill input plus official LocalImageInput values through the existing SDK adapter and detached worker.",
+        "Add one convergent supervisor refresh path and let the explicit repository bootstrap refresh an already-installed matching unit.",
+        "Clarify that native handoff singularity is per peer and milestone, while ready disjoint milestones may start concurrently in one planning turn.",
+        "Prove the installed controller can read an image and use Chromium/Playwright to inspect a page and screenshot in one disposable real run.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A schema-v3 capsule with one or more repository-relative local images reaches the same SDK worker as ordered TextInput/LocalImageInput values and returns one typed result.",
+        "Schema v1/v2 behavior is unchanged; malformed, missing, external, symlinked, special, multi-link, oversized or unsupported image paths fail before an SDK turn starts.",
+        "Image bytes are not copied into controller persistence, IPC, logs, evidence or conversation projections, and no second transport or lifecycle owner is introduced.",
+        "One supervisor refresh command uses one native profile snapshot to install, daemon-reload and restart the exact repository unit; repeated refresh converges and the bootstrap refreshes only a pre-existing matching unit.",
+        "Instructions and the legacy handoff skill explicitly allow multiple same-turn STARTs for ready disjoint milestones while preserving one start and one owner per milestone.",
+        "Focused contract, projection, adapter, controller, worker and installer tests plus the full repository gate pass before reinstalling the shared tool.",
+        "One disposable real provider smoke proves image understanding, browser-driven UI inspection, screenshot capture and controller-owned terminal result projection without claiming universal connector availability.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/cli.py",
+        "schemas/capsule.schema.json",
+        "scripts/install_personal_workflow_skills.py",
+        "Makefile",
+        "README.md",
+        "AGENTS.md",
+        "templates/AGENTS.md",
+        "templates/AGENTS.workflow.md",
+        "plugins/personal-workflow-skills/skills/codex-thread-handoff/SKILL.md",
+        "plugins/personal-workflow-skills/skills/plan-work/SKILL.md",
+        "plugins/personal-workflow-skills/skills/workflow-control/SKILL.md",
+        "tests/test_model_facing_projection.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_controller_execution.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_service_lifecycle.py",
+        "tests/test_plugin_installation.py",
+        "tests/test_workflow_assets.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_production_pilots.py",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/tui.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
+        "pyproject.toml",
+        "uv.lock",
+        "plugins/personal-workflow-skills/.codex-plugin/plugin.json",
+        ".agents/plugins/marketplace.json",
+        "docs/reviews/evidence",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Implement only local-image-worker-input in the existing dirty python-sdk-controller worktree. "
+        "Preserve schema-v1/v2 callers and the single supervisor/SDK worker authority. Accept only bounded "
+        "repository-local regular image files, pass them with the official SDK input types, retain no image "
+        "bytes, add no browser installation or TUI bitmap renderer. Add the frozen one-snapshot supervisor "
+        "refresh and clarify same-turn parallel START semantics without weakening per-milestone idempotency. "
+        "Run one authorized disposable real image plus Chromium/Playwright smoke after deterministic gates "
+        "and shared-tool installation pass."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+## Next execution — supervisor-refresh-and-runtime-compatibility-recovery
+
+This recovery supersedes the inactive `local-image-worker-input` dispatch. Its
+first implementation and green deterministic checks remain in the same dirty
+worktree. The old dispatch is already closed resultlessly as cancelled. Shared
+activation is controller-owned only after the recovery worker returns.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Complete the local-image worker candidate and make shared codex-flow refresh safe, "
+        "non-self-terminating and recoverable under intentional runtime compatibility changes."
+    ),
+    decomposition=(
+        "Preserve and reconcile the existing image, CLI, diagnostics and parallel-START candidate without reimplementing already-green work.",
+        "Add one durable supervisor shutdown fence that rejects refresh while worker or controller children are active and blocks new enqueue during handoff.",
+        "Replace immediate systemctl restart with authenticated shutdown, bounded old-owner/service disappearance, install/reload/start and replacement health verification.",
+        "Classify pre-thread native compatibility mismatch as profile/configuration drift and require a newly bound superseding dispatch rather than malformed-input retry.",
+        "Contain a durably closed worker-spawn failure to its dispatch so stale private attempt artifacts cannot terminate the repository supervisor.",
+        "Run the bootstrap inside the locked checkout environment and permit only a well-formed profile-digest update during an already fenced refresh.",
+        "Prove the refresh race, active-worker deferral, enqueue fence, lease handoff, classification and resultless supersession with focused deterministic tests.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The blocked local-image dispatch is cancelled exactly once without result, restart, successor or fabricated terminal model output before the recovery owner starts.",
+        "An active worker or controller child makes shared bootstrap/refresh defer or fail before tool/plugin installation or supervisor termination; its SDK turn and durable identity remain intact.",
+        "With no active child, refresh sets one durable fence, prevents enqueue, requests authenticated shutdown, waits for the old PID birth identity and unit inactivity, then installs, reloads, starts and health-checks exactly one replacement supervisor.",
+        "Timeout, IPC failure, service failure or replacement-health failure is explicit and leaves no false ready claim; a subsequent bounded refresh can reconcile safely.",
+        "Native compatibility mismatch before SDK identity is recorded as profile/configuration drift with human attention and is never labelled malformed_input or automatically retried against rewritten authority.",
+        "A colliding immutable attempt descriptor leaves the dispatch in human attention while the supervisor continues serving unrelated durable work; failed terminalization still fails the service closed.",
+        "The canonical make bootstrap loads checkout code through uv, then uses uv tool install for shared activation; refresh accepts no installed-unit drift except one syntactically valid prior profile digest.",
+        "The existing schema-v3 local-image input, cleaned CLI, conversation/tool summaries and same-turn disjoint START semantics remain intact; focused affected partitions and one full make check pass.",
+        "The worker does not install or refresh the shared tool during its own run; after its terminal result the controller may activate once and run the authorized disposable real image and Chromium/Playwright smoke.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/control_client.py",
+        "scripts/install_personal_workflow_skills.py",
+        "Makefile",
+        "tests/test_controller_execution.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_service_lifecycle.py",
+        "tests/test_supervisor_recovery.py",
+        "tests/test_plugin_installation.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_production_pilots.py",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md after this capsule is frozen and AGENTS.md",
+        "schemas and persisted database schema or migrations",
+        "src/codex_flow/backends/codex_sdk.py image and provider projection except for verification",
+        "src/codex_flow/contracts.py and src/codex_flow/projection.py schema-v3 image contracts except for verification",
+        "src/codex_flow/ipc.py framing and 64 KiB ceiling",
+        "TUI modules, retained evidence and wheels, plugin manifests and unrelated plugin skills",
+        "Codex authentication, global configuration, App state, remotes, Git history and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use recover-milestone and execute-milestone as one Luna XHigh mutable owner for only "
+        "supervisor-refresh-and-runtime-compatibility-recovery in the existing dirty python-sdk-controller "
+        "worktree. Preserve the first local-image worker's candidate and green checks. Implement the frozen "
+        "shutdown-fence architecture without a new table, migration, daemon, transport or lifecycle owner. "
+        "Contain already-terminalized spawn failures without hiding uncertain terminalization, and preserve exact unit authority while allowing only the fenced profile-digest rotation proven by recovery. "
+        "Never install or refresh the shared tool while this worker is active; use fake/hermetic systemd and "
+        "process-identity discriminators, affected partitions and one full make check. Return one raw typed "
+        "terminal result to the controller, which alone owns later activation and real provider/browser smoke."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+## Post-smoke successor — live-coding-agent-terminal-ui
+
+This successor starts only after one real codex-flow dispatch closes with a
+durable result and controller acknowledgement on the repaired supervisor.  A
+provider-free liveness gate is necessary but not sufficient: if the smoke does
+not complete, recovery remains the sole executable predecessor and this
+milestone stays blocked by an acceptance dependency rather than starting an
+alternate worker or UI path.
+
+The user selected a coding-agent experience for the existing terminal UI.  An
+active worker's assistant response must appear progressively in the
+conversation pane, and tool calls must appear inline with human labels and
+pending, running, succeeded, failed or interrupted state.  This is distinct
+from both the complete persisted conversation and the bounded diagnostic ring.
+Persisted SDK `Thread.read(include_turns=True)` remains the stable conversation
+authority; live deltas are ephemeral projections that may be coalesced or lost
+without changing lifecycle or completion truth.
+
+Existing agent TUIs are references, not dependencies.  Codex CLI, OpenCode,
+Aider and similar tools are complete applications coupled to their own runtime,
+session model, input loop and state projection; embedding one would introduce a
+second control plane or require replacing codex-flow's SDK, supervisor and
+Textual ownership.  The current Textual application already owns layout,
+keyboard actions, narrow rendering and conversation paging, so the milestone
+reuses it and adds no UI framework or terminal dependency.
+
+The reference implementation was checked against the open-source Codex CLI at
+upstream commit `6a479e1813fc44c1ea3c85b7b4023ee3d4c21b8f`.  Its reusable pattern is a
+committed transcript plus one mutable in-flight `active_cell`, a monotonic
+revision that invalidates cached layout whenever that cell changes, typed
+thread/turn/item notifications for start, delta and completion, and final item
+completion as the reconciliation authority when a saturated transport loses a
+delta.  Codex-flow adopts those semantic invariants, including authoritative
+completion and mutable in-place tool cells, but not the CLI's Rust/Ratatui
+widgets, app-server connection, terminal scrollback ownership or replay store.
+The pinned `openai-codex==0.147.0` Python SDK already exposes the corresponding
+typed `AgentMessageDeltaNotification`, `ItemStartedNotification`,
+`ItemCompletedNotification`, `CommandExecutionOutputDeltaNotification` and
+`McpToolCallProgressNotification` payloads; the adapter must consume those
+official SDK events rather than inventing a parser or depending on private App
+state.
+
+### Frozen live projection architecture
+
+The allowed dependency direction is:
+
+    official SDK event stream
+      -> codex_sdk typed event projection
+      -> worker in-memory message/tool accumulator
+      -> supervisor ephemeral live-view broker
+      -> authenticated IPC subscription
+      -> TerminalUiClient selected-subject subscription
+      -> Textual conversation and inline tool rendering
+
+The worker keeps one bounded accumulator per active turn.  It projects only
+typed assistant-text and tool lifecycle facts from official SDK events.  It
+coalesces rapid fragments into cumulative redacted keyframes no faster than 20
+frames per second, with an 8 KiB fragment ceiling, 64 KiB per assistant message
+or tool excerpt and 256 KiB total active-turn memory ceiling.  Intermediate
+frames are lossy under pressure, while each retained keyframe contains the
+complete bounded projection so far; terminal item state, interrupt state,
+worker identity and the ModelFacingResult are never downgraded to lossy deltas.
+An exceeded live-view bound becomes an explicit truncated-presence marker in
+the ephemeral UI only and cannot truncate or alter the official persisted
+conversation read or result contract.
+
+The supervisor broker is memory-only and identity-bound to dispatch,
+generation, attempt, SDK thread, active turn and monotonically increasing live
+revision.  It holds at most four subscribers and one latest keyframe per active
+subject.  Slow or disconnected subscribers lose intermediate frames and are
+closed without blocking worker heartbeats, controls, lease renewal, diagnostics
+or result ingress.  The existing 64 KiB framed same-UID IPC remains the only
+transport; one closed subscription operation extends that framing without a
+socket, port, daemon, timer, polling loop or alternate lifecycle owner.
+
+The TUI opens one subscription only for the selected active controller or
+worker and cancels it on selection change, reconnect or exit.  Assistant text
+updates in place instead of creating one row per token.  A tool call renders as
+one inline block whose state and bounded redacted summary update in place.
+The selected subject owns one mutable active view with a monotonic render
+revision; committed conversation rows remain immutable.  SDK `item/completed`
+replaces the matching active item with its authoritative final projection, so
+loss of an intermediate delta can affect animation smoothness but never the
+final displayed item or the stable conversation rebuilt after the turn.
+Paths, URLs, secrets and image bytes follow the existing typed presence-marker
+and redaction rules.  At terminal state or reconnect, the client discards all
+ephemeral keyframes, reads a fresh stable conversation snapshot and replaces
+the live projection; it never merges diagnostics or missing deltas to invent a
+persisted message.  Existing steer, interrupt, decision confirmation, load
+older, scrolling, controller-over-workers hierarchy and explicit unavailable,
+stale, incomplete and oversized states remain unchanged.
+
+### Architecture map, ownership and artifact budget
+
+- Modify `src/codex_flow/domain.py` only for non-persisted typed live-message,
+  tool-state, keyframe and subscription status values.
+- Modify `src/codex_flow/backends/codex_sdk.py` only to project documented SDK
+  assistant-text and tool lifecycle events into those values.
+- Modify `src/codex_flow/worker.py` only for the bounded active-turn accumulator,
+  coalescing and priority-aware publication through the existing control path.
+- Modify `src/codex_flow/supervisor.py` only for the bounded ephemeral broker,
+  exact identity validation and one subscription operation.
+- Modify `src/codex_flow/ipc.py` only for bounded multi-frame subscription
+  helpers over the existing framing and timeout rules.
+- Modify `src/codex_flow/control_client.py`, `src/codex_flow/tui_client.py`,
+  `src/codex_flow/tui_models.py` and `src/codex_flow/tui.py` for subscription
+  lifecycle, stale-frame discard and conversation-first rendering.
+- Modify only the existing focused adapter, IPC, supervisor, live-control,
+  workflow-control, production-pilot and plan-compilation tests, plus the
+  existing human-terminal-ui evidence, visual contract and four render
+  sentinels when observable UI proof changes.
+- Preserve ledger tables/schema/migrations, retry and result authority,
+  controller scheduling, service lifecycle, CLI production entrypoints,
+  capsule/result schemas, plugin authority, SDK create/resume/run semantics,
+  App/global/auth state, packaging and unrelated dirty bytes.
+
+The new durable-artifact budget is zero: no production module, table, migration,
+schema, evidence path, transport, registry, runner, daemon or dependency may be
+created.  Executor-private helpers remain within the named owner modules.  Any
+need for a new durable/public surface returns to planning before implementation.
+
+### Milestone DAG and promotion
+
+`supervisor-liveness real smoke -> live-coding-agent-terminal-ui -> objective,
+visual and architecture reviews -> ordinary codex-flow use`.  The serial edge
+is an acceptance dependency: live UI traffic cannot be promoted before the
+same production supervisor proves terminal result ingress.  The implementation
+has one mutable owner because worker event projection, IPC backpressure and TUI
+reconciliation share one live protocol.  After the exact candidate freezes,
+independent objective, visual and architecture reviews may run in parallel on
+read-only snapshots; they never own implementation bytes or lifecycle state.
+
+### Latest real-smoke status
+
+The authorized repaired-supervisor smoke reached attempt 13 on SDK thread
+`01a05e1c-a8d3-70f1-b786-1f4ef7cfcc19`.  The supervisor remained active with
+zero restarts, the worker executed commands, and official assistant-message and
+tool lifecycle events crossed the production adapter.  A read-only official
+`Thread.read(include_turns=True)` inspection proved one full persisted failed
+turn and an authoritative failed `turn/completed`: codex-lb returned HTTP 503
+because its session bridge was cooling down after repeated upstream timeouts.
+The live diagnostic ring did not retain that terminal event, but the adapter
+classified it correctly as `transient-after-identity`; no terminal model result
+or attempt-13 result file exists.
+
+Durable state is `human_attention_required` with `post_identity_loss`.  The
+reused historical dispatch entered attempt 13 with `inspection_used=4` and
+`inspection_budget=4`, so the exit path stopped before the ordinary one-read
+same-thread continuation.  Those counters are cumulative dispatch recovery
+authority, not a queue deadline.  Reusing this thirteen-attempt dispatch as a
+new smoke therefore polluted the acceptance probe.  The completed intermediate
+JSON-like assistant item was phase `commentary`, not a terminal result; the
+agent continued tool work and it was never submitted to the result contract.
+
+This proves worker/provider/tool/event reachability but not terminal result
+ingress.  Attempt 14 is forbidden.  The next smoke uses a fresh dispatch, and
+provider-transient recovery is repaired first so a typed 429/5xx can wait and
+continue the exact persisted thread without replaying completed side effects.
+
+### Program integration trunk and parallel lane policy
+
+The existing `python-sdk-controller` program worktree is the sole local
+integration trunk and stays active until this plan closes.  Its branch must
+progressively contain every promoted milestone.  Before the first mutable
+parallel fan-out, the integration owner must establish one coherent verified
+local commit containing only authorized surfaces and record the exact SHA as
+the frozen DAG base.  A dirty baseline that cannot be separated from unrelated
+user bytes blocks fan-out until this plan records a safe separation; a digest
+or test result does not substitute for the commit.
+
+Parallel mutable milestones use semantic child lanes in physical sibling Git
+worktrees at
+`<repo-parent>/<repo-name>.worktrees/<program-slug>-<lane-slug>`, each created
+by the controller from the frozen integration SHA or one exact integrated
+predecessor, with branch `agent/<program-slug>-<lane-slug>`.  No lane worker
+modifies or integrates the trunk.  Every mutable lane creates at least one
+coherent local commit before `COMPLETION`, stages only owned surfaces, inspects
+the staged diff, runs `git diff --cached --check`, and proves its named outcome
+gates.  Read-only planning/review/evidence work and an explicit no-commit
+capsule are the only exceptions.
+
+Independent review and promotion bind to an exact lane tip or commit range.  A
+repair adds a successor commit; amending an already reviewed commit invalidates
+that review.  Only the controller/integration owner may integrate promoted
+commits after promotion-blocking P0/P1 findings reach zero.  A merge commit is
+the default for true fan-out; cherry-pick or fast-forward requires a recorded
+reason.  Integration verifies ancestry and absence of unrelated commits,
+treats conflict resolution as new integration work, and reruns proportional
+integration gates.  Readiness advances only after successful integration;
+successors start from the new trunk tip.  Lane worktrees and branches remain
+until commit, review, integration and recovery evidence are durable.
+
+This plan authorizes its required local commits and local integration only.  It
+does not authorize push, rebase, history rewrite, discard, remote mutation or
+implicit cleanup.  The present dirty baseline is not safely separable into the
+required checkpoint because the policy sources overlap the existing
+uncommitted program candidate and several skill files are untracked.  No
+checkpoint SHA is fabricated here; mutable fan-out remains not ready.  This
+policy becomes operational at the first later coherent verified integration
+commit, which must record its SHA before any lane START.
+
+At this replan checkpoint the existing index already contains five staged
+semantic renames outside the policy surfaces, while the instruction/skill/test
+sources above also contain pre-existing unstaged or untracked program work.
+They cannot truthfully be folded into a policy-only commit.  The policy
+validator, five skill validators, Ruff and the focused workflow/plan suite are
+green (`74 passed`).  The full repository run reached `768 passed` and one
+pre-existing controller lease-contention timeout; the exact failed round passed
+alone, while the eight-round discriminator reproduced the timeout on a
+different round.  Because the policy change does not own controller lease code,
+that failure is retained as an integration-checkpoint blocker rather than
+repaired or hidden here.
+
+## Next execution — provider-transient-backoff-and-fresh-e2e-smoke
+
+The next owner repairs only typed transient provider recovery and then runs one
+fresh disposable E2E smoke after installation.  A pre-identity transient may
+retry without thread recovery.  After thread identity, a 429 or retryable 5xx
+never replays the original prompt blindly: the worker exits, the controller
+waits, reads the persisted thread once, proves the prior turn is failed and no
+writer is active, and issues a continuation on the same thread.  Completed
+tool/file side effects remain in the worktree and the continuation prompt
+explicitly forbids repeating them.
+
+New dispatches receive three post-identity transient recoveries.  Backoff is
+durable and deterministic, increasing across the three failures and respecting
+an explicit provider reset time when present.  Existing dispatch counters are
+never silently reset.  A typed authorized recovery action may increase the
+remaining ceiling by one bounded grant while retaining prior usage in the
+action receipt; repeated implicit grants are impossible.  After the grant is
+exhausted the dispatch requires human attention.  Inspection and provider-loss
+budgets must remain mutually sufficient, and an explicitly new smoke uses a
+new dispatch rather than inheriting historical attempts.
+
+The persisted schema changes only through a forward v16-to-v17 migration of the
+existing retry-policy authority; no table, registry, scheduler or alternate
+result path is added.  `domain.py` owns the bounded retry types,
+`codex_sdk.py` owns typed 429/5xx classification only, `ledger.py` owns counters,
+grant receipts and eligible-at state, and `supervisor.py` owns the one-read
+continuation sequence.  Worker/result submission remains unchanged.  Failed
+`turn/completed` is terminal-priority diagnostic input and must be delivered or
+reconstructed from the official read before the continuation; it never becomes
+conversation authority.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Recover typed transient codex-lb/provider failures with bounded durable backoff and prove "
+        "one fresh codex-flow worker-result-controller end-to-end smoke."
+    ),
+    decomposition=(
+        "Extend the existing retry authority and forward migration for three bounded post-identity transient continuations without resetting historical use.",
+        "Make failed-turn inspection schedule deterministic backoff and resume the exact persisted SDK thread without replaying the original prompt or completed side effects.",
+        "Preserve failed turn/completed priority across the worker-supervisor diagnostic boundary while keeping Thread.read as recovery truth.",
+        "Run provider-free migration, retry, restart, idempotence and no-duplicate-side-effect discriminators, then install through the canonical local installer.",
+        "Create one fresh disposable smoke dispatch that edits one sentinel file and returns one valid ModelFacingResult durably acknowledged by the controller."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A typed 429/500/502/503/504 after thread identity schedules at most three increasing backoff continuations on the same thread after one full failed-turn inspection; it never blindly resubmits the original prompt.",
+        "Recovery preserves completed tool/file effects, rejects active or ambiguous writers, retains cumulative usage, and requires one exact authorized grant rather than silently resetting an exhausted dispatch.",
+        "Schema v16 migrates forward without losing dispatch, result, capability, action, retry or recovery facts; no second table, scheduler, transport or lifecycle authority is introduced.",
+        "Failed turn/completed remains observable to recovery even when lossy diagnostics are saturated, while raw transcript/tool output remains outside ledger, logs and evidence.",
+        "One new disposable real dispatch starts with fresh budgets, modifies exactly its sentinel file, commits one valid raw result through worker IPC, and reaches controller acknowledgement without supervisor restart or residue.",
+        "Focused retry/migration/SDK/supervisor tests, affected semantic partitions, full make check, canonical install parity and the exact real smoke close with P0=0/P1=0."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py only for terminal lifecycle diagnostic priority",
+        "src/codex_flow/control_client.py and src/codex_flow/cli.py only for the existing typed budget grant surface",
+        "tests/test_codex_sdk_adapter.py, tests/test_supervisor_recovery.py, tests/test_ledger_integrity.py, tests/test_live_worker_control.py and tests/test_production_pilots.py",
+        "docs/reviews/peer-thread-workflow.md only for final exact evidence/status reconciliation"
+    ),
+    protected_surfaces=(
+        "capsule/result schemas and controller action semantics",
+        "TUI live-streaming modules and visual evidence",
+        "plugin registry, native authentication, App/global state and alternate transports",
+        "unrelated dirty bytes, remotes and Git history outside the required local milestone commit"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only provider-transient-backoff-and-fresh-e2e-smoke. Preserve the "
+        "single SQLite/supervisor/official-SDK authority. Implement bounded same-thread continuation for "
+        "typed 429/5xx with durable increasing backoff and no blind prompt replay; never reset historical "
+        "counters silently. Run provider-free gates first, create the required coherent local milestone "
+        "commit, then let the integration owner install and authorize exactly one fresh disposable real "
+        "smoke. Do not retry the historical attempt-13 dispatch or start the TUI successor."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+## Blocked successor — live-coding-agent-terminal-ui
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make the codex-flow TUI behave like a modern coding-agent terminal by streaming "
+        "the active assistant response and inline tool-call state without polling or alternate authority."
+    ),
+    decomposition=(
+        "Project documented assistant-text and tool lifecycle events from the official SDK into bounded non-persisted typed values.",
+        "Coalesce each active turn into cumulative redacted keyframes while preserving heartbeat, control, lease and terminal-result priority.",
+        "Carry exact identity-bound keyframes through one bounded authenticated IPC subscription and an ephemeral supervisor broker.",
+        "Update the selected TUI conversation in place, render tool state inline and reconcile terminal or reconnected views from stable Thread.read history.",
+        "Prove realistic streaming, slow-consumer loss, reconnect, privacy, controls and exact 80x24 and wide rendering without a timer or polling loop.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.VISUAL, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "During one real delayed SDK turn the selected worker's assistant text grows in place and each tool call progresses through typed visible states without manual refresh, one row per token or App APIs.",
+        "Cumulative keyframes bind dispatch, generation, attempt, thread, turn and live revision; stale, replaced, replayed, cross-subject or post-terminal frames are discarded before display.",
+        "A slow or disconnected TUI cannot delay supervisor lease renewal, worker heartbeat, steer or interrupt acknowledgement, terminal result ingress or successor scheduling; only intermediate live frames may be lost.",
+        "Raw live transcript and tool output are never written to SQLite, logs, evidence or recovery state; redaction, typed path/URL/image presence and memory/frame/subscriber bounds fail closed without altering stable history.",
+        "Reconnect and terminalization discard ephemeral state and reconstruct the complete persisted user/agent conversation from official Thread.read in SDK order, without diagnostics or deltas filling gaps.",
+        "Wide light/dark and exact 80x24 light/no-color renders retain controller-over-workers hierarchy, readable progressive assistant text, inline tool state, scrolling/load older and safe actions with no important zero-height panel.",
+        "Focused adapter, worker, supervisor, IPC, client and TUI tests, a provider-free slow-consumer stress proof, one authorized real streaming sentinel, affected partitions, full make check, exact-wheel service proof and objective/visual/architecture reviews close with P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py only for non-persisted live-view types",
+        "src/codex_flow/backends/codex_sdk.py only for official live event projection",
+        "src/codex_flow/worker.py only for bounded active-turn accumulation and publication",
+        "src/codex_flow/supervisor.py only for the ephemeral identity-bound live-view broker",
+        "src/codex_flow/ipc.py only for subscription helpers over existing 64 KiB framing",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
+        "src/codex_flow/tui.py",
+        "tests/test_codex_sdk_adapter.py, tests/test_local_ipc.py, tests/test_supervisor_recovery.py, tests/test_live_worker_control.py, tests/test_workflow_control.py, tests/test_production_pilots.py and tests/test_plan_compilation.py",
+        "docs/reviews/evidence/human-terminal-ui.json and the existing human-terminal-ui visual contract plus four render sentinels",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md after this capsule is frozen and AGENTS.md",
+        "ledger schema/tables/migrations and controller lifecycle, scheduling, decisions, retry, recovery and terminal result authority",
+        "capsule/result public schemas, contracts, projection and SDK start/resume/run writer behavior outside live event projection",
+        "service and CLI production entrypoints, plugin and native-profile authority, packaging, dependencies and retained wheels",
+        "Codex authentication, global configuration, App state, remotes, Git history, unrelated evidence and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.VISUAL, RoleId("visual-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only live-coding-agent-terminal-ui in the existing dirty "
+        "python-sdk-controller worktree after the controller records a successful repaired-supervisor "
+        "real smoke. Preserve the frozen architecture and zero durable-artifact budget. Keep Textual, "
+        "the official SDK and the single supervisor/SQLite authority; add no polling, alternate TUI, "
+        "transport, module, schema, table, dependency or App lifecycle call. Stream only bounded redacted "
+        "ephemeral cumulative assistant/tool keyframes, prioritize terminal result ingress, reconcile from "
+        "Thread.read, run the exact objective/visual/architecture gates and return one typed terminal result."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```

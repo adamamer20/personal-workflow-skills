@@ -1,0 +1,4 @@
+interface:
+  display_name: "Define Visual Contract"
+  short_description: "Freeze visual direction and sentinels"
+  default_prompt: "Use $define-visual-contract to turn real content and references into one visual direction, sentinel set, and observable rubric before implementation."

@@ -254,7 +254,7 @@ planning owner can generate a bounded same-run successor capsule and prepare
 its action exactly as follows:
 
 ```bash
-uv run codex-flow h6-app-pilot-capsule \
+uv run codex-flow visible-worker-capsule \
   --parent-run-id model-2c1f6c447b3f22b8ca2e91daaed16e07 \
   --state-root /home/adam/personal-workflow-skills.worktrees/python-sdk-controller
 uv run codex-flow control --hosting app-native \
@@ -265,6 +265,18 @@ uv run codex-flow control --hosting app-native \
 The App host must then issue exactly the returned native action and run the
 returned `app-bind`/`app-result` sequence. No UI visibility claim is made until
 that host-only pilot binds a real visible thread.
+
+## Current semantic public surface
+
+The active source and wheel expose capability-oriented modules and identifiers:
+`review_pilots`, `workflow_control_pilot`, `production_pilots`,
+`sdk_compatibility_sentinel`, and `controller_recovery_sentinel`; the review
+entrypoint is `Controller.review_workflow` with `ReviewLifecycleResult` and
+`write_review_artifact`. Production and sentinel callers use
+`run_production_pilots`, `run_workflow_control_pilot`,
+`run_sdk_compatibility_sentinel`, and `run_controller_recovery_sentinel`.
+Historical H1-H6 evidence and persisted ledger protocol values above remain
+readable and byte-for-byte unchanged.
 
 Before any installed controller opens or migrates a live ledger, refresh and
 prove the candidate package in this exact order, with `DIST` set to a newly
@@ -286,3 +298,127 @@ empty source-draft v9 App table. A non-empty draft table fails closed. Building,
 proving and installing must finish first; an older schema-v8 executable must
 not open the ledger after the candidate migrates it.
 App-native visible pilot: passed
+
+## H6-E detached supervisor and leaf-worker boundary
+
+H6-E adds the repository-local v10 queue, singleton supervisor lease,
+capability-bound worker IPC, immutable raw terminal result and successor /
+notification outboxes. SDK-headless workers are leaf workers: before the SDK
+thread is created, the worker uses the official shared Codex session and
+app-server inherited from its process environment. It never creates a private
+`CODEX_HOME`, copies authentication, or persists auth material. The supported
+`agents.enabled=false` and `features.multi_agent=false` config overrides are
+applied through the SDK runtime and per-thread config seams. The adapter
+requires both stable seams by signature and fails closed when either cannot be
+proven; prompt prose is not enforcement. The immutable queue route and
+capability descriptor bind the exact policy, and resume uses the same values,
+so drift is rejected before an external call.
+
+The installed App-native creation action has no equivalent documented
+per-task override. App-native therefore remains an optional visible-worker
+projection and is reported as `unsupported_app_native_per_task_override`; it
+does not weaken the SDK-headless guarantee or get silently converted to a
+headless worker. The worker-side adversarial sentinel attempts all collaboration
+and App lifecycle operations and records all blocked, with zero child tasks,
+lifecycle mutations, or hidden successors.
+
+The supervisor is the only lifecycle authority. Workers receive only a
+single-use `submit_result` capability and have no controller ledger access;
+queue claims, restart recovery, successor scheduling and optional terminal
+notification remain deterministic durable facts. No `wait_threads`,
+`read_thread`, source-controller polling, or controller-model keepalive is used
+after enqueue. An invalid previous-response continuation is classified as a
+typed post-identity SDK failure and remains bound to its exact durable thread;
+the worker never starts a replacement thread or claims completion from an
+ambiguous transport outcome. A superseded dispatch is a resultless terminal
+`cancelled` row: it has no claim, capability, result, successor, or
+notification fact and is ignored by claim, recovery, and submission paths.
+
+The same persisted SDK thread is App-readable when the App is later opened.
+The App is only an optional UI projection: closing it does not own or stop the
+detached queue, worker, direct IPC submission, or terminal commit. App-native
+creation remains the explicitly labelled compatibility path because its
+per-task leaf override is not exposed by the supported API.
+
+The installed SDK's `thread_resume` path classifies a `400 Invalid
+previous_response_id` response as `TerminalFailureAfterIdentity` for the exact
+durable thread. The SDK does not expose a process-birth identity for a detached
+worker, so a supervisor restart after a bound worker disappears cannot prove
+whether that worker is still live; H6-E retains that row as an ambiguous
+recoverable fact and does not create a replacement or claim completion. This is
+the precise unsupported boundary for post-bind continuation recovery.
+
+### H6-E-W-R2 continuation attempt identity
+
+An idle, dead worker continuation keeps the same logical dispatch and persisted
+SDK thread but advances the durable process `attempt` monotonically. The prior
+attempt capability remains immutable and is retired before the new claim; the
+new capability, capsule, and result paths therefore carry a distinct attempt
+identity (for example, `g1-a2`) while sharing the existing generation, result
+contract, recovery budget, and successor authority.
+
+### Failed-spawn durable terminalization
+
+Spawn preparation uses exclusive invocation-owned files. If process launch or
+the subsequent liveness bind fails, the supervisor first commits
+`human_attention_required`; only that durable authority permits cleanup of the
+files created by the invocation. A terminalization commit failure is returned
+as an explicit supervisor error and retains those files for reconciliation.
+Both the current supervisor epoch and a replacement epoch reconcile an active
+row with neither a live in-memory child nor durable liveness exactly once,
+without advancing its attempt again, refunding recovery budget, or creating a
+result, successor, notification, capability, or worker. Cleanup failures after
+the durable transition may retain a private file but cannot reopen the queue.
+
+## Integrated-control provider-free service pilot
+
+The integrated-control candidate was exercised from the exact retained
+`dist/human-terminal-ui/codex_flow-0.2.0-py3-none-any.whl` in an isolated
+temporary import root. A disposable service unit was generated and installed
+under a temporary configuration root, then the retained wheel's
+`codex_flow.cli.supervisor_run` entrypoint owned one production `Supervisor`,
+UNIX IPC socket, and SQLite ledger. Only the worker command was injected with
+a typed fake so that the production service, capability issuance, worker
+submission, control client, and shutdown path were observed without a
+provider. The worker consumed the immutable capability and capsule, bound its
+worker/turn identity, emitted 130 diagnostic events through live IPC, applied
+the exact `INTEGRATED_STEER_MARKER` steer or interrupt, persisted a sanitized
+observation, and submitted one closed `ModelFacingResult`.
+
+The 0/1/2 matrix passed with no queue, one steered worker, and a dependency-
+aware two-worker chain. The first worker completed after an acknowledged
+steer and released one pre-authorized successor; event timestamps measured the
+second worker starting after the first. The second worker received one
+interrupt and terminalized as `failed` because the result contract has no
+`interrupted` status; its command was durably rejected after the terminal
+status. A replay with a new command id was rejected, and successor and
+notification outboxes each retained one row per terminal dispatch with no
+duplicates; each terminal notification retained the queue's exact
+`source_thread_id`, and the fake wake seam acknowledged those source-thread
+deliveries without a provider call. The diagnostic ring retained at most 128 entries and 65,536 bytes
+when read before shutdown. Provider calls, App API calls, connector calls, and
+controller-model tokens were all zero.
+
+The service was killed while the one-worker case was active and restarted
+against the same ledger. The replacement authority acquired a new lease and
+adopted the same worker process rather than starting a duplicate. Each normal
+stop used the production shutdown IPC operation; the socket, workers, and
+service processes were subsequently gone, and the shutdown-requested lease
+owner was gone for stale-owner reconciliation, while the temporary service-unit
+and controller state remained inside disposable roots.
+
+Controller recovery used the existing `ControllerGenerationRecovery` API and
+the persisted `controller_decisions`, `controller_decision_generations`, and
+`controller_action_outbox` tables. A loss before decision commit and a loss
+after action commit but before acknowledgement were injected independently;
+after reopening, each inspection produced exactly one acknowledged action,
+one action-outbox row, one source-thread wake, and no duplicate action,
+successor, notification, or worker application. Stale identity was rejected,
+and an ambiguous inspection moved to `human_attention_required` with no
+outbox action. The headless `TerminalUiClient` and TUI rendered the same live
+service snapshot and retained exact worker/control identities.
+
+This is provider-free mechanism evidence only. Optional App transcript
+visibility is `not_observed`; no App lifecycle API or polling was used. The
+closed candidate record is retained at
+`docs/reviews/evidence/integrated-control.json`.

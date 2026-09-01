@@ -21,7 +21,6 @@ from .config import AuthorityUnavailable, WorkflowConfig, WorkflowConfigError, l
 from .contracts import ModelFacingCapsule, model_facing_result_schema
 from .controller import capsule_from_json
 from .domain import (
-    AcceptanceMode,
     ExecutionCapsule,
     MilestoneId,
     NativePermissionMode,
@@ -41,16 +40,16 @@ _MODEL_KEYS: Final[frozenset[str]] = frozenset(
         "schema_version",
         "objective",
         "decomposition",
-        "acceptance_modes",
         "acceptance_criteria",
-        "mutable_surfaces",
-        "protected_surfaces",
-        "authorities",
+        "surfaces",
+        "acceptance",
         "prompt",
         "recovery_policy",
-        "prompt_budget_bytes",
     }
 )
+_MODEL_KEYS_WITH_PLUGINS: Final[frozenset[str]] = _MODEL_KEYS | {"plugin_requirements"}
+_MODEL_KEYS_WITH_IMAGES: Final[frozenset[str]] = _MODEL_KEYS | {"local_image_paths"}
+_MODEL_KEYS_WITH_IMAGES_AND_PLUGINS: Final[frozenset[str]] = _MODEL_KEYS_WITH_IMAGES | {"plugin_requirements"}
 _EXECUTION_KEYS: Final[frozenset[str]] = frozenset(
     {
         "capsule_version",
@@ -73,13 +72,20 @@ _EXECUTION_KEYS: Final[frozenset[str]] = frozenset(
     }
 )
 _EXECUTION_KEYS_WITH_MODES: Final[frozenset[str]] = _EXECUTION_KEYS | {"acceptance_modes"}
+_EXECUTION_KEYS_WITH_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS | {"plugin_requirements"}
+_EXECUTION_KEYS_WITH_MODES_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS | {
+    "acceptance_modes",
+    "plugin_requirements",
+}
+_EXECUTION_KEYS_WITH_IMAGES: Final[frozenset[str]] = _EXECUTION_KEYS | {"local_image_paths"}
+_EXECUTION_KEYS_WITH_IMAGES_AND_MODES: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_IMAGES | {"acceptance_modes"}
+_EXECUTION_KEYS_WITH_IMAGES_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_IMAGES | {"plugin_requirements"}
+_EXECUTION_KEYS_WITH_IMAGES_MODES_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_IMAGES | {
+    "acceptance_modes",
+    "plugin_requirements",
+}
 _DEFAULT_VALIDATION: Final[ValidationSpec] = ValidationSpec(("git", "diff", "--check"), 60.0)
 _LANE: Final[str] = "model-facing"
-_AUTHORITY_ROLES: Final[dict[AcceptanceMode, str]] = {
-    AcceptanceMode.OBJECTIVE: "code-reviewer",
-    AcceptanceMode.VISUAL: "visual-reviewer",
-    AcceptanceMode.ARCHITECTURE: "architecture-reviewer",
-}
 
 
 def _canonical_json(value: object) -> bytes:
@@ -179,11 +185,6 @@ def _validate_authorities(capsule: ModelFacingCapsule, config: WorkflowConfig) -
         config.validate_runtime()
         config.derive_authorities(capsule.acceptance_modes)
         for authority in capsule.authorities:
-            expected = _AUTHORITY_ROLES[authority.mode]
-            if str(authority.role) != expected:
-                raise AuthorityUnavailable(
-                    f"declared authority for {authority.mode.value} must use workflow role {expected!r}"
-                )
             route = config.route(authority.role)
             if route.role != authority.role:
                 raise AuthorityUnavailable(f"workflow route for {authority.role} is aliased")
@@ -245,7 +246,7 @@ def project_model_facing_capsule(capsule: ModelFacingCapsule, *, state_root: Pat
         run_id = RunId(f"model-{digest[:32]}")
         milestone_id = MilestoneId(f"milestone-{digest[32:]}")
         return ExecutionCapsule(
-            2,
+            3 if capsule.schema_version == 3 else 2,
             run_id,
             milestone_id,
             repository,
@@ -263,6 +264,8 @@ def project_model_facing_capsule(capsule: ModelFacingCapsule, *, state_root: Pat
             model_facing_result_schema(),
             NativePermissionMode.INHERIT_NATIVE,
             capsule.acceptance_modes,
+            tuple(item.to_json() for item in capsule.plugin_requirements),
+            capsule.local_image_paths,
         )
     except (TypeError, ValueError) as exc:
         raise ProjectionError("model-facing capsule cannot be projected into an execution capsule") from exc
@@ -284,7 +287,12 @@ def load_control_capsule(path: Path, *, state_root: Path) -> tuple[ExecutionCaps
     if not isinstance(decoded, Mapping):
         raise ProjectionError("capsule root must be an object")
     keys = frozenset(decoded)
-    if keys == _MODEL_KEYS:
+    if keys in {
+        _MODEL_KEYS,
+        _MODEL_KEYS_WITH_PLUGINS,
+        _MODEL_KEYS_WITH_IMAGES,
+        _MODEL_KEYS_WITH_IMAGES_AND_PLUGINS,
+    }:
         try:
             return project_model_facing_capsule(
                 ModelFacingCapsule.from_json(decoded), state_root=state_root
@@ -293,7 +301,16 @@ def load_control_capsule(path: Path, *, state_root: Path) -> tuple[ExecutionCaps
             if isinstance(exc, ProjectionError):
                 raise
             raise ProjectionError("model-facing capsule is malformed") from exc
-    if keys in {_EXECUTION_KEYS, _EXECUTION_KEYS_WITH_MODES}:
+    if keys in {
+        _EXECUTION_KEYS,
+        _EXECUTION_KEYS_WITH_MODES,
+        _EXECUTION_KEYS_WITH_PLUGINS,
+        _EXECUTION_KEYS_WITH_MODES_AND_PLUGINS,
+        _EXECUTION_KEYS_WITH_IMAGES,
+        _EXECUTION_KEYS_WITH_IMAGES_AND_MODES,
+        _EXECUTION_KEYS_WITH_IMAGES_AND_PLUGINS,
+        _EXECUTION_KEYS_WITH_IMAGES_MODES_AND_PLUGINS,
+    }:
         try:
             return capsule_from_json(decoded), hashlib.sha256(raw).hexdigest()
         except (TypeError, ValueError) as exc:

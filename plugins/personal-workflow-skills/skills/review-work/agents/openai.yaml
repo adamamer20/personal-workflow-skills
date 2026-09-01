@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Work"
+  short_description: "Review a fixed change through one explicit lens"
+  default_prompt: "Use $review-work to review a fixed change through one explicitly named lens and classify evidence-backed findings."

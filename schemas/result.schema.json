@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-workflow-skills.invalid/schemas/result.schema.json",
+  "title": "Controller-facing model result",
+  "description": "The closed durable result projection emitted at the model boundary.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "summary",
+    "changed_surfaces",
+    "validations",
+    "durable_status",
+    "next_action"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "needs_decision",
+        "external_blocked",
+        "failed"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+    },
+    "changed_surfaces": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 16384,
+        "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+      }
+    },
+    "validations": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "passed",
+          "evidence"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          }
+        }
+      }
+    },
+    "durable_status": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+    },
+    "next_action": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+    }
+  }
+}

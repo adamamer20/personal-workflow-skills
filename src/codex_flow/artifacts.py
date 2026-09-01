@@ -14,9 +14,9 @@ from typing import Any
 from .domain import (
     DispatchClaim,
     EventRecord,
-    H4LifecycleResult,
     LedgerSnapshot,
     MilestoneRecord,
+    ReviewLifecycleResult,
     RunId,
     WorkflowReason,
     thaw_json,
@@ -355,13 +355,13 @@ def write_owned_artifact(
             os.close(descriptor)
 
 
-def write_h4_review_artifact(
+def write_review_artifact(
     repository_root: str | Path,
     run_id: RunId | str,
     milestone_id: str,
-    result: H4LifecycleResult,
+    result: ReviewLifecycleResult,
 ) -> Path:
-    """Project one sanitized H4 result after its ledger facts are committed."""
+    """Project one sanitized review result after its ledger facts are committed."""
 
     if not milestone_id or any(character in milestone_id for character in "/\\"):
         raise UnsafeArtifactPath("milestone id is not a safe artifact path component")

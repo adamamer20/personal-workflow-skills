@@ -19,8 +19,24 @@ codex-flow status --run-id RUN --milestone-id MILESTONE --state-root /absolute/c
 codex-flow cancel --run-id RUN --milestone-id MILESTONE --state-root /absolute/checkout --json
 codex-flow control --capsule /absolute/path/to/capsule.json --state-root /absolute/checkout --json
 codex-flow schema --kind all
-CODEX_FLOW_REAL_SDK=1 codex-flow h5-pilot --real --model gpt-5.6-luna --effort medium
+codex-flow diagnostics --help
+codex-flow live conversation --subject-kind worker --subject-id DISPATCH \
+  --thread-id THREAD --generation 1 --attempt 1 --json
+CODEX_FLOW_REAL_SDK=1 codex-flow workflow-control-pilot --real --model gpt-5.6-luna --effort medium
 ```
+
+The root help keeps the day-to-day surface to `tui`, `control`, `status`,
+`cancel`, `supervisor`, `live`, `schema`, and `diagnostics`. Compatibility
+root spellings for low-level, sentinel, and pilot commands remain callable but
+are hidden from help; new diagnostics use the `codex-flow diagnostics` group.
+The native conversation command reads one bounded redacted page through the
+existing supervisor/SDK worker path and never persists raw provider output.
+
+Diagnostic pilot and sentinel commands are `review-pilot`,
+`multi-authority-review-pilot`, `workflow-control-pilot`, `production-pilots`,
+`sdk-compatibility-sentinel`, `controller-recovery-sentinel`, and
+`worker-sentinel`. Run them as, for example,
+`codex-flow diagnostics sdk-compatibility-sentinel --help`.
 
 The capsule selects `current_checkout`, `existing_worktree`, or
 `managed_worktree`. Managed paths are always semantic siblings at
@@ -46,10 +62,15 @@ The explicit legacy command `$codex-thread-handoff` remains reachable through
 H6 for compatibility evidence. It is selected deliberately and is never mixed
 with the controller path for one milestone.
 
+One planning/controller turn may start multiple ready milestones when their
+mutable surfaces are disjoint. The one-start/one-owner idempotency rule is per
+peer and milestone; serial dependencies and shared mutable ownership remain
+ordered.
+
 Run the opt-in real crash/resume sentinel only in a disposable repository:
 
 ```bash
-CODEX_FLOW_REAL_SDK=1 uv run codex-flow controller-sentinel \
+CODEX_FLOW_REAL_SDK=1 uv run codex-flow controller-recovery-sentinel \
   --real --model gpt-5.6-luna --effort medium \
   --output docs/reviews/evidence/h3-controller-sentinel.json
 ```
@@ -71,7 +92,7 @@ durable controller result
         ↓
 planning thread
 
-explicit H5/H6 legacy comparison only → $codex-thread-handoff
+explicit compatibility comparison only → $codex-thread-handoff
 ```
 
 The planner owns intent, decomposition, acceptance, and protected surfaces. The
@@ -119,6 +140,25 @@ Audits:
 - `strong-typing-audit`
 
 ## Install from GitHub
+
+To install or update both the current checkout's `codex-flow` tool and matching
+plugin in the standard shared user environment, run the explicit bootstrap:
+
+```bash
+make install-personal-workflow-skills
+```
+
+It installs `codex-flow` with CPython 3.12 through `uv tool`, registers this
+checkout as the local `adam-workflows` marketplace, installs and enables
+`personal-workflow-skills`, then verifies version, CLI/TUI help, regular-file
+topology, and plugin byte parity. Repeating the command is safe. It rejects a
+private `CODEX_HOME`, custom uv tool paths, mismatched versions, and substituted
+marketplace/plugin paths. It does not copy credentials, edit `AGENTS.md`, start
+a provider or service, or install automatically from a hook. Start a new Codex
+task after success so the updated plugin is discovered.
+
+For a source marketplace without installing the Python controller, use the
+manual plugin-only commands below.
 
 Register the public marketplace and install the plugin:
 

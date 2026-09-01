@@ -1,0 +1,35 @@
+# One primary semantic partition owns every repository test file exactly once.
+schema_version = 1
+
+[partitions]
+contracts = [
+  "tests/test_codex_sdk_adapter.py",
+  "tests/test_model_facing_projection.py",
+  "tests/test_plan_compilation.py",
+  "tests/test_public_api_semantic_cutover.py",
+]
+controller = [
+  "tests/test_controller_execution.py",
+  "tests/test_controller_turn_recovery.py",
+  "tests/test_ledger_integrity.py",
+  "tests/test_multi_authority_review.py",
+  "tests/test_review_lifecycle.py",
+  "tests/test_supervisor_recovery.py",
+  "tests/test_workflow_control.py",
+]
+workers = [
+  "tests/test_live_worker_control.py",
+  "tests/test_local_ipc.py",
+  "tests/test_shared_sdk_visibility.py",
+]
+integrations = [
+  "tests/test_app_native_dispatch.py",
+  "tests/test_handoff_hooks.py",
+  "tests/test_production_pilots.py",
+  "tests/test_service_lifecycle.py",
+]
+workflow-assets = [
+  "tests/test_descriptive_naming.py",
+  "tests/test_plugin_installation.py",
+  "tests/test_workflow_assets.py",
+]

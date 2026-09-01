@@ -1,0 +1,60 @@
+# The controller owns routing. Skills refer to role classes, never model IDs.
+
+[roles.plan]
+model = "gpt-5.6-sol"
+thinking = "high"
+
+[roles.execute_bounded]
+model = "gpt-5.6-luna"
+thinking = "high"
+speed = "fast"
+
+[roles.execute_substantial]
+model = "gpt-5.6-luna"
+thinking = "xhigh"
+speed = "fast"
+
+[roles.execute_visual]
+model = "gpt-5.6-sol"
+thinking = "medium"
+
+[roles.review]
+model = "gpt-5.6-luna"
+thinking = "xhigh"
+speed = "fast"
+
+[roles.review_implementation]
+model = "gpt-5.6-luna"
+thinking = "xhigh"
+speed = "fast"
+
+[roles.review_visual]
+model = "gpt-5.6-sol"
+thinking = "high"
+
+[roles.recover_local]
+model = "gpt-5.6-sol"
+thinking = "medium"
+
+[roles.recover_architecture]
+model = "gpt-5.6-sol"
+thinking = "high"
+
+[limits]
+repair_cycles_before_recovery = 2
+major_compactions_before_rollover = 2
+max_fresh_contexts_per_milestone = 4
+
+[review]
+default_contexts = 1
+allow_parallel_distinct_lenses = true
+allowed_lenses = ["spec", "correctness", "standards", "contract-risk", "security", "visual"]
+
+[worktrees]
+root_pattern = "{repo_parent}/{repo_name}.worktrees"
+branch_prefix = "agent/"
+reuse_for_sequential_milestones = true
+reuse_for_repair = true
+reuse_for_review = true
+reuse_for_recovery = true
+reuse_for_model_escalation = true

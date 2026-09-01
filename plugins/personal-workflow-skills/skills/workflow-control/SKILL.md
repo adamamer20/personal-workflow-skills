@@ -5,16 +5,38 @@ description: Invoke the packaged codex-flow controller for one typed capsule and
 
 # Workflow Control
 
-Use this skill as the runtime boundary for one decision-ready milestone. It
-accepts the typed `codex_flow.contracts.ModelFacingCapsule` authoring contract.
-The controller owns workspace identity, repository routing, the SQLite
-dispatch authority, lifecycle facts, and the serialized result. Select exactly
-one hosting mode; never silently substitute the other.
+Preflight without mutation: `uv tool list`, `codex-flow --help`, and
+`codex-flow tui --help`. If `codex-flow 0.2.0` or its TUI is unavailable, stop
+and direct the user to `make install-personal-workflow-skills` in the matching
+checkout. This skill never installs or updates state.
+
+Use this skill as the runtime boundary for one decision-ready milestone. The
+normal path accepts only the canonical plan path and exact active milestone id;
+the controller compiles the typed `codex_flow.contracts.ModelFacingCapsule`
+without executing plan text. The explicit `--capsule` form remains a
+low-level/testing input. The controller owns workspace identity, repository
+routing, the SQLite dispatch authority, lifecycle facts, and serialized
+results. Select exactly one hosting mode; never silently substitute the other.
+
+A single planning/controller turn may issue multiple START operations for ready
+disjoint milestones. Handoff singularity is per peer and milestone: each gets
+one owner and one START, while dependencies and shared mutable surfaces remain
+serial.
+
+The controller records one long-lived program integration worktree and a frozen
+verified commit SHA before mutable fan-out. Parallel mutable work uses semantic
+child lanes in physical sibling worktrees from that exact SHA or an exact
+integrated predecessor. Workers commit only their lane; they never integrate
+the trunk. After exact-commit review reaches zero promotion-blocking P0/P1, only
+the controller/integration owner may integrate the promoted commit, update DAG
+readiness and derive successors from the new trunk tip. This cognitive skill
+does not run Git operations itself.
 
 ## SDK-headless mode
 
 ```text
-codex-flow control --capsule /absolute/path/capsule.json \
+codex-flow control --plan-path /absolute/path/docs/reviews/peer-thread-workflow.md \
+  --milestone-id H6-E-W \
   --state-root /absolute/path/checkout --json
 ```
 
@@ -41,27 +63,11 @@ codex-flow control --hosting app-native \
   --state-root /absolute/path/checkout --json
 ```
 
-If state is `prepared`, perform exactly one
-native, non-blocking Codex app task creation using the returned action's exact
-`model`, `reasoning_effort`, `workspace_path`, `prompt`, and `output_schema`.
-Do not create another worktree. The App host is the trusted identity authority:
-construct one `HostReceipt` only from the
-actual native action result and the action's dispatch id, digest, bind
-challenge, and claim capability. Its HMAC proves capability possession, not
-Codex App attestation. Never use guessed, user-supplied, or prior-task ids:
-
-```python
-from codex_flow.app_native import AppNativeTaskAction, HostIdentity, HostReceipt
-from codex_flow.domain import ThreadIdentity
-
-action = AppNativeTaskAction.from_json(prepared["action"])
-receipt = HostReceipt.from_native_result(
-    action,
-    HostIdentity(actual_native_host_id, ThreadIdentity(actual_native_thread_id)),
-)
-```
-
-Both `actual_native_*` values must come directly from that native tool result.
+If state is `prepared`, perform exactly one native, non-blocking Codex app task
+creation from the returned action's exact fields. Do not create another
+worktree. Build one `HostReceipt` only from that native result and its exact
+dispatch id, digest, bind challenge, claim capability, host id, and thread id;
+its HMAC proves capability possession, not App attestation. Never guess ids.
 Write `receipt.to_json()` unchanged as closed JSON, then bind:
 
 ```text

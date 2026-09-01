@@ -1,4 +1,4 @@
 interface:
   display_name: "Plan Work"
   short_description: "Turn substantial work into executable milestones"
-  default_prompt: "Use $plan-work to make this program decision-ready and write one typed capsule with explicit acceptance modes, authorities, and protected surfaces."
+  default_prompt: "Use $plan-work to make this program decision-ready and write one typed capsule in the canonical plan with explicit acceptance modes, authorities, protected surfaces, a frozen architecture map, and a dependency DAG/readiness projection for independently closable disjoint milestones."

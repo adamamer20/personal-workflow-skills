@@ -1,0 +1,2 @@
+# Retained terminal renders are exact evidence bytes produced by the renderer.
+docs/reviews/evidence/human-terminal-ui/conversation-*.svg whitespace=-blank-at-eol

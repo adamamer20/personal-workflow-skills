@@ -1,0 +1,3086 @@
+"""Detached, event-driven repository supervisor for H6-E."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import select
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from collections.abc import Callable, Sequence
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from .backends.codex_sdk import (
+    LEAF_WORKER_CONFIG_OVERRIDES,
+    CodexSdkAdapter,
+    CodexSdkConfig,
+    CodexSdkNotifier,
+    ThreadInspection,
+    ThreadInspectionKind,
+    WakeDeliveryAmbiguous,
+    WakeDeliveryUnavailable,
+)
+from .contracts import ModelFacingControllerActionBundle, PluginCapabilitySnapshot, PluginRequirement
+from .domain import (
+    CONVERSATION_MAX_CONCURRENT_READS,
+    CONVERSATION_READ_DEADLINE_SECONDS,
+    CompatibilityRebind,
+    ControlCommandKind,
+    ControlCommandState,
+    ControllerClaimantKind,
+    ControllerDecisionId,
+    ControllerDecisionState,
+    ControllerGenerationState,
+    ControllerRecoveryInspectionClaim,
+    ConversationHistoryPage,
+    ConversationHistoryRequest,
+    ConversationHistoryStatus,
+    ConversationSubjectKind,
+    NativePermissionMode,
+    ReasoningEffort,
+    RecoveryActionKind,
+    RetryBudgetChange,
+    Sandbox,
+    ThreadIdentity,
+    WorkerResultRejectionCode,
+    conversation_history_page_from_json,
+    redact_diagnostic_text,
+    strict_json_loads,
+)
+from .ipc import IpcError, decode_frame, encode_frame, ensure_runtime_dir, peer_uid
+from .ledger import Ledger, LedgerError, RecordNotFound, StaleWriter, SupervisorRefreshBlocked
+from .native_profile import NativeProfileProjection
+from .plugin_capabilities import PluginCapabilityError, _verified_skill_input
+from .worker import (
+    WORKER_EXIT_AUTHENTICATION,
+    WORKER_EXIT_CAPABILITY,
+    WORKER_EXIT_FAIL_CLOSED,
+    WORKER_EXIT_INTEGRITY,
+    WORKER_EXIT_MALFORMED,
+    WORKER_EXIT_PERMISSION,
+    WORKER_EXIT_PROFILE,
+    WORKER_EXIT_RESPONSE_CHAIN_INVALID,
+    WORKER_EXIT_RESULT_TRANSPORT_AFTER_IDENTITY,
+    WORKER_EXIT_SCHEMA_OUTPUT_INVALID,
+    WORKER_EXIT_TERMINAL_AFTER_IDENTITY,
+    WORKER_EXIT_TRANSIENT_AFTER_IDENTITY,
+    WORKER_EXIT_TRANSPORT_BEFORE_IDENTITY,
+    WORKER_EXIT_UNKNOWN_AFTER_IDENTITY,
+    WORKER_EXIT_UNKNOWN_BEFORE_IDENTITY,
+    _write_once,
+    recovery_continuation_prompt,
+    write_capability,
+)
+
+
+class SupervisorError(RuntimeError):
+    """Supervisor startup, lease, or lifecycle failure."""
+
+
+class FailedSpawnTerminalizationError(SupervisorError):
+    """A failed worker launch still requires durable terminalization."""
+
+
+class WorkerCompatibilityDrift(SupervisorError):
+    """The verified installed runtime identity tuple differs from authority."""
+
+    def __init__(
+        self,
+        *,
+        queued_profile_sha256: str,
+        current_profile_sha256: str,
+        queued_compatibility_sha256: str,
+        current_compatibility_sha256: str,
+    ) -> None:
+        self.queued_profile_sha256 = queued_profile_sha256
+        self.current_profile_sha256 = current_profile_sha256
+        self.queued_compatibility_sha256 = queued_compatibility_sha256
+        self.current_compatibility_sha256 = current_compatibility_sha256
+        super().__init__(
+            "native profile/configuration identity drift before worker launch: "
+            f"profile queued={queued_profile_sha256} current={current_profile_sha256}; "
+            f"compatibility queued={queued_compatibility_sha256} current={current_compatibility_sha256}"
+        )
+
+
+class WorkerResultRejected(IpcError):
+    """A worker result was rejected with a bounded, sanitized reason code."""
+
+    def __init__(self, code: WorkerResultRejectionCode) -> None:
+        self.code = code
+        super().__init__(code.value)
+
+
+IPC_ACCEPTED_FRAME_TIMEOUT_SECONDS = 2.0
+WORKER_CANCELLATION_STOP_TIMEOUT_SECONDS = 2.0
+
+
+WorkerCommand = Callable[[dict[str, object], Path, Path, Path], subprocess.Popen[bytes]]
+WakeDelivery = Callable[[str, str], str]
+ThreadInspector = Callable[[str], ThreadInspection]
+
+_PUBLIC_QUEUE_FIELDS = frozenset(
+    {
+        "dispatch_id",
+        "run_id",
+        "milestone_id",
+        "role",
+        "generation",
+        "backend",
+        "workspace_path",
+        "result_contract_sha256",
+        "state",
+        "sequence",
+        "available_at",
+        "deadline",
+        "claim_epoch",
+        "attempt",
+        "thread_id",
+        "host_id",
+        "raw_result_sha256",
+        "terminal_status",
+        "created_at",
+        "updated_at",
+    }
+)
+
+
+def _public_activity(row: dict[str, object]) -> dict[str, object]:
+    """Project one durable diagnostic row into the closed client shape."""
+
+    return {
+        "sequence": row["sequence"],
+        "kind": row["kind"],
+        "occurred_at": row["occurred_at"],
+        "text": row["text"],
+        "payload_sha256": row["payload_sha256"],
+    }
+
+
+def _public_retry_policy(row: dict[str, object]) -> dict[str, object]:
+    """Project retry-policy facts without leaking ledger timestamps/shape."""
+
+    return {
+        key: row[key]
+        for key in (
+            "revision",
+            "policy_version",
+            "pre_identity_budget",
+            "invalid_chain_budget",
+            "schema_envelope_budget",
+            "post_identity_loss_budget",
+            "pre_identity_used",
+            "invalid_chain_used",
+            "schema_envelope_used",
+            "post_identity_loss_used",
+            "last_failure",
+            "strategy",
+            "next_eligible_at",
+            "prior_thread_id",
+            "prior_turn_id",
+            "human_attention_reason",
+        )
+    }
+
+
+def _public_control_command(row: dict[str, object]) -> dict[str, object]:
+    """Project the existing canonical command row into its closed wire shape."""
+
+    return {
+        key: row[key]
+        for key in (
+            "command_id",
+            "dispatch_id",
+            "submission_sequence",
+            "generation",
+            "attempt",
+            "thread_id",
+            "turn_id",
+            "kind",
+            "payload",
+            "payload_sha256",
+            "state",
+            "acknowledgement_json",
+            "created_at",
+            "sent_at",
+            "acknowledged_at",
+        )
+    }
+
+
+def process_birth_identity(pid: int | None = None) -> str:
+    """Return Linux process start-time identity, or a conservative fallback."""
+
+    target = os.getpid() if pid is None else pid
+    try:
+        fields = Path(f"/proc/{target}/stat").read_text(encoding="ascii").split()
+        return fields[21]
+    except (OSError, IndexError, ValueError):
+        return f"pid:{target}"
+
+
+class Supervisor:
+    """One repository-bound queue owner and local IPC endpoint."""
+
+    def __init__(
+        self,
+        state_root: Path,
+        *,
+        runtime_root: Path | None = None,
+        lease_seconds: float = 30.0,
+        worker_command: Sequence[str] | None = None,
+        controller_command: Sequence[str] | None = None,
+        wake_delivery: WakeDelivery | None = None,
+        thread_inspector: ThreadInspector | None = None,
+    ) -> None:
+        self.state_root = Path(state_root).resolve(strict=True)
+        self.state_dir = self.state_root / ".codex-flow"
+        self.runtime_root = ensure_runtime_dir(runtime_root or self.state_dir / "runtime")
+        self.socket_path = self.runtime_root / "supervisor.sock"
+        self.lease_seconds = lease_seconds
+        self.worker_command = tuple(worker_command or (sys.executable, "-m", "codex_flow.worker"))
+        self.controller_command = tuple(
+            controller_command or (sys.executable, "-m", "codex_flow.cli", "controller-generation")
+        )
+        self._wake_delivery = wake_delivery
+        self._thread_inspector = thread_inspector
+        self.ledger = Ledger(self.state_dir / "workflow.db")
+        self.owner_nonce = os.urandom(32).hex()
+        self.owner_nonce_sha256 = hashlib.sha256(self.owner_nonce.encode("ascii")).hexdigest()
+        self.epoch: int | None = None
+        self._socket: socket.socket | None = None
+        self._children: dict[str, subprocess.Popen[bytes]] = {}
+        self._controller_children: dict[str, subprocess.Popen[bytes]] = {}
+        self._resumed_children: set[str] = set()
+        self._active_turns: dict[str, tuple[int, int, str, str]] = {}
+        self._stop = False
+        self._next_checkpoint_deadline: datetime | None = None
+        self._next_renewal_monotonic: float | None = None
+        self._conversation_requests: dict[str, dict[str, object]] = {}
+        self._conversation_requests_lock = threading.Lock()
+        self._conversation_read_slots = threading.BoundedSemaphore(CONVERSATION_MAX_CONCURRENT_READS)
+
+    def _refresh_checkpoint_deadline(self) -> None:
+        value = self.ledger.next_checkpoint_deadline()
+        if value is None:
+            self._next_checkpoint_deadline = None
+            return
+        try:
+            self._next_checkpoint_deadline = datetime.fromisoformat(value.removesuffix("Z")).replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError as exc:
+            raise SupervisorError("checkpoint deadline is not a valid UTC timestamp") from exc
+
+    def _select_timeout(self, fallback: float) -> float:
+        deadlines = [fallback]
+        if self._next_checkpoint_deadline is not None:
+            deadlines.append(max(0.0, (self._next_checkpoint_deadline - datetime.now(timezone.utc)).total_seconds()))
+        if self._next_renewal_monotonic is not None:
+            deadlines.append(max(0.0, self._next_renewal_monotonic - time.monotonic()))
+        return min(deadlines)
+
+    def close(self) -> None:
+        for child in (*self._children.values(), *self._controller_children.values()):
+            if child.poll() is None:
+                try:
+                    child.terminate()
+                    child.wait(timeout=1)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        child.kill()
+                    except OSError:
+                        pass
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
+        try:
+            if self.socket_path.exists() and not self.socket_path.is_symlink():
+                self.socket_path.unlink()
+        except OSError:
+            pass
+        self.ledger.close()
+
+    def _reap_controller_generations(self) -> bool:
+        """Reap controller processes without treating exit as completion."""
+
+        changed = False
+        for decision_id, child in tuple(self._controller_children.items()):
+            return_code = child.poll()
+            if return_code is None:
+                continue
+            if return_code == WORKER_EXIT_PROFILE:
+                try:
+                    status = self.ledger.controller_decision(decision_id)
+                    self.ledger.record_controller_profile_drift(
+                        decision_id,
+                        generation=int(status.current_generation),
+                    )
+                except LedgerError as exc:
+                    # The child crossed a known terminal boundary, but the
+                    # corresponding durable closure did not.  Keep lifecycle
+                    # authority fail-closed instead of silently allowing the
+                    # scheduler to retry the same incompatible profile.
+                    raise SupervisorError("controller profile-drift terminalization failed") from exc
+            self._controller_children.pop(decision_id, None)
+            changed = True
+        return changed
+
+    @staticmethod
+    def _controller_model_and_effort(_row: dict[str, object]) -> tuple[str, str]:
+        """Return the repository-owned controller route, never the worker route."""
+
+        return "gpt-5.6-sol", ReasoningEffort.MEDIUM.value
+
+    def _spawn_controller_generation(self, status: object, *, recovery: bool = False) -> bool:
+        """Start one private controller-generation service process.
+
+        The durable generation row is reserved before ``Popen``.  A restart
+        therefore sees ``delivery_starting``/``active`` and performs a single
+        inspect-before-replace recovery instead of opening a speculative
+        second writer.
+        """
+
+        from .domain import ControllerDecisionStatus, ControllerGenerationState
+
+        if self.epoch is None or not isinstance(status, ControllerDecisionStatus):
+            return False
+        decision_id = str(status.decision_id)
+        if decision_id in self._controller_children:
+            return False
+        generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
+        if recovery:
+            if generation.state not in {
+                ControllerGenerationState.PREPARED,
+                ControllerGenerationState.DELIVERY_STARTING,
+                ControllerGenerationState.ACTIVE,
+                ControllerGenerationState.COMPLETED,
+                ControllerGenerationState.FAILED,
+                ControllerGenerationState.INTERRUPTED,
+            }:
+                return False
+            row = self.ledger.queue_dispatch(status.dispatch_id)
+            model, effort = self._controller_model_and_effort(row)
+            permission_args = self._controller_permission_args(row)
+            command = (
+                *self.controller_command,
+                "--recover",
+                "--decision-id",
+                decision_id,
+                "--state-root",
+                str(self.state_root),
+                "--cwd",
+                str(row["workspace_path"]),
+                "--model",
+                model,
+                "--reasoning-effort",
+                effort,
+                *permission_args,
+            )
+        else:
+            if generation.state is not ControllerGenerationState.PREPARED:
+                return False
+            self.ledger.prepare_controller_generation(
+                status.decision_id, generation=status.current_generation, prompt_sha256=None
+            )
+            row = self.ledger.queue_dispatch(status.dispatch_id)
+            model, effort = self._controller_model_and_effort(row)
+            permission_args = self._controller_permission_args(row)
+            command = (
+                *self.controller_command,
+                "--decision-id",
+                decision_id,
+                "--state-root",
+                str(self.state_root),
+                "--cwd",
+                str(row["workspace_path"]),
+                "--model",
+                model,
+                "--reasoning-effort",
+                effort,
+                *permission_args,
+            )
+        try:
+            launch_authority = self.ledger._controller_generation_launch_authority(
+                status.decision_id,
+                generation=status.current_generation,
+            )
+        except LedgerError:
+            return False
+        try:
+            child = subprocess.Popen(command, start_new_session=True, close_fds=True)
+        except OSError:
+            # Popen is a synchronous pre-identity boundary.  Reset only the
+            # exact prepared revision; if a human/model claim won the race,
+            # the CAS rejects this reset and leaves the newer claim intact.
+            if not recovery:
+                try:
+                    self.ledger.reset_controller_generation_delivery(
+                        status.decision_id,
+                        generation=status.current_generation,
+                        expected_revision=status.revision,
+                        claimant_id="",
+                        token="",
+                    )
+                except LedgerError:
+                    pass
+            elif (
+                generation.inspection_outcome is None
+                and status.claimant_kind in {None, ControllerClaimantKind.MODEL}
+                and generation.state in {ControllerGenerationState.DELIVERY_STARTING, ControllerGenerationState.ACTIVE}
+            ):
+                # A restart can leave a delivery_starting/active generation
+                # orphaned before this recovery process acquires identity.
+                # The failed Popen is an ambiguous launch boundary.  Record
+                # one durable human-attention fact through an exact revision
+                # and claimant CAS; a concurrent/newer human claim therefore
+                # remains untouched and the failed launch cannot be retried as
+                # a speculative second writer.
+                try:
+                    self.ledger._mark_controller_generation_launch_ambiguous(
+                        status.decision_id,
+                        generation=status.current_generation,
+                        expected_revision=status.revision,
+                        expected_state=status.state,
+                        expected_claimant_kind=status.claimant_kind,
+                        expected_claimant_id=status.claimant_id,
+                    )
+                except LedgerError:
+                    pass
+            return False
+        try:
+            self.ledger._bind_controller_generation_launch(
+                status.decision_id,
+                generation=status.current_generation,
+                expected_authority_sha256=launch_authority,
+            )
+        except LedgerError:
+            self._stop_unowned_controller_child(child)
+            return False
+        self._controller_children[decision_id] = child
+        return True
+
+    @staticmethod
+    def _stop_unowned_controller_child(child: subprocess.Popen[bytes]) -> None:
+        """Boundedly reap a process that lost durable launch authority."""
+
+        try:
+            child.terminate()
+        except OSError:
+            # The process may already have exited between the ownership CAS
+            # and termination.  It still needs a bounded wait so the parent
+            # does not leave a zombie behind.
+            pass
+        try:
+            child.wait(timeout=1)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                child.kill()
+            except OSError:
+                pass
+            try:
+                child.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        except OSError:
+            pass
+
+    @staticmethod
+    def _controller_permission_args(row: dict[str, object]) -> tuple[str, ...]:
+        """Forward the durable native authority facts to the private runner."""
+
+        try:
+            route = strict_json_loads(str(row["route_json"]), max_bytes=16_384)
+        except (TypeError, ValueError):
+            return ()
+        if not isinstance(route, dict):
+            return ()
+        effective = route.get("effective_permission")
+        compatibility = route.get("native_compatibility_sha256")
+        if not isinstance(effective, dict) or not isinstance(compatibility, str):
+            # Hermetic low-level queue fixtures intentionally omit profile
+            # identities; their private runner keeps its explicit read-only
+            # donor configuration rather than manufacturing native authority.
+            return ()
+        encoded = json.dumps(effective, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return ("--effective-permission-json", encoded, "--native-compatibility-sha256", compatibility)
+
+    def _schedule_controller_generations(self) -> bool:
+        """Drive due decisions and at most one process per generation."""
+
+        if self.ledger.supervisor_refresh_fenced():
+            return False
+        changed = self._reap_controller_generations()
+        for status in self.ledger.controller_decisions():
+            if self.ledger.supervisor_refresh_fenced():
+                break
+            # Lease expiry is a durable CAS boundary.  Human claims can be
+            # released directly; model claims are released only after the
+            # generation has an authoritative one-read inspection.  A stale
+            # model claim therefore remains untouched while its recovery
+            # subprocess performs that inspection.
+            try:
+                reaped = self.ledger.reap_controller_claim(status.decision_id)
+            except LedgerError:
+                reaped = None
+            if reaped is not None and reaped != status:
+                status = reaped
+                changed = True
+            if status.state is ControllerDecisionState.AWAITING_CLAIM:
+                # A prepared generation has never crossed the external
+                # identity boundary and may be launched normally.  Any other
+                # durable generation state (delivery_starting/active or a
+                # completed persisted inspection) belongs to recovery: a
+                # restart must inspect or replay that exact lineage rather
+                # than silently abandoning it behind an awaiting decision.
+                generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
+                changed = (
+                    self._spawn_controller_generation(
+                        status,
+                        recovery=generation.state is not ControllerGenerationState.PREPARED,
+                    )
+                    or changed
+                )
+                continue
+            if status.state is ControllerDecisionState.CLAIMED:
+                # Human ownership resolves the decision through the same
+                # typed action client, but it never owns or launches the
+                # model generation lineage.  In particular, a human claim
+                # racing an already delivery-starting/active generation must
+                # not cause the scheduler to create a recovery subprocess.
+                if status.claimant_kind is ControllerClaimantKind.HUMAN:
+                    continue
+                generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
+                if (
+                    generation.state is ControllerGenerationState.ACTIVE
+                    and status.claim_expires_at is not None
+                    and status.claim_expires_at
+                    > datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+                    and str(status.decision_id) not in self._controller_children
+                ):
+                    # A controller that persisted an explicit temporary
+                    # provider reset keeps its model claim until that bound.
+                    # A supervisor restart must not consume the one-read
+                    # recovery path before the deferred owner is eligible.
+                    continue
+                if (
+                    generation.state
+                    in {
+                        ControllerGenerationState.DELIVERY_STARTING,
+                        ControllerGenerationState.ACTIVE,
+                        ControllerGenerationState.COMPLETED,
+                        ControllerGenerationState.FAILED,
+                        ControllerGenerationState.INTERRUPTED,
+                    }
+                    and (
+                        generation.inspection_outcome is None
+                        or generation.inspection_outcome == ControllerGenerationState.COMPLETED.value
+                    )
+                    and str(status.decision_id) not in self._controller_children
+                ):
+                    changed = self._spawn_controller_generation(status, recovery=True) or changed
+            elif status.state is ControllerDecisionState.ACTION_COMMITTED:
+                # A process can crash after the atomic effect commit but
+                # before acknowledgement.  The recovery runner has a typed
+                # outbox acknowledgement path that does not perform another
+                # SDK read, so the receipt can be closed exactly once.
+                generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
+                if str(status.decision_id) not in self._controller_children:
+                    changed = self._spawn_controller_generation(status, recovery=True) or changed
+            elif (
+                status.state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED
+                and status.action_id is not None
+                and status.action_sha256 is not None
+                and self.ledger.controller_action_pending_acknowledgement(status.decision_id)
+            ):
+                # ``require_human_attention`` deliberately preserves the
+                # attention state while its effect receipt is committed.  A
+                # restart still owes the separate acknowledgement fact, and
+                # the recovery runner closes it directly from the durable
+                # outbox without inspecting or launching an SDK writer.
+                if str(status.decision_id) not in self._controller_children:
+                    changed = self._spawn_controller_generation(status, recovery=True) or changed
+        return changed
+
+    def _reap_children(self) -> bool:
+        """Observe child exits without polling the queue or Codex tasks."""
+
+        changed = False
+        for dispatch_id, child in tuple(self._children.items()):
+            return_code = child.poll()
+            if return_code is None:
+                continue
+            # Keep the child and its liveness identity owned by this
+            # supervisor until the durable exit/classification transaction
+            # commits.  A transient LedgerError must leave the event
+            # retryable in the same epoch rather than stranding starting or
+            # running work after the in-memory child entry is discarded.
+            try:
+                row = self.ledger.queue_dispatch(dispatch_id)
+                live = self.ledger.worker_liveness(dispatch_id)
+                cancellation = next(
+                    (
+                        action
+                        for action in self.ledger.pending_cancellation_actions()
+                        if action["dispatch_id"] == dispatch_id
+                    ),
+                    None,
+                )
+                if cancellation is not None and live is not None:
+                    self.ledger.acknowledge_worker_cancellation_exit(
+                        dispatch_id,
+                        action_id=str(cancellation["action_id"]),
+                        pid=int(live["pid"]),
+                        process_birth_identity=str(live["process_birth_identity"]),
+                        exit_code=return_code,
+                    )
+                    row = self.ledger.queue_dispatch(dispatch_id)
+                    live = self.ledger.worker_liveness(dispatch_id)
+                if live is not None:
+                    if live["exited_at"] is None:
+                        self.ledger.mark_worker_exit(
+                            dispatch_id,
+                            pid=int(live["pid"]),
+                            process_birth_identity=str(live["process_birth_identity"]),
+                            exit_code=return_code,
+                            classification=(
+                                "transport-before-identity"
+                                if return_code == WORKER_EXIT_TRANSPORT_BEFORE_IDENTITY
+                                else "response-chain-invalid"
+                                if return_code == WORKER_EXIT_RESPONSE_CHAIN_INVALID
+                                else "schema-output-invalid"
+                                if return_code == WORKER_EXIT_SCHEMA_OUTPUT_INVALID
+                                else "transient-after-identity"
+                                if return_code == WORKER_EXIT_TRANSIENT_AFTER_IDENTITY
+                                else "authentication-failure"
+                                if return_code == WORKER_EXIT_AUTHENTICATION
+                                else "permission-failure"
+                                if return_code == WORKER_EXIT_PERMISSION
+                                else "capability-failure"
+                                if return_code == WORKER_EXIT_CAPABILITY
+                                else "profile-failure"
+                                if return_code == WORKER_EXIT_PROFILE
+                                else "result-transport-after-identity"
+                                if return_code == WORKER_EXIT_RESULT_TRANSPORT_AFTER_IDENTITY
+                                else "integrity-failure"
+                                if return_code == WORKER_EXIT_INTEGRITY
+                                else "malformed-input"
+                                if return_code in {WORKER_EXIT_MALFORMED, WORKER_EXIT_FAIL_CLOSED}
+                                else "unknown-sdk-failure"
+                                if return_code
+                                in {WORKER_EXIT_UNKNOWN_AFTER_IDENTITY, WORKER_EXIT_UNKNOWN_BEFORE_IDENTITY}
+                                else "terminal-after-identity"
+                                if return_code == WORKER_EXIT_TERMINAL_AFTER_IDENTITY
+                                else "worker-exit"
+                            ),
+                        )
+                elif row["state"] not in {"completed", "failed", "cancelled"}:
+                    self.ledger.mark_human_attention_required(
+                        dispatch_id,
+                        reason="worker exited without a persisted liveness identity",
+                    )
+                durable = self.ledger.queue_dispatch(dispatch_id)
+                if durable["state"] == "human_attention_required":
+                    try:
+                        self.ledger.rearm_checkpoint(dispatch_id, seconds=0.001)
+                    except StaleWriter:
+                        # One already-armed wake or active controller owns the
+                        # recovery decision.  Child reaping remains idempotent.
+                        pass
+            except LedgerError:
+                continue
+            self._children.pop(dispatch_id, None)
+            self._resumed_children.discard(dispatch_id)
+            active_turns = getattr(self, "_active_turns", None)
+            if active_turns is not None:
+                active_turns.pop(dispatch_id, None)
+            # A child exit is an event even if the liveness bind raced with a
+            # very fast process.  The durable transition above has either
+            # closed the active row or proved that it was already terminal.
+            changed = True
+            # Every exit, including a provider response-chain rejection, now
+            # enters the same inspect-before-mutate recovery boundary.  The
+            # old automatic fresh retry was unsafe because it could create a
+            # writer without proving that the persisted thread was idle.
+            # Recovery policy, not an exit code, owns any continuation/fresh
+            # thread decision.
+        return changed
+
+    @staticmethod
+    def _exact_process_is_live(pid: int, birth_identity: str) -> bool:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return process_birth_identity(pid) == birth_identity
+
+    def _advance_worker_cancellation(self, action: dict[str, object]) -> bool:
+        """Stop and acknowledge one exact owned child under a bounded deadline."""
+
+        dispatch_id = str(action["dispatch_id"])
+        queue = self.ledger.queue_dispatch(dispatch_id)
+        if queue["state"] == "cancelled":
+            return True
+        live = self.ledger.worker_liveness(dispatch_id)
+        if live is None or live["exited_at"] is not None:
+            return False
+        pid = int(live["pid"])
+        birth_identity = str(live["process_birth_identity"])
+        child = self._children.get(dispatch_id)
+        exit_code: int | None = None
+        if child is not None:
+            child_pid = getattr(child, "pid", pid)
+            if isinstance(child_pid, bool) or not isinstance(child_pid, int) or child_pid != pid:
+                raise LedgerError("cancellation child identity conflicts with durable liveness")
+            exit_code = child.poll()
+            if exit_code is None:
+                try:
+                    child.terminate()
+                    exit_code = child.wait(timeout=WORKER_CANCELLATION_STOP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    try:
+                        exit_code = child.wait(timeout=WORKER_CANCELLATION_STOP_TIMEOUT_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        return False
+                except OSError:
+                    return False
+        else:
+            if self._exact_process_is_live(pid, birth_identity):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    return False
+                deadline = time.monotonic() + WORKER_CANCELLATION_STOP_TIMEOUT_SECONDS
+                while time.monotonic() < deadline and self._exact_process_is_live(pid, birth_identity):
+                    time.sleep(0.02)
+                if self._exact_process_is_live(pid, birth_identity):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        return False
+                    deadline = time.monotonic() + WORKER_CANCELLATION_STOP_TIMEOUT_SECONDS
+                    while time.monotonic() < deadline and self._exact_process_is_live(pid, birth_identity):
+                        time.sleep(0.02)
+                if self._exact_process_is_live(pid, birth_identity):
+                    return False
+        self.ledger.acknowledge_worker_cancellation_exit(
+            dispatch_id,
+            action_id=str(action["action_id"]),
+            pid=pid,
+            process_birth_identity=birth_identity,
+            exit_code=exit_code,
+        )
+        self._children.pop(dispatch_id, None)
+        self._resumed_children.discard(dispatch_id)
+        active_turns = getattr(self, "_active_turns", None)
+        if active_turns is not None:
+            active_turns.pop(dispatch_id, None)
+        return True
+
+    def _advance_pending_cancellations(self) -> bool:
+        changed = False
+        for action in self.ledger.pending_cancellation_actions():
+            try:
+                changed = self._advance_worker_cancellation(action) or changed
+            except LedgerError:
+                continue
+        return changed
+
+    def acquire(self) -> dict[str, object]:
+        existing = self.ledger.supervisor_authority()
+        if existing is not None and int(existing["pid"]) != os.getpid():
+            try:
+                os.kill(int(existing["pid"]), 0)
+                live = process_birth_identity(int(existing["pid"])) == str(existing["process_birth_identity"])
+            except OSError:
+                live = False
+            if live:
+                raise SupervisorError("another live supervisor owns the repository")
+        executable = Path(sys.executable).resolve()
+        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+        fact = self.ledger.acquire_supervisor(
+            repository_root=self.state_root,
+            state_root=self.state_root,
+            pid=os.getpid(),
+            process_birth_identity=process_birth_identity(),
+            executable_digest=digest,
+            version="0.2.0",
+            owner_nonce_sha256=self.owner_nonce_sha256,
+            lease_seconds=self.lease_seconds,
+        )
+        self.epoch = int(fact["epoch"])
+        if self.socket_path.exists():
+            if self.socket_path.is_symlink() or not self.socket_path.is_socket():
+                raise SupervisorError("supervisor socket path is unsafe")
+            self.socket_path.unlink()
+        endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        endpoint.bind(os.fspath(self.socket_path))
+        os.chmod(self.socket_path, 0o600)
+        endpoint.listen(16)
+        endpoint.setblocking(False)
+        self._socket = endpoint
+        return fact
+
+    def rebind_legacy_active_queue(
+        self,
+        dispatch_id: str,
+        *,
+        source_thread_id: str,
+        native_home: Path | None = None,
+    ) -> dict[str, object]:
+        """Recover missing v10 authority before restarting one active worker."""
+
+        queue = self.ledger.queue_dispatch(dispatch_id)
+        try:
+            capsule = strict_json_loads(str(queue["capsule_json"]), max_bytes=2_000_000)
+        except ValueError as exc:
+            raise SupervisorError("legacy queue capsule is not valid bounded JSON") from exc
+        if not isinstance(capsule, dict):
+            raise SupervisorError("legacy queue capsule root must be an object")
+        try:
+            permission_mode = NativePermissionMode(str(capsule["permission_mode"]))
+            source = ThreadIdentity(source_thread_id)
+        except (KeyError, ValueError) as exc:
+            raise SupervisorError("legacy queue lacks original permission or source authority") from exc
+        home = (native_home or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))).resolve(strict=True)
+        try:
+            profile = NativeProfileProjection.load(home)
+            profile.verify_worker_sources()
+            effective = profile.effective_authority(permission_mode)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise SupervisorError("shared native Codex profile cannot authorize legacy recovery") from exc
+        return self.ledger.rebind_legacy_active_queue(
+            dispatch_id,
+            source_thread_id=source.id,
+            permission_mode=permission_mode,
+            native_profile_sha256=profile.profile_sha256,
+            native_compatibility_sha256=profile.worker_compatibility_sha256,
+            effective_permission=effective,
+        )
+
+    @staticmethod
+    def _controller_status_payload(status: object) -> dict[str, object]:
+        from .domain import ControllerDecisionStatus
+
+        if not isinstance(status, ControllerDecisionStatus):
+            raise IpcError("controller decision status is not typed")
+        summary = status.summary
+        return {
+            "decision_id": str(status.decision_id),
+            "dispatch_id": str(status.dispatch_id),
+            "kind": status.kind,
+            "state": status.state.value,
+            "revision": status.revision,
+            "current_generation": int(status.current_generation),
+            "generation_budget": status.generation_budget,
+            "generation_used": status.generation_used,
+            "claimant_kind": status.claimant_kind.value if status.claimant_kind else None,
+            "claimant_id": status.claimant_id,
+            "claim_expires_at": status.claim_expires_at,
+            "action_id": status.action_id,
+            "action_sha256": status.action_sha256,
+            "deadline": status.deadline,
+            "summary": {
+                "dispatch_id": str(summary.dispatch_id),
+                "kind": summary.kind,
+                "state": summary.state.value,
+                "summary": summary.summary,
+                "source_thread_id": summary.source_thread_id,
+                "deadline": summary.deadline,
+                "revision": summary.revision,
+                "expected_successor_dispatch_ids": list(summary.expected_successor_dispatch_ids),
+                **summary.context_json(),
+            },
+        }
+
+    @staticmethod
+    def _controller_claim_payload(claim: object) -> dict[str, object]:
+        from .domain import ControllerDecisionClaim
+
+        if not isinstance(claim, ControllerDecisionClaim):
+            raise IpcError("controller decision claim is not typed")
+        return {
+            "decision_id": str(claim.decision_id),
+            "generation": int(claim.generation),
+            "claimant_kind": claim.claimant_kind.value,
+            "claimant_id": claim.claimant_id,
+            "revision": claim.revision,
+            "lease_expires_at": claim.lease_expires_at,
+            "token": claim.token,
+        }
+
+    @staticmethod
+    def _controller_generation_payload(generation: object) -> dict[str, object]:
+        from .domain import ControllerGenerationStatus
+
+        if not isinstance(generation, ControllerGenerationStatus):
+            raise IpcError("controller generation status is not typed")
+        return {
+            "decision_id": str(generation.decision_id),
+            "generation": int(generation.generation),
+            "lineage_id": generation.lineage_id,
+            "predecessor_generation": int(generation.predecessor_generation)
+            if generation.predecessor_generation is not None
+            else None,
+            "source_kind": generation.source_kind,
+            "state": generation.state.value,
+            "prompt_sha256": generation.prompt_sha256,
+            "controller_thread_id": generation.controller_thread_id.id
+            if generation.controller_thread_id is not None
+            else None,
+            "controller_turn_id": generation.controller_turn_id,
+            "inspection_outcome": generation.inspection_outcome,
+        }
+
+    @staticmethod
+    def _controller_inspection_claim_payload(claim: object) -> dict[str, object]:
+        if not isinstance(claim, ControllerRecoveryInspectionClaim):
+            raise IpcError("controller inspection claim is not typed")
+        return {
+            "decision_id": str(claim.decision_id),
+            "generation": int(claim.generation),
+            "revision": claim.revision,
+            "lease_expires_at": claim.lease_expires_at,
+            "token": claim.token,
+        }
+
+    @staticmethod
+    def _controller_receipt_payload(receipt: object) -> dict[str, object]:
+        from .domain import ControllerActionReceipt
+
+        if not isinstance(receipt, ControllerActionReceipt):
+            raise IpcError("controller action receipt is not typed")
+        return {
+            "action_id": receipt.action_id,
+            "decision_id": str(receipt.decision_id),
+            "generation": int(receipt.generation),
+            "expected_revision": receipt.expected_revision,
+            "bundle_sha256": receipt.bundle_sha256,
+            "effect_receipt": receipt.effect_receipt,
+            "state": receipt.state,
+            "committed_at": receipt.committed_at,
+            "acknowledged_at": receipt.acknowledged_at,
+        }
+
+    def _controller_request(self, payload: dict[str, object]) -> dict[str, object]:
+        operation = payload.get("operation")
+        if operation == "controller_pending":
+            if set(payload) != {"version", "operation"}:
+                raise IpcError("controller pending request has an unsupported shape")
+            return {
+                "version": 1,
+                "ok": True,
+                "decisions": [self._controller_status_payload(item) for item in self.ledger.controller_decisions()],
+            }
+        if operation == "controller_status":
+            if set(payload) != {"version", "operation", "decision_id"}:
+                raise IpcError("controller status request has an unsupported shape")
+            status = self.ledger.controller_decision(ControllerDecisionId(payload["decision_id"]))
+            return {"version": 1, "ok": True, "decision": self._controller_status_payload(status)}
+        if operation == "controller_claim":
+            allowed = {
+                "version",
+                "operation",
+                "decision_id",
+                "claimant_kind",
+                "claimant_id",
+                "expected_revision",
+                "generation",
+                "token",
+            }
+            if set(payload) - allowed or not {
+                "version",
+                "operation",
+                "decision_id",
+                "claimant_kind",
+                "claimant_id",
+                "expected_revision",
+            }.issubset(payload):
+                raise IpcError("controller claim request has an unsupported shape")
+            claim = self.ledger.claim_controller_decision(
+                ControllerDecisionId(payload["decision_id"]),
+                claimant_kind=payload["claimant_kind"],
+                claimant_id=payload["claimant_id"],
+                expected_revision=payload["expected_revision"],
+                generation=payload.get("generation"),
+                token=payload.get("token"),
+            )
+            return {"version": 1, "ok": True, "claim": self._controller_claim_payload(claim)}
+        if operation == "controller_renew_claim":
+            required = {"version", "operation", "decision_id", "claimant_id", "token", "expected_revision"}
+            if set(payload) != required:
+                raise IpcError("controller claim renewal request has an unsupported shape")
+            claim = self.ledger.renew_controller_decision_claim(
+                ControllerDecisionId(payload["decision_id"]),
+                claimant_id=payload["claimant_id"],
+                token=payload["token"],
+                expected_revision=payload["expected_revision"],
+            )
+            return {"version": 1, "ok": True, "claim": self._controller_claim_payload(claim)}
+        if operation == "controller_defer_rate_limit":
+            required = {
+                "version",
+                "operation",
+                "decision_id",
+                "generation",
+                "claimant_id",
+                "token",
+                "expected_revision",
+                "retry_at",
+            }
+            if set(payload) != required:
+                raise IpcError("controller rate-limit deferral request has an unsupported shape")
+            claim = self.ledger.defer_controller_rate_limit(
+                ControllerDecisionId(payload["decision_id"]),
+                generation=payload["generation"],
+                claimant_id=payload["claimant_id"],
+                token=payload["token"],
+                expected_revision=payload["expected_revision"],
+                retry_at=payload["retry_at"],
+            )
+            return {"version": 1, "ok": True, "claim": self._controller_claim_payload(claim)}
+        if operation == "controller_submit_actions":
+            required = {"version", "operation", "bundle", "claimant_id", "token"}
+            if set(payload) != required or not isinstance(payload["bundle"], dict):
+                raise IpcError("controller action submission has an unsupported shape")
+            bundle = ModelFacingControllerActionBundle.from_json(payload["bundle"])
+            receipt = self.ledger.submit_controller_actions(
+                bundle, claimant_id=payload["claimant_id"], token=payload["token"]
+            )
+            return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
+        if operation == "controller_submit_recovered_actions":
+            allowed = {"version", "operation", "bundle", "decision_id"}
+            if set(payload) - allowed or not ({"version", "operation"} <= set(payload)):
+                raise IpcError("recovered controller action submission has an unsupported shape")
+            if ("bundle" in payload) == ("decision_id" in payload):
+                raise IpcError("recovered controller action submission requires one decision identity")
+            argument: object
+            if "bundle" in payload:
+                if not isinstance(payload["bundle"], dict):
+                    raise IpcError("recovered controller action bundle is malformed")
+                argument = ModelFacingControllerActionBundle.from_json(payload["bundle"])
+            else:
+                argument = ControllerDecisionId(payload["decision_id"])
+            receipt = self.ledger.submit_recovered_controller_actions(argument)
+            return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
+        if operation == "controller_acknowledge":
+            required = {
+                "version",
+                "operation",
+                "decision_id",
+                "action_id",
+                "bundle_sha256",
+                "committed_revision",
+                "claimant_id",
+                "token",
+            }
+            if set(payload) != required:
+                raise IpcError("controller acknowledgement has an unsupported shape")
+            receipt = self.ledger.acknowledge_controller_action(
+                ControllerDecisionId(payload["decision_id"]),
+                action_id=payload["action_id"],
+                bundle_sha256=payload["bundle_sha256"],
+                committed_revision=payload["committed_revision"],
+                claimant_id=payload["claimant_id"],
+                token=payload["token"],
+            )
+            return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
+        if operation == "controller_acknowledge_recovered":
+            required = {
+                "version",
+                "operation",
+                "decision_id",
+                "action_id",
+                "bundle_sha256",
+                "committed_revision",
+            }
+            if set(payload) != required:
+                raise IpcError("recovered controller acknowledgement has an unsupported shape")
+            receipt = self.ledger.acknowledge_recovered_controller_action(
+                ControllerDecisionId(payload["decision_id"]),
+                action_id=payload["action_id"],
+                bundle_sha256=payload["bundle_sha256"],
+                committed_revision=payload["committed_revision"],
+            )
+            return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
+        if operation == "controller_generation":
+            allowed = {"version", "operation", "decision_id", "generation"}
+            if set(payload) - allowed or not {"version", "operation", "decision_id"}.issubset(payload):
+                raise IpcError("controller generation request has an unsupported shape")
+            generation = self.ledger.controller_generation(
+                ControllerDecisionId(payload["decision_id"]),
+                payload.get("generation"),
+            )
+            return {"version": 1, "ok": True, "generation": self._controller_generation_payload(generation)}
+        if operation == "controller_prepare_generation":
+            allowed = {"version", "operation", "decision_id", "generation", "prompt_sha256"}
+            if set(payload) - allowed or not {"version", "operation", "decision_id", "generation"}.issubset(payload):
+                raise IpcError("controller generation preparation has an unsupported shape")
+            generation = self.ledger.prepare_controller_generation(
+                ControllerDecisionId(payload["decision_id"]),
+                generation=payload["generation"],
+                prompt_sha256=payload.get("prompt_sha256"),
+            )
+            return {"version": 1, "ok": True, "generation": self._controller_generation_payload(generation)}
+        if operation == "controller_bind_generation_thread":
+            required = {"version", "operation", "decision_id", "generation", "controller_thread_id"}
+            if set(payload) != required:
+                raise IpcError("controller generation thread binding has an unsupported shape")
+            generation = self.ledger.bind_controller_generation_thread(
+                ControllerDecisionId(payload["decision_id"]),
+                generation=payload["generation"],
+                controller_thread_id=payload["controller_thread_id"],
+            )
+            return {"version": 1, "ok": True, "generation": self._controller_generation_payload(generation)}
+        if operation == "controller_bind_generation_turn":
+            required = {
+                "version",
+                "operation",
+                "decision_id",
+                "generation",
+                "controller_thread_id",
+                "controller_turn_id",
+            }
+            if set(payload) - (required | {"previous_controller_turn_id"}) or not required.issubset(payload):
+                raise IpcError("controller generation turn binding has an unsupported shape")
+            generation = self.ledger.bind_controller_generation_turn(
+                ControllerDecisionId(payload["decision_id"]),
+                generation=payload["generation"],
+                controller_thread_id=payload["controller_thread_id"],
+                controller_turn_id=payload["controller_turn_id"],
+                previous_controller_turn_id=payload.get("previous_controller_turn_id"),
+            )
+            return {"version": 1, "ok": True, "generation": self._controller_generation_payload(generation)}
+        if operation == "controller_complete_generation":
+            required = {"version", "operation", "decision_id", "generation", "state"}
+            if set(payload) != required:
+                raise IpcError("controller generation completion has an unsupported shape")
+            generation = self.ledger.complete_controller_generation(
+                ControllerDecisionId(payload["decision_id"]),
+                generation=payload["generation"],
+                state=ControllerGenerationState(payload["state"]),
+            )
+            return {"version": 1, "ok": True, "generation": self._controller_generation_payload(generation)}
+        if operation == "controller_reset_generation_delivery":
+            required = {
+                "version",
+                "operation",
+                "decision_id",
+                "generation",
+                "expected_revision",
+                "claimant_id",
+                "token",
+            }
+            if set(payload) != required:
+                raise IpcError("controller generation reset has an unsupported shape")
+            generation = self.ledger.reset_controller_generation_delivery(
+                ControllerDecisionId(payload["decision_id"]),
+                generation=payload["generation"],
+                expected_revision=payload["expected_revision"],
+                claimant_id=payload["claimant_id"],
+                token=payload["token"],
+            )
+            return {"version": 1, "ok": True, "generation": self._controller_generation_payload(generation)}
+        if operation == "controller_recover":
+            required = {"version", "operation", "decision_id", "inspection_outcome"}
+            if set(payload) != required:
+                raise IpcError("controller recovery request has an unsupported shape")
+            generation = self.ledger.request_controller_recovery(
+                ControllerDecisionId(payload["decision_id"]), inspection_outcome=payload["inspection_outcome"]
+            )
+            return {"version": 1, "ok": True, "generation": self._controller_generation_payload(generation)}
+        if operation in {"controller_reserve_recovery", "controller_complete_recovery"}:
+            required = {"version", "operation", "decision_id"}
+            if operation == "controller_complete_recovery":
+                required.update({"inspection_outcome", "claim"})
+            if set(payload) - (required | {"bundle"}) or not required.issubset(payload):
+                raise IpcError("controller recovery inspection request has an unsupported shape")
+            identity = ControllerDecisionId(payload["decision_id"])
+            if operation == "controller_reserve_recovery":
+                claim = self.ledger.reserve_controller_recovery_inspection(identity)
+                return {"version": 1, "ok": True, "claim": self._controller_inspection_claim_payload(claim)}
+            else:
+                raw_claim = payload["claim"]
+                if not isinstance(raw_claim, dict) or set(raw_claim) != {
+                    "decision_id",
+                    "generation",
+                    "revision",
+                    "lease_expires_at",
+                    "token",
+                }:
+                    raise IpcError("controller inspection claim is malformed")
+                claim = ControllerRecoveryInspectionClaim(
+                    ControllerDecisionId(raw_claim["decision_id"]),
+                    raw_claim["generation"],  # type: ignore[arg-type]
+                    raw_claim["revision"],  # type: ignore[arg-type]
+                    raw_claim["lease_expires_at"],  # type: ignore[arg-type]
+                    raw_claim["token"],  # type: ignore[arg-type]
+                )
+                generation = self.ledger.complete_controller_recovery_inspection(
+                    identity,
+                    inspection_outcome=payload["inspection_outcome"],
+                    claim=claim,
+                    bundle=ModelFacingControllerActionBundle.from_json(payload["bundle"])
+                    if isinstance(payload.get("bundle"), dict)
+                    else None,
+                )
+            return {"version": 1, "ok": True, "generation": self._controller_generation_payload(generation)}
+        raise IpcError("unsupported controller operation")
+
+    def _request_ack(self, payload: dict[str, object]) -> dict[str, object]:
+        try:
+            operation = payload.get("operation")
+            if payload.get("version") != 1 or not isinstance(operation, str):
+                raise IpcError("unsupported IPC request version or operation")
+            if operation == "wake":
+                if set(payload) != {"version", "operation"}:
+                    raise IpcError("wake request has an unsupported shape")
+                return {"version": 1, "ok": True, "operation": "wake"}
+            if operation == "shutdown":
+                if set(payload) != {"version", "operation"}:
+                    raise IpcError("shutdown request has an unsupported shape")
+                if self.epoch is None:
+                    raise IpcError("supervisor lease is not acquired")
+                self.ledger.request_supervisor_shutdown(epoch=self.epoch, owner_nonce_sha256=self.owner_nonce_sha256)
+                self._stop = True
+                return {"version": 1, "ok": True, "operation": "shutdown"}
+            if operation.startswith("controller_"):
+                return self._controller_request(payload)
+            if operation == "status":
+                if set(payload) - {"version", "operation", "dispatch_id"}:
+                    raise IpcError("status request has an unsupported shape")
+                selected = payload.get("dispatch_id")
+                rows = self.ledger.queue_dispatches()
+                if selected is not None:
+                    if not isinstance(selected, str):
+                        raise IpcError("status dispatch identity is invalid")
+                    rows = tuple(row for row in rows if row.get("dispatch_id") == selected)
+                queue = []
+                active_turns = getattr(self, "_active_turns", {})
+                for row in rows:
+                    item = {key: row[key] for key in _PUBLIC_QUEUE_FIELDS if key in row}
+                    item["retry_policy"] = _public_retry_policy(self.ledger.retry_policy(str(row["dispatch_id"])))
+                    item["recent_activity"] = [
+                        _public_activity(activity) for activity in self.ledger.recent_activity(str(row["dispatch_id"]))
+                    ]
+                    active = active_turns.get(str(row["dispatch_id"]))
+                    item["active_turn_id"] = active[3] if active is not None else None
+                    queue.append(item)
+                return {"version": 1, "ok": True, "queue": queue}
+            if operation == "activity":
+                return self._activity(payload)
+            if operation == "conversation_history":
+                return self._conversation_history(payload)
+            if operation == "conversation_history_response":
+                return self._history_response(payload)
+            if operation == "control_status":
+                if set(payload) != {"version", "operation", "command_id"}:
+                    raise IpcError("control status request has an unsupported shape")
+                command_id = payload.get("command_id")
+                if not isinstance(command_id, str):
+                    raise IpcError("control command id is invalid")
+                try:
+                    command = self.ledger.control_command(command_id)
+                except RecordNotFound:
+                    command = None
+                return {
+                    "version": 1,
+                    "ok": True,
+                    "command": None if command is None else _public_control_command(command),
+                }
+            if operation == "steer":
+                return self._create_control(payload, ControlCommandKind.STEER)
+            if operation == "interrupt":
+                return self._create_control(payload, ControlCommandKind.INTERRUPT)
+            if operation == "control":
+                kind_value = payload.get("kind")
+                try:
+                    kind = ControlCommandKind(str(kind_value))
+                except ValueError as exc:
+                    raise IpcError("control command kind is invalid") from exc
+                normalized = dict(payload)
+                normalized["operation"] = kind.value
+                normalized.pop("kind", None)
+                return self._create_control(normalized, kind)
+            if operation == "poll_commands":
+                return self._poll_commands(payload)
+            if operation == "ack_control":
+                return self._ack_control(payload)
+            if operation == "worker_event":
+                return self._worker_event(payload)
+            if operation == "bind_turn":
+                return self._bind_turn(payload)
+            if operation == "retry":
+                return self._retry(payload)
+            if operation == "recovery_action":
+                return self._recovery_action(payload)
+            if operation == "bind_worker":
+                return self._bind_worker(payload)
+            if operation == "heartbeat":
+                return self._heartbeat(payload)
+            if operation == "submit_result":
+                return self._submit_result(payload)
+            raise IpcError("unsupported IPC operation")
+        except (KeyError, TypeError, ValueError, LedgerError) as exc:
+            raise IpcError("IPC request failed closed") from exc
+
+    @staticmethod
+    def _strict_worker_process_identity(payload: dict[str, object], row: dict[str, object]) -> tuple[int, int]:
+        generation = payload.get("generation")
+        attempt = payload.get("attempt")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise IpcError("worker generation is invalid")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise IpcError("worker attempt is invalid")
+        if (generation, attempt) != (row.get("generation"), row.get("attempt")):
+            raise IpcError("worker process identity is stale")
+        return generation, attempt
+
+    @classmethod
+    def _strict_worker_turn_identity(
+        cls, payload: dict[str, object], row: dict[str, object]
+    ) -> tuple[int, int, str, str]:
+        generation, attempt = cls._strict_worker_process_identity(payload, row)
+        thread_id = payload.get("thread_id")
+        turn_id = payload.get("turn_id")
+        if not isinstance(thread_id, str) or row.get("thread_id") != thread_id:
+            raise IpcError("worker turn thread identity conflicts with queue")
+        try:
+            ThreadIdentity(thread_id)
+        except ValueError as exc:
+            raise IpcError("worker turn thread identity is invalid") from exc
+        if (
+            not isinstance(turn_id, str)
+            or not turn_id
+            or len(turn_id) > 512
+            or any(character.isspace() or ord(character) < 0x20 for character in turn_id)
+        ):
+            raise IpcError("worker turn identity is invalid")
+        return generation, attempt, thread_id, turn_id
+
+    @staticmethod
+    def _control_identity(payload: dict[str, object]) -> tuple[str, int, int, str, str, str]:
+        dispatch_id = payload.get("dispatch_id")
+        thread_id = payload.get("thread_id")
+        turn_id = payload.get("turn_id")
+        if not isinstance(dispatch_id, str) or not isinstance(thread_id, str) or not isinstance(turn_id, str):
+            raise IpcError("live control identity is incomplete")
+        try:
+            ThreadIdentity(thread_id)
+        except ValueError as exc:
+            raise IpcError("live control thread identity is invalid") from exc
+        if (
+            not turn_id
+            or len(turn_id) > 512
+            or any(character.isspace() or ord(character) < 0x20 for character in turn_id)
+        ):
+            raise IpcError("live control turn identity is invalid")
+        generation = payload.get("generation")
+        attempt = payload.get("attempt")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise IpcError("live control generation is invalid")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise IpcError("live control attempt is invalid")
+        command_id = payload.get("command_id")
+        if (
+            not isinstance(command_id, str)
+            or not command_id.strip()
+            or len(command_id.encode("utf-8")) > 256
+            or any(character.isspace() or ord(character) < 0x20 for character in command_id)
+        ):
+            raise IpcError("live control command id is invalid")
+        return dispatch_id, generation, attempt, thread_id, turn_id, command_id
+
+    def _activity(self, payload: dict[str, object]) -> dict[str, object]:
+        if set(payload) - {"version", "operation", "dispatch_id", "limit"}:
+            raise IpcError("activity request has an unsupported shape")
+        dispatch_id = payload.get("dispatch_id")
+        if not isinstance(dispatch_id, str):
+            raise IpcError("activity dispatch identity is required")
+        limit = payload.get("limit", 128)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= 128:
+            raise IpcError("activity limit is invalid")
+        return {
+            "version": 1,
+            "ok": True,
+            "dispatch_id": dispatch_id,
+            "activity": [
+                _public_activity(activity) for activity in self.ledger.recent_activity(dispatch_id, limit=limit)
+            ],
+        }
+
+    @staticmethod
+    def _public_conversation_page(page: ConversationHistoryPage) -> dict[str, object]:
+        return {"version": 1, "ok": True, "page": page.to_json()}
+
+    @staticmethod
+    def _conversation_request(payload: dict[str, object]) -> ConversationHistoryRequest:
+        required = {
+            "version",
+            "operation",
+            "subject_kind",
+            "subject_id",
+            "thread_id",
+            "generation",
+            "attempt",
+            "revision",
+            "page_token",
+            "page_fragments",
+        }
+        if set(payload) != required:
+            raise IpcError("conversation history request has an unsupported shape")
+        try:
+            return ConversationHistoryRequest(
+                ConversationSubjectKind(payload["subject_kind"]),
+                payload["subject_id"],  # type: ignore[arg-type]
+                ThreadIdentity(payload["thread_id"]),  # type: ignore[arg-type]
+                payload["generation"],  # type: ignore[arg-type]
+                payload["attempt"],  # type: ignore[arg-type]
+                payload["revision"],  # type: ignore[arg-type]
+                payload["page_token"],  # type: ignore[arg-type]
+                payload["page_fragments"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise IpcError("conversation history request is malformed") from exc
+
+    def _inactive_conversation_page(self, request: ConversationHistoryRequest) -> ConversationHistoryPage:
+        if request.subject_kind is ConversationSubjectKind.WORKER:
+            try:
+                row = self.ledger.queue_dispatch(request.subject_id)
+            except (LedgerError, RecordNotFound):
+                return ConversationHistoryPage(
+                    request.subject_kind,
+                    request.subject_id,
+                    request.thread_id,
+                    ConversationHistoryStatus.DELETED,
+                    None,
+                    reason="worker history is deleted",
+                )
+            if row.get("thread_id") != request.thread_id.id:
+                raise IpcError("conversation worker thread identity is stale")
+            if request.generation != row.get("generation") or request.attempt != row.get("attempt"):
+                raise IpcError("conversation worker process identity is stale")
+            model = "gpt-5.6-luna"
+            effort = ReasoningEffort.MEDIUM
+            try:
+                capsule = strict_json_loads(str(row["capsule_json"]), max_bytes=2_000_000)
+                if isinstance(capsule, dict):
+                    if isinstance(capsule.get("model"), str):
+                        model = capsule["model"]
+                    if isinstance(capsule.get("reasoning_effort"), str):
+                        effort = ReasoningEffort(capsule["reasoning_effort"])
+            except (TypeError, ValueError, KeyError):
+                pass
+            config = CodexSdkConfig(model, effort, sandbox=Sandbox.READ_ONLY, cwd=Path(str(row["workspace_path"])))
+        else:
+            try:
+                decision = self.ledger.controller_decision(ControllerDecisionId(request.subject_id))
+            except (LedgerError, ValueError):
+                return ConversationHistoryPage(
+                    request.subject_kind,
+                    request.subject_id,
+                    request.thread_id,
+                    ConversationHistoryStatus.DELETED,
+                    None,
+                    reason="controller history is deleted",
+                )
+            source = decision.summary.source_thread_id
+            if source != request.thread_id.id:
+                raise IpcError("conversation controller thread identity is stale")
+            if request.generation != int(decision.current_generation) or request.revision != decision.revision:
+                raise IpcError("conversation controller revision is stale")
+            config = CodexSdkConfig(
+                "gpt-5.6-luna", ReasoningEffort.MEDIUM, sandbox=Sandbox.READ_ONLY, cwd=self.state_root
+            )
+        adapter = CodexSdkAdapter(config)
+        try:
+            return adapter.read_conversation_history(request)
+        finally:
+            adapter.close()
+
+    def _history_response(self, payload: dict[str, object]) -> dict[str, object]:
+        required = {
+            "version",
+            "operation",
+            "request_id",
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "thread_id",
+            "turn_id",
+            "token",
+            "page",
+        }
+        if set(payload) != required:
+            raise IpcError("conversation history response has an unsupported shape")
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str):
+            raise IpcError("conversation history response identity is invalid")
+        with self._conversation_requests_lock:
+            pending = self._conversation_requests.get(request_id)
+        if pending is None:
+            raise IpcError("conversation history response is stale")
+        dispatch_id = str(pending["dispatch_id"])
+        row, generation, attempt, _token = self._worker_capability(payload)
+        if dispatch_id != str(row["dispatch_id"]) or (generation, attempt) != (
+            pending["generation"],
+            pending["attempt"],
+        ):
+            raise IpcError("conversation history response process identity is stale")
+        if payload.get("thread_id") != pending["thread_id"] or payload.get("turn_id") != pending["turn_id"]:
+            raise IpcError("conversation history response turn identity is stale")
+        page = payload.get("page")
+        try:
+            typed_page = conversation_history_page_from_json(page)
+        except (TypeError, ValueError) as exc:
+            raise IpcError("conversation history response page is malformed") from exc
+        request = pending["request"]
+        assert isinstance(request, ConversationHistoryRequest)
+        if (
+            typed_page.subject_kind is not request.subject_kind
+            or typed_page.subject_id != request.subject_id
+            or typed_page.thread_id != request.thread_id
+        ):
+            raise IpcError("conversation history response page is malformed")
+        pending["response"] = typed_page
+        event = pending["event"]
+        assert isinstance(event, threading.Event)
+        event.set()
+        return {"version": 1, "ok": True}
+
+    def _conversation_history(self, payload: dict[str, object]) -> dict[str, object]:
+        request = self._conversation_request(payload)
+        active = getattr(self, "_active_turns", {}).get(request.subject_id)
+        if request.subject_kind is ConversationSubjectKind.WORKER and active is not None:
+            if (request.generation, request.attempt, request.thread_id.id) != active[:3]:
+                raise IpcError("conversation worker identity is stale")
+        if not self._conversation_read_slots.acquire(blocking=False):
+            return self._public_conversation_page(
+                ConversationHistoryPage(
+                    request.subject_kind,
+                    request.subject_id,
+                    request.thread_id,
+                    ConversationHistoryStatus.UNAVAILABLE,
+                    None,
+                    reason="conversation read capacity is busy",
+                )
+            )
+        if request.subject_kind is ConversationSubjectKind.WORKER and active is not None:
+            request_id = uuid.uuid4().hex
+            event = threading.Event()
+            pending: dict[str, object] = {
+                "request": request,
+                "event": event,
+                "dispatch_id": request.subject_id,
+                "generation": request.generation,
+                "attempt": request.attempt,
+                "thread_id": request.thread_id.id,
+                "turn_id": active[3],
+            }
+            with self._conversation_requests_lock:
+                self._conversation_requests[request_id] = pending
+            try:
+                if not event.wait(CONVERSATION_READ_DEADLINE_SECONDS):
+                    page = ConversationHistoryPage(
+                        request.subject_kind,
+                        request.subject_id,
+                        request.thread_id,
+                        ConversationHistoryStatus.UNAVAILABLE,
+                        None,
+                        reason="active worker did not answer history read",
+                    )
+                else:
+                    typed_page = pending.get("response")
+                    if not isinstance(typed_page, ConversationHistoryPage):
+                        page = ConversationHistoryPage(
+                            request.subject_kind,
+                            request.subject_id,
+                            request.thread_id,
+                            ConversationHistoryStatus.UNAVAILABLE,
+                            None,
+                            reason="history response was unavailable",
+                        )
+                    else:
+                        return self._public_conversation_page(typed_page)
+                return self._public_conversation_page(page)
+            finally:
+                with self._conversation_requests_lock:
+                    self._conversation_requests.pop(request_id, None)
+                self._conversation_read_slots.release()
+
+        result: list[ConversationHistoryPage] = []
+        errors: list[Exception] = []
+        finished = threading.Event()
+
+        def read_inactive() -> None:
+            try:
+                result.append(self._inactive_conversation_page(request))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                self._conversation_read_slots.release()
+                finished.set()
+
+        try:
+            threading.Thread(
+                target=read_inactive,
+                name="codex-flow-inactive-conversation-read",
+                daemon=True,
+            ).start()
+        except RuntimeError:
+            self._conversation_read_slots.release()
+            raise
+        if not finished.wait(CONVERSATION_READ_DEADLINE_SECONDS):
+            return self._public_conversation_page(
+                ConversationHistoryPage(
+                    request.subject_kind,
+                    request.subject_id,
+                    request.thread_id,
+                    ConversationHistoryStatus.UNAVAILABLE,
+                    None,
+                    reason="conversation read exceeded its deadline",
+                )
+            )
+        if errors:
+            if isinstance(errors[0], IpcError):
+                raise errors[0]
+            return self._public_conversation_page(
+                ConversationHistoryPage(
+                    request.subject_kind,
+                    request.subject_id,
+                    request.thread_id,
+                    ConversationHistoryStatus.UNAVAILABLE,
+                    None,
+                    reason="conversation read failed",
+                )
+            )
+        return self._public_conversation_page(result[0])
+
+    def _create_control(self, payload: dict[str, object], kind: ControlCommandKind) -> dict[str, object]:
+        required = {
+            "version",
+            "operation",
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "thread_id",
+            "turn_id",
+            "command_id",
+            "payload",
+        }
+        if set(payload) != required:
+            raise IpcError("live control request has an unsupported shape")
+        dispatch_id, generation, attempt, thread_id, turn_id, command_id = self._control_identity(payload)
+        if not command_id:
+            raise IpcError("live control command id is required")
+        raw_payload = payload.get("payload")
+        if kind is ControlCommandKind.STEER:
+            if not isinstance(raw_payload, str) or not raw_payload.strip() or len(raw_payload.encode("utf-8")) > 8192:
+                raise IpcError("steer payload exceeds its byte limit")
+        elif raw_payload is not None:
+            raise IpcError("interrupt payload must be null")
+        active = getattr(self, "_active_turns", {}).get(dispatch_id)
+        if active is None:
+            raise IpcError("live control turn is not currently bound")
+        if active != (generation, attempt, thread_id, turn_id):
+            raise IpcError("live control identity is stale")
+        command = self.ledger.create_control_command(
+            dispatch_id,
+            command_id=command_id,
+            generation=generation,
+            attempt=attempt,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            kind=kind,
+            payload=raw_payload if isinstance(raw_payload, str) else None,
+        )
+        return {"version": 1, "ok": True, "command": _public_control_command(command)}
+
+    def _worker_capability(self, payload: dict[str, object]) -> tuple[dict[str, object], int, int, str]:
+        row = self._queue(payload)
+        generation, attempt = self._strict_worker_process_identity(payload, row)
+        token = payload.get("token")
+        if not isinstance(token, str):
+            raise IpcError("worker control capability is stale")
+        try:
+            self.ledger.worker_attempt_capability(
+                str(row["dispatch_id"]),
+                generation=generation,
+                attempt=attempt,
+                token=token,
+            )
+        except (LedgerError, ValueError) as exc:
+            raise IpcError("worker control capability is invalid") from exc
+        return row, generation, attempt, token
+
+    def _renew_worker_liveness(
+        self, row: dict[str, object], *, generation: int, attempt: int, token: str
+    ) -> dict[str, object]:
+        try:
+            return self.ledger.renew_worker_liveness(
+                str(row["dispatch_id"]),
+                generation=generation,
+                attempt=attempt,
+                token=token,
+                lease_seconds=self.lease_seconds,
+                epoch=int(self.epoch or 0),
+            )
+        except (LedgerError, ValueError) as exc:
+            raise IpcError("worker control capability is invalid") from exc
+
+    def _bind_turn(self, payload: dict[str, object]) -> dict[str, object]:
+        expected = {"version", "operation", "dispatch_id", "generation", "attempt", "token", "thread_id", "turn_id"}
+        if set(payload) != expected:
+            raise IpcError("turn binding request has an unsupported shape")
+        row, generation, attempt, _token = self._worker_capability(payload)
+        generation, attempt, thread_id, turn_id = self._strict_worker_turn_identity(payload, row)
+        active_turns = getattr(self, "_active_turns", None)
+        if active_turns is None:
+            active_turns = {}
+            self._active_turns = active_turns
+        active_turns[str(row["dispatch_id"])] = (
+            generation,
+            attempt,
+            thread_id,
+            turn_id,
+        )
+        return {"version": 1, "ok": True, "dispatch_id": row["dispatch_id"], "turn_id": turn_id}
+
+    def _worker_event(self, payload: dict[str, object]) -> dict[str, object]:
+        required = {
+            "version",
+            "operation",
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "token",
+            "thread_id",
+            "turn_id",
+            "sequence",
+            "kind",
+            "text",
+        }
+        if set(payload) - (required | {"payload_sha256"}) or not required.issubset(payload):
+            raise IpcError("worker event request has an unsupported shape")
+        row, generation, attempt, token = self._worker_capability(payload)
+        generation, attempt, thread_id, turn_id = self._strict_worker_turn_identity(payload, row)
+        active = getattr(self, "_active_turns", {}).get(str(row["dispatch_id"]))
+        if active != (generation, attempt, thread_id, turn_id):
+            raise IpcError("worker event turn identity is stale")
+        sequence = payload["sequence"]
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            raise IpcError("worker event sequence is invalid")
+        kind = payload["kind"]
+        text = payload["text"]
+        if not isinstance(kind, str) or not kind or len(kind) > 128:
+            raise IpcError("worker event kind is invalid")
+        if text is not None and not isinstance(text, str):
+            raise IpcError("worker event text is invalid")
+        if text is not None:
+            try:
+                if len(text.encode("utf-8")) > 8192 or "\x00" in text:
+                    raise IpcError("worker event text exceeds its byte limit")
+            except UnicodeEncodeError as exc:
+                raise IpcError("worker event text is invalid") from exc
+        payload_sha256 = payload.get("payload_sha256")
+        if payload_sha256 is not None:
+            if not isinstance(payload_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", payload_sha256) is None:
+                raise IpcError("worker event payload digest is invalid")
+            if (
+                text is None
+                or hashlib.sha256(redact_diagnostic_text(text).encode("utf-8")).hexdigest() != payload_sha256
+            ):
+                raise IpcError("worker event payload digest conflicts with text")
+        try:
+            event = self.ledger.append_worker_diagnostic(
+                str(row["dispatch_id"]),
+                generation=generation,
+                attempt=attempt,
+                token=token,
+                epoch=int(self.epoch or 0),
+                lease_seconds=self.lease_seconds,
+                kind=kind,
+                text=text,
+                payload_sha256=payload_sha256,
+                sequence=sequence,
+            )
+        except (LedgerError, ValueError) as exc:
+            raise IpcError("worker event capability or sequence is invalid") from exc
+        response: dict[str, object] = {"version": 1, "ok": True, "event": event}
+        if event is None:
+            response["evicted"] = True
+        return response
+
+    def _poll_commands(self, payload: dict[str, object]) -> dict[str, object]:
+        expected = {"version", "operation", "dispatch_id", "generation", "attempt", "token", "thread_id", "turn_id"}
+        if set(payload) != expected:
+            raise IpcError("command poll request has an unsupported shape")
+        row, generation, attempt, token = self._worker_capability(payload)
+        generation, attempt, thread_id, turn_id = self._strict_worker_turn_identity(payload, row)
+        self._renew_worker_liveness(row, generation=generation, attempt=attempt, token=token)
+        # A supervisor restart clears only in-memory active-turn state.  The
+        # worker's first poll rebinds the exact live turn under the same
+        # durable attempt capability; no replacement turn can be addressed.
+        active_turns = getattr(self, "_active_turns", None)
+        if active_turns is None:
+            active_turns = {}
+            self._active_turns = active_turns
+        active_turns[str(row["dispatch_id"])] = (
+            generation,
+            attempt,
+            thread_id,
+            turn_id,
+        )
+        commands = self.ledger.claim_control_commands(
+            str(row["dispatch_id"]),
+            generation=generation,
+            attempt=attempt,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
+        with self._conversation_requests_lock:
+            history_requests = []
+            for request_id, pending in self._conversation_requests.items():
+                if (
+                    pending.get("dispatch_id") == str(row["dispatch_id"])
+                    and pending.get("generation") == generation
+                    and pending.get("attempt") == attempt
+                    and pending.get("thread_id") == thread_id
+                    and pending.get("turn_id") == turn_id
+                ):
+                    request = pending.get("request")
+                    if isinstance(request, ConversationHistoryRequest):
+                        history_requests.append({"request_id": request_id, **request.to_json()})
+        return {"version": 1, "ok": True, "commands": list(commands), "history_requests": history_requests}
+
+    def _ack_control(self, payload: dict[str, object]) -> dict[str, object]:
+        expected = {
+            "version",
+            "operation",
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "token",
+            "command_id",
+            "thread_id",
+            "turn_id",
+            "kind",
+            "state",
+            "detail",
+        }
+        if set(payload) != expected:
+            raise IpcError("control acknowledgement has an unsupported shape")
+        row, capability_generation, capability_attempt, token = self._worker_capability(payload)
+        _, generation, attempt, thread_id, turn_id, command_id = self._control_identity(payload)
+        if (generation, attempt) != (capability_generation, capability_attempt):
+            raise IpcError("control acknowledgement process identity is stale")
+        if str(row["dispatch_id"]) != str(payload["dispatch_id"]):
+            raise IpcError("control acknowledgement dispatch is stale")
+        if payload["kind"] not in {kind.value for kind in ControlCommandKind}:
+            raise IpcError("control acknowledgement kind is invalid")
+        try:
+            state = ControlCommandState(str(payload["state"]))
+        except ValueError as exc:
+            raise IpcError("control acknowledgement state is invalid") from exc
+        if state not in {
+            ControlCommandState.ACKNOWLEDGED,
+            ControlCommandState.REJECTED,
+            ControlCommandState.UNRESOLVED,
+        }:
+            raise IpcError("control acknowledgement state is invalid")
+        command = self.ledger.control_command(command_id)
+        if (
+            int(command["generation"]),
+            int(command["attempt"]),
+            str(command["thread_id"]),
+            str(command["turn_id"]),
+            str(command["kind"]),
+        ) != (generation, attempt, thread_id, turn_id, str(payload["kind"])):
+            raise IpcError("control acknowledgement identity is stale")
+        detail = payload.get("detail")
+        if detail is not None and not isinstance(detail, str):
+            raise IpcError("control acknowledgement detail is invalid")
+        if detail is not None:
+            try:
+                if len(detail.encode("utf-8")) > 256 or "\x00" in detail:
+                    raise IpcError("control acknowledgement detail exceeds its byte limit")
+                detail = redact_diagnostic_text(detail, limit=256)
+            except (UnicodeEncodeError, ValueError) as exc:
+                raise IpcError("control acknowledgement detail is invalid") from exc
+        if command.get("state") != ControlCommandState.SENT.value:
+            raise IpcError("control acknowledgement is not bound to a sent command")
+        self._renew_worker_liveness(row, generation=generation, attempt=attempt, token=token)
+        acknowledged = self.ledger.acknowledge_control_command(
+            command_id,
+            state=state,
+            acknowledgement={"detail": detail},
+        )
+        return {"version": 1, "ok": True, "command": acknowledged}
+
+    def _retry(self, payload: dict[str, object]) -> dict[str, object]:
+        normalized = dict(payload)
+        normalized["operation"] = "recovery_action"
+        normalized["action_kind"] = RecoveryActionKind.RETRY.value
+        return self._recovery_action(normalized)
+
+    def _recovery_action(self, payload: dict[str, object]) -> dict[str, object]:
+        required = {"version", "operation", "dispatch_id", "action_id", "expected_revision", "action_kind", "reason"}
+        if set(payload) - (required | {"requested_budget", "compatibility_rebind"}) or not required.issubset(payload):
+            raise IpcError("recovery action request has an unsupported shape")
+        dispatch_id = payload["dispatch_id"]
+        action_id = payload["action_id"]
+        expected_revision = payload["expected_revision"]
+        reason = payload["reason"]
+        if not isinstance(dispatch_id, str) or not isinstance(action_id, str) or not isinstance(reason, str):
+            raise IpcError("recovery action identity is invalid")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            raise IpcError("recovery action revision is invalid")
+        try:
+            kind = RecoveryActionKind(str(payload["action_kind"]))
+        except ValueError as exc:
+            raise IpcError("recovery action kind is invalid") from exc
+        requested: RetryBudgetChange | None = None
+        rebind: CompatibilityRebind | None = None
+        if "requested_budget" in payload:
+            raw_budget = payload["requested_budget"]
+            if not isinstance(raw_budget, dict):
+                raise IpcError("recovery action budget is invalid")
+            try:
+                if set(raw_budget) != {
+                    "pre_identity_budget",
+                    "invalid_chain_budget",
+                    "schema_envelope_budget",
+                    "post_identity_loss_budget",
+                }:
+                    raise ValueError("budget shape is invalid")
+                requested = RetryBudgetChange(**raw_budget)
+            except (TypeError, ValueError) as exc:
+                raise IpcError("recovery action budget is invalid") from exc
+        if "compatibility_rebind" in payload:
+            raw_rebind = payload["compatibility_rebind"]
+            try:
+                if not isinstance(raw_rebind, dict) or set(raw_rebind) != {
+                    "expected_compatibility_sha256",
+                    "proposed_compatibility_sha256",
+                    "expected_profile_sha256",
+                    "proposed_profile_sha256",
+                    "expected_generation",
+                    "expected_attempt",
+                }:
+                    raise ValueError("compatibility rebind shape is invalid")
+                rebind = CompatibilityRebind(**raw_rebind)
+            except (TypeError, ValueError) as exc:
+                raise IpcError("compatibility rebind facts are invalid") from exc
+        if kind is RecoveryActionKind.COMPATIBILITY_REBIND:
+            if rebind is None or requested is not None:
+                raise IpcError("compatibility rebind request has conflicting facts")
+            queue = self.ledger.queue_dispatch(dispatch_id)
+            try:
+                route = strict_json_loads(str(queue["route_json"]), max_bytes=16_384)
+                capsule = strict_json_loads(str(queue["capsule_json"]), max_bytes=2_000_000)
+                if not isinstance(route, dict) or not isinstance(capsule, dict):
+                    raise ValueError("queued authority is not an object")
+                raw_requirements = capsule.get("plugin_requirements", [])
+                route_requirements = route.get("plugin_requirements", [])
+                raw_snapshots = route.get("plugin_capabilities", [])
+                if raw_requirements != route_requirements or not isinstance(raw_requirements, list):
+                    raise ValueError("queued plugin requirements changed")
+                if not isinstance(raw_snapshots, list):
+                    raise ValueError("queued plugin snapshots are malformed")
+                requirements = tuple(PluginRequirement.from_json(item) for item in raw_requirements)
+                snapshots: list[PluginCapabilitySnapshot] = []
+                for raw_snapshot in raw_snapshots:
+                    if not isinstance(raw_snapshot, dict) or not isinstance(raw_snapshot.get("capability_sha256"), str):
+                        raise ValueError("queued plugin snapshot is malformed")
+                    snapshot = PluginCapabilitySnapshot.from_json(
+                        {key: value for key, value in raw_snapshot.items() if key != "capability_sha256"}
+                    )
+                    if raw_snapshot["capability_sha256"] != snapshot.capability_digest:
+                        raise ValueError("queued plugin snapshot digest changed")
+                    snapshots.append(snapshot)
+                if len(requirements) != len(snapshots):
+                    raise ValueError("queued plugin snapshot cardinality changed")
+                profile_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve(strict=True)
+                with _verified_skill_input(requirements, tuple(snapshots), profile_home):
+                    profile = NativeProfileProjection.load(profile_home)
+                    profile.verify_worker_sources()
+                    if (
+                        profile.profile_sha256 != rebind.proposed_profile_sha256
+                        or profile.worker_compatibility_sha256 != rebind.proposed_compatibility_sha256
+                    ):
+                        raise ValueError("proposed identity tuple is not the verified installed runtime")
+            except (OSError, PluginCapabilityError, TypeError, ValueError, RuntimeError) as exc:
+                raise IpcError("installed runtime compatibility could not be verified") from exc
+            action = self.ledger.apply_recovery_action(
+                dispatch_id,
+                action_id=action_id,
+                expected_revision=expected_revision,
+                action_kind=kind,
+                reason=reason,
+                compatibility_rebind=rebind,
+            )
+        else:
+            if rebind is not None:
+                raise IpcError("non-rebind recovery action carries compatibility facts")
+            action = self.ledger.apply_recovery_action(
+                dispatch_id,
+                action_id=action_id,
+                expected_revision=expected_revision,
+                action_kind=kind,
+                reason=reason,
+                requested_budget=requested,
+            )
+        if kind is RecoveryActionKind.CANCEL:
+            self._advance_worker_cancellation(action)
+        return {"version": 1, "ok": True, "action": action}
+
+    def _queue(self, payload: dict[str, object]) -> dict[str, object]:
+        dispatch_id = payload.get("dispatch_id")
+        if not isinstance(dispatch_id, str):
+            raise IpcError("dispatch id is required")
+        if self.epoch is None:
+            raise IpcError("supervisor lease is not acquired")
+        row = self.ledger.queue_dispatch(dispatch_id)
+        if row.get("claim_epoch") != self.epoch:
+            raise IpcError("queue claim epoch is stale")
+        return row
+
+    def _bind_worker(self, payload: dict[str, object]) -> dict[str, object]:
+        if set(payload) != {
+            "version",
+            "operation",
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "token",
+            "thread_id",
+        }:
+            raise IpcError("worker identity request has an unsupported shape")
+        row, generation, attempt, token = self._worker_capability(payload)
+        thread_id = payload.get("thread_id")
+        if not isinstance(thread_id, str):
+            raise IpcError("worker identity binding is incomplete")
+        try:
+            ThreadIdentity(thread_id)
+        except ValueError as exc:
+            raise IpcError("worker thread identity is invalid") from exc
+        try:
+            bound = self.ledger.bind_worker_thread(
+                str(row["dispatch_id"]),
+                epoch=int(self.epoch),
+                generation=generation,
+                attempt=attempt,
+                token=token,
+                thread_id=thread_id,
+            )
+        except (LedgerError, ValueError) as exc:
+            raise IpcError("worker capability does not match queue attempt") from exc
+        latest = (
+            self.ledger._db()
+            .execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM diagnostic_ring WHERE dispatch_id = ?",
+                (str(row["dispatch_id"]),),
+            )
+            .fetchone()
+        )
+        return {
+            "version": 1,
+            "ok": True,
+            "dispatch_id": row["dispatch_id"],
+            "thread_id": bound["thread_id"],
+            "next_event_sequence": int(latest[0]) if latest is not None else 0,
+        }
+
+    def _heartbeat(self, payload: dict[str, object]) -> dict[str, object]:
+        if set(payload) != {
+            "version",
+            "operation",
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "token",
+        }:
+            raise IpcError("worker heartbeat request has an unsupported shape")
+        row, generation, attempt, token = self._worker_capability(payload)
+        live = self._renew_worker_liveness(row, generation=generation, attempt=attempt, token=token)
+        return {
+            "version": 1,
+            "ok": True,
+            "operation": "heartbeat",
+            "dispatch_id": row["dispatch_id"],
+            "last_seen_at": live["last_seen_at"],
+        }
+
+    def _submit_result(self, payload: dict[str, object]) -> dict[str, object]:
+        required = {
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "backend",
+            "workspace_path",
+            "schema_sha256",
+            "token",
+            "raw_result",
+        }
+        if set(payload) - ({"version", "operation"} | required) or not required.issubset(payload):
+            raise IpcError("worker result request has an unsupported shape")
+        try:
+            row, generation, attempt, token = self._worker_capability(payload)
+        except IpcError as exc:
+            dispatch_id = payload.get("dispatch_id")
+            if isinstance(dispatch_id, str):
+                code = WorkerResultRejectionCode.CAPABILITY_STALE
+                self._record_worker_result_rejection(dispatch_id, code)
+                raise WorkerResultRejected(code) from exc
+            raise
+        if (
+            payload["backend"] != row["backend"]
+            or payload["workspace_path"] != row["workspace_path"]
+            or payload["schema_sha256"] != row["result_contract_sha256"]
+        ):
+            code = WorkerResultRejectionCode.CAPABILITY_STALE
+            self._record_worker_result_rejection(str(row["dispatch_id"]), code)
+            raise WorkerResultRejected(code)
+        if not isinstance(payload["raw_result"], str):
+            raise IpcError("worker raw result must be UTF-8 text")
+        raw = payload["raw_result"].encode("utf-8")
+        if len(raw) > 65_536:
+            raise IpcError("worker raw result exceeds bounded limit")
+        try:
+            terminal = self.ledger.commit_queue_result(
+                str(row["dispatch_id"]),
+                generation=generation,
+                attempt=attempt,
+                token=token,
+                raw_result=raw,
+            )
+        except StaleWriter as exc:
+            code = (
+                WorkerResultRejectionCode.CAPABILITY_EXPIRED
+                if "capability has expired" in str(exc)
+                else WorkerResultRejectionCode.CAPABILITY_STALE
+            )
+            self._record_worker_result_rejection(str(row["dispatch_id"]), code)
+            raise WorkerResultRejected(code) from exc
+        except (TypeError, ValueError):
+            # The worker request contains only bounded UTF-8 text.  Keep the
+            # parser's detailed failure private and expose one stable reason
+            # that cannot leak a token or transcript fragment.
+            code = WorkerResultRejectionCode.MALFORMED_OUTPUT
+            self._record_worker_result_rejection(str(row["dispatch_id"]), code)
+            raise WorkerResultRejected(code) from None
+        active = getattr(self, "_active_turns", {}).get(str(row["dispatch_id"]))
+        if active is not None:
+            _generation, _attempt, _thread_id, active_turn_id = active
+            for command in self.ledger.control_commands(str(row["dispatch_id"])):
+                if (
+                    command.get("state") == ControlCommandState.SENT.value
+                    and command.get("kind") == ControlCommandKind.INTERRUPT.value
+                    and command.get("turn_id") == active_turn_id
+                ):
+                    try:
+                        terminal_status = terminal.get("terminal_status")
+                        acknowledgement_state = (
+                            ControlCommandState.ACKNOWLEDGED
+                            if terminal_status == "interrupted"
+                            else ControlCommandState.REJECTED
+                        )
+                        self.ledger.acknowledge_control_command(
+                            str(command["command_id"]),
+                            state=acknowledgement_state,
+                            acknowledgement={
+                                "terminal_status": terminal_status,
+                                "detail": (
+                                    None
+                                    if acknowledgement_state is ControlCommandState.ACKNOWLEDGED
+                                    else "SDK turn completed without interrupt terminal evidence"
+                                ),
+                            },
+                        )
+                    except LedgerError:
+                        pass
+            # Any command that was never observed by the worker, or whose
+            # acknowledgement was lost as the terminal result crossed the
+            # IPC boundary, is unresolved rather than replayed against a
+            # replacement turn.
+            self.ledger.unresolved_control_commands(str(row["dispatch_id"]))
+        active_turns = getattr(self, "_active_turns", None)
+        if active_turns is not None:
+            active_turns.pop(str(row["dispatch_id"]), None)
+        digest = str(terminal.get("raw_result_sha256") or hashlib.sha256(raw).hexdigest())
+        return {
+            "version": 1,
+            "ok": True,
+            "dispatch_id": row["dispatch_id"],
+            "terminal_status": terminal["state"],
+            "result_sha256": digest,
+        }
+
+    def _record_worker_result_rejection(self, dispatch_id: str, code: WorkerResultRejectionCode) -> None:
+        """Retain one sanitized diagnostic for a rejected worker result."""
+
+        try:
+            self.ledger.append_diagnostic(
+                dispatch_id,
+                kind="worker_result_rejected",
+                text=code.value,
+            )
+        except LedgerError:
+            # The rejection itself remains fail-closed even if diagnostic
+            # retention loses a race with terminalization or cancellation.
+            pass
+
+    def _accept_connection(self, connection: socket.socket) -> str | None:
+        operation: str | None = None
+        try:
+            # Bound the header/body read before inspecting any peer payload so
+            # a same-uid client that sends only a partial frame cannot stall
+            # lease renewal, recovery, or other control clients.
+            connection.settimeout(min(IPC_ACCEPTED_FRAME_TIMEOUT_SECONDS, max(self.lease_seconds / 3.0, 0.05)))
+            uid = peer_uid(connection)
+            if uid is not None and uid != os.getuid():
+                raise IpcError("IPC peer uid does not match the controller uid")
+            request = decode_frame(connection)
+            raw_operation = request.get("operation")
+            operation = raw_operation if isinstance(raw_operation, str) else None
+            self._renew_supervisor_lease_if_due()
+            if request.get("operation") == "conversation_history":
+                threading.Thread(
+                    target=self._serve_conversation_connection,
+                    args=(connection, request),
+                    name="codex-flow-conversation-read",
+                    daemon=True,
+                ).start()
+                return operation
+            response = self._request_ack(request)
+        except WorkerResultRejected as exc:
+            response = {
+                "version": 1,
+                "ok": False,
+                "error": "request_rejected",
+                "reason_code": exc.code.value,
+            }
+        except (IpcError, OSError, LedgerError):
+            response = {"version": 1, "ok": False, "error": "request_rejected"}
+        try:
+            connection.sendall(encode_frame(response))
+        except OSError:
+            # A rejected or disconnected peer owns only its socket.  Failure
+            # to deliver the bounded rejection must never escape the
+            # foreground supervisor loop.
+            pass
+        finally:
+            connection.close()
+        return operation
+
+    def _serve_conversation_connection(self, connection: socket.socket, request: dict[str, object]) -> None:
+        """Resolve one history read off the foreground lifecycle loop."""
+
+        try:
+            response = self._request_ack(request)
+        except WorkerResultRejected as exc:
+            response = {
+                "version": 1,
+                "ok": False,
+                "error": "request_rejected",
+                "reason_code": exc.code.value,
+            }
+        except (IpcError, OSError, LedgerError):
+            response = {"version": 1, "ok": False, "error": "request_rejected"}
+        try:
+            connection.sendall(encode_frame(response))
+        except OSError:
+            pass
+        finally:
+            connection.close()
+
+    def _spawn_one(self, row: dict[str, object], *, recovery_continuation: bool = False) -> None:
+        """Prepare and launch one worker, closing failed claims safely.
+
+        Worker launch crosses a process boundary, so descriptor creation and
+        ``Popen`` cannot share the ledger transaction.  If preparation or
+        binding fails, remove only files created by this invocation and move
+        any still-active claim to the durable human-attention state.  This
+        prevents a continuation from stranding ``claimed``/``none`` state that
+        a restart could accidentally try to reuse.
+        """
+
+        created_paths: list[Path] = []
+        try:
+            self._prepare_and_spawn_one(
+                row,
+                recovery_continuation=recovery_continuation,
+                created_paths=created_paths,
+            )
+        except BaseException as exc:
+            try:
+                self._close_failed_spawn(row, created_paths, failure=exc)
+            except Exception as terminalization_error:
+                raise FailedSpawnTerminalizationError(
+                    "worker spawn failed before durable terminalization"
+                ) from terminalization_error
+            raise
+
+    def _prepare_and_spawn_one(
+        self,
+        row: dict[str, object],
+        *,
+        recovery_continuation: bool,
+        created_paths: list[Path],
+    ) -> None:
+        if self.epoch is None:
+            return
+        if row.get("backend") != "sdk_headless":
+            # The visible App-native creation API has no proven per-task
+            # collaboration/agent override.  Never silently run it as a leaf
+            # SDK worker or synthesize completion while the App is absent.
+            raise SupervisorError("App-native queue dispatch lacks a proven leaf-worker runtime boundary")
+        try:
+            route = json.loads(str(row["route_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SupervisorError("queue route facts are not valid JSON") from exc
+        policy = route.get("leaf_worker_policy") if isinstance(route, dict) else None
+        expected_policy = {
+            "agents.enabled": False,
+            "features.multi_agent": False,
+            "config_overrides": list(LEAF_WORKER_CONFIG_OVERRIDES),
+        }
+        if policy != expected_policy:
+            raise SupervisorError("SDK-headless queue lacks the controller-bound leaf-worker policy")
+        try:
+            capsule_value = strict_json_loads(str(row["capsule_json"]).encode("utf-8"), max_bytes=2_000_000)
+            if not isinstance(capsule_value, dict):
+                raise ValueError("queue capsule is not an object")
+            raw_requirements = capsule_value.get("plugin_requirements", [])
+            route_requirements = route.get("plugin_requirements", []) if isinstance(route, dict) else None
+            route_capabilities = route.get("plugin_capabilities", []) if isinstance(route, dict) else None
+            if raw_requirements != route_requirements or not isinstance(raw_requirements, list):
+                raise ValueError("queued plugin requirements do not match route authority")
+            plugin_requirements = tuple(PluginRequirement.from_json(item) for item in raw_requirements)
+            if not isinstance(route_capabilities, list):
+                raise ValueError("queued plugin capabilities are malformed")
+            plugin_snapshots: list[PluginCapabilitySnapshot] = []
+            for raw_snapshot in route_capabilities:
+                if not isinstance(raw_snapshot, dict) or not isinstance(raw_snapshot.get("capability_sha256"), str):
+                    raise ValueError("queued plugin capability digest is malformed")
+                snapshot = PluginCapabilitySnapshot.from_json(
+                    {key: value for key, value in raw_snapshot.items() if key != "capability_sha256"}
+                )
+                if raw_snapshot["capability_sha256"] != snapshot.capability_digest:
+                    raise ValueError("queued plugin capability digest does not match its snapshot")
+                plugin_snapshots.append(snapshot)
+            if len(plugin_snapshots) != len(plugin_requirements):
+                raise ValueError("queued plugin capability cardinality changed")
+        except (PluginCapabilityError, TypeError, ValueError) as exc:
+            raise SupervisorError("queued plugin capability authority is invalid") from exc
+        effective_permission = route.get("effective_permission") if isinstance(route, dict) else None
+        if not isinstance(effective_permission, dict):
+            raise SupervisorError("SDK-headless queue lacks effective native permission facts")
+        native_profile_sha256 = route.get("native_profile_sha256")
+        native_compatibility_sha256 = route.get("native_compatibility_sha256")
+        if native_profile_sha256 is not None and not isinstance(native_profile_sha256, str):
+            raise SupervisorError("queue native profile identity is malformed")
+        if native_compatibility_sha256 is not None and not isinstance(native_compatibility_sha256, str):
+            raise SupervisorError("queue native compatibility identity is malformed")
+        profile_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        try:
+            with _verified_skill_input(plugin_requirements, plugin_snapshots, profile_home):
+                self._issue_and_spawn_verified_worker(
+                    row,
+                    capsule_value=capsule_value,
+                    policy=policy,
+                    effective_permission=effective_permission,
+                    native_profile_sha256=native_profile_sha256,
+                    native_compatibility_sha256=native_compatibility_sha256,
+                    plugin_requirements=plugin_requirements,
+                    plugin_snapshots=tuple(plugin_snapshots),
+                    profile_home=profile_home,
+                    recovery_continuation=recovery_continuation,
+                    created_paths=created_paths,
+                )
+        except PluginCapabilityError as exc:
+            raise SupervisorError("queued plugin capability changed before worker launch") from exc
+
+    def _issue_and_spawn_verified_worker(
+        self,
+        row: dict[str, object],
+        *,
+        capsule_value: dict[str, object],
+        policy: object,
+        effective_permission: dict[str, object],
+        native_profile_sha256: str | None,
+        native_compatibility_sha256: str | None,
+        plugin_requirements: tuple[PluginRequirement, ...],
+        plugin_snapshots: tuple[PluginCapabilitySnapshot, ...],
+        profile_home: Path,
+        recovery_continuation: bool,
+        created_paths: list[Path],
+    ) -> None:
+        """Issue and launch only while the fresh plugin descriptor remains held."""
+
+        dispatch_id = str(row["dispatch_id"])
+        # Bind secretless provider identity at the service boundary.  The
+        # profile loader verifies the invoking environment contains the value,
+        # but only its key name and digest enter SQLite.
+        try:
+            profile_home = profile_home.resolve(strict=True)
+            profile = NativeProfileProjection.load(profile_home)
+            profile.verify_worker_sources()
+            if (
+                native_profile_sha256 is not None
+                and native_compatibility_sha256 is not None
+                and (
+                    profile.profile_sha256 != native_profile_sha256
+                    or profile.worker_compatibility_sha256 != native_compatibility_sha256
+                )
+            ):
+                raise WorkerCompatibilityDrift(
+                    queued_profile_sha256=native_profile_sha256,
+                    current_profile_sha256=profile.profile_sha256,
+                    queued_compatibility_sha256=native_compatibility_sha256,
+                    current_compatibility_sha256=profile.worker_compatibility_sha256,
+                )
+            self.ledger.configure_recovery(
+                dispatch_id,
+                provider_env_key=profile.provider_env_key,
+                profile_sha256=profile.profile_sha256,
+            )
+        except SupervisorError:
+            raise
+        except (OSError, ValueError, RuntimeError) as exc:
+            # Hermetic low-level tests intentionally omit a native profile;
+            # production service startup remains fail-closed at its explicit
+            # credential handoff boundary.
+            if native_compatibility_sha256 is not None:
+                raise SupervisorError("shared native Codex profile cannot authorize worker launch") from exc
+        attempt_suffix = f"g{int(row['generation'])}-a{int(row['attempt'])}"
+        token = os.urandom(32).hex()
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        self.ledger.issue_attempt_capability(
+            dispatch_id,
+            generation=int(row["generation"]),
+            attempt=int(row["attempt"]),
+            operation="submit_result",
+            schema_sha256=str(row["result_contract_sha256"]),
+            workspace_path=Path(str(row["workspace_path"])),
+            backend=str(row["backend"]),
+            token_sha256=token_hash,
+            # Queue ``deadline`` is a checkpoint/scheduling horizon.  It is
+            # intentionally not reused as result authorization: recovery may
+            # launch the exact active attempt after that horizon has passed.
+            expires_at=None,
+            lease_seconds=self.lease_seconds,
+        )
+        dispatch_digest = hashlib.sha256(dispatch_id.encode()).hexdigest()[:24]
+        # Attempts are immutable.  A crashed worker may leave its private
+        # O_EXCL descriptors behind, so a recovered attempt must never reuse
+        # the prior capability, capsule, or result pathname.
+        cap_path = self.runtime_root / f"capability-{dispatch_digest}-{attempt_suffix}.json"
+        capsule_path = self.runtime_root / f"capsule-{dispatch_digest}-{attempt_suffix}.json"
+        result_path = self.runtime_root / f"result-{dispatch_digest}-{attempt_suffix}.json"
+        artifact_paths = (cap_path, capsule_path, result_path)
+        if any(os.path.lexists(path) for path in artifact_paths):
+            raise SupervisorError("worker attempt artifacts already exist")
+        capability_payload = {
+            "version": 1,
+            "operation": "submit_result",
+            "dispatch_id": dispatch_id,
+            "generation": row["generation"],
+            "attempt": row["attempt"],
+            "backend": row["backend"],
+            "workspace_path": row["workspace_path"],
+            "schema_sha256": row["result_contract_sha256"],
+            "token": token,
+            "socket_path": os.fspath(self.socket_path),
+            "worker_role": "leaf",
+            "allowed_operations": ["submit_result"],
+            "leaf_worker_policy": policy,
+            "effective_permission": effective_permission,
+            "native_profile_sha256": native_profile_sha256,
+            "native_compatibility_sha256": native_compatibility_sha256,
+            "plugin_requirements": [item.to_json() for item in plugin_requirements],
+            "plugin_capabilities": [
+                {**item.to_json(), "capability_sha256": item.capability_digest} for item in plugin_snapshots
+            ],
+        }
+        try:
+            write_capability(cap_path, capability_payload)
+        except FileExistsError:
+            # O_EXCL reports a colliding descriptor that this invocation did
+            # not create; leave it untouched for forensic inspection.
+            raise
+        except BaseException:
+            # ``write_capability`` uses O_EXCL; record a path only when this
+            # invocation created it so cleanup cannot remove a colliding file.
+            if cap_path.is_file() and not cap_path.is_symlink():
+                created_paths.append(cap_path)
+            raise
+        created_paths.append(cap_path)
+        if recovery_continuation:
+            capsule_value["prompt"] = recovery_continuation_prompt(
+                workspace=Path(str(row["workspace_path"])),
+                resume_same_thread=row.get("thread_id") is not None,
+                observed_state="idle-no-result",
+            )
+        capsule_payload = json.dumps(capsule_value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        capsule_fd: int | None = None
+        try:
+            capsule_fd = os.open(
+                capsule_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o400,
+            )
+            _write_once(capsule_fd, capsule_payload)
+        except BaseException:
+            if capsule_fd is not None and capsule_path.is_file() and not capsule_path.is_symlink():
+                created_paths.append(capsule_path)
+            raise
+        finally:
+            if capsule_fd is not None:
+                os.close(capsule_fd)
+        created_paths.append(capsule_path)
+        self.ledger.set_queue_state(dispatch_id, "starting", epoch=self.epoch)
+        command = (
+            *self.worker_command,
+            "--capability-file",
+            os.fspath(cap_path),
+            "--capsule-file",
+            os.fspath(capsule_path),
+            "--result-file",
+            os.fspath(result_path),
+            "--socket-path",
+            os.fspath(self.socket_path),
+        )
+        thread_id = row.get("thread_id")
+        if thread_id is not None:
+            command += ("--resume-thread-id", str(thread_id))
+        try:
+            child = subprocess.Popen(command, start_new_session=True, close_fds=True)
+        except OSError as exc:
+            raise SupervisorError("worker launch failed") from exc
+        try:
+            self.ledger.bind_worker_liveness(
+                dispatch_id,
+                epoch=int(self.epoch),
+                generation=int(row["generation"]),
+                attempt=int(row["attempt"]),
+                pid=child.pid,
+                process_birth_identity=process_birth_identity(child.pid),
+                lease_token_sha256=token_hash,
+                lease_seconds=self.lease_seconds,
+            )
+        except LedgerError:
+            # A very fast worker can submit and terminalize between Popen and
+            # the parent liveness bind.  Its already-authorized result owns
+            # the terminal fact; do not turn that race into a fabricated
+            # worker failure or kill the child after successful ingress.
+            current = self.ledger.queue_dispatch(dispatch_id)
+            if current["state"] not in {"completed", "failed", "cancelled"}:
+                try:
+                    child.terminate()
+                except OSError:
+                    pass
+                raise
+        except BaseException:
+            try:
+                child.terminate()
+            except OSError:
+                pass
+            raise
+        self._children[dispatch_id] = child
+        if thread_id is not None:
+            self._resumed_children.add(dispatch_id)
+
+    def _close_failed_spawn(
+        self,
+        row: dict[str, object],
+        created_paths: Sequence[Path],
+        *,
+        failure: BaseException,
+    ) -> None:
+        """Clean this spawn's private files and close any stranded claim."""
+
+        dispatch_id = str(row["dispatch_id"])
+        queue = self.ledger.queue_dispatch(dispatch_id)
+        recovery = self.ledger.recovery_state(dispatch_id)
+        if queue["state"] in {"queued", "claimed", "starting", "running"} and recovery["recovery_state"] == "none":
+            if isinstance(failure, WorkerCompatibilityDrift):
+                self.ledger.mark_human_attention_required(
+                    dispatch_id,
+                    reason=str(failure),
+                    failure_class="profile",
+                )
+            else:
+                self.ledger.mark_human_attention_required(
+                    dispatch_id,
+                    reason="worker spawn failed before a durable live-worker binding",
+                )
+
+        # Invocation-owned files are secondary to ledger authority.  Retain
+        # them when terminalization fails so reconciliation never loses the
+        # exact attempt facts it needs to diagnose the stranded claim.
+        for path in created_paths:
+            try:
+                metadata = path.lstat()
+            except OSError:
+                continue
+            # Never remove a path that became a link or was replaced by a
+            # multi-link file after creation.  A stale colliding descriptor is
+            # therefore retained as evidence rather than deleted blindly.
+            if path.is_symlink() or not path.is_file() or metadata.st_nlink != 1:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+
+    def process_once(self) -> bool:
+        if self.epoch is None:
+            self.acquire()
+        self._renew_supervisor_lease_if_due(force=True)
+        if self.ledger.supervisor_refresh_fenced():
+            return False
+        claim_nonce_hash = hashlib.sha256(os.urandom(32)).hexdigest()
+        try:
+            row = self.ledger.claim_queue_dispatch(epoch=int(self.epoch), claim_nonce_sha256=claim_nonce_hash)
+        except SupervisorRefreshBlocked:
+            return False
+        if row is None:
+            return False
+        self._spawn_one(row, recovery_continuation=int(row["attempt"]) > 1)
+        self._refresh_checkpoint_deadline()
+        return True
+
+    def _process_queue_event(self) -> bool:
+        """Keep one durably closed dispatch failure local to that dispatch.
+
+        ``_spawn_one`` moves an ordinary preparation/launch failure to
+        ``human_attention_required`` before re-raising.  The foreground
+        service must preserve that fail-closed dispatch fact without turning
+        it into a repository-wide supervisor outage.  Failure to commit that
+        terminalization is different: it still escapes so systemd and an
+        operator can see that lifecycle authority is uncertain.
+        """
+
+        try:
+            return self.process_once()
+        except FailedSpawnTerminalizationError:
+            raise
+        except SupervisorError:
+            return False
+
+    def _recover_exited_dispatch(self, row: dict[str, object]) -> bool:
+        """Inspect one exited worker's persisted SDK thread before writing."""
+
+        dispatch_id = str(row["dispatch_id"])
+        thread_id = row.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            self.ledger.unresolved_control_commands(dispatch_id)
+            self.ledger.mark_human_attention_required(
+                dispatch_id,
+                reason="worker exited without a persisted SDK thread identity",
+            )
+            return True
+        inspector = self._thread_inspector
+        if inspector is None:
+            inspector = self._default_thread_inspector
+        if inspector is None:  # pragma: no cover - the default is always bound
+            self.ledger.mark_human_attention_required(
+                dispatch_id,
+                reason="persisted-thread inspection capability is unavailable",
+            )
+            return True
+        try:
+            inspection = inspector(thread_id)
+        except Exception:
+            inspection = ThreadInspection(thread_id, ThreadInspectionKind.AMBIGUOUS, detail="inspection failed")
+        if inspection.kind is ThreadInspectionKind.TERMINAL_RESULT:
+            # A persisted completed turn proves that an interrupt command did
+            # not receive the required interrupted terminal evidence.  Reject
+            # only the exact sent interrupt; every other in-flight command is
+            # unresolved because its application cannot be reconstructed.
+            for command in self.ledger.control_commands(dispatch_id):
+                if (
+                    command.get("kind") == ControlCommandKind.INTERRUPT.value
+                    and command.get("state") == ControlCommandState.SENT.value
+                    and (inspection.turn_id is None or command.get("turn_id") == inspection.turn_id)
+                ):
+                    try:
+                        self.ledger.acknowledge_control_command(
+                            str(command["command_id"]),
+                            state=ControlCommandState.REJECTED,
+                            acknowledgement={
+                                "terminal_status": "completed",
+                                "detail": "SDK turn completed without interrupt terminal evidence",
+                            },
+                        )
+                    except LedgerError:
+                        pass
+            self.ledger.unresolved_control_commands(dispatch_id)
+            if not isinstance(inspection.raw_result, str):
+                self.ledger.mark_human_attention_required(dispatch_id, reason="terminal inspection had no envelope")
+            else:
+                try:
+                    self.ledger.ingest_recovered_result(dispatch_id, raw_result=inspection.raw_result)
+                except (LedgerError, ValueError):
+                    self.ledger.mark_human_attention_required(
+                        dispatch_id,
+                        reason="persisted-thread terminal envelope was invalid or conflicting",
+                    )
+            self._refresh_checkpoint_deadline()
+            return True
+        if inspection.kind is ThreadInspectionKind.INTERRUPTED:
+            # The SDK terminal status is the only authority for confirming an
+            # interrupt.  Preserve that evidence on the exact command while
+            # stopping automatic recovery; no synthetic model result is
+            # fabricated for an interrupted turn.
+            for command in self.ledger.control_commands(dispatch_id):
+                if (
+                    command.get("kind") == ControlCommandKind.INTERRUPT.value
+                    and command.get("state") == ControlCommandState.SENT.value
+                    and (inspection.turn_id is None or command.get("turn_id") == inspection.turn_id)
+                ):
+                    try:
+                        self.ledger.acknowledge_control_command(
+                            str(command["command_id"]),
+                            state=ControlCommandState.ACKNOWLEDGED,
+                            acknowledgement={
+                                "terminal_status": "interrupted",
+                                "detail": "SDK turn ended with interrupted terminal evidence",
+                            },
+                        )
+                    except LedgerError:
+                        pass
+            self.ledger.unresolved_control_commands(dispatch_id)
+            self.ledger.mark_human_attention_required(
+                dispatch_id,
+                reason="SDK worker turn was interrupted; no terminal model result was produced",
+            )
+            return True
+        if inspection.kind is ThreadInspectionKind.ACTIVE_WRITER:
+            self.ledger.unresolved_control_commands(dispatch_id)
+            retry_at = datetime.now(timezone.utc) + timedelta(seconds=min(max(self.lease_seconds, 1.0), 300.0))
+            self.ledger.record_recovery_inspection(
+                dispatch_id,
+                kind="active_writer",
+                thread_id=thread_id,
+                turn_id=inspection.turn_id,
+                next_eligible_at=retry_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            )
+            return True
+        if inspection.kind is ThreadInspectionKind.IDLE_NO_RESULT:
+            self.ledger.unresolved_control_commands(dispatch_id)
+            self.ledger.record_recovery_inspection(
+                dispatch_id,
+                kind="idle_no_result",
+                thread_id=thread_id,
+                turn_id=inspection.turn_id,
+                next_eligible_at=datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            )
+            return True
+        if inspection.kind in {ThreadInspectionKind.EMPTY_HISTORY, ThreadInspectionKind.FAILED_TURN}:
+            policy = self.ledger.retry_policy(dispatch_id)
+            if (
+                inspection.kind is ThreadInspectionKind.FAILED_TURN
+                and policy.get("last_failure") == "post_identity_loss"
+                and policy.get("strategy") == "same_thread_continuation"
+                and 0 < int(policy.get("post_identity_loss_used", 0)) <= int(policy.get("post_identity_loss_budget", 0))
+            ):
+                self.ledger.unresolved_control_commands(dispatch_id)
+                self.ledger.record_recovery_inspection(
+                    dispatch_id,
+                    kind="transient_failed_turn",
+                    thread_id=thread_id,
+                    turn_id=inspection.turn_id,
+                    next_eligible_at=datetime.now(timezone.utc)
+                    .isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z"),
+                )
+                return True
+            if (
+                policy.get("last_failure") == "invalid_response_chain"
+                and policy.get("strategy") == "fresh_thread"
+                and 0 < int(policy.get("invalid_chain_used", 0)) <= int(policy.get("invalid_chain_budget", 0))
+            ):
+                self.ledger.unresolved_control_commands(dispatch_id)
+                self.ledger.record_recovery_inspection(
+                    dispatch_id,
+                    kind=(
+                        "invalid_chain_empty_history"
+                        if inspection.kind is ThreadInspectionKind.EMPTY_HISTORY
+                        else "invalid_chain_failed_turn"
+                    ),
+                    thread_id=thread_id,
+                    turn_id=inspection.turn_id,
+                    next_eligible_at=datetime.now(timezone.utc)
+                    .isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z"),
+                )
+                return True
+            self.ledger.unresolved_control_commands(dispatch_id)
+            self.ledger.mark_human_attention_required(
+                dispatch_id,
+                reason="persisted-thread failed or empty history lacks typed invalid-chain authority",
+            )
+            return True
+        self.ledger.unresolved_control_commands(dispatch_id)
+        self.ledger.mark_human_attention_required(
+            dispatch_id,
+            reason="persisted-thread inspection was ambiguous or malformed",
+        )
+        return True
+
+    def _default_thread_inspector(self, thread_id: str) -> ThreadInspection:
+        """Inspect one persisted thread through the shared SDK session."""
+
+        adapter = CodexSdkAdapter(
+            CodexSdkConfig(
+                model="recovery-inspection",
+                reasoning_effort=ReasoningEffort.NONE,
+                sandbox=Sandbox.READ_ONLY,
+                cwd=self.state_root,
+            )
+        )
+        try:
+            return adapter.inspect_persisted_thread(ThreadIdentity(thread_id))
+        finally:
+            adapter.close()
+
+    def recover_once(self) -> None:
+        """Reconcile one restart snapshot without duplicating live work."""
+
+        if self.ledger.supervisor_refresh_fenced():
+            return
+        self.ledger.reconcile_inflight_wakes()
+        self.ledger.reconcile_exhausted_wake_notifications()
+        self._advance_pending_cancellations()
+        for row in self.ledger.queue_dispatches():
+            if row.get("state") == "result_submitted":
+                try:
+                    self.ledger.finalize_queue_result(str(row["dispatch_id"]))
+                except LedgerError:
+                    pass
+
+        processed_inspections: set[str] = set()
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        for pending in self.ledger.queue_dispatches():
+            recovery = self.ledger.recovery_state(str(pending["dispatch_id"]))
+            if recovery.get("recovery_state") != "recovery_retry_wait":
+                continue
+            eligible = recovery.get("next_eligible_at")
+            if isinstance(eligible, str) and eligible > now:
+                continue
+            try:
+                self.ledger.begin_recovery_inspection(str(pending["dispatch_id"]), epoch=int(self.epoch), now=now)
+            except LedgerError:
+                continue
+
+        for row in self.ledger.queue_dispatches():
+            if row.get("state") not in {"claimed", "starting", "running"}:
+                continue
+            dispatch_id = str(row["dispatch_id"])
+            child = getattr(self, "_children", {}).get(dispatch_id)
+            if row.get("claim_epoch") == self.epoch and child is not None and child.poll() is None:
+                continue
+            live = self.ledger.worker_liveness(dispatch_id)
+            if live is not None and live.get("exited_at") is None:
+                try:
+                    os.kill(int(live["pid"]), 0)
+                    alive = process_birth_identity(int(live["pid"])) == str(live["process_birth_identity"])
+                except OSError:
+                    alive = False
+                if alive:
+                    if row.get("claim_epoch") == self.epoch:
+                        continue
+                    try:
+                        self.ledger.adopt_live_worker(
+                            dispatch_id,
+                            new_epoch=int(self.epoch),
+                            pid=int(live["pid"]),
+                            process_birth_identity=str(live["process_birth_identity"]),
+                            claim_nonce_sha256=hashlib.sha256(os.urandom(32)).hexdigest(),
+                        )
+                    except LedgerError:
+                        pass
+                    continue
+            if live is not None and live.get("exited_at") is not None:
+                try:
+                    if self._recover_exited_dispatch(row):
+                        processed_inspections.add(str(row["dispatch_id"]))
+                        continue
+                except LedgerError:
+                    continue
+            if live is None:
+                try:
+                    self.ledger.mark_human_attention_required(
+                        dispatch_id,
+                        reason="active queue dispatch has no persisted worker liveness identity",
+                    )
+                except (LedgerError, ValueError):
+                    pass
+                continue
+            # A restart found a bound worker process that is no longer alive,
+            # but its exit was not durably observed.  Record that fact first;
+            # the same inspect-before-mutate recovery boundary then decides
+            # whether to wait, continue, or require a human.
+            try:
+                self.ledger.mark_worker_exit(
+                    str(row["dispatch_id"]),
+                    pid=int(live["pid"]),
+                    process_birth_identity=str(live["process_birth_identity"]),
+                    classification="restart-observed-worker-dead",
+                )
+                refreshed = self.ledger.queue_dispatch(str(row["dispatch_id"]))
+                if self._recover_exited_dispatch(refreshed):
+                    processed_inspections.add(str(row["dispatch_id"]))
+            except (LedgerError, ValueError):
+                continue
+
+        for row in self.ledger.queue_dispatches():
+            if row.get("state") != "recovery_inspection_pending":
+                continue
+            if str(row["dispatch_id"]) in processed_inspections:
+                continue
+            try:
+                self._recover_exited_dispatch(row)
+            except LedgerError:
+                continue
+
+        # A continuation is claimable only after the preceding read-only
+        # inspection committed ``recovery_continuation_pending``.  This path
+        # consumes one durable continuation budget before creating a writer.
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        for row in self.ledger.queue_dispatches():
+            recovery = self.ledger.recovery_state(str(row["dispatch_id"]))
+            if recovery.get("recovery_state") != "recovery_continuation_pending":
+                continue
+            eligible = recovery.get("next_eligible_at")
+            if isinstance(eligible, str) and eligible > now:
+                continue
+            try:
+                claimed = self.ledger.begin_recovery_continuation(
+                    str(row["dispatch_id"]),
+                    epoch=int(self.epoch),
+                    claim_nonce_sha256=hashlib.sha256(os.urandom(32)).hexdigest(),
+                    now=now,
+                )
+                if claimed.get("state") == "claimed":
+                    self._spawn_one(claimed, recovery_continuation=True)
+            except FailedSpawnTerminalizationError:
+                raise
+            except (LedgerError, SupervisorError):
+                continue
+
+    def _deliver_wakes(self) -> bool:
+        """Deliver pending harness envelopes without reading Codex task state."""
+
+        changed = False
+        for wake in self.ledger.wake_outbox(state="pending"):
+            delivery_id = str(wake["delivery_id"])
+            while True:
+                claimed = self.ledger.claim_wake(delivery_id)
+                if claimed is None or claimed["state"] != "starting":
+                    break
+                source_thread_id = claimed.get("source_thread_id")
+                if not isinstance(source_thread_id, str):
+                    break
+                try:
+                    if self._wake_delivery is None:
+                        turn_id = CodexSdkNotifier().deliver(source_thread_id, str(claimed["payload_json"]))
+                    else:
+                        turn_id = self._wake_delivery(source_thread_id, str(claimed["payload_json"]))
+                except WakeDeliveryAmbiguous:
+                    outcome = self.ledger.record_wake_delivery(delivery_id, outcome="ambiguous")
+                except (WakeDeliveryUnavailable, OSError, RuntimeError, ValueError):
+                    outcome = self.ledger.record_wake_delivery(delivery_id, outcome="failed")
+                else:
+                    outcome = self.ledger.record_wake_delivery(delivery_id, outcome="delivered", source_turn_id=turn_id)
+                changed = True
+                # Source notification is best-effort and has a ledger-owned
+                # two-attempt ceiling. Exhaust that bounded budget in the
+                # triggering event so a first unavailable call cannot strand
+                # the controller decision until an unrelated socket event.
+                if outcome["state"] != "pending":
+                    break
+        return changed
+
+    def _renew_supervisor_lease_if_due(self, *, force: bool = False) -> None:
+        """Renew before post-IPC lifecycle work while preserving exact epoch ownership."""
+
+        epoch = getattr(self, "epoch", None)
+        owner_nonce_sha256 = getattr(self, "owner_nonce_sha256", None)
+        lease_seconds = getattr(self, "lease_seconds", None)
+        if epoch is None or not isinstance(owner_nonce_sha256, str) or not isinstance(lease_seconds, int | float):
+            return
+        now_monotonic = time.monotonic()
+        next_renewal = getattr(self, "_next_renewal_monotonic", None)
+        if not force and next_renewal is not None and now_monotonic < next_renewal:
+            return
+        self.ledger.renew_supervisor(
+            epoch=epoch,
+            owner_nonce_sha256=owner_nonce_sha256,
+            lease_seconds=lease_seconds,
+        )
+        self._next_renewal_monotonic = now_monotonic + max(lease_seconds / 3.0, 0.1)
+
+    def run_foreground(self, *, timeout: float = 0.25, max_cycles: int | None = None) -> None:
+        try:
+            self.acquire()
+            self.recover_once()
+            self._refresh_checkpoint_deadline()
+            self._next_renewal_monotonic = time.monotonic() + max(self.lease_seconds / 3.0, 0.1)
+            self._process_queue_event()
+            self._deliver_wakes()
+            self._schedule_controller_generations()
+            cycles = 0
+            while not self._stop and (max_cycles is None or cycles < max_cycles):
+                cycles += 1
+                endpoint = self._socket
+                if endpoint is None:
+                    break
+                ready, _, _ = select.select([endpoint], [], [], self._select_timeout(timeout))
+                if ready:
+                    connection, _ = endpoint.accept()
+                    operation = self._accept_connection(connection)
+                    self._renew_supervisor_lease_if_due()
+                    # A producer wake or a worker terminal submission is the
+                    # only normal queue-read trigger after startup.
+                    if operation in {"wake", "submit_result", "retry", "recovery_action"}:
+                        self._process_queue_event()
+                    self._deliver_wakes()
+                    self._schedule_controller_generations()
+                    self._refresh_checkpoint_deadline()
+                now_monotonic = time.monotonic()
+                if self._next_renewal_monotonic is not None and now_monotonic >= self._next_renewal_monotonic:
+                    self._renew_supervisor_lease_if_due()
+                    if self._reap_children():
+                        self.recover_once()
+                        self._process_queue_event()
+                    self._refresh_checkpoint_deadline()
+                if (
+                    self._next_checkpoint_deadline is not None
+                    and self._next_checkpoint_deadline <= datetime.now(timezone.utc)
+                    and self.epoch is not None
+                ):
+                    self.ledger.claim_due_checkpoint(epoch=int(self.epoch))
+                    self._deliver_wakes()
+                    self._schedule_controller_generations()
+                    self._refresh_checkpoint_deadline()
+                self._schedule_controller_generations()
+        finally:
+            self.close()
+
+
+__all__ = ["Supervisor", "SupervisorError", "WorkerResultRejected", "process_birth_identity"]

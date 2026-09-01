@@ -10,23 +10,44 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "openai-codex==0.147.0",
+  "textual>=6.1,<7",
   "typer>=0.16,<1",
 ]
 
 [project.scripts]
 codex-flow = "codex_flow.cli:app"
 
+[tool.hatch.build.force-include]
+"schemas/capsule.schema.json" = "codex_flow/workflow_assets/schemas/capsule.schema.json"
+"schemas/evidence.schema.json" = "codex_flow/workflow_assets/schemas/evidence.schema.json"
+"schemas/finding.schema.json" = "codex_flow/workflow_assets/schemas/finding.schema.json"
+"schemas/recovery.schema.json" = "codex_flow/workflow_assets/schemas/recovery.schema.json"
+"schemas/result.schema.json" = "codex_flow/workflow_assets/schemas/result.schema.json"
+"schemas/review.schema.json" = "codex_flow/workflow_assets/schemas/review.schema.json"
+"schemas/visual-contract.schema.json" = "codex_flow/workflow_assets/schemas/visual-contract.schema.json"
+"templates/AGENTS.workflow.md" = "codex_flow/workflow_assets/templates/AGENTS.workflow.md"
+"config/workflow.toml.example" = "codex_flow/workflow_assets/config/workflow.toml.example"
+"config/test-partitions.toml" = "codex_flow/workflow_assets/config/test-partitions.toml"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/codex_flow"]
+only-include = ["src/codex_flow", "schemas", "templates/AGENTS.workflow.md", "config/workflow.toml.example", "config/test-partitions.toml"]
+
+[tool.hatch.build.targets.wheel.sources]
+schemas = "codex_flow/workflow_assets/schemas"
+templates = "codex_flow/workflow_assets/templates"
+config = "codex_flow/workflow_assets/config"
 
 [tool.hatch.build.targets.wheel.force-include]
 "workflow.toml" = "codex_flow/workflow.toml"
+
 
 [tool.uv]
 package = true
 
 [dependency-groups]
 dev = [
+  "jsonschema>=4.23,<5",
   "pre-commit>=3.6,<5",
   "pytest>=8.0,<9",
   "ruff>=0.12,<1",

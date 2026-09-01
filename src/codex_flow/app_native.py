@@ -17,7 +17,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Final
 
-from .contracts import ModelFacingResult
+from .contracts import (
+    ModelFacingResult,
+    model_facing_result_schema,
+    model_facing_result_schema_sha256,
+)
 from .domain import DispatchId, JsonObject, ReasoningEffort, ThreadIdentity, freeze_json, thaw_json
 
 _TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
@@ -81,11 +85,12 @@ class AppNativeTaskAction:
     workspace_path: Path
     prompt: str
     output_schema: JsonObject
+    result_contract_sha256: str | None = None
     action: str = "create_native_task"
     non_blocking: bool = True
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version not in {1, 2}:
             raise AppNativeError("unsupported App-native action schema version")
         if self.action != "create_native_task" or self.non_blocking is not True:
             raise AppNativeError("App-native action must be one non-blocking native task creation")
@@ -116,9 +121,18 @@ class AppNativeTaskAction:
         if not isinstance(schema, Mapping):
             raise AppNativeError("native task output schema must be a JSON object")
         object.__setattr__(self, "output_schema", schema)
+        if self.schema_version == 1:
+            if self.result_contract_sha256 is not None:
+                raise AppNativeError("version-1 App-native actions cannot carry a result contract digest")
+        else:
+            expected_digest = model_facing_result_schema_sha256()
+            if self.result_contract_sha256 != expected_digest:
+                raise AppNativeError("version-2 App-native action result contract digest is invalid")
+            if schema != model_facing_result_schema():
+                raise AppNativeError("version-2 App-native action must bind ModelFacingResult schema version 1")
 
     def to_json(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "schema_version": self.schema_version,
             "action": self.action,
             "non_blocking": self.non_blocking,
@@ -129,27 +143,50 @@ class AppNativeTaskAction:
             "reasoning_effort": self.reasoning_effort.value,
             "workspace_path": str(self.workspace_path),
             "prompt": self.prompt,
-            "output_schema": thaw_json(self.output_schema),
         }
+        if self.schema_version == 1:
+            payload["output_schema"] = thaw_json(self.output_schema)
+        else:
+            payload["result_contract_sha256"] = self.result_contract_sha256
+        return payload
 
     @classmethod
     def from_json(cls, value: Mapping[str, object]) -> AppNativeTaskAction:
-        expected = {
-            "schema_version",
-            "action",
-            "non_blocking",
-            "dispatch_id",
-            "claim_token",
-            "bind_challenge",
-            "model",
-            "reasoning_effort",
-            "workspace_path",
-            "prompt",
-            "output_schema",
-        }
+        version = value.get("schema_version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise AppNativeError("App-native action schema version must be an integer")
+        if version == 1:
+            expected = {
+                "schema_version",
+                "action",
+                "non_blocking",
+                "dispatch_id",
+                "claim_token",
+                "bind_challenge",
+                "model",
+                "reasoning_effort",
+                "workspace_path",
+                "prompt",
+                "output_schema",
+            }
+        elif version == 2:
+            expected = {
+                "schema_version",
+                "action",
+                "non_blocking",
+                "dispatch_id",
+                "claim_token",
+                "bind_challenge",
+                "model",
+                "reasoning_effort",
+                "workspace_path",
+                "prompt",
+                "result_contract_sha256",
+            }
+        else:
+            raise AppNativeError("unsupported App-native action schema version")
         if set(value) != expected:
             raise AppNativeError(f"App-native action keys must be exactly {sorted(expected)!r}")
-        version = value["schema_version"]
         non_blocking = value["non_blocking"]
         strings = (
             value["action"],
@@ -161,10 +198,20 @@ class AppNativeTaskAction:
             value["workspace_path"],
             value["prompt"],
         )
-        if isinstance(version, bool) or not isinstance(version, int) or non_blocking is not True:
+        if non_blocking is not True:
             raise AppNativeError("App-native action scalar values are invalid")
-        if any(not isinstance(item, str) for item in strings) or not isinstance(value["output_schema"], Mapping):
+        if any(not isinstance(item, str) for item in strings):
             raise AppNativeError("App-native action fields have invalid types")
+        if version == 1:
+            schema = value["output_schema"]
+            if not isinstance(schema, Mapping):
+                raise AppNativeError("App-native action fields have invalid types")
+            result_contract_sha256 = None
+        else:
+            schema = model_facing_result_schema()
+            result_contract_sha256 = value["result_contract_sha256"]
+            if not isinstance(result_contract_sha256, str):
+                raise AppNativeError("App-native result contract digest must be a string")
         return cls(
             version,
             DispatchId(strings[1]),
@@ -174,7 +221,8 @@ class AppNativeTaskAction:
             ReasoningEffort(strings[5]),
             Path(strings[6]),
             strings[7],
-            dict(value["output_schema"]),
+            dict(schema),
+            result_contract_sha256=result_contract_sha256,
             action=strings[0],
             non_blocking=non_blocking,
         )

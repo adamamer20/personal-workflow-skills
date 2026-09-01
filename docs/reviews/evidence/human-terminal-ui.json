@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "milestone": "human-terminal-control-correctness-closure",
+  "legacy_label": "H6-I bounded repair",
+  "status": "implementation_complete_promotion_pending",
+  "candidate": {
+    "sha256": "7da3f1e6491470da73ea5ff05870d52ce8fe458a88b817e0d3a9bcd84f52f7e0",
+    "framing": "11 sorted repository-relative UTF-8 paths, each followed by NUL and raw bytes; this evidence record is self-excluded",
+    "path_count": 11,
+    "plan_sha256": "ee92d605dbc453cdf46d0062bea38c59e3626b4348d08e508c87b329b3bf3875",
+    "capsule_sha256": "65fb555193f21df60bbace155f945605e7767b2e8ba7e0c4a499773f8a519578",
+    "mutable_surface_count": 8
+  },
+  "inventory": [
+    {"path": "docs/reviews/evidence/human-terminal-ui/dark-wide.svg", "sha256": "19ce1a8065d0fa92a5d1453ae08dfa1f0fcab6fd7397277e8938e8cf9c5ec4cc", "size": 70415},
+    {"path": "docs/reviews/evidence/human-terminal-ui/light-narrow.svg", "sha256": "2177d550aec798106b51a6fc19323a9755ebc517d6a4583037793f1b7aa7f1ed", "size": 27699},
+    {"path": "docs/reviews/evidence/human-terminal-ui/light-wide.svg", "sha256": "9b09223dfe9cb38a970a5558e97036d10cf76f2f929c418c2c303da7e70720e5", "size": 70040},
+    {"path": "docs/reviews/evidence/human-terminal-ui/no-color-narrow.svg", "sha256": "35c6c19d856099da65cf8d62f9e525c7a9592bbba72ed21f7ed96da1f2160a3e", "size": 30532},
+    {"path": "src/codex_flow/control_client.py", "sha256": "75a584b489476c584514ad94d33d209d6374e00871e57d90df062fa1ba2ace84", "size": 41470},
+    {"path": "src/codex_flow/supervisor.py", "sha256": "8364fb191bd81382a8040217cedfc453cbdd8c47897bd9e6d8e8327a27cf35c8", "size": 118936},
+    {"path": "src/codex_flow/tui.py", "sha256": "ae30f8085ff85169e54325df48503bf41be8efb63820015b24598bb06c0a6940", "size": 21537},
+    {"path": "src/codex_flow/tui_client.py", "sha256": "63fb761cc1b60e650a478c52974ca2741862671c93beca2405465e8ee1147c15", "size": 17235},
+    {"path": "tests/test_live_worker_control.py", "sha256": "5424aaf61b94151f10e9a3219da7ded85fdd2384b25f7c5bb1fd5696eb153ff7", "size": 42366},
+    {"path": "tests/test_plan_compilation.py", "sha256": "896aef9290b8d7e9c69f2bdb74abaee3ab02ff24e411a6093521a85c8771d037", "size": 14174},
+    {"path": "tests/test_workflow_control.py", "sha256": "b29b4fd6401c0812eaa2b23377c3285e601b619f4f405d3919c2d4346ba8efbe", "size": 9818}
+  ],
+  "runtime": {
+    "authority": "Existing ControlCommand and ledger row through one read-only supervisor control_status operation",
+    "command_identity": "Caller-generated before send and retained across exact reconciliation and at most one same-id resend",
+    "presentation_outcomes": ["accepted", "rejected", "post_send_uncertain"],
+    "resume_proof": "Exactly one focused worker or decision selection over the latest connected typed snapshot, with one matching inactive LiveWorkerStatus",
+    "database_reads_from_tui": 0,
+    "provider_calls": 0,
+    "app_calls": 0,
+    "background_polling": false,
+    "resume_argv": ["codex", "resume", "<validated-thread-id>"],
+    "resume_shell": false
+  },
+  "retained_wheel": {
+    "path": "dist/human-terminal-ui/codex_flow-0.2.0-py3-none-any.whl",
+    "sha256": "1d6eaa14c6f6c5e56f110950eb64d8e0f7513cdfb19d7243defdd058d66beea2",
+    "size": 328062,
+    "kind": "regular nonsymlinked file",
+    "reproducibility": "two fresh builds were byte-identical",
+    "archive_source_parity": "32 packaged source files matched repository bytes",
+    "python": "3.12.13",
+    "openai_codex": "0.147.0",
+    "textual": "6.12.0"
+  },
+  "observable_proof": {
+    "resume_selection": "Worker and decision ListViews retain independent indexes; keyboard focus selects the sole identity authority and updates the visible detail. Worker focus and decision focus open their distinct inactive thread ids, while both/neither client inputs, no focus and a focused list without an index fail closed.",
+    "resume": "Decision Open rejects offline, zero-match, multiple-match, active-turn and stale-revision facts; one exact focused decision with an inactive source-thread match passes the unchanged thread id to the resume handler.",
+    "lost_reply_after_commit": "A real Supervisor UNIX socket committed one command after its caller closed without reading, then exact-id status, same-id replay and terminal acknowledgement observed the single canonical row.",
+    "explicit_absence": "One explicit absence allowed one resend with the retained id; both sends used the same id.",
+    "repeated_ambiguity": "Unavailable reconciliation preserved post_send_uncertain and the retained id across an explicit repeat with no second send.",
+    "integrity": "Command-id or payload-semantic mismatch fails closed before success presentation.",
+    "ui_feedback": "Rejected and Post Send Uncertain remain visibly distinct after event-driven refresh.",
+    "provider_free_supervisor": "Source and exact-wheel real UNIX-socket proofs queued and read one exact command with zero provider/App calls and zero child launches.",
+    "visual": "All four fixed SVG sentinels remain byte-identical; no rerender was performed."
+  },
+  "gates": {
+    "focused_terminal_control": "48 passed",
+    "workers_partition": "49 passed",
+    "integrations_partition": "60 passed",
+    "full_make_check": "665 passed; validator 16 skills and 7 schemas; compileall and all pre-commit hooks passed",
+    "ruff": "passed",
+    "ruff_format": "passed",
+    "git_diff_check": "passed",
+    "exact_wheel": "two fresh byte-identical builds, all 32 package source/archive hashes, atomic retained placement, isolated Python 3.12 install/import and CLI help passed",
+    "exact_wheel_sha256": "1d6eaa14c6f6c5e56f110950eb64d8e0f7513cdfb19d7243defdd058d66beea2",
+    "exact_wheel_size": 328062,
+    "installed_wheel_supervisor": "real provider-free lost-reply, control_status, same-id replay and terminal acknowledgement passed with one durable row and zero child launches"
+  },
+  "protected_control_authority": {
+    "src/codex_flow/domain.py": "4533cbed076176f9f5fca8836242621e57b2df43cb4409c2f958b3d7bf79549a",
+    "src/codex_flow/ledger.py": "8edaeb30e1cf66510a6a74d501bc3629ccbe9470be9b729719f829eaef1da514",
+    "src/codex_flow/controller_recovery.py": "cbac49929dbb348ca49582fd794b2b8a05feef5bf144109bafa2d6622af2cf9e",
+    "docs/reviews/evidence/controller-turn-recovery.json": "440de5aee4ecfe710b5ece2195d45947f32fa0ef0da9911d54bbf4fd2e534970",
+    "src/codex_flow/plugin_capabilities.py": "9160baf282d78e5ad1e2bcf3edafb8112f60883be09439ed3bd106b7f9e94927",
+    "docs/reviews/evidence/plugin-capability-parity.json": "70cdb7f615b8907166a5b37b10cdcad94b5a2493eb1721a5838e4a34beb65ef3",
+    "src/codex_flow/tui_models.py": "d91ebece567090893d15ec833fa90089a039e285f643a9200c634b1d8fe92ca6",
+    "src/codex_flow/cli.py": "dbbf72fea4432383903274e451d36ba87ef3cb3681d522333dc9dd037e27cbd7",
+    "pyproject.toml": "c42b58cdbccec3e87641cddb26589cfa4be082294bb54c32f6d4b807f2dbcb9f",
+    "uv.lock": "986364657fb9fc5bbd93643222bae627e15910fb77c9b698e3c4506bc4679dd6"
+  },
+  "provider_sentinel": {
+    "status": "external_blocked",
+    "attempt_reused": false,
+    "detail": "The consumed delayed-steer provider sentinel was not retried."
+  },
+  "self_review": {"p0": 0, "p1": 0},
+  "independent_reviews": {
+    "objective": "pending Luna XHigh at configured fast speed",
+    "visual": "pending independent Sol High full-size review"
+  }
+}

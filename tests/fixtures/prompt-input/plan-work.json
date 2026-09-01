@@ -2,6 +2,90 @@
   "schema_version": 1,
   "skill": "plan-work",
   "input_text": "Use $plan-work to write one decision-ready typed capsule.",
+  "architecture_map": {
+    "paths": [
+      {
+        "path": "schemas/capsule.schema.json",
+        "action": "create",
+        "responsibility": "closed capsule projection contract",
+        "owner": "workflow-assets"
+      },
+      {
+        "path": "scripts/validate.py",
+        "action": "modify",
+        "responsibility": "workflow asset and partition validation",
+        "owner": "workflow-assets"
+      },
+      {
+        "path": "src/codex_flow/contracts.py",
+        "action": "preserve",
+        "responsibility": "typed serialization authority",
+        "owner": "controller"
+      }
+    ],
+    "dependency_direction": "schemas/templates/config -> validator/tests -> Make targets",
+    "primary_identifiers": ["ModelFacingCapsule", "test-workflow-assets", "capsule.schema.json"],
+    "new_artifact_budget": 22,
+    "milestone_graph": {
+      "milestones": [
+        {
+          "id": "shared-authority-foundation",
+          "owner": "planning-authority",
+          "mutable_surfaces": ["shared schemas", "public contracts", "state authority", "production entrypoints"],
+          "dependencies": [],
+          "readiness": "completed",
+          "vertical": true,
+          "independently_closable": true
+        },
+        {
+          "id": "workflow-asset-lane",
+          "owner": "workflow-assets-owner",
+          "mutable_surfaces": ["workflow skills", "workflow templates"],
+          "dependencies": ["shared-authority-foundation"],
+          "readiness": "ready",
+          "vertical": true,
+          "independently_closable": true
+        },
+        {
+          "id": "runtime-proof-lane",
+          "owner": "runtime-proof-owner",
+          "mutable_surfaces": ["runtime proof", "integration evidence"],
+          "dependencies": ["shared-authority-foundation"],
+          "readiness": "ready",
+          "vertical": true,
+          "independently_closable": true
+        }
+      ],
+      "current_readiness": {
+        "shared-authority-foundation": "completed",
+        "workflow-asset-lane": "ready",
+        "runtime-proof-lane": "ready"
+      },
+      "serial_edges": [
+        {
+          "from": "shared-authority-foundation",
+          "to": "workflow-asset-lane",
+          "reason": "shared schema"
+        },
+        {
+          "from": "shared-authority-foundation",
+          "to": "runtime-proof-lane",
+          "reason": "state authority"
+        }
+      ],
+      "shared_authorities_frozen": [
+        "shared schemas",
+        "public contracts",
+        "state authority",
+        "production entrypoints"
+      ],
+      "fan_out_after": "shared-authority-foundation",
+      "ready_parallel_groups": [["workflow-asset-lane", "runtime-proof-lane"]],
+      "critical_path": ["shared-authority-foundation", "workflow-asset-lane"],
+      "critical_path_minimized": true,
+      "nested_controller_default": false
+    }
+  },
   "required": [
     "objective",
     "visual",
@@ -11,7 +95,15 @@
     "code authority",
     "visual authority",
     "boundary/security authority",
-    "completion-biased"
+    "completion-biased",
+    "implementation architecture map",
+    "new-artifact budget",
+    "dependency direction",
+    "one responsibility",
+    "create",
+    "modify",
+    "preserve",
+    "remove"
   ],
   "forbidden": [
     "create_thread",

@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-workflow-skills.invalid/schemas/capsule.schema.json",
+  "title": "Controller-facing model capsule",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "objective",
+        "decomposition",
+        "acceptance_criteria",
+        "surfaces",
+        "acceptance",
+        "prompt",
+        "recovery_policy"
+      ],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 1},
+        "objective": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "decomposition": {
+          "type": "array", "maxItems": 128, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+        },
+        "acceptance_criteria": {
+          "type": "array", "maxItems": 128, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+        },
+        "surfaces": {
+          "type": "object", "minProperties": 0, "maxProperties": 128,
+          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+          "additionalProperties": {"type": "string", "enum": ["mutable", "protected"]}
+        },
+        "acceptance": {
+          "type": "object", "minProperties": 1, "maxProperties": 3, "additionalProperties": false,
+          "properties": {
+            "objective": {"type": "string", "const": "code-reviewer"},
+            "visual": {"type": "string", "const": "visual-reviewer"},
+            "architecture": {"type": "string", "const": "architecture-reviewer"}
+          }
+        },
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "recovery_policy": {"type": "string", "const": "completion_biased"}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "objective",
+        "decomposition",
+        "acceptance_criteria",
+        "surfaces",
+        "acceptance",
+        "prompt",
+        "recovery_policy",
+        "plugin_requirements"
+      ],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 2},
+        "objective": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "decomposition": {
+          "type": "array", "maxItems": 128, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+        },
+        "acceptance_criteria": {
+          "type": "array", "maxItems": 128, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+        },
+        "surfaces": {
+          "type": "object", "minProperties": 0, "maxProperties": 128,
+          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+          "additionalProperties": {"type": "string", "enum": ["mutable", "protected"]}
+        },
+        "acceptance": {
+          "type": "object", "minProperties": 1, "maxProperties": 3, "additionalProperties": false,
+          "properties": {
+            "objective": {"type": "string", "const": "code-reviewer"},
+            "visual": {"type": "string", "const": "visual-reviewer"},
+            "architecture": {"type": "string", "const": "architecture-reviewer"}
+          }
+        },
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "recovery_policy": {"type": "string", "const": "completion_biased"},
+        "plugin_requirements": {
+          "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["canonical_id", "version", "source", "bundle_digest", "bundled_skill_ids", "mcp_connectors"],
+            "properties": {
+              "canonical_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+              "version": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+              "source": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+              "bundle_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "bundled_skill_ids": {
+                "type": "array", "maxItems": 128, "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+              },
+              "mcp_connectors": {
+                "type": "array", "maxItems": 128, "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "objective",
+        "decomposition",
+        "acceptance_criteria",
+        "surfaces",
+        "acceptance",
+        "prompt",
+        "recovery_policy",
+        "local_image_paths"
+      ],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 3},
+        "objective": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "decomposition": {
+          "type": "array", "maxItems": 128, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+        },
+        "acceptance_criteria": {
+          "type": "array", "maxItems": 128, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+        },
+        "surfaces": {
+          "type": "object", "minProperties": 0, "maxProperties": 128,
+          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+          "additionalProperties": {"type": "string", "enum": ["mutable", "protected"]}
+        },
+        "acceptance": {
+          "type": "object", "minProperties": 1, "maxProperties": 3, "additionalProperties": false,
+          "properties": {
+            "objective": {"type": "string", "const": "code-reviewer"},
+            "visual": {"type": "string", "const": "visual-reviewer"},
+            "architecture": {"type": "string", "const": "architecture-reviewer"}
+          }
+        },
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "recovery_policy": {"type": "string", "const": "completion_biased"},
+        "local_image_paths": {
+          "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?!/)(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+        },
+        "plugin_requirements": {
+          "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["canonical_id", "version", "source", "bundle_digest", "bundled_skill_ids", "mcp_connectors"],
+            "properties": {
+              "canonical_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+              "version": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+              "source": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+              "bundle_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "bundled_skill_ids": {
+                "type": "array", "maxItems": 128, "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+              },
+              "mcp_connectors": {
+                "type": "array", "maxItems": 128, "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

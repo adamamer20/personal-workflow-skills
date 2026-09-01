@@ -1,0 +1,131 @@
+{
+  "schema": "codex-flow/live-worker-control/v1",
+  "status": "external_blocked",
+  "external_gate": "BLOCKED",
+  "candidate": {
+    "base_commit": "14106f3ee1e376f7c105d9e309292e9a742f0482",
+    "repaired_candidate_sha256": "b49e8da8debe577c4b3bb661bd0c1aa8ac6cab46a5161cabdd5d8b2195c15bb5",
+    "digest_basis": "SHA-256 over semantic domain codex-flow/live-worker-control-candidate/v1 newline, raw git rev-parse HEAD output, --tracked-diff-- newline plus raw git diff --binary HEAD --, followed by sorted non-ignored untracked files excluding only docs/reviews/evidence/live-worker-control.json, each with --untracked-path-- newline, raw path, newline, decimal byte length, newline, raw content and newline --untracked-end-- newline delimiters",
+    "plan_revision_sha256": "8b478ec7929fa52bc1638cc7a8bb4339f55081417d72aff0eea9f5d48856cf93",
+    "capsule_block_sha256": "076d40daf6e9f37448c49b339155f605fbbe53f18f1d79aa8db5ee37156ec334",
+    "pre_repair_candidate_sha256": "8ea819175f6525234901b1bc22956d0873fe42555c7694d45412f282a20b3a48",
+    "predecessor_repaired_candidate_sha256": "3457b99128d2af84f93e69f343215a2f7e6a94d4013e607121cc93ef4c6d3ff9",
+    "rejected_candidate_sha256": "78aae2667fc08d1bfcab86cab83606f2286acc7075db86df88995123633ec743",
+    "rejected_wheel_sha256": "b1150bf92db515e6927a40d72bff61022926f5bc662299182a6cfaa92489bf42",
+    "leaf_worker": true,
+    "subagents_or_peer_tasks_created": 0,
+    "codex_task_polling": 0,
+    "global_configuration_changed": false,
+    "unrelated_dirty_surfaces_preserved": true
+  },
+  "changed_surfaces": [
+    "src/codex_flow/domain.py",
+    "src/codex_flow/ledger.py",
+    "src/codex_flow/supervisor.py",
+    "src/codex_flow/backends/codex_sdk.py",
+    "src/codex_flow/control_client.py",
+    "tests/test_supervisor_recovery.py",
+    "tests/test_live_worker_control.py",
+    "tests/test_codex_sdk_adapter.py",
+    "docs/reviews/evidence/live-worker-control.json"
+  ],
+  "validation": {
+    "focused_repair_tests": "50 passed: malformed bool/numeric/turn identities preserve liveness, activity and active-turn ownership; both cancel/result orderings plus reap/restart idempotency converge",
+    "affected_semantic_consumers": "103 passed across live-worker control, supervisor recovery, local IPC and service lifecycle",
+    "full_pytest": "not rerun under the proportional gate policy; 430-pass predecessor evidence was carried forward because shared impact was bounded by the affected 103-test closure gate",
+    "make_check": "not rerun under the proportional gate policy; focused Ruff format/check and affected semantic partitions passed",
+    "git_diff_check": "passed",
+    "self_review": "complete; no open P0/P1 identified in the owned repair surfaces"
+  },
+  "exact_wheel": {
+    "build_tool": "uv",
+    "wheel_version": "0.2.0",
+    "wheel_sha256": "44dbeaa82538c8b08e6a2210cd7e51c20591c3e94685656724f311e3aeb63603",
+    "wheel_bytes": 248065,
+    "wheel_path": "/tmp/tmp.SiU5vfEheo/dist/codex_flow-0.2.0-py3-none-any.whl",
+    "offline_build": true,
+    "temporary_virtualenv_install": "passed",
+    "installed_help": "passed",
+    "installed_supervisor_help": "passed",
+    "installed_live_help": "passed",
+    "installed_schema_result": "passed",
+    "source_imports_bypassed": true,
+    "temporary_build_and_install_artifacts_removed": true,
+    "packaged_workflow_sha256": "845f67e337b36ae301e09ab0e48cf31547b96d5e7cb768b7569f543126e92812",
+    "workflow_matches_source": true,
+    "global_tool_or_plugin_state_changed": false
+  },
+  "service_identity": {
+    "temporary_unit_check": "passed",
+    "exact_installed_executable": true,
+    "installed_executable_sha256": "c8891e1191285593d6858379c6744973b7494b6b5f0ed5abc7aaf3bfde8ef21c",
+    "supervisor_help_entrypoint": "passed",
+    "restart_on_failure": true,
+    "private_runtime_directory": true,
+    "real_user_service_installed": false,
+    "global_service_configuration_changed": false
+  },
+  "sentinel": {
+    "status": "failed",
+    "provider_attempts": 1,
+    "sdk": {
+      "package": "openai-codex",
+      "version": "0.147.0",
+      "runtime_version": "unknown"
+    },
+    "worker": {
+      "production_entrypoint": true,
+      "leaf_worker": true,
+      "app_api_calls": 0,
+      "task_api_calls": 0
+    },
+    "control": {
+      "steer_submitted": false,
+      "marker_observed": false,
+      "activity_observed": false
+    },
+    "failure": {
+      "queue_state": "human_attention_required",
+      "recovery_state": "human_attention_required",
+      "exit_classification": "malformed-input",
+      "exit_code": 85,
+      "strategy": "human_attention_required",
+      "last_failure": "malformed_input",
+      "detail": "unknown non-transient SDK failure after thread identity"
+    },
+    "repository": {
+      "before_sha256": "c63d9a2134ae74d4d2f2bf2d8edaf44afc49005cfd53ebde5f9a24cc1cdefce5",
+      "after_sha256": "c63d9a2134ae74d4d2f2bf2d8edaf44afc49005cfd53ebde5f9a24cc1cdefce5",
+      "unchanged": true
+    },
+    "cleanup": {
+      "temporary_repository_removed": true,
+      "thread_archived": false
+    },
+    "started_at": "2026-08-27T16:49:53.636084+00:00",
+    "finished_at": "2026-08-27T16:51:24.239724+00:00"
+  },
+  "shared_sdk_route": {
+    "auth_source": "standard_inherited_codex_session",
+    "private_codex_home_override": false,
+    "auth_material_copied": false,
+    "auth_material_exposed": false,
+    "runtime_config_overrides": [
+      "agents.enabled=false",
+      "features.multi_agent=false"
+    ],
+    "app_api_calls": 0,
+    "task_api_calls": 0
+  },
+  "residual_risks": [
+    "The one authorized real SDK attempt failed after thread identity with an unknown non-transient SDK failure; delayed-turn steer and marker proof remain unobserved.",
+    "The pinned SDK/runtime prerequisite for a successful delayed-turn steer sentinel is unavailable in this attempt; the sentinel was not retried."
+  ],
+  "next_action": "Run the one authorized Luna XHigh objective recheck of repaired candidate b49e8da8debe577c4b3bb661bd0c1aa8ac6cab46a5161cabdd5d8b2195c15bb5; carry forward the prior architecture approval only after confirming this repair stayed within the fixed design, and retain the consumed provider gate as separately BLOCKED.",
+  "sanitized": true,
+  "secrets_or_raw_prompts_or_results_retained": false,
+  "reviews": {
+    "objective": "not_run_by_capsule",
+    "architecture": "prior exact-candidate approval carried as evidence; repair self-review found no architecture-surface change and reviewer confirmation remains pending"
+  }
+}

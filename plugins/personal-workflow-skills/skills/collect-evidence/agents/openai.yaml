@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collect Evidence"
+  short_description: "Build compact, traceable evidence packs"
+  default_prompt: "Use $collect-evidence to answer one bounded question with traceable source facts, inferences, confidence, and uncertainty."

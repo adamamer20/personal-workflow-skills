@@ -18,7 +18,7 @@ runtime only when explicitly authorized and must write retained evidence:
 
 ```bash
 make setup
-CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-sentinel \
+CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-compatibility-sentinel \
   --model gpt-5.6-luna --effort medium
 ```
 
@@ -87,6 +87,12 @@ digests. Do not ask a model to copy a capsule into a sidecar JSON. Retain the
 explicit `--capsule` entrypoint only for low-level integration tests and callers
 that already own a typed serialized contract.
 
+Repository workflow skills are cognitive roles around this controller. They may
+define intent, acceptance, evidence, and findings, but never own dispatch,
+callbacks, routing, retries, successor scheduling, worktree creation, or direct
+ledger mutation. Shared schemas and the validator describe these boundaries;
+the typed Python contracts remain serialization authority.
+
 Existing plugin hooks, workflow/audit skills, manifests, validators, the
 protected primary checkout, remotes, global Codex state, downstream
 repositories, and later milestones remain protected unless the canonical plan
@@ -95,6 +101,13 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 
 ## Execution workspace topology
 
+- The program worktree is the sole local integration trunk. It remains active
+  until the whole canonical plan closes, and its branch progressively contains
+  every promoted milestone. Before mutable fan-out, the integration owner must
+  bring that trunk to one coherent verified state, create a local commit that
+  contains only authorized surfaces, and record its exact SHA as the frozen DAG
+  base. If unrelated dirty baseline bytes cannot be separated safely, fan-out
+  remains blocked until the plan records a safe separation.
 - A fresh Codex thread or model context does not imply a fresh Git worktree. A
   worktree is an isolated mutable workspace owned by a program or execution
   lane, not by Luna, Sol, a reviewer, or a thread id.
@@ -108,6 +121,13 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   program slug, or `<program-slug>-<lane-slug>` for a parallel lane; never use a
   task id, client id, model name, or milestone number as the primary identity.
   Use the corresponding `agent/<program-or-lane-slug>` branch by default.
+- A parallel mutable lane is semantically a child of the program but uses a
+  physical sibling Git worktree at
+  `<repo-parent>/<repo-name>.worktrees/<program-slug>-<lane-slug>`. The
+  controller creates it from the recorded frozen integration SHA or one exact
+  integrated predecessor, with branch `agent/<program-slug>-<lane-slug>`. A
+  lane worker never edits, merges into, or otherwise integrates the program
+  trunk.
 - The canonical plan selects `current_checkout`, `existing_worktree`, or
   `managed_worktree` before task creation and records the exact repository,
   path, branch, base SHA, and lane when applicable. Handoff transports launch
@@ -115,6 +135,25 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 - When the native task API cannot address the selected existing workspace,
   fail the handoff closed and preserve the workspace capsule. Never substitute
   a runtime-generated worktree merely because a fresh thread was requested.
+- Before `COMPLETION`, every mutable milestone must create at least one coherent
+  local commit containing only its owned surfaces after inspecting the staged
+  diff and passing `git diff --cached --check` plus its outcome gates. Read-only
+  planning, review, evidence work and an explicit no-commit capsule are the only
+  exceptions. Independent review and promotion bind to the exact lane commit or
+  commit range; a repair creates a successor commit and never amends a reviewed
+  commit without invalidating that review.
+- Only the controller/integration owner integrates promoted lane commits into
+  the program trunk after promotion-blocking P0/P1 findings reach zero. Use an
+  explicit traceable Git strategy: a merge commit is the default for true
+  fan-out, while cherry-pick or fast-forward requires a recorded reason. Verify
+  ancestry and absence of unrelated commits; treat conflict resolution as new
+  integration work and rerun proportional integration gates. Update DAG
+  readiness only after that integration succeeds, start successors from the new
+  integrated tip, and retain lane worktrees/branches until commit, review,
+  integration and recovery evidence are durable.
+- This policy authorizes the local commits and local integration operations
+  required by an accepted program plan. It does not authorize push, rebase,
+  history rewrite, discard, remote mutation or implicit cleanup.
 
 ## Controller routing and recovery semantics
 
@@ -125,6 +164,32 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   acceptance, and unresolved decisions. The design must be decision-ready
   enough that the implementation capsule does not ask its executor to invent
   architecture.
+- The design also freezes an implementation architecture map before handoff:
+  every expected production module/path is labelled `create`, `modify`,
+  `preserve` or `remove`; each module has one responsibility and allowed
+  dependency direction; primary classes, protocols, persisted/public types and
+  entrypoints have names and owners; state, error and serialization boundaries
+  are explicit; and every new durable artifact is justified against a bounded
+  file/module budget. Luna may split private helpers inside an owned module but
+  may not invent another production module, public class, registry, runner,
+  schema or entrypoint without a bounded Sol plan update first.
+- After freezing that architecture map, planning must attempt to factor the
+  program into independently closable vertical milestones with disjoint
+  mutable surfaces. Record the milestone dependency DAG and current readiness;
+  freeze shared schemas, public or persisted contracts, state authority and
+  production entrypoints before dependent fan-out. Every retained serial edge
+  names one concrete permitted reason: shared schema, state authority,
+  entrypoint, migration order or acceptance dependency. Minimize the safe
+  critical path without maximizing milestone count or inventing fake
+  boundaries. Each mutable milestone remains single-owner; parallelism is
+  only between ready disjoint lanes. Read-only scouts and distinct review
+  authorities may overlap, while nested swarm/controller orchestration is
+  rejected as a default.
+- A single planning/controller turn may issue multiple native START operations
+  when each milestone is ready, has one owner, has disjoint mutable surfaces,
+  and each peer is started exactly once. This per-milestone rule does not relax
+  idempotency: serial dependencies or shared mutable ownership still require
+  one START to wait for the relevant predecessor.
 - After that design is accepted, Luna XHigh implements it as the single mutable
   owner. Luna may resolve local mechanical details but returns any material
   boundary, public or persisted contract, ownership, security/privacy, cost,
@@ -154,6 +219,22 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   goal is not reasonably achievable under accepted constraints.
 - Never escalate to the user merely because implementation is difficult, a
   previous model did not converge, or an implementation plan was disproven.
+
+## Descriptive durable naming
+
+- Give every new or renamed durable path and code/contract identifier a stable,
+  descriptive semantic name based on capability, domain, responsibility, or
+  observable behavior. This includes files, modules, classes, functions,
+  methods, variables, constants, tests, fixtures, CLI commands, public exports,
+  evidence records, and generated artifacts. Never couple them to a temporary
+  milestone, task, thread, model, or sequence label such as `h6_*`, `s1_*`, or
+  `milestone-*`.
+- A published historical path or persisted protocol/schema identifier may keep
+  a numbered label only when compatibility or provenance requires it. Record
+  each exception with its exact identifier, reason, immutable/versioned status,
+  and compatibility check. Plan safe reference-preserving renames; never bulk
+  rename symbols, imports, packaging paths, commands, links, fixtures, or
+  evidence blindly.
 
 ## Safety and review
 

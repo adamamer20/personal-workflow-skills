@@ -1,4 +1,4 @@
 interface:
   display_name: "Workflow Control"
   short_description: "Run one typed capsule through codex-flow"
-  default_prompt: "Use $workflow-control to invoke codex-flow for one decision-ready capsule and report its durable status."
+  default_prompt: "Use $workflow-control with the canonical plan path and exact milestone id to invoke codex-flow for one decision-ready milestone and report its durable status."

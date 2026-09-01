@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -19,10 +20,22 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from .app_native import AppNativeDispatchRecord, AppNativeState, AppNativeTaskAction, HostIdentity, HostReceipt
-from .artifacts import write_h4_review_artifact, write_owned_artifact
-from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
+from .artifacts import write_owned_artifact, write_review_artifact
+from .backends.codex_sdk import (
+    LEAF_WORKER_CONFIG_OVERRIDES,
+    CodexSdkAdapter,
+    CodexSdkConfig,
+    NativeRuntimeConfig,
+)
 from .config import AuthorityUnavailable, WorkflowConfig, load_workflow_config
-from .contracts import ModelFacingResult, model_facing_result_schema
+from .contracts import (
+    ModelFacingResult,
+    PluginCapabilitySnapshot,
+    PluginRequirement,
+    format_model_facing_result_prompt,
+    model_facing_result_schema,
+    model_facing_result_schema_sha256,
+)
 from .domain import (
     AcceptanceMode,
     AuthorityPlan,
@@ -34,11 +47,11 @@ from .domain import (
     ExecutionCapsule,
     ExecutionRecord,
     ExecutionStatus,
-    H4LifecycleResult,
     JsonObject,
     LifecyclePhase,
     LifecycleRecord,
     LifecycleStatus,
+    LocalImageInput,
     MilestoneId,
     NativePermissionAuthority,
     NativePermissionMode,
@@ -50,9 +63,11 @@ from .domain import (
     RepairRecord,
     ReplanProposal,
     ReviewFinding,
+    ReviewLifecycleResult,
     ReviewResult,
     RunId,
     Schema,
+    SkillInput,
     TerminalFailureAfterIdentity,
     ThreadIdentity,
     TransportFailureBeforeIdentity,
@@ -65,9 +80,23 @@ from .domain import (
     canonicalize_execution_capsule,
     strict_json_loads,
     thaw_json,
+    validate_local_image_inputs,
 )
-from .ledger import Ledger, NativeCompatibilityConflict, NativePermissionConflict, RecordNotFound
+from .ledger import (
+    Ledger,
+    NativeCompatibilityConflict,
+    NativePermissionConflict,
+    RecordNotFound,
+    SupervisorRefreshBlocked,
+)
 from .native_profile import NativeDiscoveryCompatibilityError, NativeProfileProjection
+from .plugin_capabilities import (
+    PluginCapabilityError,
+    _verified_skill_input,
+    resolve_plugin_requirements,
+    standard_codex_home,
+    verify_plugin_requirements,
+)
 from .worktrees import WorktreeManager
 
 
@@ -108,7 +137,12 @@ class Adapter(Protocol):
     def resume_thread(self, thread: ThreadIdentity) -> ThreadIdentity: ...
 
     def run_turn(
-        self, thread: ThreadIdentity, input: str, *, output_schema: Schema | None = None
+        self,
+        thread: ThreadIdentity,
+        input: str | SkillInput,
+        *,
+        local_image_inputs: tuple[LocalImageInput, ...] = (),
+        output_schema: Schema | None = None,
     ) -> TurnObservation: ...
 
     def close(self) -> None: ...
@@ -144,6 +178,24 @@ class GitAuthoritySnapshot:
     sha256: str
 
 
+def _leaf_worker_prompt(prompt: str) -> str:
+    """Remove controller-lifecycle prose from the leaf's work prompt."""
+
+    # The model-facing projection carries a controller-owned intent appendix.
+    # The leaf receives the bounded work instruction only; routing, identity,
+    # successor and wake facts stay in the harness capability/ledger.
+    source = prompt.split("\n\nCodex Flow model-facing intent:", 1)[0]
+    result = re.sub(
+        r"Remove all callback responsibility from worker prompts:.*?harness-owned\.\s*",
+        "",
+        source,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    if not result:
+        raise ControllerError("leaf worker prompt contains no executable work instruction")
+    return result
+
+
 def _bounded_command(workspace: Path, arguments: tuple[str, ...]) -> bytes:
     try:
         result = subprocess.run(
@@ -160,8 +212,20 @@ def _bounded_command(workspace: Path, arguments: tuple[str, ...]) -> bytes:
     return result.stdout
 
 
-def _stable_git_tree_digest(paths: tuple[Path, ...]) -> tuple[str, int, int]:
-    """Hash selected stable metadata, excluding volatile lock files."""
+def _stable_git_tree_digest(
+    paths: tuple[Path, ...], *, excluded_subtrees: tuple[Path, ...] = ()
+) -> tuple[str, int, int]:
+    """Hash selected stable metadata, excluding volatile lock files/subtrees."""
+
+    excluded = tuple(path.resolve() for path in excluded_subtrees)
+
+    def is_excluded(path: Path) -> bool:
+        resolved = path.resolve()
+        return any(resolved != root and resolved.is_relative_to(root) for root in excluded)
+
+    def is_excluded_directory(path: Path) -> bool:
+        resolved = path.resolve()
+        return any(resolved == root or resolved.is_relative_to(root) for root in excluded)
 
     digest = hashlib.sha256()
     files = 0
@@ -178,9 +242,15 @@ def _stable_git_tree_digest(paths: tuple[Path, ...]) -> tuple[str, int, int]:
                     metadata = os.lstat(Path(current) / name)
                     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                         raise ControllerError("Git authority directory tree contains an indirect path")
-                directories[:] = sorted(name for name in directories if not name.endswith(".lock"))
+                directories[:] = sorted(
+                    name
+                    for name in directories
+                    if not name.endswith(".lock") and not is_excluded_directory(Path(current) / name)
+                )
                 for name in sorted(item for item in names if not item.endswith(".lock")):
                     path = Path(current) / name
+                    if is_excluded(path):
+                        continue
                     entries.append((os.fspath(path), path))
         else:
             entries.append((os.fspath(root), root))
@@ -223,16 +293,41 @@ def git_authority_snapshot(workspace: Path) -> GitAuthoritySnapshot:
     ).resolve()
     head_oid = os.fsdecode(_bounded_command(workspace, ("git", "rev-parse", "--verify", "HEAD"))).strip()
     branch = os.fsdecode(_bounded_command(workspace, ("git", "symbolic-ref", "--quiet", "--short", "HEAD"))).strip()
-    refs = _bounded_command(
+    refs_raw = _bounded_command(
         workspace,
         ("git", "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)"),
+    )
+    if refs_raw and not refs_raw.endswith(b"\n"):
+        raise ControllerError("Git ref inventory ended with an incomplete record")
+    ref_records: list[tuple[str, str, str]] = []
+    for raw_record in refs_raw.splitlines():
+        fields = raw_record.split(b"\0")
+        if len(fields) != 3:
+            raise ControllerError("Git ref inventory contains an incomplete record")
+        try:
+            refname, objectname, symref = (field.decode("utf-8", errors="strict") for field in fields)
+        except UnicodeDecodeError as exc:
+            raise ControllerError("Git ref inventory is not valid UTF-8") from exc
+        if (
+            not refname.startswith("refs/")
+            or refname.endswith("/")
+            or any(ord(char) < 0x20 or char == "\x7f" for char in refname)
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", objectname)
+            or (symref and not symref.startswith("refs/"))
+            or any(ord(char) < 0x20 or char == "\x7f" for char in symref)
+        ):
+            raise ControllerError("Git ref inventory contains an invalid record")
+        ref_records.append((refname, objectname, symref))
+        if len(ref_records) > _GIT_AUTHORITY_MAX_FILES:
+            raise ControllerError("Git ref inventory exceeds its bounded record limit")
+    ordinary_ref_records = tuple(
+        sorted(record for record in ref_records if not record[0].startswith("refs/codex/turn-diffs/"))
     )
     selected = tuple(
         dict.fromkeys(
             (
                 common_dir / "config",
                 common_dir / "config.worktree",
-                common_dir / "packed-refs",
                 common_dir / "shallow",
                 common_dir / "refs",
                 common_dir / "logs" / "refs",
@@ -251,7 +346,14 @@ def git_authority_snapshot(workspace: Path) -> GitAuthoritySnapshot:
             )
         )
     )
-    metadata_sha256, file_count, byte_count = _stable_git_tree_digest(selected)
+    metadata_sha256, file_count, byte_count = _stable_git_tree_digest(
+        selected,
+        excluded_subtrees=(
+            common_dir / "refs" / "codex" / "turn-diffs",
+            common_dir / "logs" / "refs" / "codex" / "turn-diffs",
+        ),
+    )
+    refs = _canonical_json(ordinary_ref_records)
     details: JsonObject = {
         "schema": "codex-flow/git-authority/v1",
         "head_oid": head_oid,
@@ -269,7 +371,7 @@ def git_authority_snapshot(workspace: Path) -> GitAuthoritySnapshot:
 
 def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
     capsule = canonicalize_execution_capsule(capsule)
-    return {
+    value: JsonObject = {
         "capsule_version": capsule.capsule_version,
         "run_id": str(capsule.run_id),
         "milestone_id": str(capsule.milestone_id),
@@ -292,6 +394,11 @@ def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
         "permission_mode": capsule.permission_mode.value,
         "acceptance_modes": [mode.value for mode in capsule.acceptance_modes],
     }
+    if capsule.plugin_requirements:
+        value["plugin_requirements"] = [dict(item) for item in capsule.plugin_requirements]
+    if capsule.local_image_paths:
+        value["local_image_paths"] = list(capsule.local_image_paths)
+    return value
 
 
 def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
@@ -314,9 +421,19 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         "output_schema",
         "permission_mode",
     }
-    optional = {"acceptance_modes"}
-    if set(value) not in (expected, expected | optional):
-        raise ValueError(f"capsule keys must be exactly {sorted(expected)!r}")
+    optional = {"acceptance_modes", "plugin_requirements"}
+    image_optional = {"local_image_paths"}
+    accepted_keys = (
+        expected,
+        expected | {"acceptance_modes"},
+        expected | optional,
+        expected | image_optional,
+        expected | image_optional | {"acceptance_modes"},
+        expected | image_optional | {"plugin_requirements"},
+        expected | image_optional | optional,
+    )
+    if not any(set(value) == keys for keys in accepted_keys):
+        raise ValueError("capsule keys do not match the closed execution schema")
 
     def require_string(field: str) -> str:
         raw = value[field]
@@ -363,6 +480,12 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         raise ValueError("capsule acceptance_modes must be an array of strings")
     run_id = require_string("run_id")
     milestone_id = require_string("milestone_id")
+    raw_requirements = value.get("plugin_requirements", [])
+    if not isinstance(raw_requirements, list) or any(not isinstance(item, Mapping) for item in raw_requirements):
+        raise ValueError("capsule plugin_requirements must be an array of objects")
+    raw_images = value.get("local_image_paths", [])
+    if not isinstance(raw_images, list) or any(not isinstance(item, str) for item in raw_images):
+        raise ValueError("capsule local_image_paths must be an array of strings")
     return ExecutionCapsule(
         version,
         RunId(run_id),
@@ -382,6 +505,8 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         cast(JsonObject, schema),
         NativePermissionMode(permission_mode),
         tuple(AcceptanceMode(item) for item in raw_modes),
+        tuple(dict(item) for item in raw_requirements),
+        tuple(raw_images),
     )
 
 
@@ -534,10 +659,10 @@ class Controller:
     def close(self) -> None:
         self.ledger.close()
 
-    def h4_walking_skeleton(self, config: WorkflowConfig | None = None) -> H4WalkingSkeleton:
-        """Return the H4 orchestration view over this controller's ledger."""
+    def review_workflow(self, config: WorkflowConfig | None = None) -> ReviewWorkflow:
+        """Return the review orchestration view over this controller's ledger."""
 
-        return H4WalkingSkeleton(self.ledger, self.state_root, config)
+        return ReviewWorkflow(self.ledger, self.state_root, config)
 
     def _fault(self, stage: str) -> None:
         if self._fault_injector is not None:
@@ -624,6 +749,125 @@ class Controller:
         ):
             raise ControllerError("durable capsule identity or digest changed")
         return capsule
+
+    def enqueue(
+        self,
+        capsule: ExecutionCapsule,
+        *,
+        backend: str = "sdk_headless",
+        action_json: str | None = None,
+        plan_path: Path | str = "internal",
+        plan_revision_sha256: str | None = None,
+        projection_sha256: str | None = None,
+        checkpoint_seconds: float = 1800.0,
+    ) -> dict[str, object]:
+        """Durably claim and queue a dispatch for the detached supervisor."""
+
+        source_thread_id = os.environ.get("CODEX_THREAD_ID") or None
+        if source_thread_id is not None:
+            try:
+                source_thread_id = ThreadIdentity(source_thread_id).id
+            except ValueError as exc:
+                raise ControllerError("CODEX_THREAD_ID is not a valid source controller identity") from exc
+        with self._mutation_lock():
+            self.ledger.assert_supervisor_refresh_allowed()
+            if self.ledger.supervisor_refresh_fenced():
+                raise SupervisorRefreshBlocked("supervisor refresh fence is active")
+            planned = self._plan(capsule)
+            existing_dispatch = None
+            try:
+                existing_dispatch = self.ledger.get_dispatch(
+                    DispatchId.from_parts(planned.run_id, planned.milestone_id, "executor", 1)
+                )
+            except RecordNotFound:
+                pass
+            profile = (
+                NativeProfileProjection.load(Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve())
+                if self._production_adapter
+                else self._trusted_test_native_profile
+            )
+            if profile is None:
+                # Trusted hermetic tests do not have a native profile to
+                # inherit.  Keep that low-level seam conservative; production
+                # enqueue always binds the actual native profile above.
+                effective_permission = NativePermissionAuthority(
+                    capsule.permission_mode,
+                    "read-only",
+                    "never",
+                )
+                native_profile_sha256 = None
+                native_compatibility_sha256 = None
+            else:
+                if backend == "sdk_headless":
+                    profile.verify_worker_sources()
+                else:
+                    profile.verify_sources()
+                effective_permission = profile.effective_authority(capsule.permission_mode)
+                native_profile_sha256 = profile.profile_sha256
+                native_compatibility_sha256 = (
+                    profile.worker_compatibility_sha256 if backend == "sdk_headless" else profile.compatibility_sha256
+                )
+            try:
+                plugin_requirements = tuple(PluginRequirement.from_json(item) for item in capsule.plugin_requirements)
+                if plugin_requirements and backend != "sdk_headless":
+                    raise PluginCapabilityError("required plugins are unsupported by the App-native route")
+                plugin_snapshots = resolve_plugin_requirements(
+                    plugin_requirements,
+                    profile.source_home if profile is not None else standard_codex_home(),
+                )
+            except PluginCapabilityError as exc:
+                raise ControllerError(f"plugin capability is unavailable: {exc}") from exc
+            route = {
+                "role": "executor",
+                "model": capsule.model,
+                "reasoning_effort": capsule.reasoning_effort.value,
+                "effective_permission": effective_permission.facts,
+                "native_profile_sha256": native_profile_sha256,
+                "native_compatibility_sha256": native_compatibility_sha256,
+                "plugin_requirements": [item.to_json() for item in plugin_requirements],
+                "plugin_capabilities": [
+                    {**item.to_json(), "capability_sha256": item.capability_digest} for item in plugin_snapshots
+                ],
+                # This policy is an immutable queue fact consumed by the
+                # detached worker before SDK thread creation.  App-native
+                # creation has no equivalent per-task override in the donor
+                # API and is therefore explicitly marked unsupported rather
+                # than pretending prompt prose enforces leaf topology.
+                "leaf_worker_policy": (
+                    {
+                        "agents.enabled": False,
+                        "features.multi_agent": False,
+                        "config_overrides": list(LEAF_WORKER_CONFIG_OVERRIDES),
+                    }
+                    if backend == "sdk_headless"
+                    else {"status": "unsupported_app_native_per_task_override"}
+                ),
+            }
+            queue_projection = capsule_json(capsule)
+            queue_projection["prompt"] = _leaf_worker_prompt(str(queue_projection["prompt"]))
+            projected = _canonical_json(queue_projection).decode("utf-8")
+            if existing_dispatch is None:
+                # Bind all native/profile and generated projection facts before
+                # creating the execution dispatch authority.
+                self.ledger.claim_dispatch(planned.run_id, planned.milestone_id, "executor", 1)
+            return self.ledger.enqueue_dispatch(
+                DispatchId.from_parts(planned.run_id, planned.milestone_id, "executor", 1),
+                backend=backend,
+                capsule_json=projected,
+                route_json=json.dumps(route, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                workspace_path=capsule.workspace_path,
+                result_contract_sha256=model_facing_result_schema_sha256(),
+                action_json=action_json,
+                plan_path=plan_path,
+                plan_revision_sha256=plan_revision_sha256,
+                projection_sha256=projection_sha256 or _digest_bytes(projected.encode("utf-8")),
+                source_thread_id=source_thread_id,
+                permission_mode=capsule.permission_mode,
+                native_profile_sha256=native_profile_sha256,
+                native_compatibility_sha256=native_compatibility_sha256,
+                effective_permission=effective_permission,
+                checkpoint_seconds=checkpoint_seconds,
+            )
 
     def _assert_protected_clean(self, capsule: ExecutionCapsule) -> None:
         if not capsule.protected_paths:
@@ -1291,8 +1535,43 @@ class Controller:
             raise ControllerError("workspace changed during pre-external authorization")
         return captures[0]
 
-    def _authorize_external_call(self, capsule: ExecutionCapsule, record: ExecutionRecord) -> None:
+    def _authorize_external_call(
+        self, capsule: ExecutionCapsule, record: ExecutionRecord
+    ) -> tuple[tuple[PluginRequirement, ...], tuple[PluginCapabilitySnapshot, ...], Path]:
         """Exactly revalidate every durable authority immediately before an external boundary."""
+
+        plugin_requirements = tuple(PluginRequirement.from_json(item) for item in capsule.plugin_requirements)
+        snapshots: tuple[PluginCapabilitySnapshot, ...] = ()
+        profile = self._trusted_test_native_profile if not self._production_adapter else None
+        home = profile.source_home if profile is not None else standard_codex_home()
+        try:
+            if plugin_requirements:
+                snapshots = verify_plugin_requirements(plugin_requirements, home)
+                try:
+                    queue = self.ledger.queue_dispatch(
+                        DispatchId.from_parts(record.run_id, record.milestone_id, "executor", 1)
+                    )
+                except RecordNotFound:
+                    queue = None
+                if queue is None:
+                    route = None
+                else:
+                    route_raw = queue.get("route_json")
+                    if not isinstance(route_raw, str):
+                        raise ControllerError("durable plugin capability route is missing")
+                    route = strict_json_loads(route_raw, max_bytes=1_048_576)
+                    if not isinstance(route, Mapping):
+                        raise ControllerError("durable plugin capability route is malformed")
+                expected_requirements = [item.to_json() for item in plugin_requirements]
+                expected_capabilities = [
+                    {**item.to_json(), "capability_sha256": item.capability_digest} for item in snapshots
+                ]
+                if route is not None and route.get("plugin_requirements") != expected_requirements:
+                    raise ControllerError("durable plugin requirement binding changed before SDK start")
+                if route is not None and route.get("plugin_capabilities") != expected_capabilities:
+                    raise ControllerError("durable plugin capability digest changed before SDK start")
+        except PluginCapabilityError as exc:
+            raise ControllerError(f"plugin capability changed before SDK start: {exc}") from exc
 
         current = self.ledger.get_execution(record.run_id, record.milestone_id)
         if current.workspace_path != capsule.workspace_path:
@@ -1342,6 +1621,7 @@ class Controller:
             raise ControllerError("Git authority changed from its durable baseline before external call")
         if protected != current.protected_before_sha256:
             raise ControllerError("protected paths changed from their durable baseline before external call")
+        return plugin_requirements, snapshots, home
 
     def _app_controller_state_digest(self) -> str:
         snapshot = {
@@ -1362,6 +1642,11 @@ class Controller:
             if record.status is not ExecutionStatus.PLANNED:
                 raise ControllerError("App-native prepare cannot replace an SDK-headless execution")
             capsule = self._load_durable_capsule(record)
+            try:
+                if capsule.plugin_requirements:
+                    raise ControllerError("required plugins are unsupported by the App-native route")
+            except PluginCapabilityError as exc:
+                raise ControllerError(f"plugin capability requirement is malformed: {exc}") from exc
             if capsule.workspace_mode is WorkspaceMode.MANAGED_WORKTREE:
                 raise ControllerError("App-native dispatch requires an already selected existing checkout")
             if capsule.output_schema != model_facing_result_schema():
@@ -1387,15 +1672,16 @@ class Controller:
                 raise ControllerError("protected paths changed between App-native plan and prepare")
             dispatch_id = DispatchId.from_parts(capsule.run_id, capsule.milestone_id, "executor", 1)
             action = AppNativeTaskAction(
-                1,
+                2,
                 dispatch_id,
                 secrets.token_hex(32),
                 secrets.token_hex(32),
                 capsule.model,
                 capsule.reasoning_effort,
                 capsule.workspace_path,
-                capsule.prompt,
+                format_model_facing_result_prompt(capsule.prompt),
                 capsule.output_schema,
+                result_contract_sha256=model_facing_result_schema_sha256(),
             )
             return self.ledger.prepare_app_native_dispatch(
                 capsule.run_id,
@@ -1526,6 +1812,7 @@ class Controller:
             raise UncertainPreIdentity("prior SDK start crossed the durable external-call boundary")
         self._worktrees.select(capsule)
         self._assert_protected_clean(capsule)
+        local_image_inputs = self._validate_local_image_inputs(capsule)
         if record.checkpoint is ControllerCheckpoint.WORKSPACE_BASELINE_DURABLE:
             integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
             if integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None:
@@ -1599,20 +1886,35 @@ class Controller:
             try:
                 if native_runtime is not None:
                     native_runtime.native_profile.verify_sources()
-                self._authorize_external_call(capsule, record)
+                plugin_facts = self._authorize_external_call(capsule, record)
+            except Exception:
+                self.ledger._reject_thread_start_authorization(capsule.run_id, capsule.milestone_id)
+                raise
+            skill_binding = _verified_skill_input(*plugin_facts)
+            try:
+                skill_input = skill_binding.__enter__()
             except Exception:
                 self.ledger._reject_thread_start_authorization(capsule.run_id, capsule.milestone_id)
                 raise
             try:
-                identity = adapter.start_thread()
-            except Exception as exc:
-                self.ledger.record_pre_identity_uncertainty(capsule.run_id, capsule.milestone_id)
-                raise UncertainPreIdentity(
-                    "SDK start failed before durable identity; automatic retry is forbidden"
-                ) from exc
-            record = self.ledger.record_thread_identity(capsule.run_id, capsule.milestone_id, identity)
-            self._fault("after_thread_identity")
-            return self._execute_turn_and_finish(capsule, record, adapter)
+                try:
+                    identity = adapter.start_thread()
+                except Exception as exc:
+                    self.ledger.record_pre_identity_uncertainty(capsule.run_id, capsule.milestone_id)
+                    raise UncertainPreIdentity(
+                        "SDK start failed before durable identity; automatic retry is forbidden"
+                    ) from exc
+                record = self.ledger.record_thread_identity(capsule.run_id, capsule.milestone_id, identity)
+                self._fault("after_thread_identity")
+                return self._execute_turn_and_finish(
+                    capsule,
+                    record,
+                    adapter,
+                    skill_input=skill_input,
+                    local_image_inputs=local_image_inputs,
+                )
+            finally:
+                skill_binding.__exit__(None, None, None)
         finally:
             adapter.close()
 
@@ -1636,6 +1938,7 @@ class Controller:
         capsule = self._load_durable_capsule(record)
         self._worktrees.select(capsule)
         self._assert_protected_clean(capsule)
+        local_image_inputs = self._validate_local_image_inputs(capsule)
         integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
         if integrity.workspace_baseline_head_sha is None or integrity.workspace_baseline is None:
             raise ControllerError("execution lacks a durable per-milestone workspace baseline")
@@ -1691,16 +1994,29 @@ class Controller:
                     native_runtime.native_profile.verify_sources()
                 except NativeDiscoveryCompatibilityError as exc:
                     raise UnsafeResumeCompatibilityChange(str(exc)) from exc
-            self._authorize_external_call(capsule, record)
-            resumed = adapter.resume_thread(record.thread_id)
-            if resumed != record.thread_id:
-                raise ControllerError("SDK resume changed durable thread identity")
-            return self._execute_turn_and_finish(capsule, record, adapter)
+            plugin_facts = self._authorize_external_call(capsule, record)
+            with _verified_skill_input(*plugin_facts) as skill_input:
+                resumed = adapter.resume_thread(record.thread_id)
+                if resumed != record.thread_id:
+                    raise ControllerError("SDK resume changed durable thread identity")
+                return self._execute_turn_and_finish(
+                    capsule,
+                    record,
+                    adapter,
+                    skill_input=skill_input,
+                    local_image_inputs=local_image_inputs,
+                )
         finally:
             adapter.close()
 
     def _execute_turn_and_finish(
-        self, capsule: ExecutionCapsule, record: ExecutionRecord, adapter: Adapter | None
+        self,
+        capsule: ExecutionCapsule,
+        record: ExecutionRecord,
+        adapter: Adapter | None,
+        *,
+        skill_input: SkillInput | None = None,
+        local_image_inputs: tuple[LocalImageInput, ...] = (),
     ) -> ExecutionRecord:
         if record.thread_id is None:
             raise ControllerError("cannot execute without a durable SDK identity")
@@ -1726,7 +2042,20 @@ class Controller:
             except Exception:
                 self.ledger._reject_turn_authorization(capsule.run_id, capsule.milestone_id)
                 raise
-            observation = adapter.run_turn(record.thread_id, capsule.prompt, output_schema=capsule.output_schema)
+            sdk_input: str | SkillInput = capsule.prompt
+            if capsule.plugin_requirements:
+                if skill_input is None:
+                    raise ControllerError("verified bundled skill input is unavailable")
+                sdk_input = skill_input
+            if local_image_inputs:
+                observation = adapter.run_turn(
+                    record.thread_id,
+                    sdk_input,
+                    local_image_inputs=local_image_inputs,
+                    output_schema=capsule.output_schema,
+                )
+            else:
+                observation = adapter.run_turn(record.thread_id, sdk_input, output_schema=capsule.output_schema)
             try:
                 if controller_state_before != self._controller_tree_snapshot(self.state_root):
                     controller_state_error = "controller_state_mutated"
@@ -1895,6 +2224,15 @@ class Controller:
         self._project_execution(terminal)
         return terminal
 
+    @staticmethod
+    def _validate_local_image_inputs(capsule: ExecutionCapsule) -> tuple[LocalImageInput, ...]:
+        if not capsule.local_image_paths:
+            return ()
+        try:
+            return validate_local_image_inputs(capsule.local_image_paths, workspace=capsule.workspace_path)
+        except (OSError, ValueError) as exc:
+            raise ControllerError("local image input is invalid before SDK start") from exc
+
     def _finish_terminal(self, record: ExecutionRecord) -> ExecutionRecord:
         state = self.ledger.current_state(record.run_id, record.milestone_id)
         target = WorkflowState.COMPLETED if record.status is ExecutionStatus.COMPLETED else WorkflowState.FAILED
@@ -2014,7 +2352,35 @@ def execution_json(record: ExecutionRecord) -> JsonObject:
     }
 
 
-class H4WalkingSkeleton:
+def queue_json(row: Mapping[str, object]) -> JsonObject:
+    """Public queue projection omitting prompts, tokens and raw result text."""
+
+    allowed = {
+        "dispatch_id",
+        "run_id",
+        "milestone_id",
+        "role",
+        "generation",
+        "backend",
+        "workspace_path",
+        "result_contract_sha256",
+        "state",
+        "sequence",
+        "available_at",
+        "deadline",
+        "claim_epoch",
+        "attempt",
+        "thread_id",
+        "host_id",
+        "raw_result_sha256",
+        "terminal_status",
+        "created_at",
+        "updated_at",
+    }
+    return {key: row[key] for key in allowed if key in row}
+
+
+class ReviewWorkflow:
     """Objective execution/review/repair loop over the existing SDK ledger.
 
     The callbacks are deliberately narrow seams: the executor may call the
@@ -2124,16 +2490,16 @@ class H4WalkingSkeleton:
         recovery: RecoveryDecision | None = None,
         authority_plan: AuthorityPlan | None = None,
         rendered_evidence: tuple[RenderedEvidence, ...] = (),
-    ) -> H4LifecycleResult:
+    ) -> ReviewLifecycleResult:
         if recovery is not None:
             existing_recovery = any(
                 record.kind == "recovery_decision"
                 and record.data.get("outcome") == recovery.outcome.value
                 and record.data.get("checkpoint") == recovery.checkpoint
-                for record in self.ledger.h4_lifecycle(run_id, milestone_id)
+                for record in self.ledger.review_lifecycle(run_id, milestone_id)
             )
             if not existing_recovery:
-                self.ledger.record_h4_recovery(run_id, milestone_id, recovery)
+                self.ledger.record_review_recovery(run_id, milestone_id, recovery)
         lifecycle = tuple(
             LifecycleRecord(
                 record.phase,
@@ -2141,9 +2507,9 @@ class H4WalkingSkeleton:
                 record.sequence,
                 thaw_json(record.data),
             )
-            for record in self.ledger.h4_lifecycle(run_id, milestone_id)
+            for record in self.ledger.review_lifecycle(run_id, milestone_id)
         )
-        result = H4LifecycleResult(
+        result = ReviewLifecycleResult(
             status,
             accepted,
             tuple(review.review_id for review in reviews),
@@ -2154,7 +2520,7 @@ class H4WalkingSkeleton:
             authority_plan,
             rendered_evidence,
         )
-        write_h4_review_artifact(self.repository_root, run_id, str(milestone_id), result)
+        write_review_artifact(self.repository_root, run_id, str(milestone_id), result)
         return result
 
     def run(
@@ -2167,7 +2533,7 @@ class H4WalkingSkeleton:
         repair: Callable[[ReviewFinding], RepairRecord],
         current_revision: Callable[[], str],
         budget: Budget | None = None,
-    ) -> H4LifecycleResult:
+    ) -> ReviewLifecycleResult:
         """Run one bounded objective -> review -> repair -> fresh review loop."""
 
         active_budget = budget or Budget(max_turns=2, max_repairs=1, max_reviews=2, max_validations=2)
@@ -2177,11 +2543,11 @@ class H4WalkingSkeleton:
             self.ledger.transition(run_id, milestone_id, WorkflowState.RUNNING, expected_state=WorkflowState.STARTING)
             current = WorkflowState.RUNNING
         if current is not WorkflowState.RUNNING:
-            raise ControllerError(f"H4 objective requires RUNNING workflow state, found {current.value}")
+            raise ControllerError(f"review objective requires RUNNING workflow state, found {current.value}")
         exhausted = active_budget.exhausted()
         if exhausted is not None:
             recovery = self.classify_recovery(proven_infeasible=True, checkpoint=f"budget:{exhausted.value}")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2209,7 +2575,7 @@ class H4WalkingSkeleton:
             recovery = self.classify_recovery(
                 checkpoint="objective_transport_boundary",
             )
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2230,7 +2596,7 @@ class H4WalkingSkeleton:
             )
         except Exception as exc:
             recovery = self.classify_recovery(proven_infeasible=True, checkpoint="objective_failure")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2249,7 +2615,7 @@ class H4WalkingSkeleton:
                 repairs=(),
                 recovery=recovery,
             )
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.COMPLETED,
@@ -2264,7 +2630,7 @@ class H4WalkingSkeleton:
         revision = current_revision()
         if active_budget.reviews >= active_budget.max_reviews:
             recovery = self.classify_recovery(proven_infeasible=True, checkpoint="review_limit")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2284,7 +2650,7 @@ class H4WalkingSkeleton:
                 recovery=recovery,
             )
         active_budget = replace(active_budget, reviews=active_budget.reviews + 1)
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.REVIEWING,
@@ -2296,7 +2662,7 @@ class H4WalkingSkeleton:
         first = reviewer(revision, True)
         if first.reviewed_revision != revision or not first.fresh or not first.read_only:
             recovery = self.classify_recovery(checkpoint="stale_review")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.REPAIR_REQUIRED,
@@ -2321,7 +2687,7 @@ class H4WalkingSkeleton:
             )
         reviews.append(first)
         blockers = first.promotion_blockers
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.REPAIR_REQUIRED if blockers else WorkflowState.ACCEPTED,
@@ -2353,7 +2719,7 @@ class H4WalkingSkeleton:
             raise ControllerError("repair must acknowledge the exact finding and same durable owner")
         repairs.append(repair_record)
         active_budget = replace(active_budget, repairs=active_budget.repairs + 1)
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.RUNNING,
@@ -2368,7 +2734,7 @@ class H4WalkingSkeleton:
             },
             reason=ReasonCode.REVIEW_REJECTED,
         )
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.COMPLETED,
@@ -2379,9 +2745,9 @@ class H4WalkingSkeleton:
         )
         fresh_revision = current_revision()
         if active_budget.reviews >= active_budget.max_reviews:
-            raise ControllerError("H4 review limit exhausted before fresh re-review")
+            raise ControllerError("review limit exhausted before fresh re-review")
         active_budget = replace(active_budget, reviews=active_budget.reviews + 1)
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.REVIEWING,
@@ -2393,7 +2759,7 @@ class H4WalkingSkeleton:
         second = reviewer(fresh_revision, True)
         if second.reviewed_revision != fresh_revision or not second.fresh or not second.read_only:
             recovery = self.classify_recovery(checkpoint="stale_re_review")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.REPAIR_REQUIRED,
@@ -2426,7 +2792,7 @@ class H4WalkingSkeleton:
         reviews.append(second)
         if second.promotion_blockers:
             recovery = self.classify_recovery(proven_infeasible=True, checkpoint="re_review_rejected")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2445,7 +2811,7 @@ class H4WalkingSkeleton:
                 repairs=tuple(repairs),
                 recovery=recovery,
             )
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.ACCEPTED,
@@ -2501,11 +2867,11 @@ class H4WalkingSkeleton:
         render_evidence: Callable[[str], RenderedEvidence] | None = None,
         architecture_replan: Callable[[ReviewFinding], ReplanProposal] | None = None,
         planner: Callable[[DecisionRequest], DecisionResponse] | None = None,
-        notification: Callable[[H4LifecycleResult], None] | None = None,
+        notification: Callable[[ReviewLifecycleResult], None] | None = None,
         budget: Budget | None = None,
         available_models: set[str] | None = None,
-    ) -> H4LifecycleResult:
-        """Run the complete bounded H4 objective/visual/architecture route.
+    ) -> ReviewLifecycleResult:
+        """Run the complete bounded objective/visual/architecture review route.
 
         All mode reviewers are read-only and independent.  The first review
         pass is complete before any repair is attempted; a rejection is then
@@ -2547,8 +2913,8 @@ class H4WalkingSkeleton:
             self.ledger.claim_dispatch(run_id, milestone_id, "executor", 1)
             self.ledger.transition(run_id, milestone_id, WorkflowState.RUNNING, expected_state=WorkflowState.STARTING)
         if self.ledger.current_state(run_id, milestone_id) is not WorkflowState.RUNNING:
-            raise ControllerError("multi-authority H4 requires a running milestone")
-        self.ledger.record_h4_fact(
+            raise ControllerError("multi-authority review requires a running milestone")
+        self.ledger.record_review_fact(
             run_id,
             milestone_id,
             phase=LifecyclePhase.ROUTING,
@@ -2556,10 +2922,10 @@ class H4WalkingSkeleton:
             data={"acceptance_modes": [mode.value for mode in modes], "authority_plan": self._authority_json(plan)},
         )
 
-        def budget_failure(kind: str) -> H4LifecycleResult:
+        def budget_failure(kind: str) -> ReviewLifecycleResult:
             nonlocal recovery
             recovery = self.classify_recovery(proven_infeasible=True, checkpoint=f"budget:{kind}")
-            self.ledger.record_h4_fact(
+            self.ledger.record_review_fact(
                 run_id,
                 milestone_id,
                 phase=LifecyclePhase.BUDGET,
@@ -2568,7 +2934,7 @@ class H4WalkingSkeleton:
             )
             state = self.ledger.current_state(run_id, milestone_id)
             if state not in {WorkflowState.FAILED, WorkflowState.ACCEPTED}:
-                self.ledger.record_h4_transition(
+                self.ledger.record_review_transition(
                     run_id,
                     milestone_id,
                     WorkflowState.FAILED,
@@ -2600,7 +2966,7 @@ class H4WalkingSkeleton:
                 raise ValueError("objective output must be a JSON object")
         except (TransportFailureBeforeIdentity, TerminalFailureAfterIdentity) as exc:
             recovery = self.classify_recovery(checkpoint="objective_transport_boundary")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2622,7 +2988,7 @@ class H4WalkingSkeleton:
             )
         except Exception as exc:
             recovery = self.classify_recovery(proven_infeasible=True, checkpoint="objective_failure")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2642,7 +3008,7 @@ class H4WalkingSkeleton:
                 recovery=recovery,
                 authority_plan=plan,
             )
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.COMPLETED,
@@ -2656,7 +3022,7 @@ class H4WalkingSkeleton:
             try:
                 rendered = render_evidence(revision)  # type: ignore[misc]
             except Exception as exc:
-                self.ledger.record_h4_transition(
+                self.ledger.record_review_transition(
                     run_id,
                     milestone_id,
                     WorkflowState.FAILED,
@@ -2677,7 +3043,7 @@ class H4WalkingSkeleton:
                     authority_plan=plan,
                 )
             if rendered.revision != revision:
-                self.ledger.record_h4_transition(
+                self.ledger.record_review_transition(
                     run_id,
                     milestone_id,
                     WorkflowState.FAILED,
@@ -2698,7 +3064,7 @@ class H4WalkingSkeleton:
                     authority_plan=plan,
                 )
             evidence.append(rendered)
-            self.ledger.record_h4_fact(
+            self.ledger.record_review_fact(
                 run_id,
                 milestone_id,
                 phase=LifecyclePhase.REVIEW,
@@ -2706,7 +3072,7 @@ class H4WalkingSkeleton:
                 data=self._evidence_json(rendered),
             )
 
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.REVIEWING,
@@ -2741,7 +3107,7 @@ class H4WalkingSkeleton:
                 raise ControllerError(f"stale {mode.value} reviewer result")
             if mode is AcceptanceMode.VISUAL and evidence[0].evidence_id not in result.evidence_ids:
                 raise ControllerError("visual review did not acknowledge fixed rendered evidence")
-            self.ledger.record_h4_fact(
+            self.ledger.record_review_fact(
                 run_id,
                 milestone_id,
                 phase=LifecyclePhase.REVIEW,
@@ -2753,7 +3119,7 @@ class H4WalkingSkeleton:
         try:
             first_reviews = [invoke(mode, revision, True) for mode in modes]
         except AuthorityUnavailable as exc:
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2775,7 +3141,7 @@ class H4WalkingSkeleton:
             )
         except ControllerError as exc:
             recovery = self.classify_recovery(checkpoint="stale_authority")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2797,7 +3163,7 @@ class H4WalkingSkeleton:
                 rendered_evidence=tuple(evidence),
             )
         except Exception as exc:
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2820,7 +3186,7 @@ class H4WalkingSkeleton:
         reviews.extend(first_reviews)
         blockers = [finding for review in first_reviews for finding in review.promotion_blockers]
         if not blockers:
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.ACCEPTED,
@@ -2844,7 +3210,7 @@ class H4WalkingSkeleton:
                 try:
                     notification(result)
                 except Exception as exc:
-                    self.ledger.record_h4_fact(
+                    self.ledger.record_review_fact(
                         run_id,
                         milestone_id,
                         phase=LifecyclePhase.ACCEPTANCE,
@@ -2856,13 +3222,13 @@ class H4WalkingSkeleton:
                         notification_failure=True,
                         lifecycle=tuple(
                             LifecycleRecord(item.phase, item.kind, item.sequence, thaw_json(item.data))
-                            for item in self.ledger.h4_lifecycle(run_id, milestone_id)
+                            for item in self.ledger.review_lifecycle(run_id, milestone_id)
                         ),
                     )
-                    write_h4_review_artifact(self.repository_root, run_id, str(milestone_id), result)
+                    write_review_artifact(self.repository_root, run_id, str(milestone_id), result)
             return result
 
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.REPAIR_REQUIRED,
@@ -2889,12 +3255,12 @@ class H4WalkingSkeleton:
                     "The proposed architecture strategy changes an accepted boundary; confirm a new authorized scope.",
                     ("keep-accepted-boundary", "request-user-decision"),
                 )
-                self.ledger.record_h4_decision_request(run_id, milestone_id, request)
+                self.ledger.record_review_decision_request(run_id, milestone_id, request)
                 if planner is not None:
                     response = planner(request)
                     if not isinstance(response, DecisionResponse) or response.request_id != request.request_id:
                         raise ControllerError("planner returned an invalid decision response")
-                    self.ledger.record_h4_decision_response(run_id, milestone_id, response)
+                    self.ledger.record_review_decision_response(run_id, milestone_id, response)
                 recovery = self.classify_recovery(
                     intent_unchanged=isinstance(proposal, ReplanProposal) and proposal.intent_unchanged,
                     contract_unchanged=isinstance(proposal, ReplanProposal) and proposal.contract_unchanged,
@@ -2906,7 +3272,7 @@ class H4WalkingSkeleton:
                     scope_unchanged=isinstance(proposal, ReplanProposal) and proposal.scope_unchanged,
                     checkpoint="architecture_replan",
                 )
-                self.ledger.record_h4_recovery(run_id, milestone_id, recovery)
+                self.ledger.record_review_recovery(run_id, milestone_id, recovery)
                 return self._project_result(
                     run_id,
                     milestone_id,
@@ -2923,8 +3289,8 @@ class H4WalkingSkeleton:
                     rendered_evidence=tuple(evidence),
                 )
             recovery = self.classify_recovery(checkpoint="architecture_replan")
-            self.ledger.record_h4_recovery(run_id, milestone_id, recovery)
-            self.ledger.record_h4_fact(
+            self.ledger.record_review_recovery(run_id, milestone_id, recovery)
+            self.ledger.record_review_fact(
                 run_id,
                 milestone_id,
                 phase=LifecyclePhase.RECOVERY,
@@ -2939,7 +3305,7 @@ class H4WalkingSkeleton:
         try:
             repair_record = repair(finding)
         except Exception as exc:
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -2963,7 +3329,7 @@ class H4WalkingSkeleton:
         if repair_record.finding_id != finding.finding_id or not repair_record.same_owner:
             raise ControllerError("multi-authority repair must retain the exact finding and same owner")
         repairs.append(repair_record)
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.RUNNING,
@@ -2973,7 +3339,7 @@ class H4WalkingSkeleton:
             data={"repair_id": repair_record.repair_id, "finding_id": finding.finding_id, "same_owner": True},
             reason=ReasonCode.REVIEW_REJECTED,
         )
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.COMPLETED,
@@ -2987,7 +3353,7 @@ class H4WalkingSkeleton:
             try:
                 refreshed = render_evidence(fresh_revision)  # type: ignore[misc]
             except Exception as exc:
-                self.ledger.record_h4_transition(
+                self.ledger.record_review_transition(
                     run_id,
                     milestone_id,
                     WorkflowState.FAILED,
@@ -3009,7 +3375,7 @@ class H4WalkingSkeleton:
                     rendered_evidence=tuple(evidence),
                 )
             if refreshed.evidence_id != evidence[0].evidence_id:
-                self.ledger.record_h4_transition(
+                self.ledger.record_review_transition(
                     run_id,
                     milestone_id,
                     WorkflowState.FAILED,
@@ -3031,7 +3397,7 @@ class H4WalkingSkeleton:
                     rendered_evidence=tuple(evidence),
                 )
             evidence[0] = refreshed
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.REVIEWING,
@@ -3075,7 +3441,7 @@ class H4WalkingSkeleton:
                     if item.finding_id not in prior_ids and item.survives_prior_repair:
                         raise ControllerError("new review scope cannot masquerade as a surviving finding")
                 second_reviews.append(second)
-                self.ledger.record_h4_fact(
+                self.ledger.record_review_fact(
                     run_id,
                     milestone_id,
                     phase=LifecyclePhase.REVIEW,
@@ -3083,7 +3449,7 @@ class H4WalkingSkeleton:
                     data={"mode": mode.value, "review": self._review_json(second), "round": 2},
                 )
         except AuthorityUnavailable as exc:
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -3105,7 +3471,7 @@ class H4WalkingSkeleton:
             )
         except ControllerError as exc:
             recovery = self.classify_recovery(checkpoint="stale_authority")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -3127,7 +3493,7 @@ class H4WalkingSkeleton:
                 rendered_evidence=tuple(evidence),
             )
         except Exception as exc:
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -3151,7 +3517,7 @@ class H4WalkingSkeleton:
         remaining = [finding for review in second_reviews for finding in review.promotion_blockers]
         if remaining:
             recovery = self.classify_recovery(proven_infeasible=True, checkpoint="re_review_rejected")
-            self.ledger.record_h4_transition(
+            self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
                 WorkflowState.FAILED,
@@ -3172,7 +3538,7 @@ class H4WalkingSkeleton:
                 authority_plan=plan,
                 rendered_evidence=tuple(evidence),
             )
-        self.ledger.record_h4_transition(
+        self.ledger.record_review_transition(
             run_id,
             milestone_id,
             WorkflowState.ACCEPTED,
@@ -3197,7 +3563,7 @@ class H4WalkingSkeleton:
             try:
                 notification(result)
             except Exception as exc:
-                self.ledger.record_h4_fact(
+                self.ledger.record_review_fact(
                     run_id,
                     milestone_id,
                     phase=LifecyclePhase.ACCEPTANCE,
@@ -3209,8 +3575,8 @@ class H4WalkingSkeleton:
                     notification_failure=True,
                     lifecycle=tuple(
                         LifecycleRecord(item.phase, item.kind, item.sequence, thaw_json(item.data))
-                        for item in self.ledger.h4_lifecycle(run_id, milestone_id)
+                        for item in self.ledger.review_lifecycle(run_id, milestone_id)
                     ),
                 )
-                write_h4_review_artifact(self.repository_root, run_id, str(milestone_id), result)
+                write_review_artifact(self.repository_root, run_id, str(milestone_id), result)
         return result

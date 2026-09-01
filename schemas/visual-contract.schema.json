@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-workflow-skills.invalid/schemas/visual-contract.schema.json",
+  "title": "Visual implementation contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "intent", "sentinels", "acceptance_rubric"],
+  "properties": {
+    "schema_version": {"enum": [1, "1"]},
+    "name": {"type": "string", "minLength": 1},
+    "intent": {"type": "string", "minLength": 1},
+    "sentinels": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["id", "description", "render_path"], "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "render_path": {"type": "string", "minLength": 1}, "viewport": {"type": "string", "minLength": 1}}}},
+    "acceptance_rubric": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "constraints": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "status": "provider_free_integration_and_shared_user_activation_complete",
+  "candidate": {
+    "sha256": "10653fe7053abff68b1431b2e34ef08d1d5fe8e5de8b4dc3adb29d14bfdf9367",
+    "framing": "149 sorted existing Git tracked or nonignored untracked repository paths, each followed by NUL and raw bytes; this evidence record and ignored retained wheels are excluded",
+    "base_sha": "14106f3ee1e376f7c105d9e309292e9a742f0482",
+    "branch": "agent/python-sdk-controller"
+  },
+  "starting_state": {
+    "dirty_patch_sha256": "d88e3ebe5fe92167258a1f1f3afdf6c849dd95c179faedac71a6cbd889102197",
+    "review_repair_start_candidate_sha256": "457fd054e72bd0e4337e07f67b54cab8c7a996166951f7799d46f0545b6fb08e",
+    "review_repair_start_patch_sha256": "aa3ec6e2385922e5e7ba072798b37835b1dfb3f965d794d3a59f6151c5960d4e",
+    "full_file_manifest_sha256": "459fe2f482cca96f39754fc1353839f664110dbf169e578eff5106972354006f",
+    "protected_source_comparison": "The integrated-control protected-byte authority was rechecked exactly: 40 of 50 protected paths remain byte-identical and the other 10 are the explicitly delegated SDK/conversation/TUI/plan surfaces. AGENTS.md remains byte-identical at b4bf4abea607a9d3e4ac208d143503fdc896c895b6f4bc95e94e5cd0f614d06f."
+  },
+  "conversation_history": {
+    "donor_candidate_sha256": "87045b6e1d3b49f5523a7e3a81d44b389b15ac8ff25146c4836322145b6da22a",
+    "repaired_candidate_sha256": "9d17c6af5ba20de7ba4cf00a8ecfba049fe1ece04a173fb01fa87c6e04de40cf",
+    "evidence_path": "docs/reviews/evidence/complete-conversation-history.json",
+    "evidence_sha256": "f4fafa995c3463f0c3241cba1e12691ace043e858860f34b128228521db53eb4",
+    "retained_wheel_path": "dist/complete-conversation-history/codex_flow-0.2.0-py3-none-any.whl",
+    "retained_wheel_sha256": "4c19f79230f894795ed18440c79ebd92eabe00e59c202dd34f4802ef92100d4e",
+    "retained_wheel_size": 340822,
+    "observable_outcome": "Controller and worker SDK conversations project complete persisted ordered user and agent messages, including empty user content as one typed zero-length fragment, through explicit newest-page and load-older behavior, stable identity and snapshot checks, privacy redaction, reconnect discard and conversation-first TUI rendering. Native App transcripts remain outside this contract.",
+    "render_sha256": {
+      "conversation-light-wide.svg": "ee6a59e56ed28d42f0ffc3ba5138ad1d28d21bb402fbaaa19f97bf1d73972734",
+      "conversation-dark-wide.svg": "932fda33594a5d0b09429274ddd062c98d1698783cda3c7200eeb9ac4f9bcd3c",
+      "conversation-light-80x24.svg": "1ac91fe8185ff94dcbdcab443fc1266818c94278b8986a1680c40e32d19c2284",
+      "conversation-no-color-80x24.svg": "fc7fbd964b5f49fc5588cce406e66acfef3f99bb5c54a7196d0707ed3a4cfb30"
+    }
+  },
+  "provider_schema_projection": {
+    "authority": "https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas",
+    "method": "Positive recursive allowlist for the documented Structured Outputs subset; canonical const and nested oneOf become provider enum and anyOf, unsupported local constraints are omitted, regex extension groups or backreferences are not placed on the wire, and unrepresentable root unions or dynamic-key objects fail closed.",
+    "local_authority": "The full canonical Draft 2020-12-compatible validator is unchanged as returned-output acceptance authority.",
+    "observed_errors_closed": [
+      "uniqueItems is absent from the provider projection but remains locally enforced",
+      "lookaround pattern on changed_surfaces items is absent from the provider projection but remains locally enforced"
+    ]
+  },
+  "retained_wheels": {
+    "historical_human_terminal_ui": {
+      "path": "dist/human-terminal-ui/codex_flow-0.2.0-py3-none-any.whl",
+      "sha256": "1d6eaa14c6f6c5e56f110950eb64d8e0f7513cdfb19d7243defdd058d66beea2",
+      "size": 328062,
+      "evidence_path": "docs/reviews/evidence/human-terminal-ui.json",
+      "evidence_sha256": "2e6cf6d2c480497919f9a6852666a6bcb9309a5a97aee7a2fa2c2cd4e748efcb",
+      "recovery": "exact local closure artifacts restored as regular single-link historical authorities"
+    },
+    "historical_workflow_skill": {
+      "path": "dist/structured-output-runtime/codex_flow-0.2.0-py3-none-any.whl",
+      "sha256": "fea94483f8c0a834ba139612603a223868a536a1837bdb03a02e20319780815a",
+      "size": 259769,
+      "topology": "regular single-link file; historical evidence unchanged"
+    },
+    "current_integrated": {
+      "path": "dist/integrated-runtime/codex_flow-0.2.0-py3-none-any.whl",
+      "sha256": "4c19f79230f894795ed18440c79ebd92eabe00e59c202dd34f4802ef92100d4e",
+      "size": 340822,
+      "reproducibility": "two fresh SOURCE_DATE_EPOCH=0 builds were byte-identical",
+      "record_source_asset_parity": "passed for every RECORD row, packaged Python source, seven schemas, workflow template, example configuration, test partitions and workflow.toml",
+      "isolated_install": "Python 3.12.13 installed codex-flow 0.2.0 with openai-codex 0.147.0 and Textual 6.12.0; CLI, TUI, schema and provider-free supervisor status smoke passed from /tmp"
+    }
+  },
+  "installer": {
+    "entrypoint": "make install-personal-workflow-skills",
+    "orchestrator": "scripts/install_personal_workflow_skills.py",
+    "safety": "Standard-library closed argv; validates raw marketplace and plugin authority paths before canonicalization and rejects private CODEX_HOME, uv tool path substitution, manifest or version mismatch, duplicate or substituted authority, symlink aliases or ancestors, special files and multi-link bundle topology.",
+    "isolated": "Fresh and repeated isolated standard-home runs from /tmp both returned ready with exact versions and byte-parity checks.",
+    "shared_user_activation": {
+      "status": "ready",
+      "controller_version": "0.2.0",
+      "plugin_version": "0.1.7+codex.20260831000000",
+      "controller_command": "/home/adam/.local/bin/codex-flow",
+      "tui_command": "/home/adam/.local/bin/codex-flow tui",
+      "plugin_id": "personal-workflow-skills@adam-workflows",
+      "enabled": true,
+      "plugin_source": "/home/adam/personal-workflow-skills.worktrees/python-sdk-controller/plugins/personal-workflow-skills"
+    },
+    "installed_controller_source_parity": "32 Python package files matched the repaired integrated source bytes"
+  },
+  "causal_closure": {
+    "ARCH-RETENTION-001": "Recovered and restored exact historical evidence and wheel bytes; successor authority moved to complete-conversation-history paths.",
+    "INST-TOPOLOGY-001": "Raw marketplace and plugin paths plus ancestors are lstat-checked for symlinks before strict resolution; focused marketplace-root and plugin-root alias tests fail closed.",
+    "CONV-EMPTY-MESSAGE-001": "Empty SDK user content retains exact identity/order through projection, one-fragment paging and TUI rendering without invented visible text.",
+    "visual_findings": "Light renders use a real D transition; wide and 80x24 action rows expose position, scrolling, Load older, Open and Details."
+  },
+  "gates": {
+    "focused_integration": "185 passed plus 4 outside-checkout isolated installer discriminators",
+    "semantic_partitions": {
+      "contracts": "76 passed",
+      "controller": "405 passed",
+      "workers": "55 passed",
+      "integrations": "61 passed",
+      "workflow_assets": "100 passed"
+    },
+    "full_make_check": "passed: Ruff format/check, 697 tests, validator, compileall and all pre-commit hooks",
+    "validator": "Validated 16 cross-project skills and 7 workflow schemas",
+    "diff_hygiene": "git diff --check passed",
+    "provider_calls": 0,
+    "services_started": 0
+  },
+  "review": {
+    "self_review_p0": 0,
+    "self_review_p1": 0,
+    "independent_objective": "pending",
+    "independent_visual": "pending",
+    "independent_architecture": "pending"
+  },
+  "remaining_gate": "One separately authorized real two-turn SDK sentinel is still required for provider transcript compatibility. Fixture and provider-free SDK reads do not claim that result."
+}

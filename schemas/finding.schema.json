@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-workflow-skills.invalid/schemas/finding.schema.json",
+  "title": "Workflow finding",
+  "description": "A stable, evidence-backed review finding. Severity and promotion impact are independent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "lens",
+    "severity",
+    "promotion_blocking",
+    "promotion_reason",
+    "acceptance_or_guarantee",
+    "location_or_artifact",
+    "evidence",
+    "causal_class",
+    "user_impact_or_dependency_risk",
+    "required_action"
+  ],
+  "properties": {
+    "schema_version": {"enum": [1, "1"]},
+    "id": {
+      "type": "string",
+      "pattern": "^F-[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Stable across repair and re-review for the same causal issue."
+    },
+    "lens": {
+      "type": "string",
+      "enum": ["spec", "correctness", "standards", "contract-risk", "security", "visual"]
+    },
+    "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+    "promotion_blocking": {"type": "boolean"},
+    "promotion_reason": {"type": "string", "minLength": 1},
+    "acceptance_or_guarantee": {"type": "string", "minLength": 1},
+    "location_or_artifact": {"type": "string", "minLength": 1},
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {"type": "string", "minLength": 1},
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "detail"],
+            "properties": {
+              "source": {"type": "string", "minLength": 1},
+              "detail": {"type": "string", "minLength": 1},
+              "kind": {"type": "string", "enum": ["observation", "command", "artifact", "test"]}
+            }
+          }
+        ]
+      }
+    },
+    "causal_class": {"type": "string", "minLength": 1},
+    "user_impact_or_dependency_risk": {"type": "string", "minLength": 1},
+    "required_action": {"type": "string", "minLength": 1},
+    "defer_to": {"type": "string", "minLength": 1},
+    "owner": {"type": "string", "minLength": 1},
+    "related_finding_ids": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^F-[A-Za-z0-9][A-Za-z0-9._-]*$"},
+      "uniqueItems": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"promotion_blocking": {"const": false}}},
+      "then": {"required": ["defer_to"]}
+    }
+  ]
+}

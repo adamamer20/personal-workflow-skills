@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-workflow-skills.invalid/schemas/recovery.schema.json",
+  "title": "Milestone recovery artifact",
+  "description": "A typed diagnosis and bounded continuation for stalled work.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "milestone", "diagnosis", "remaining_work", "status", "evidence", "action"],
+  "properties": {
+    "schema_version": {"enum": [1, "1"]},
+    "milestone": {"type": "string", "minLength": 1},
+    "diagnosis": {"type": "string", "enum": ["near_completion", "local_implementation", "wrong_hypothesis", "wrong_implementation", "wrong_implementation_strategy", "guarantee_mismatch", "architecture_replan", "material_decision", "environment", "external_dependency", "infeasible", "impossible"]},
+    "remaining_work": {"type": "string", "enum": ["small", "medium", "fundamental"]},
+    "status": {"type": "string", "enum": ["completed", "continued", "needs_decision", "external_blocked", "failed"]},
+    "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "failure_capture": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "discriminating_evidence": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "action": {"type": "string", "minLength": 1},
+    "causal_finding_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^F-[A-Za-z0-9][A-Za-z0-9._-]*$"}},
+    "guarantee_assessment": {"type": "string"},
+    "plan_delta": {"type": "string"},
+    "next_action": {"type": ["string", "null"]},
+    "workspace": {"type": "string", "minLength": 1}
+  }
+}

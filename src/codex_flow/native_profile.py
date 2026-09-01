@@ -1,10 +1,10 @@
-"""Fail-closed projection of native Codex agent configuration.
+"""Fail-closed inspection of the native Codex agent configuration.
 
-The controller gives the SDK child a private ``CODEX_HOME`` so mutable runtime
-state cannot reach the user's global Codex state.  This module projects only
-the native agent semantics H3 supports into that private home.  Controller-
-owned execution policy is deliberately excluded and supplied through the SDK
-thread boundary instead.
+The H6 shared-session route reads the user's standard Codex home only to bind
+immutable provider, discovery and permission facts.  It never copies
+authentication or creates a private replacement home.  Controller-owned
+execution policy is deliberately excluded and supplied through the SDK thread
+boundary instead.
 """
 
 from __future__ import annotations
@@ -42,13 +42,11 @@ _SENSITIVE_KEY = re.compile(
     re.I,
 )
 
-_PRESERVED_TOP_LEVEL = frozenset(
+_REQUIRED_PRESERVED_TOP_LEVEL = frozenset(
     {
-        "agents",
         "approval_policy",
         "approvals_reviewer",
         "features",
-        "hooks",
         "marketplaces",
         "mcp_servers",
         "model_catalog_json",
@@ -60,14 +58,16 @@ _PRESERVED_TOP_LEVEL = frozenset(
         "projects",
         "skills",
         "sandbox_mode",
-        "shell_environment_policy",
     }
 )
+_OPTIONAL_PRESERVED_TOP_LEVEL = frozenset({"agents", "hooks", "shell_environment_policy"})
+_PRESERVED_TOP_LEVEL = _REQUIRED_PRESERVED_TOP_LEVEL | _OPTIONAL_PRESERVED_TOP_LEVEL
 _CONTROLLER_OWNED_TOP_LEVEL = frozenset(
     {
         "model",
         "model_reasoning_effort",
         "plan_mode_reasoning_effort",
+        "service_tier",
     }
 )
 _NON_AGENT_TOP_LEVEL = frozenset({"desktop", "notice", "tui"})
@@ -105,6 +105,11 @@ _MCP_STRING_LIST_FIELDS = frozenset({"args", "disabled_tools", "enabled_tools", 
 _MCP_BOOLEAN_FIELDS = frozenset({"enabled", "required"})
 _MCP_TIMEOUT_FIELDS = frozenset({"startup_timeout_sec", "tool_timeout_sec"})
 _MAX_MCP_COLLECTION_ENTRIES = 4_096
+# MCP timeout values are persisted in the native TOML projection and later
+# consumed by the pinned runtime.  Keep that boundary finite and bounded
+# without coercing arbitrary Python integers through ``float`` (which can
+# raise ``OverflowError`` for otherwise valid TOML integers).
+_MAX_MCP_TIMEOUT_SECONDS = 86_400
 _DISCOVERY_DIRECTORIES = ("memories", "plugins", "skills")
 
 TomlValue: TypeAlias = str | int | float | bool | list["TomlValue"] | dict[str, "TomlValue"]
@@ -168,6 +173,7 @@ class NativeProfileProjection:
     native_sandbox_mode: str
     native_approval_policy: str
     projected_config_sha256: str
+    worker_compatibility_sha256: str
     compatibility_sha256: str
     profile_sha256: str
     ephemeral_environment: tuple[tuple[str, str], ...] = field(repr=False)
@@ -256,7 +262,11 @@ class NativeProfileProjection:
             for name in _DISCOVERY_DIRECTORIES
         )
 
-        preserved = {key: _toml_value(projected_data[key], path=key) for key in sorted(_PRESERVED_TOP_LEVEL)}
+        preserved = {
+            key: _toml_value(projected_data[key], path=key)
+            for key in sorted(_PRESERVED_TOP_LEVEL)
+            if key in projected_data
+        }
         projected_toml = _render_toml(preserved)
         projected_digest = hashlib.sha256(projected_toml.encode("utf-8")).hexdigest()
         facts: JsonObject = {
@@ -289,6 +299,11 @@ class NativeProfileProjection:
         }
         compatibility_facts["compatible_config_sha256"] = hashlib.sha256(
             _render_toml(compatibility_preserved).encode("utf-8")
+        ).hexdigest()
+        worker_compatibility_digest = hashlib.sha256(
+            json.dumps(
+                compatibility_facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+            ).encode("utf-8")
         ).hexdigest()
         compatibility_facts["discovery_identities"] = [
             {
@@ -336,6 +351,7 @@ class NativeProfileProjection:
             native_sandbox_mode,
             native_approval_policy,
             projected_digest,
+            worker_compatibility_digest,
             compatibility_digest,
             profile_digest,
             ephemeral_environment,
@@ -363,6 +379,7 @@ class NativeProfileProjection:
             },
             "model_catalog_sha256": self.model_catalog_source.sha256,
             "projected_config_sha256": self.projected_config_sha256,
+            "worker_compatibility_sha256": self.worker_compatibility_sha256,
             "compatibility_sha256": self.compatibility_sha256,
             "profile_sha256": self.profile_sha256,
             "discovery_surfaces": [mount.target_name for mount in self.discovery_mounts],
@@ -393,6 +410,44 @@ class NativeProfileProjection:
                 != mount.identity
             ):
                 raise NativeDiscoveryCompatibilityError("native discovery surface changed during launch")
+
+    def verify_worker_sources(self) -> None:
+        """Verify launch authority while allowing ambient discovery edits.
+
+        H6-E workers have no named discovery capability. Their compatibility
+        identity protects config, provider, model catalog and discovery mount
+        topology, but does not pin unrelated recursive discovery contents.
+        """
+
+        _, current_config = _read_regular(
+            self.config_source.path,
+            _MAX_CONFIG_BYTES,
+            label="native Codex config",
+            require_private_permissions=True,
+        )
+        _, current_catalog = _read_regular(
+            self.model_catalog_source.path,
+            _MAX_MODEL_CATALOG_BYTES,
+            label="native model catalog",
+            require_private_permissions=False,
+        )
+        if current_config != self.config_source or current_catalog != self.model_catalog_source:
+            raise NativeProfileError("native profile source changed during launch")
+        for mount in self.discovery_mounts:
+            descriptor, ancestors = _open_absolute_directory(
+                mount.source, label=f"native {mount.target_name} discovery surface"
+            )
+            try:
+                current = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            root = mount.identity.root
+            if ancestors != mount.identity.ancestor_identities or (
+                current.st_dev,
+                current.st_ino,
+                current.st_mode,
+            ) != (root.device, root.inode, root.mode):
+                raise NativeDiscoveryCompatibilityError("native discovery mount changed during launch")
 
     def effective_authority(self, requested: NativePermissionMode) -> NativePermissionAuthority:
         """Return native permissions or a controller-requested monotonic restriction."""
@@ -529,12 +584,16 @@ def _project_native_config(data: Mapping[str, object]) -> tuple[dict[str, object
         for key in sorted(_MCP_TIMEOUT_FIELDS):
             if key in raw_server:
                 value = raw_server[key]
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, int | float)
-                    or not math.isfinite(value)
-                    or value <= 0
-                ):
+                if isinstance(value, bool) or not isinstance(value, int | float):
+                    raise NativeProfileError("native MCP timeout fields must be finite positive numbers")
+                if isinstance(value, int):
+                    # Do not call math.isfinite on ints: Python converts an
+                    # int to float there, and a very large TOML integer can
+                    # overflow before validation gets a chance to reject it.
+                    valid_timeout = 0 < value <= _MAX_MCP_TIMEOUT_SECONDS
+                else:
+                    valid_timeout = math.isfinite(value) and 0 < value <= _MAX_MCP_TIMEOUT_SECONDS
+                if not valid_timeout:
                     raise NativeProfileError("native MCP timeout fields must be finite positive numbers")
                 projected_server[key] = value
 
@@ -894,12 +953,17 @@ def _write_all(descriptor: int, value: bytes) -> None:
 
 def _validate_top_level(data: Mapping[str, object]) -> None:
     keys = set(data)
-    missing = _PRESERVED_TOP_LEVEL - keys
+    missing = _REQUIRED_PRESERVED_TOP_LEVEL - keys
     unknown = keys - _PRESERVED_TOP_LEVEL - _CONTROLLER_OWNED_TOP_LEVEL - _NON_AGENT_TOP_LEVEL
     if missing:
         raise NativeProfileError(f"native profile is missing required surfaces: {', '.join(sorted(missing))}")
     if unknown:
         raise NativeProfileError(f"native profile contains unsupported surfaces: {', '.join(sorted(unknown))}")
+    for key in sorted(_OPTIONAL_PRESERVED_TOP_LEVEL & keys):
+        if not isinstance(data[key], dict):
+            raise NativeProfileError(f"native profile optional surface {key!r} must be a table")
+    if "service_tier" in data:
+        _required_string(data, "service_tier")
 
 
 def _reject_secret_fields(value: object, *, path: str = "") -> None:

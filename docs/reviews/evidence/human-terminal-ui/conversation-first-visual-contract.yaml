@@ -1,0 +1,46 @@
+schema_version: 1
+name: Codex Flow terminal workspace
+intent: >-
+  Present the durable controller and its workers as one compact selectable session
+  tree around a dominant conversation, with coding-CLI density and contextual control.
+sentinels:
+  - id: controller-wide-light
+    description: >-
+      True light 120x40 workspace with selectable Sol controller, three worker
+      states, controller conversation selected, compact actions, and closed inspector.
+    render_path: docs/reviews/evidence/human-terminal-ui/conversation-light-wide.svg
+    viewport: 120x40
+  - id: worker-wide-dark
+    description: >-
+      Dark 120x40 worker conversation with bounded tool summary, active state,
+      older-page affordance, and open technical drawer.
+    render_path: docs/reviews/evidence/human-terminal-ui/conversation-dark-wide.svg
+    viewport: 120x40
+  - id: controller-narrow-light
+    description: >-
+      Exact light 80x24 controller-selected view retaining the compact session
+      strip, two transcript messages, position cue, and contextual actions.
+    render_path: docs/reviews/evidence/human-terminal-ui/conversation-light-80x24.svg
+    viewport: 80x24
+  - id: active-narrow-no-color
+    description: >-
+      Exact monochrome 80x24 active-only view proving controller hierarchy,
+      focus, attention, loading, and command-palette discoverability without color.
+    render_path: docs/reviews/evidence/human-terminal-ui/conversation-no-color-80x24.svg
+    viewport: 80x24
+acceptance_rubric:
+  - The controller is the first selectable session and exposes its exact generation thread and conversation through existing typed APIs.
+  - The selected task state and attention need are understandable at first glance without reading an identifier.
+  - The transcript dominates the layout and distinguishes user agent and bounded tool events without empty transport deltas.
+  - Wide layouts use a compact session rail transcript and contextual action row without oversized cards or dominant blank space.
+  - Exact 80x24 retains controller access active session two messages scroll position and relevant actions.
+  - Active-only mode always retains the controller and attention decisions.
+  - Light dark and no-color modes preserve hierarchy focus state and readable contrast with non-color cues.
+  - Common contextual actions remain direct while rare commands are discoverable through a palette.
+  - Offline loading empty stale incomplete failed and confirmation states are explicit and never invent content.
+constraints:
+  - The TUI consumes existing typed snapshot history and decision clients only and owns no lifecycle or polling.
+  - Complete conversation retains the official shared-SDK full-items source boundary and diagnostics never fill transcript gaps.
+  - Controller and worker transcript text is redacted before IPC and never persisted in the ledger logs recovery results or evidence.
+  - Existing four semantic render paths are reused and must be regenerated because current bytes do not satisfy this revised contract.
+  - Independent visual promotion review is omitted by user choice but native-size self-inspection remains required.

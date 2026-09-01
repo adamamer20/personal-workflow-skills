@@ -1,6 +1,6 @@
 {
   "name": "personal-workflow-skills",
-  "version": "0.1.5+codex.20260825000000",
+  "version": "0.1.7+codex.20260831000000",
   "description": "Cross-project planning, typed milestone execution, controller-backed workflow control, legacy handoff, and code-audit workflows.",
   "author": {
     "name": "Adam Amer"
@@ -13,6 +13,6 @@
     "developerName": "Adam Amer",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Choose the smallest workflow: plan new substantial work, execute one decision-ready milestone, or hand off to a peer thread."
+    "defaultPrompt": "Choose the smallest workflow: plan new substantial work, or execute one decision-ready milestone through normal $workflow-control. Use $codex-thread-handoff only when explicitly requested for legacy compatibility or deliberate comparison."
   }
 }
