@@ -1,24 +1,30 @@
 {
   "authorized_changed_paths": [
-    "M medium.txt",
-    "?? .codex-flow/"
+    "M workflow_result.txt"
   ],
-  "base_sha": "57e8d6cb978172c442baf471abecd454f1d698c1",
+  "base_sha": "95201a787a46433020e41e9baa71432953749632",
   "command": [
     "codex-flow",
     "control"
   ],
-  "controller_checkpoint": "result_durable",
+  "controller_checkpoint": null,
   "controller_exit_code": 0,
   "controller_status": "completed",
+  "dispatch_id_sha256": "eca3178e08d270cf2ba4ebc852ce78901bd0536ebf3e72433168c5a5e2f57ec9",
   "final_file_sha256": "be9e35885d26bab9689ab7a97cac19b9eea7deeb4ba071ab394057229ef9caf7",
+  "git_head_unchanged": true,
   "model": "gpt-5.6-luna",
   "observable_edit": true,
   "protected_file_sha256": "4378f5f8c155589bc148ca4213669f0b620dd18942e10450eae5779ce6c59beb",
   "protected_unchanged": true,
   "reasoning_effort": "medium",
+  "result_durable_status": "controller_acknowledged",
   "result_status": "completed",
   "route": "workflow-control/codex-flow",
   "schema": "codex-flow/h5-workflow-control-medium/v1",
-  "status": "passed"
+  "status": "passed",
+  "supervisor_clean_shutdown": true,
+  "temporary_repository_removed": true,
+  "worker_attempts_observed": 1,
+  "worker_result_acknowledged": true
 }

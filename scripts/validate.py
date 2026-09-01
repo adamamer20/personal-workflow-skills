@@ -962,25 +962,60 @@ def validate_workflow_control_evidence() -> None:
         "observable_edit",
         "protected_unchanged",
         "authorized_changed_paths",
+        "dispatch_id_sha256",
+        "result_durable_status",
+        "worker_result_acknowledged",
+        "worker_attempts_observed",
+        "git_head_unchanged",
+        "supervisor_clean_shutdown",
+        "temporary_repository_removed",
     }
-    if set(evidence) != required | {"base_sha", "controller_exit_code", "final_file_sha256", "protected_file_sha256"}:
+    if set(evidence) != required | {
+        "base_sha",
+        "controller_exit_code",
+        "final_file_sha256",
+        "protected_file_sha256",
+    }:
         fail("H5 evidence shape is not the sanitized controller contract")
     if evidence.get("schema") != "codex-flow/h5-workflow-control-medium/v1":
         fail("H5 evidence schema is unsupported")
     if evidence.get("status") != "passed" or evidence.get("route") != "workflow-control/codex-flow":
         fail("H5 evidence does not prove controller reachability")
-    if evidence.get("controller_status") != "completed" or evidence.get("controller_checkpoint") != "result_durable":
+    if (
+        evidence.get("controller_exit_code") != 0
+        or evidence.get("controller_status") != "completed"
+        or evidence.get("controller_checkpoint") is not None
+        or evidence.get("worker_result_acknowledged") is not True
+    ):
         fail("H5 evidence does not prove a durable terminal result")
-    if evidence.get("result_status") != "completed" or evidence.get("observable_edit") is not True:
+    if (
+        evidence.get("result_status") != "completed"
+        or evidence.get("result_durable_status") != "controller_acknowledged"
+        or evidence.get("observable_edit") is not True
+        or evidence.get("worker_attempts_observed") != 1
+    ):
         fail("H5 evidence does not prove the observable medium outcome")
-    if evidence.get("protected_unchanged") is not True:
+    if (
+        evidence.get("protected_unchanged") is not True
+        or evidence.get("git_head_unchanged") is not True
+        or evidence.get("supervisor_clean_shutdown") is not True
+        or evidence.get("temporary_repository_removed") is not True
+    ):
         fail("H5 evidence does not prove protected-surface integrity")
     command = evidence.get("command")
     if command != ["codex-flow", "control"]:
         fail("H5 evidence must name the controller entrypoint")
     changed_paths = evidence.get("authorized_changed_paths")
-    if changed_paths != ["M medium.txt", "?? .codex-flow/"]:
+    if changed_paths != ["M workflow_result.txt"]:
         fail("H5 evidence changed-path scope is not the bounded medium outcome")
+    if evidence.get("final_file_sha256") != "be9e35885d26bab9689ab7a97cac19b9eea7deeb4ba071ab394057229ef9caf7":
+        fail("H5 evidence does not bind the exact observable file bytes")
+    if evidence.get("protected_file_sha256") != "4378f5f8c155589bc148ca4213669f0b620dd18942e10450eae5779ce6c59beb":
+        fail("H5 evidence does not bind the exact protected file bytes")
+    for field, length in (("base_sha", 40), ("dispatch_id_sha256", 64)):
+        value = evidence.get(field)
+        if not isinstance(value, str) or re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is None:
+            fail(f"H5 evidence {field} is malformed")
 
 
 def validate_thread_handoff_contract() -> None:

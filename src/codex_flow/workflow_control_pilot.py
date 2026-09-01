@@ -312,7 +312,9 @@ def run_workflow_control_pilot(*, model: str, effort: ReasoningEffort) -> dict[s
                 for row in _git(root, "status", "--short", "--untracked-files=all").splitlines()
                 if ".codex-flow/" not in row
             ]
-            exact_changed_paths = changed_paths == [" M workflow_result.txt"]
+            # ``_git`` strips the command output envelope, including the one
+            # leading porcelain column when the index is clean.
+            exact_changed_paths = changed_paths == ["M workflow_result.txt"]
             worker_acknowledged = (
                 worker is not None
                 and not _exact_process_is_live(int(worker["pid"]), str(worker["process_birth_identity"]))
