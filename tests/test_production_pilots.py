@@ -7,12 +7,14 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import zipfile
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+import codex_flow.workflow_control_pilot as workflow_control_pilot_module
 from codex_flow.cli import app
 from codex_flow.ledger import (
     _APP_NATIVE_DISPATCHES_DRAFT_V9_DDL,
@@ -31,6 +33,7 @@ from codex_flow.production_pilots import (
     production_pilot_specs,
     write_production_evidence,
 )
+from codex_flow.supervisor import Supervisor, process_birth_identity
 
 INTEGRATED_WHEEL = Path("dist/integrated-runtime/codex_flow-0.2.0-py3-none-any.whl")
 INTEGRATED_WHEEL_SHA256 = "4c19f79230f894795ed18440c79ebd92eabe00e59c202dd34f4802ef92100d4e"
@@ -1486,3 +1489,113 @@ def test_integrated_control_runs_exact_retained_wheel_service_provider_free(tmp_
     assert all(matrix[str(count)]["steer_observation"].get("skill_input_consumed") is True for count in (1, 2))
     assert observed["sdk"]["typed_input_consumed"] is True
     assert observed["sdk"]["structured_output_unchanged"] is True
+
+
+class _RunningSupervisorProcess:
+    def poll(self) -> None:
+        return None
+
+
+def test_workflow_control_pilot_waits_for_temporary_supervisor_readiness(tmp_path: Path) -> None:
+    supervisor = Supervisor(tmp_path, worker_command=("provider-must-not-run",))
+    thread = threading.Thread(
+        target=supervisor.run_foreground,
+        kwargs={"timeout": 0.05},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        workflow_control_pilot_module._supervisor_ready(  # pyright: ignore[reportPrivateUsage]
+            tmp_path,
+            _RunningSupervisorProcess(),  # type: ignore[arg-type]
+            timeout_seconds=2.0,
+        )
+    finally:
+        supervisor._stop = True  # pyright: ignore[reportPrivateUsage]
+        thread.join(timeout=2.0)
+    assert not thread.is_alive()
+
+
+def test_workflow_control_pilot_waits_for_exact_worker_exit_before_terminal_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = subprocess.Popen((sys.executable, "-c", "import time; time.sleep(0.15)"))
+    birth_identity = process_birth_identity(worker.pid)
+    reaper = threading.Thread(target=worker.wait, daemon=True)
+    reaper.start()
+
+    class FakeLedger:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def queue_dispatch(self, _dispatch_id: str) -> dict[str, object]:
+            return {
+                "state": "running" if worker.poll() is None else "completed",
+                "raw_result_json": "{}",
+                "raw_result_sha256": "0" * 64,
+            }
+
+        def worker_liveness(self, _dispatch_id: str) -> dict[str, object]:
+            return {
+                "generation": 1,
+                "attempt": 1,
+                "pid": worker.pid,
+                "process_birth_identity": birth_identity,
+                "exited_at": None if worker.poll() is None else "2000-01-01T00:00:00Z",
+            }
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workflow_control_pilot_module, "Ledger", FakeLedger)
+    queue, live, attempts = workflow_control_pilot_module._wait_for_terminal_result(  # pyright: ignore[reportPrivateUsage]
+        tmp_path,
+        "pilot/worker/executor/1",
+        _RunningSupervisorProcess(),  # type: ignore[arg-type]
+        timeout_seconds=2.0,
+    )
+    reaper.join(timeout=1.0)
+    assert queue["state"] == "completed"
+    assert live is not None and live["exited_at"] is not None
+    assert attempts == 1
+
+
+def test_workflow_control_pilot_terminal_wait_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NeverStartedLedger:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def queue_dispatch(self, _dispatch_id: str) -> dict[str, object]:
+            return {"state": "queued"}
+
+        def worker_liveness(self, _dispatch_id: str) -> None:
+            return None
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(workflow_control_pilot_module, "Ledger", NeverStartedLedger)
+    with pytest.raises(TimeoutError, match="did not start"):
+        workflow_control_pilot_module._wait_for_terminal_result(  # pyright: ignore[reportPrivateUsage]
+            tmp_path,
+            "pilot/worker/executor/1",
+            _RunningSupervisorProcess(),  # type: ignore[arg-type]
+            timeout_seconds=0.02,
+        )
+
+
+def test_workflow_control_pilot_cleanup_stops_temporary_supervisor_process(tmp_path: Path) -> None:
+    process = subprocess.Popen(
+        (sys.executable, "-c", "import time; time.sleep(60)"),
+        start_new_session=True,
+    )
+    assert workflow_control_pilot_module._shutdown_supervisor(  # pyright: ignore[reportPrivateUsage]
+        tmp_path,
+        process,
+        grace_seconds=0.05,
+    )
+    assert process.poll() is not None
