@@ -8161,7 +8161,8 @@ class Ledger:
         # authority.  Suppression makes unresolved actionless deliveries
         # non-deliverable while retaining the complete ordered cycle history.
         self._db().execute(
-            "UPDATE controller_decisions SET state = 'superseded', superseded_at = ?, claim_lease_expires_at = NULL, updated_at = ? "
+            "UPDATE controller_decisions SET state = 'superseded', superseded_at = ?, "
+            "claim_lease_expires_at = NULL, human_attention_reason = NULL, updated_at = ? "
             "WHERE dispatch_id = ? AND kind = 'checkpoint' AND action_id IS NULL "
             "AND state NOT IN ('action_committed', 'acknowledged', 'superseded', 'legacy_closed')",
             (now, now, str(dispatch_id)),

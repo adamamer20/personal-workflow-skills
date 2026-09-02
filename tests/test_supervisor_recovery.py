@@ -1320,6 +1320,30 @@ def test_terminal_result_preserves_contiguous_checkpoint_audit_with_middle_actio
         third = ledger.claim_due_checkpoint(epoch=epoch, now="9999-01-01T00:00:02Z")
         assert third is not None
 
+        # Reproduce the real recovery history: actionless controller
+        # inspections can become ambiguous while a middle cycle commits an
+        # action.  Terminal supersession must clear the attention-only reason
+        # as well as preserving every cycle.
+        attention_at = "9999-01-01T00:00:03Z"
+        for status in (first, third):
+            ledger._db().execute(
+                "UPDATE wake_outbox SET state = 'failed', attempt_count = 2, updated_at = ? WHERE decision_id = ?",
+                (attention_at, str(status["decision_id"])),
+            )
+            ledger._db().execute(
+                "UPDATE controller_decision_generations SET state = 'ambiguous', "
+                "inspection_started_at = ?, inspection_completed_at = ?, inspection_outcome = 'ambiguous', "
+                "terminal_at = ?, updated_at = ? WHERE decision_id = ? AND generation = 1",
+                (attention_at, attention_at, attention_at, attention_at, str(status["decision_id"])),
+            )
+            ledger._db().execute(
+                "UPDATE controller_decisions SET state = 'human_attention_required', "
+                "human_attention_reason = 'controller inspection: ambiguous', updated_at = ? "
+                "WHERE decision_id = ?",
+                (attention_at, str(status["decision_id"])),
+            )
+        ledger._db().commit()
+
         terminal = ledger.commit_queue_result(
             DISPATCH,
             generation=1,
@@ -1337,6 +1361,16 @@ def test_terminal_result_preserves_contiguous_checkpoint_audit_with_middle_actio
         assert ledger.controller_decision(str(first["decision_id"])).state is ControllerDecisionState.SUPERSEDED
         assert ledger.controller_decision(str(second["decision_id"])).state is ControllerDecisionState.ACKNOWLEDGED
         assert ledger.controller_decision(str(third["decision_id"])).state is ControllerDecisionState.SUPERSEDED
+        remaining_attention_reasons = (
+            ledger._db()
+            .execute(
+                "SELECT COUNT(*) FROM controller_decisions WHERE decision_id IN (?, ?) "
+                "AND human_attention_reason IS NOT NULL",
+                (str(first["decision_id"]), str(third["decision_id"])),
+            )
+            .fetchone()[0]
+        )
+        assert remaining_attention_reasons == 0
         assert [item["kind"] for item in ledger.wake_outbox(state="pending")] == ["terminal"]
         ledger.close()
 
