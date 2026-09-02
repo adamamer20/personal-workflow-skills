@@ -151,6 +151,16 @@ IPC_ACCEPTED_FRAME_TIMEOUT_SECONDS = 2.0
 WORKER_CANCELLATION_STOP_TIMEOUT_SECONDS = 2.0
 STATUS_RECENT_ACTIVITY_LIMIT = 4
 STATUS_ACTIVITY_TEXT_MAX_BYTES = 512
+QUEUE_TRIGGERING_OPERATIONS = frozenset(
+    {
+        "wake",
+        "submit_result",
+        "retry",
+        "recovery_action",
+        "controller_submit_actions",
+        "controller_submit_recovered_actions",
+    }
+)
 
 
 WorkerCommand = Callable[[dict[str, object], Path, Path, Path], subprocess.Popen[bytes]]
@@ -3203,7 +3213,7 @@ class Supervisor:
                     self._renew_supervisor_lease_if_due()
                     # A producer wake or a worker terminal submission is the
                     # only normal queue-read trigger after startup.
-                    if operation in {"wake", "submit_result", "retry", "recovery_action"}:
+                    if operation in QUEUE_TRIGGERING_OPERATIONS:
                         self._process_queue_event()
                     self._deliver_wakes()
                     self._schedule_controller_generations()

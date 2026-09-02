@@ -45,6 +45,7 @@ from codex_flow.ipc import IpcError, IpcTransportError, decode_frame, encode_fra
 from codex_flow.ledger import CorruptSchemaError, Ledger, LedgerError, StaleWriter, UnsupportedSchemaVersion, utc_now
 from codex_flow.plugin_capabilities import PluginCapabilityError, discover_plugin_capabilities
 from codex_flow.supervisor import (
+    QUEUE_TRIGGERING_OPERATIONS,
     FailedSpawnTerminalizationError,
     Supervisor,
     SupervisorError,
@@ -3012,7 +3013,15 @@ def test_explicit_retry_uses_fresh_thread_recovery_prompt(monkeypatch: pytest.Mo
         assert "retains changes made by the prior worker" in fresh_thread
         assert "fresh SDK thread replacing a failed execution" in fresh_thread
         assert "recover context from the worktree" in fresh_thread
+        assert "this dispatch's active row" in fresh_thread
+        assert "not conflicting owners" in fresh_thread
         ledger.close()
+
+
+def test_controller_action_submission_immediately_triggers_queue_processing() -> None:
+    assert "controller_submit_actions" in QUEUE_TRIGGERING_OPERATIONS
+    assert "controller_submit_recovered_actions" in QUEUE_TRIGGERING_OPERATIONS
+    assert "controller_acknowledge" not in QUEUE_TRIGGERING_OPERATIONS
 
 
 def test_worker_exit_recovery_inspects_once_after_event_reap() -> None:

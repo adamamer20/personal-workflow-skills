@@ -106,8 +106,11 @@ _RETRYABLE_RESULT_SUBMIT_ERRNOS = frozenset(
 RECOVERY_CONTINUATION_PREAMBLE = (
     "RECOVERY INSPECT-BEFORE-MUTATE: this is a bounded recovery execution. "
     "The assigned worktree retains changes made by the prior worker. Inspect the current workspace and retained "
-    "evidence before any mutation. Do not repeat repository work already present, do not delegate, and return "
-    "exactly one schema-v1 ModelFacingResult terminal envelope."
+    "evidence before any mutation. The controller already established this capability as the sole mutable worker; "
+    "the supervisor, this worker process, and this dispatch's active row are expected parts of your own attempt, not "
+    "conflicting owners. Do not inspect codex-flow runtime ownership or declare blocked merely because your own "
+    "attempt is active. Do not repeat repository work already present, do not delegate, and return exactly one "
+    "schema-v1 ModelFacingResult terminal envelope."
 )
 
 
