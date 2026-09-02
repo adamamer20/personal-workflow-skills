@@ -8292,7 +8292,8 @@ class Ledger:
                 prior_thread_id=str(queue["thread_id"]) if queue["thread_id"] else None,
                 worker_was_bound=True,
                 allow_ambiguous_inspection=(
-                    (classification is None or classification == "worker-exit") and retry_failure is None
+                    classification in {None, "worker-exit", "restart-observed-worker-dead"}
+                    and retry_failure is None
                 ),
             )
             self._fault("after_worker_exit")

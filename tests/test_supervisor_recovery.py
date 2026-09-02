@@ -3843,6 +3843,76 @@ def test_dead_idle_recovery_consumes_one_bounded_continuation_without_resetting_
         ledger.close()
 
 
+def test_restart_observed_dead_worker_inspects_and_resumes_the_same_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger = _production_queued_ledger(root)
+        first = _supervisor(ledger, root)
+        first_epoch = int(first["epoch"])
+        ledger.claim_queue_dispatch(epoch=first_epoch, claim_nonce_sha256="a" * 64)
+        ledger.set_queue_state(DISPATCH, "starting", epoch=first_epoch)
+        token_hash = hashlib.sha256(b"dead-worker-token").hexdigest()
+        ledger.issue_attempt_capability(
+            DISPATCH,
+            generation=1,
+            attempt=1,
+            operation="submit_result",
+            schema_sha256=model_facing_result_schema_sha256(),
+            workspace_path=root,
+            backend="sdk_headless",
+            token_sha256=token_hash,
+            expires_at="9999-12-31T23:59:59Z",
+        )
+        ledger.bind_worker_liveness(
+            DISPATCH,
+            epoch=first_epoch,
+            generation=1,
+            attempt=1,
+            pid=2_147_483_647,
+            process_birth_identity="dead-worker",
+            lease_token_sha256=token_hash,
+        )
+        ledger._db().execute("UPDATE dispatch_queue SET thread_id = 'old-thread' WHERE dispatch_id = ?", (DISPATCH,))
+        ledger._db().execute("UPDATE supervisor_authority SET expires_at = '2000-01-01T00:00:00Z'")
+        ledger._db().commit()
+        replacement = ledger.acquire_supervisor(
+            repository_root=root,
+            state_root=root,
+            pid=os.getpid(),
+            process_birth_identity="replacement-supervisor",
+            executable_digest="c" * 64,
+            version="test",
+            owner_nonce_sha256="d" * 64,
+        )
+        supervisor = _configured_supervisor(ledger, root, int(replacement["epoch"]))
+        inspected: list[str] = []
+
+        def inspect(thread_id: str) -> ThreadInspection:
+            inspected.append(thread_id)
+            return ThreadInspection(thread_id, ThreadInspectionKind.IDLE_NO_RESULT)
+
+        supervisor._thread_inspector = inspect
+        child = _LiveChild()
+        monkeypatch.setattr(supervisor_module.subprocess, "Popen", lambda *args, **kwargs: child)
+
+        supervisor.recover_once()
+
+        queue = ledger.queue_dispatch(DISPATCH)
+        recovery = ledger.recovery_state(DISPATCH)
+        retry = ledger.retry_policy(DISPATCH)
+        assert queue["state"] == "starting", (queue, recovery, retry)
+        assert queue["attempt"] == 2
+        assert queue["thread_id"] == "old-thread"
+        assert inspected == ["old-thread"]
+        assert recovery["worker_exit_classification"] == "restart-observed-worker-dead"
+        assert recovery["recovery_state"] == "none"
+        assert recovery["continuation_used"] == 1
+        assert supervisor._children[DISPATCH] is child
+        ledger.close()
+
+
 def test_real_spawn_continuation_uses_new_monotonic_attempt_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
