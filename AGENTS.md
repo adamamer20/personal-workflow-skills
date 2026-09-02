@@ -45,6 +45,10 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-compatibility-sentinel \
 
 ## Semantic density
 
+- Optimize for semantic compression, not abstraction count. Under-abstraction
+  is also a defect when a repeated domain decision, relationship, transition,
+  or validation remains manually distributed. A useful abstraction makes that
+  repeated semantic pattern disappear from call sites.
 - Prefer the smallest representation that makes the invariant obvious. New
   vocabulary is more expensive than new lines: extend an existing domain
   concept before adding a class, protocol, model, enum, wrapper, manager,
@@ -61,6 +65,10 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-compatibility-sentinel \
   lifecycle, or policy composition. Do not add a `Protocol` for one production
   implementation unless it is a real independently owned and replaceable
   architectural boundary; tests alone are not sufficient justification.
+- Prefer pure policy functions/reducers, declarative specifications, small
+  relationship types, and typed boundary codecs when they compress repeated
+  decisions or eliminate downstream defensive code. Do not unify incidental
+  syntax or genuinely different mechanics merely to reduce line count.
 - Put behavior beside the invariant and split modules by coherent reason to
   change, not by line count. Delete pass-through layers and collapse
   config/state/result families when a domain reader would not distinguish them.

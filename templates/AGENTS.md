@@ -49,6 +49,10 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
 
 ### Semantic density
 
+- Optimize for semantic compression, not abstraction count. Under-abstraction
+  is also a defect when a repeated domain decision, relationship, transition,
+  or validation remains manually distributed. A useful abstraction makes that
+  repeated semantic pattern disappear from call sites.
 - Prefer the smallest representation that makes the invariant obvious. New
   vocabulary is more expensive than new lines. Extend an existing domain
   concept before adding another named abstraction.
@@ -64,6 +68,10 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   lifecycle, or policy composition. A one-implementation protocol requires a
   real independently owned and replaceable architectural boundary; tests alone
   are not sufficient justification.
+- Prefer pure policy functions/reducers, declarative specifications, small
+  relationship types, and typed boundary codecs when they compress repeated
+  decisions or eliminate downstream defensive code. Do not unify incidental
+  syntax or genuinely different mechanics merely to reduce line count.
 - Keep behavior beside the invariant, split modules by coherent reason to
   change rather than line count, remove pass-through layers, and collapse
   config/state/result families a domain reader would not distinguish.

@@ -44,6 +44,11 @@ the actual semantic delta; any unplanned module, public type, protocol,
 registry, runner, schema, entrypoint, compatibility path, or layer returns to
 planning.
 
+Do not equate simplicity with fewer abstractions. Implement planned semantic
+compression when a pure policy/reducer, declarative spec, relationship type, or
+typed codec makes repeated decisions, state handling, or validation disappear
+from call sites. Do not unify incidental mechanical repetition.
+
 Honor the capsule's distinct code authority for `objective`, render-aware
 visual authority for `visual`, and boundary/security authority for
 `architecture`; do not substitute one authority for another.

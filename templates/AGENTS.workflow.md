@@ -44,6 +44,10 @@
 
 ### Semantic density
 
+- Optimize for semantic compression, not abstraction count. Under-abstraction
+  matters when repeated decisions, relationships, transitions, or validation
+  remain distributed. A useful abstraction makes that semantic pattern
+  disappear from call sites.
 - Prefer the smallest representation that makes the invariant obvious. A new
   named abstraction must encode a distinct invariant, domain distinction,
   policy, lifecycle/identity, boundary validation, genuine substitution seam,
@@ -56,6 +60,10 @@
   lifecycle, or policy composition. A one-implementation protocol requires a
   real independently owned and replaceable boundary; tests alone do not justify
   it.
+- Prefer pure policy functions/reducers, declarative specifications, small
+  relationship types, and typed boundary codecs when they eliminate repeated
+  decisions or downstream defensive code. Do not unify incidental syntax or
+  genuinely different mechanics merely to reduce line count.
 - Treat semantic vocabulary as a budget. Extend an existing domain concept
   before adding another class, protocol, enum, config/state/result/context type,
   manager, adapter, or service. Keep behavior beside its invariant, split by

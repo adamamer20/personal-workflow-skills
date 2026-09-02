@@ -59,6 +59,11 @@ boundary, pass-through services/adapters, config/state/result/context wrappers
 without distinct invariants, repeated boundary validation/conversion, behavior
 separated from its invariant, and tests that pin implementation ceremony.
 
+Also detect under-abstraction: repeated domain decisions, relationships,
+transitions, state handling, or parsing that a pure policy/reducer, declarative
+specification, small relationship type, or typed codec could make disappear
+from call sites. Do not recommend unifying incidental mechanical repetition.
+
 Prefer deletion, collapse, a function, an existing domain concept, or direct
 composition when accepted guarantees remain intact. Do not reward explicitness
 or type count by itself; every retained abstraction must carry a distinct

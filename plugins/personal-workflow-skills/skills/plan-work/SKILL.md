@@ -36,7 +36,8 @@ dependency edge, or durable artifact requires a bounded plan update.
 ## Budget semantic vocabulary
 
 Record a semantic delta: new domain concepts/invariants, classes or public
-boundaries, new compatibility paths, and concepts collapsed/deleted. New
+boundaries, new compatibility paths, repeated semantic patterns compressed,
+and concepts collapsed/deleted. New
 vocabulary must carry an invariant, domain distinction, policy,
 lifecycle/identity, boundary validation, genuine substitution, or reusable
 algorithm; explicitness, forwarding, tests, or style alone do not justify it.
@@ -46,6 +47,9 @@ lifecycle, or policy; a one-implementation protocol needs a real independently
 owned and replaceable boundary. Validate once at each untrusted edge into one
 trusted representation. Keep behavior beside its invariant, split by reason to
 change, and reject pass-through layers or synonym config/state/result families.
+Plan a pure reducer/policy, declarative spec, relationship type, or typed codec
+when it makes repeated decisions, relationships, transitions, or validation
+disappear from call sites; do not abstract incidental mechanical repetition.
 
 ## Factor an independently closable milestone DAG
 
