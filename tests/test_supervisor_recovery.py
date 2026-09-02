@@ -1237,6 +1237,145 @@ def _completed_worker_result() -> str:
     )
 
 
+def _prepare_result_transport_attention(
+    ledger: Ledger,
+    root: Path,
+    epoch: int,
+    *,
+    token: str = "a" * 64,
+) -> None:
+    """Retain one exact exited attempt whose result transport was exhausted."""
+
+    ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
+    ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
+    token_sha256 = hashlib.sha256(token.encode("ascii")).hexdigest()
+    ledger.issue_attempt_capability(
+        DISPATCH,
+        generation=1,
+        attempt=1,
+        operation="submit_result",
+        schema_sha256=model_facing_result_schema_sha256(),
+        workspace_path=root,
+        backend="sdk_headless",
+        token_sha256=token_sha256,
+        expires_at="9999-12-31T23:59:59Z",
+    )
+    ledger.bind_worker_liveness(
+        DISPATCH,
+        epoch=epoch,
+        generation=1,
+        attempt=1,
+        pid=os.getpid(),
+        process_birth_identity="result-transport-worker",
+        lease_token_sha256=token_sha256,
+    )
+    ledger.mark_worker_exit(
+        DISPATCH,
+        pid=os.getpid(),
+        process_birth_identity="result-transport-worker",
+        exit_code=WORKER_EXIT_RESULT_TRANSPORT_AFTER_IDENTITY,
+        classification="result-transport-after-identity",
+    )
+
+
+def test_delayed_exact_result_is_accepted_after_result_transport_exit() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger = _queued_ledger(root)
+        epoch = int(_supervisor(ledger, root)["epoch"])
+        _prepare_result_transport_attention(ledger, root, epoch)
+
+        terminal = ledger.commit_queue_result(
+            DISPATCH,
+            generation=1,
+            attempt=1,
+            token="a" * 64,
+            raw_result=_completed_worker_result(),
+        )
+
+        assert terminal["state"] == "completed"
+        capability = ledger.worker_attempt_capability(DISPATCH, generation=1, attempt=1, token="a" * 64)
+        assert capability["consumed_at"] is not None
+        assert capability["accepted_result_sha256"] == hashlib.sha256(_completed_worker_result().encode()).hexdigest()
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    "guard", ["wrong-token", "active-worker", "unrelated-attention", "replaced-attempt", "pending-cancel"]
+)
+def test_retained_result_recovery_rejects_non_exact_owner(guard: str) -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger = _queued_ledger(root)
+        epoch = int(_supervisor(ledger, root)["epoch"])
+        _prepare_result_transport_attention(ledger, root, epoch)
+        token = "a" * 64
+        attempt = 1
+        if guard == "wrong-token":
+            token = "b" * 64
+        elif guard == "active-worker":
+            ledger._db().execute("UPDATE worker_liveness SET exited_at = NULL WHERE dispatch_id = ?", (DISPATCH,))
+        elif guard == "unrelated-attention":
+            ledger._db().execute(
+                "UPDATE retry_policies SET last_failure = 'unknown' WHERE dispatch_id = ?", (DISPATCH,)
+            )
+        elif guard == "replaced-attempt":
+            attempt = 2
+        else:
+            ledger.apply_recovery_action(
+                DISPATCH,
+                action_id="cancel-before-retained-result",
+                expected_revision=int(ledger.retry_policy(DISPATCH)["revision"]),
+                action_kind=RecoveryActionKind.CANCEL,
+                reason="cancellation retains terminal ownership",
+            )
+        ledger._db().commit()
+
+        with pytest.raises(StaleWriter):
+            ledger.commit_retained_queue_result(
+                DISPATCH,
+                generation=1,
+                attempt=attempt,
+                token=token,
+                raw_result=_completed_worker_result(),
+            )
+
+        assert ledger.queue_dispatch(DISPATCH)["raw_result_json"] is None
+        ledger.close()
+
+
+def test_restart_recovers_expired_private_result_once() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger = _queued_ledger(root)
+        epoch = int(_supervisor(ledger, root)["epoch"])
+        _prepare_result_transport_attention(ledger, root, epoch)
+        ledger._db().execute(
+            "UPDATE attempt_capabilities SET expires_at = '2000-01-01T00:00:00Z' WHERE dispatch_id = ?",
+            (DISPATCH,),
+        )
+        ledger._db().commit()
+        supervisor = _configured_supervisor(ledger, root, epoch)
+        digest = hashlib.sha256(DISPATCH.encode()).hexdigest()[:24]
+        capability_path = supervisor.runtime_root / f"capability-{digest}-g1-a1.json"
+        result_path = supervisor.runtime_root / f"result-{digest}-g1-a1.json"
+        worker_module.write_capability(capability_path, _private_capability_payload(root))
+        result_path.write_text(_completed_worker_result(), encoding="utf-8")
+        result_path.chmod(0o400)
+
+        supervisor.recover_once()
+        first = ledger.queue_dispatch(DISPATCH)
+        supervisor.recover_once()
+
+        assert first["state"] == "completed"
+        assert ledger.queue_dispatch(DISPATCH) == first
+        capability = ledger.worker_attempt_capability(DISPATCH, generation=1, attempt=1, token="a" * 64)
+        assert capability["consumed_at"] is not None
+        assert ledger._db().execute("SELECT COUNT(*) FROM successor_outbox").fetchone()[0] == 1
+        assert ledger._db().execute("SELECT COUNT(*) FROM wake_outbox").fetchone()[0] == 1
+        ledger.close()
+
+
 def test_recovered_attempt_repairs_past_capability_and_ignores_queue_deadline() -> None:
     """A stale checkpoint horizon must not expire the active recovered attempt."""
 
@@ -3324,14 +3463,23 @@ def test_worker_event_storm_keeps_short_supervisor_lease_and_terminal_result_liv
         ledger.close()
 
 
-def test_only_output_delta_worker_events_are_lossy() -> None:
-    assert worker_module._is_lossy_worker_diagnostic(
-        worker_module.LifecycleEvent(1, "item/commandExecution/outputDelta", "turn-1", "noisy")
+def test_high_volume_worker_events_are_lossy_but_terminal_boundaries_are_not() -> None:
+    methods = [
+        "item/agentMessage/delta",
+        "item/commandExecution/outputDelta",
+        "thread/tokenUsage/updated",
+        "turn/diff/updated",
+    ]
+    assert all(
+        worker_module._is_lossy_worker_diagnostic(worker_module.LifecycleEvent(index, method, "turn-1", "noisy"))
+        for index, method in enumerate(methods * 1_000, start=1)
     )
     assert not worker_module._is_lossy_worker_diagnostic(
-        worker_module.LifecycleEvent(2, "item/commandExecution/completed", "turn-1", "complete")
+        worker_module.LifecycleEvent(4_001, "item/completed", "turn-1", "complete")
     )
-    assert not worker_module._is_lossy_worker_diagnostic(worker_module.LifecycleEvent(3, "turn/completed", "turn-1"))
+    assert not worker_module._is_lossy_worker_diagnostic(
+        worker_module.LifecycleEvent(4_002, "turn/completed", "turn-1")
+    )
 
 
 def test_worker_diagnostic_fails_closed_after_explicit_supervisor_authority_loss() -> None:

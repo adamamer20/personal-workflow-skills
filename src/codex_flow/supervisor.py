@@ -75,6 +75,9 @@ from .worker import (
     WORKER_EXIT_TRANSPORT_BEFORE_IDENTITY,
     WORKER_EXIT_UNKNOWN_AFTER_IDENTITY,
     WORKER_EXIT_UNKNOWN_BEFORE_IDENTITY,
+    WorkerError,
+    _read_private_capability,
+    _read_private_file,
     _write_once,
     recovery_continuation_prompt,
     write_capability,
@@ -2943,6 +2946,18 @@ class Supervisor:
                 except LedgerError:
                     pass
 
+        # A worker can finish and persist its exact result while synchronous
+        # diagnostic traffic delays IPC until after the exit classification.
+        # Reconcile only that typed, exited attempt from its private immutable
+        # artifacts; never inspect or resume the provider thread for this case.
+        for row in self.ledger.queue_dispatches():
+            if row.get("state") != "human_attention_required":
+                continue
+            try:
+                self._recover_retained_worker_result(row)
+            except (LedgerError, WorkerError, ValueError):
+                continue
+
         processed_inspections: set[str] = set()
         now = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
         for pending in self.ledger.queue_dispatches():
@@ -3052,6 +3067,43 @@ class Supervisor:
                 raise
             except (LedgerError, SupervisorError):
                 continue
+
+    def _recover_retained_worker_result(self, row: dict[str, object]) -> bool:
+        """Ingest one exact result artifact from an exited transport attempt."""
+
+        dispatch_id = str(row["dispatch_id"])
+        generation = int(row["generation"])
+        attempt = int(row["attempt"])
+        runtime_root = getattr(self, "runtime_root", None)
+        if not isinstance(runtime_root, Path):
+            return False
+        dispatch_digest = hashlib.sha256(dispatch_id.encode()).hexdigest()[:24]
+        suffix = f"g{generation}-a{attempt}"
+        capability_path = runtime_root / f"capability-{dispatch_digest}-{suffix}.json"
+        result_path = runtime_root / f"result-{dispatch_digest}-{suffix}.json"
+        if not os.path.lexists(capability_path) or not os.path.lexists(result_path):
+            return False
+        binding = _read_private_capability(capability_path)
+        capability = binding.payload
+        expected = {
+            "dispatch_id": dispatch_id,
+            "generation": generation,
+            "attempt": attempt,
+            "backend": row["backend"],
+            "workspace_path": row["workspace_path"],
+            "schema_sha256": row["result_contract_sha256"],
+        }
+        if any(capability.get(key) != value for key, value in expected.items()):
+            raise WorkerError("retained worker capability does not match queue identity")
+        raw_result = _read_private_file(result_path, max_bytes=65_536, require_readonly=True)
+        terminal = self.ledger.commit_retained_queue_result(
+            dispatch_id,
+            generation=generation,
+            attempt=attempt,
+            token=str(capability["token"]),
+            raw_result=raw_result,
+        )
+        return terminal["state"] in {"completed", "failed"}
 
     def _deliver_wakes(self) -> bool:
         """Deliver pending harness envelopes without reading Codex task state."""

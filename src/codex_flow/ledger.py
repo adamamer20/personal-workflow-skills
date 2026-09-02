@@ -7046,14 +7046,23 @@ class Ledger:
             raise StaleWriter("result capability has already been consumed")
         if str(capability["expires_at"]) <= utc_now():
             raise StaleWriter("result capability has expired")
-        if queue["state"] not in {
-            "starting",
-            "running",
-            "recovery_inspection_pending",
-            "recovery_retry_wait",
-            "recovery_continuation_pending",
-            "result_submitted",
-        }:
+        late_result_transport_recovery = queue[
+            "state"
+        ] == "human_attention_required" and self._late_result_transport_recovery_allowed_in_transaction(
+            str(dispatch_id), generation=generation, attempt=attempt
+        )
+        if (
+            queue["state"]
+            not in {
+                "starting",
+                "running",
+                "recovery_inspection_pending",
+                "recovery_retry_wait",
+                "recovery_continuation_pending",
+                "result_submitted",
+            }
+            and not late_result_transport_recovery
+        ):
             raise StaleWriter(f"result submission is not allowed from queue state {queue['state']}")
         now = utc_now()
         self._db().execute(
@@ -7067,7 +7076,8 @@ class Ledger:
             (raw_bytes.decode("utf-8"), digest, result.status.value, now, str(dispatch_id)),
         )
         self._db().execute(
-            "UPDATE recovery_state SET recovery_state = ?, next_eligible_at = NULL, updated_at = ? "
+            "UPDATE recovery_state SET recovery_state = ?, next_eligible_at = NULL, "
+            "human_attention_reason = NULL, updated_at = ? "
             "WHERE dispatch_id = ?",
             (
                 "failed" if result.status.value in {"failed", "external_blocked", "needs_decision"} else "completed",
@@ -7077,6 +7087,46 @@ class Ledger:
         )
         row = self._db().execute("SELECT * FROM dispatch_queue WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
         return self._queue_row(row)
+
+    def _late_result_transport_recovery_allowed_in_transaction(
+        self,
+        dispatch_id: str,
+        *,
+        generation: int,
+        attempt: int,
+    ) -> bool:
+        """Prove one exited attempt still owns a delayed terminal result."""
+
+        retry = (
+            self._db()
+            .execute("SELECT last_failure, strategy FROM retry_policies WHERE dispatch_id = ?", (dispatch_id,))
+            .fetchone()
+        )
+        recovery = (
+            self._db()
+            .execute(
+                "SELECT worker_exit_classification, recovery_state FROM recovery_state WHERE dispatch_id = ?",
+                (dispatch_id,),
+            )
+            .fetchone()
+        )
+        live = (
+            self._db()
+            .execute("SELECT generation, attempt, exited_at FROM worker_liveness WHERE dispatch_id = ?", (dispatch_id,))
+            .fetchone()
+        )
+        return bool(
+            retry is not None
+            and retry["last_failure"] == RetryFailureClass.RESULT_TRANSPORT_AFTER_IDENTITY.value
+            and retry["strategy"] == RecoveryStrategy.HUMAN_ATTENTION.value
+            and recovery is not None
+            and recovery["worker_exit_classification"] == "result-transport-after-identity"
+            and recovery["recovery_state"] == "human_attention_required"
+            and live is not None
+            and int(live["generation"]) == generation
+            and int(live["attempt"]) == attempt
+            and live["exited_at"] is not None
+        )
 
     def commit_queue_result(
         self,
@@ -7107,6 +7157,73 @@ class Ledger:
                 digest=digest,
             )
             now = utc_now()
+            self._db().execute(
+                "UPDATE retry_policies SET revision = revision + 1, strategy = 'none', next_eligible_at = NULL, "
+                "human_attention_reason = NULL, updated_at = ? WHERE dispatch_id = ?",
+                (now, str(dispatch_id)),
+            )
+            return self._finalize_queue_result_in_transaction(dispatch_id)
+
+    def commit_retained_queue_result(
+        self,
+        dispatch_id: DispatchId | str,
+        *,
+        generation: int,
+        attempt: int,
+        token: str,
+        raw_result: str | bytes,
+    ) -> JsonObject:
+        """Recover one exact private result after result transport exhausted.
+
+        Only the unchanged, exited generation/attempt that entered typed
+        result-transport attention may receive a short renewal.  The ordinary
+        capability validation, cancellation fence and terminal commit remain
+        the sole result authority.
+        """
+
+        from .contracts import ModelFacingResult
+
+        result = ModelFacingResult.from_agent_message(raw_result)
+        raw_bytes = raw_result.encode("utf-8") if isinstance(raw_result, str) else bytes(raw_result)
+        if len(raw_bytes) > 65_536:
+            raise ValueError("worker raw result exceeds bounded limit")
+        digest = hashlib.sha256(raw_bytes).hexdigest()
+        with self._transaction():
+            if not self._late_result_transport_recovery_allowed_in_transaction(
+                str(dispatch_id), generation=generation, attempt=attempt
+            ):
+                raise StaleWriter("retained result does not own an exact result-transport recovery")
+            capability = (
+                self._db()
+                .execute(
+                    "SELECT consumed_at FROM attempt_capabilities "
+                    "WHERE dispatch_id = ? AND generation = ? AND attempt = ?",
+                    (str(dispatch_id), generation, attempt),
+                )
+                .fetchone()
+            )
+            if capability is None or capability["consumed_at"] is not None:
+                raise StaleWriter("retained result capability is unavailable")
+            now = utc_now()
+            self._db().execute(
+                "UPDATE attempt_capabilities SET expires_at = ? "
+                "WHERE dispatch_id = ? AND generation = ? AND attempt = ? AND consumed_at IS NULL",
+                (
+                    self._expires_after(now, _ATTEMPT_CAPABILITY_MIN_LIFETIME_SECONDS),
+                    str(dispatch_id),
+                    generation,
+                    attempt,
+                ),
+            )
+            self._submit_queue_result_in_transaction(
+                dispatch_id,
+                generation=generation,
+                attempt=attempt,
+                token=token,
+                raw_bytes=raw_bytes,
+                result=result,
+                digest=digest,
+            )
             self._db().execute(
                 "UPDATE retry_policies SET revision = revision + 1, strategy = 'none', next_eligible_at = NULL, "
                 "human_attention_reason = NULL, updated_at = ? WHERE dispatch_id = ?",

@@ -914,9 +914,20 @@ def run_sdk_worker(
 
 
 def _is_lossy_worker_diagnostic(event: LifecycleEvent) -> bool:
-    """Identify the one high-volume SDK event class safe to drop."""
+    """Identify high-volume SDK progress events safe to drop.
 
-    return event.method.rsplit("/", 1)[-1] == "outputDelta"
+    These events are useful for a live progress projection but are not
+    lifecycle authority.  Keeping them off the synchronous worker IPC path
+    prevents a long assistant response or command stream from delaying the
+    capability-bound terminal result.  Completed item and turn events are
+    deliberately absent from this set.
+    """
+
+    return event.method.rsplit("/", 1)[-1] == "outputDelta" or event.method in {
+        "item/agentMessage/delta",
+        "thread/tokenUsage/updated",
+        "turn/diff/updated",
+    }
 
 
 __all__ = [
