@@ -5,34 +5,44 @@ description: Implement exactly one decision-ready typed capsule, verify its obse
 
 # Execute Milestone
 
-Own exactly one decision-ready capsule from discovery through verification. The
-capsule is the authority for intent, decomposition, acceptance modes, mutable
-surfaces, protected surfaces, and scope. Do not invent a second milestone,
-change the public contract, or turn implementation into planning.
+Own exactly one decision-ready capsule through verification. It governs intent,
+acceptance, mutable/protected surfaces, and scope. Do not invent another
+milestone, change public contracts, or turn implementation into planning.
 
 ## Work inside the capsule
 
-Read the repository instructions, canonical plan, capsule, relevant code/tests,
-and exact worktree status. State the active scope, non-goals, protected
-surfaces, acceptance modes, and promotion gates before editing. Preserve
-unrelated user changes. Give shared schemas, runners, persisted contracts, and
-production entrypoints one owner.
+Read instructions, plan, capsule, relevant code/tests, and worktree status.
+State scope, non-goals, protected surfaces, acceptance modes, and promotion
+gates. Preserve unrelated changes and singular ownership of shared contracts
+and entrypoints.
 
-Implement the smallest coherent change. Keep every edit inside the mutable
-surfaces and prove protected surfaces remain unchanged. Run focused checks,
-repair ordinary failures, and self-review the complete diff. Acceptance is
-observable: rendered evidence is required for `visual`, boundary and safety
-evidence for `architecture`, and deterministic code/contract evidence for
-`objective`. A mixed capsule must pass all of its modes.
+Implement the smallest coherent change within mutable surfaces and prove
+protected surfaces unchanged. Repair ordinary failures and self-review the
+diff. Acceptance is observable: rendered evidence for `visual`, boundary/safety
+evidence for `architecture`, deterministic evidence for `objective`; mixed
+capsules pass every mode.
 
-Use stable descriptive semantic names for every new durable path and
-code/contract identifier, including files, modules, classes, functions,
-methods, variables, constants, tests, fixtures, CLI commands, public exports,
-evidence records, and generated artifacts. Reject temporary milestone/task
-labels in new names. Preserve an explicitly documented historical or protocol
-name only for compatibility/provenance, and update symbols, imports, packaging,
-commands, links, fixtures, evidence references, and tests together when the
-capsule owns a safe rename.
+Use stable capability/domain names for every durable path or identifier; reject
+temporary milestone/task labels. Preserve numbered historical/protocol names
+only for documented compatibility/provenance, and migrate all owned references
+together.
+
+## Preserve semantic density
+
+Implement the planned semantic delta. New vocabulary must carry an invariant,
+domain distinction, policy, lifecycle/identity, boundary validation, genuine
+substitution, or reusable algorithm; explicitness, forwarding, tests, or style
+alone do not justify it. Use functions/direct composition by default. A class
+needs state, identity, lifecycle, or policy; a one-implementation protocol needs
+a real independently owned and replaceable boundary.
+
+Keep strict edges and boring interiors: validate once at the earliest honest
+boundary into one trusted representation. Keep behavior beside its invariant;
+reject pass-through layers and synonym lifecycle nouns. Tests describe
+observable guarantees and transitions, not helper decomposition. Self-review
+the actual semantic delta; any unplanned module, public type, protocol,
+registry, runner, schema, entrypoint, compatibility path, or layer returns to
+planning.
 
 Honor the capsule's distinct code authority for `objective`, render-aware
 visual authority for `visual`, and boundary/security authority for
@@ -50,25 +60,16 @@ Outcome and evidence are ordered and non-negotiable:
 A lower-priority item never authorizes weakening a higher-priority item.
 Numeric targets are secondary unless the accepted plan marks them hard external constraints. Even a hard cap never silently authorizes removing a required check: use proof-preserving replacement or return a bounded replan or genuine decision when it conflicts. Never report success merely because a proxy is exact.
 
-Do not delete or weaken a production, persisted-artifact, lineage, isolation,
-recovery, or independent-proof check to meet a proxy. Removing a check requires
-proof-preserving replacement; if a designated hard cap still conflicts, stop
-the approach and return a bounded replan or genuine decision.
-
 ## Proportional validation and findings
 
-Run the smallest discriminating checks for each changed surface during
-implementation. At closure, run every affected semantic partition and each
-explicit packaging, integration, or promotion gate named by the capsule. A
-shared contract, test-collection, or packaging change requires the full
-repository gate. Tests, manifests, counts, and status metadata are supporting
-evidence rather than a substitute for the observable outcome.
+Use discriminating checks during implementation. At closure run every affected
+semantic partition and named packaging/integration/promotion gate. Shared
+contracts, collection, or packaging require the full repository gate. Tests and
+metadata support, but do not replace, observable outcome evidence.
 
-Treat severity and promotion impact separately. A P0 is presumptively blocking;
-a P1 blocks when it violates an accepted guarantee, public or persisted
-contract, security boundary, architecture ownership, production reachability,
-or data integrity. Non-blocking findings carry an owner and `defer_to` target.
-Close only when no open finding is promotion-blocking.
+Separate severity from promotion impact. P0 is presumptively blocking; P1
+blocks accepted guarantees, contracts, boundaries, production reachability, or
+integrity. Deferrals name owner and `defer_to`; close with none blocking.
 
 For a mutable milestone, `COMPLETION` also requires at least one coherent local
 commit on the assigned lane branch. Stage only owned surfaces, inspect the exact
@@ -83,11 +84,9 @@ retries, successor scheduling, worktree creation, or ledger mutation.
 
 ## Controller boundary
 
-Use `$workflow-control` for the runtime path. It invokes the packaged
-`codex-flow` controller and reports the durable status; it is the only runtime
-control surface for this milestone. Do not create another orchestration path or
-persist ad-hoc workflow state. The controller result is supplementary to the
-actual repository outcome, not a substitute for it.
+Use `$workflow-control`, backed by packaged `codex-flow`, as the sole runtime
+control surface. Do not add orchestration or ad-hoc state; durable controller
+status supplements rather than replaces repository outcome.
 
 Recovery is completion-biased within the capsule: finish a bounded repair or
 change implementation approach while intent, contract, safety boundary, cost,

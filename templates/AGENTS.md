@@ -47,6 +47,30 @@ bookkeeping support evidence but do not replace observable outcome proof.
 Record finding severity separately from `promotion_blocking`; close with no
 open promotion-blocking findings, while deferred findings name `defer_to`.
 
+### Semantic density
+
+- Prefer the smallest representation that makes the invariant obvious. New
+  vocabulary is more expensive than new lines. Extend an existing domain
+  concept before adding another named abstraction.
+- A class, protocol, model, enum, wrapper, manager, adapter, service, or
+  result/config/state/context type must encode a distinct invariant, domain
+  distinction, policy, lifecycle/identity, boundary validation, genuine
+  substitution seam, or reusable algorithm. Explicitness, forwarding, test
+  convenience, and stylistic cleanliness alone do not justify it.
+- Keep strict edges and boring interiors. Parse, validate, and normalize once
+  at the earliest honest boundary into one trusted domain representation; do
+  not repeat validation or conversions that add no meaning.
+- Functions are the default. Classes require persistent state, identity,
+  lifecycle, or policy composition. A one-implementation protocol requires a
+  real independently owned and replaceable architectural boundary; tests alone
+  are not sufficient justification.
+- Keep behavior beside the invariant, split modules by coherent reason to
+  change rather than line count, remove pass-through layers, and collapse
+  config/state/result families a domain reader would not distinguish.
+- Tests express observable guarantees, transitions, and forbidden transitions.
+  Avoid tests that pin helper decomposition, forwarding methods, or field
+  assignment.
+
 - For a new substantial or architecturally uncertain program, start with a Sol
   Medium architecture thread and use `$plan-work`. Update the single project-owned
   canonical plan under `docs/reviews/` by default, or at the path defined by

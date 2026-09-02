@@ -52,7 +52,18 @@ data flow, cleanup, cancellation, and cross-component integration.
 ### Standards / maintainability
 
 Check repository conventions, clarity, duplication, unnecessary indirection,
-speculative generality, ownership, and change surface.
+speculative generality, ownership, change surface, and semantic density. Compare
+the planned and implemented semantic delta. Look specifically for multiple
+symbols expressing one concept, one-implementation protocols without a real
+boundary, pass-through services/adapters, config/state/result/context wrappers
+without distinct invariants, repeated boundary validation/conversion, behavior
+separated from its invariant, and tests that pin implementation ceremony.
+
+Prefer deletion, collapse, a function, an existing domain concept, or direct
+composition when accepted guarantees remain intact. Do not reward explicitness
+or type count by itself; every retained abstraction must carry a distinct
+invariant, domain distinction, policy, lifecycle/identity, boundary validation,
+genuine substitution seam, or reusable algorithm.
 
 ### Visual
 

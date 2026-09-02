@@ -42,6 +42,27 @@
 - Treat disproportionate implementation complexity as evidence to revisit the
   guarantee or boundary, not as a reason to add another control plane.
 
+### Semantic density
+
+- Prefer the smallest representation that makes the invariant obvious. A new
+  named abstraction must encode a distinct invariant, domain distinction,
+  policy, lifecycle/identity, boundary validation, genuine substitution seam,
+  or reusable algorithm. Explicitness, test convenience, forwarding, or
+  stylistic cleanliness alone is not enough.
+- Keep strict edges and boring interiors: parse/validate/normalize once at the
+  earliest honest boundary, then use one trusted domain representation inward.
+  Do not create conversion or wrapper chains unless each step changes meaning.
+- Functions are the default. Classes require persistent state, identity,
+  lifecycle, or policy composition. A one-implementation protocol requires a
+  real independently owned and replaceable boundary; tests alone do not justify
+  it.
+- Treat semantic vocabulary as a budget. Extend an existing domain concept
+  before adding another class, protocol, enum, config/state/result/context type,
+  manager, adapter, or service. Keep behavior beside its invariant, split by
+  reason to change rather than size, and remove pass-through layers.
+- Tests express observable guarantees, transitions, and forbidden transitions;
+  they do not pin private helper decomposition, forwarding, or field assignment.
+
 ### Execution, review, and recovery
 
 - The milestone owner implements, validates, debugs ordinary failures,

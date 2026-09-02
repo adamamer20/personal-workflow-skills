@@ -5,14 +5,13 @@ description: Turn substantial or architecturally uncertain work into one decisio
 
 # Plan Work
 
-Use when work needs decomposition, explicit acceptance, or ownership decisions.
-The planner owns intent/canonical plan; the executor owns a capsule.
+Use for decomposition, acceptance, or ownership decisions. Planner owns the
+plan; executor owns one capsule.
 
 ## Produce one decision-ready plan
 
-Inspect instructions, plan, code/tests, and worktree first. Ask only questions
-that may change intent, contracts, safety, ownership, scope, or acceptance;
-resolve ordinary details from evidence.
+Inspect instructions, plan, code/tests, and worktree. Ask only about unresolved
+intent, contracts, safety, ownership, scope, or acceptance.
 
 Keep exactly one active plan at the repository path. It must state:
 
@@ -26,56 +25,58 @@ Keep exactly one active plan at the repository path. It must state:
 
 ## Freeze the implementation architecture map
 
-Before execution, map each production path as `create`, `modify`, `preserve`, or
-`remove`, assign one responsibility/owner and dependency direction, name owned
-types and entrypoints, state error/serialization/side-effect boundaries, and
-set a bounded new-artifact budget with reasons.
+Map each production path as `create`, `modify`, `preserve`, or `remove`; assign
+one responsibility/owner and dependency direction; name owned types,
+entrypoints, boundaries, and a reasoned new-artifact budget.
 
 Prefer an existing coherent module. Private helpers may remain inside it; a new
 production module, public class, registry, runner, schema, entrypoint,
 dependency edge, or durable artifact requires a bounded plan update.
 
+## Budget semantic vocabulary
+
+Record a semantic delta: new domain concepts/invariants, classes or public
+boundaries, new compatibility paths, and concepts collapsed/deleted. New
+vocabulary must carry an invariant, domain distinction, policy,
+lifecycle/identity, boundary validation, genuine substitution, or reusable
+algorithm; explicitness, forwarding, tests, or style alone do not justify it.
+
+Use functions and direct composition by default. A class needs state, identity,
+lifecycle, or policy; a one-implementation protocol needs a real independently
+owned and replaceable boundary. Validate once at each untrusted edge into one
+trusted representation. Keep behavior beside its invariant, split by reason to
+change, and reject pass-through layers or synonym config/state/result families.
+
 ## Factor an independently closable milestone DAG
 
-After freezing the map, record a dependency DAG and current readiness for
-independently closable vertical milestones with disjoint mutable surfaces.
-Freeze shared schemas, public/persisted contracts, state authority, and
-production entrypoints before fan-out. Each serial edge names shared schema,
-state authority, entrypoint, migration order, or acceptance dependency.
-Minimize the safe critical path; keep milestones single-owner and independently
-closable, reject fake boundaries and nested swarm/controller orchestration, and
-parallelize only ready milestones with disjoint surfaces. One planning turn may
-issue multiple START operations under those conditions; the one-start rule is
-per peer and milestone, and serial dependencies remain serial.
+Record a dependency DAG and current readiness for independently closable
+vertical milestones with disjoint mutable surfaces. Freeze shared schemas,
+public/persisted contracts, state authority, and production entrypoints before
+fan-out. Each serial edge names its schema, authority, entrypoint, migration
+order, or acceptance dependency. Minimize the critical path; require single-owner
+milestones, reject fake boundaries and nested swarm/controller orchestration,
+and parallelize only ready milestones with disjoint work. Multiple STARTs are allowed only for
+such peers; serial dependencies remain serial.
 
-Record one program worktree as the sole local integration trunk for the life of
-the plan. Before any mutable parallel group becomes ready, require a coherent
-verified local trunk commit containing only authorized surfaces and record its
-exact SHA as `fan_out_base`. If unrelated dirty baseline bytes are not safely
-separable, keep fan-out blocked and plan the separation instead of blessing an
-ambiguous base.
+Keep one program worktree as the sole local integration trunk. Before mutable
+fan-out, require a verified authorized trunk commit and record its SHA as
+`fan_out_base`; unrelated dirty baseline bytes block fan-out until separated.
 
-For every parallel mutable milestone, record a semantic lane and its physical
-sibling worktree path
+For each parallel mutable milestone, record its physical sibling worktree path
 `<repo-parent>/<repo-name>.worktrees/<program-slug>-<lane-slug>`, branch
 `agent/<program-slug>-<lane-slug>`, exact base SHA, owned surfaces, review
 commit/range and integration edge. Lane workers never mutate or integrate the
-trunk. A mutable milestone requires a coherent owned-surface local commit before
-`COMPLETION`; read-only planning/review/evidence and an explicit no-commit
-contract are the only exceptions.
-Require staged-diff inspection and `git diff --cached --check` before that
-commit.
+trunk. Mutable `COMPLETION` requires a coherent owned-surface local commit after
+staged-diff inspection and `git diff --cached --check`; only read-only work or
+an explicit no-commit contract is exempt.
 
-Promotion binds to exact commits. A repair adds a successor commit, and only the
-controller/integration owner integrates promoted lane commits after blocking
-P0/P1 findings reach zero. Prefer a merge commit for true fan-out; require a
-recorded reason for cherry-pick or fast-forward, ancestry/extraneous-commit
-verification, conflict work as a new integration change, and proportional
-integration gates. Advance readiness only after integration succeeds; derive
-successors from the new integrated tip and retain lane worktrees/branches until
-commit, review, integration and recovery evidence are durable. Local planned
-commits/integration are authorized; push, rebase, history rewrite, discard,
-remote mutation and implicit cleanup are not.
+Promotion binds to exact commits; repairs add a successor commit. Only the
+integration owner integrates lanes after blocking P0/P1=0. Prefer a merge commit
+for fan-out; otherwise record why, perform ancestry/extraneous-commit
+verification, treat conflicts as new changes, and run integration gates. Advance
+from the new integrated tip and retain lanes until evidence is durable. Planned
+local commits/integration are authorized; push, rebase, history rewrite,
+discard, remote mutation, and implicit cleanup are not.
 
 ## Outcome and evidence priority
 
@@ -103,24 +104,19 @@ mode; passing one authority never implies another.
 
 ## Proportional validation
 
-Run the smallest discriminating checks during execution, then each affected
-partition and named package/integration/promotion gate at closure. Tests and
-bookkeeping support observable proof; shared contracts, collection, or
-packaging require the full repository gate. Track severity separately from
-`promotion_blocking`; P0 is presumptively blocking and P1 blocks accepted
-guarantees or integrity. Deferred findings name an owner and `defer_to`; close
-with no open promotion-blocking finding. Skills own cognition only: never
-dispatch, callback, route, retry, schedule successors, create worktrees, or
-mutate the ledger.
+Use discriminating checks during execution and every affected partition and
+named closure gate. Tests/bookkeeping support observable proof; shared
+contracts, collection, or packaging require the full repository gate. Track
+severity separately from `promotion_blocking`; deferred findings name owner and
+`defer_to`, and closure has none open. Skills never dispatch, callback, route,
+retry, schedule successors, create worktrees, or mutate the ledger.
 
 ## Typed capsule boundary
 
-Write the next capsule with typed `codex_flow.contracts.ModelFacingCapsule`
-(objective, decomposition, acceptance modes/criteria, mutable/protected
-surfaces, authorities, bounded prompt, `completion-biased` recovery). JSON is
-controller projection only; reference the architecture map and artifact budget
-without a sidecar. The controller owns identity, workspace, persistence, and
-durable status.
+Write the next typed `codex_flow.contracts.ModelFacingCapsule` with objective,
+decomposition, acceptance, surfaces, authorities, bounded prompt, and
+`completion-biased` recovery. JSON is controller projection only; reference the
+architecture map/budgets without a sidecar. The controller owns runtime facts.
 
 ## Handoff to execution
 
@@ -138,5 +134,6 @@ gate, or turn an implementation difficulty into a user question.
 
 Before ending, verify one owner per mutable surface, no mutable/protected
 overlap, explicit modes/authorities, bounded capsule, observable gates,
-architecture map, artifact budget, semantic names/exceptions, and a successor.
+architecture map, artifact and semantic-vocabulary budgets, semantic delta,
+semantic names/exceptions, and a successor.
 Keep historical evidence beside the plan.

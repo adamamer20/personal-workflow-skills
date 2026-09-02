@@ -1317,6 +1317,84 @@ def validate_milestone_graph_contract() -> None:
                     fail(f"{path}: nested swarm/controller orchestration cannot be the default")
 
 
+def validate_semantic_density_contract() -> None:
+    """Keep the shared implementation policy biased toward fewer stronger concepts."""
+
+    workflow_template = ROOT / "templates" / "AGENTS.workflow.md"
+    paths = (
+        ROOT / "AGENTS.md",
+        GLOBAL_AGENTS_PATH,
+        workflow_template,
+        WORKFLOW_PATHS["plan"],
+        WORKFLOW_PATHS["execute"],
+        WORKFLOW_PATHS["review"],
+    )
+    normalized = {path: " ".join(path.read_text(encoding="utf-8").lower().split()) for path in paths}
+    required_by_path = {
+        ROOT / "AGENTS.md": (
+            "semantic density",
+            "smallest representation that makes the invariant obvious",
+            "new vocabulary is more expensive than new lines",
+            "strict edges and boring interiors",
+            "functions are the default",
+            "one production implementation",
+            "tests alone",
+            "pass-through layers",
+            "externally meaningful guarantees",
+        ),
+        GLOBAL_AGENTS_PATH: (
+            "semantic density",
+            "smallest representation that makes the invariant obvious",
+            "new vocabulary is more expensive than new lines",
+            "strict edges and boring interiors",
+            "functions are the default",
+            "one-implementation protocol",
+            "tests alone",
+            "pass-through layers",
+            "observable guarantees",
+        ),
+        workflow_template: (
+            "semantic density",
+            "smallest representation that makes the invariant obvious",
+            "strict edges and boring interiors",
+            "functions are the default",
+            "one-implementation protocol",
+            "semantic vocabulary as a budget",
+            "pass-through layers",
+            "observable guarantees",
+        ),
+        WORKFLOW_PATHS["plan"]: (
+            "budget semantic vocabulary",
+            "semantic delta",
+            "new domain concepts",
+            "new compatibility paths",
+            "functions and direct composition",
+            "one-implementation protocol",
+            "pass-through layers",
+        ),
+        WORKFLOW_PATHS["execute"]: (
+            "preserve semantic density",
+            "semantic delta",
+            "strict edges and boring interiors",
+            "one-implementation protocol",
+            "pass-through layers",
+            "observable guarantees",
+        ),
+        WORKFLOW_PATHS["review"]: (
+            "semantic density",
+            "planned and implemented semantic delta",
+            "multiple symbols expressing one concept",
+            "one-implementation protocols",
+            "pass-through services/adapters",
+            "tests that pin implementation ceremony",
+        ),
+    }
+    for path, required in required_by_path.items():
+        for token in required:
+            if token not in normalized[path]:
+                fail(f"{path}: missing semantic-density contract: {token}")
+
+
 def validate_git_lane_integration_contract() -> None:
     """Enforce commit-addressed integration trunk and parallel lane policy."""
 
@@ -2158,6 +2236,7 @@ def main(partition: str | None = None) -> int:
     validate_workflow_control_evidence()
     validate_global_agents_template()
     validate_milestone_graph_contract()
+    validate_semantic_density_contract()
     validate_git_lane_integration_contract()
     validate_workflow_assets()
     validate_outcome_evidence_priority_contract()

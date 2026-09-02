@@ -32,7 +32,8 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-compatibility-sentinel \
 - Use Ruff, pytest with strict configuration/markers, and pre-commit through
   the root Makefile. Keep tests runnable from the repository root.
 - Use Typer for the persistent `codex-flow` CLI, `pathlib` for paths, precise
-  PEP 484/695 annotations, typed boundary models, and explicit protocols.
+  PEP 484/695 annotations, typed boundary models, and protocols only at genuine
+  architectural boundaries.
 - Convert raw SDK payloads at the adapter boundary. Do not use
   `getattr`/`setattr`/`hasattr` for expected interfaces; an interface drift
   must fail visibly in typed code or a focused contract test.
@@ -41,6 +42,31 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-compatibility-sentinel \
 - Read secrets from environment variables only. Never hard-code credentials,
   paths, hosts, or URLs, and never mutate global Codex configuration,
   authentication, hooks, remotes, or unrelated tasks.
+
+## Semantic density
+
+- Prefer the smallest representation that makes the invariant obvious. New
+  vocabulary is more expensive than new lines: extend an existing domain
+  concept before adding a class, protocol, model, enum, wrapper, manager,
+  result/config/context type, adapter, or service.
+- A named abstraction must encode a distinct invariant, domain distinction,
+  policy, lifecycle/identity, boundary validation, genuine substitution seam,
+  or reusable algorithm. Explicitness, test convenience, forwarding, or “clean
+  architecture” alone does not pay that rent.
+- Keep strict edges and boring interiors. Parse, validate, and normalize an
+  untrusted representation once at the earliest honest boundary, convert it to
+  one trusted domain representation, and avoid wrapper chains or repeated
+  validation that do not change semantics.
+- Functions are the default. Introduce a class for persistent state, identity,
+  lifecycle, or policy composition. Do not add a `Protocol` for one production
+  implementation unless it is a real independently owned and replaceable
+  architectural boundary; tests alone are not sufficient justification.
+- Put behavior beside the invariant and split modules by coherent reason to
+  change, not by line count. Delete pass-through layers and collapse
+  config/state/result families when a domain reader would not distinguish them.
+- Tests describe externally meaningful guarantees, state transitions, and
+  forbidden transitions. Prefer behavior tables and public-boundary tests over
+  tests that pin helper decomposition, forwarding methods, or field assignment.
 
 ## Program ownership and boundaries
 
