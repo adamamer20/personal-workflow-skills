@@ -8939,6 +8939,7 @@ class Ledger:
                         int(policy["provider_transient_budget"]) != 3
                         or int(policy["provider_transient_grant_used"]) != 0
                         or int(policy["provider_transient_used"]) < 3
+                        or int(recovery["continuation_budget"]) != 3
                         or provider_budget != 4
                         or any(int(requested[name]) != int(policy[name]) for name in used)
                     ):
@@ -8952,6 +8953,7 @@ class Ledger:
                     )
                     self._db().execute(
                         "UPDATE recovery_state SET recovery_state = 'recovery_inspection_pending', "
+                        "continuation_budget = 4, "
                         "next_eligible_at = NULL, human_attention_reason = NULL, updated_at = ? "
                         "WHERE dispatch_id = ?",
                         (now, str(dispatch_id)),

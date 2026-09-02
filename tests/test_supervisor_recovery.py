@@ -2718,6 +2718,7 @@ def test_provider_transient_grant_is_exact_idempotent_and_preserves_usage() -> N
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
+        authority = _supervisor(ledger, root)
         ledger._db().execute(
             "UPDATE dispatch_queue SET state = 'human_attention_required', thread_id = 'provider-thread' "
             "WHERE dispatch_id = ?",
@@ -2754,7 +2755,10 @@ def test_provider_transient_grant_is_exact_idempotent_and_preserves_usage() -> N
         assert policy["provider_transient_used"] == 3
         assert policy["provider_transient_budget"] == 4
         assert policy["provider_transient_grant_used"] == 1
-        assert ledger.recovery_state(DISPATCH)["recovery_state"] == "recovery_inspection_pending"
+        recovery = ledger.recovery_state(DISPATCH)
+        assert recovery["recovery_state"] == "recovery_inspection_pending"
+        assert recovery["continuation_budget"] == 4
+        assert recovery["continuation_used"] == 3
         assert ledger.queue_dispatch(DISPATCH)["state"] == "recovery_inspection_pending"
 
         repeated = ledger.apply_recovery_action(
@@ -2776,6 +2780,42 @@ def test_provider_transient_grant_is_exact_idempotent_and_preserves_usage() -> N
                 reason="authorize a second provider continuation",
                 requested_budget=requested,
             )
+
+        ledger.record_recovery_inspection(
+            DISPATCH,
+            kind="transient_failed_turn",
+            thread_id="provider-thread",
+            turn_id="granted-failed-turn",
+            next_eligible_at="2000-01-01T00:00:00Z",
+        )
+        fourth = ledger.begin_recovery_continuation(
+            DISPATCH,
+            epoch=int(authority["epoch"]),
+            claim_nonce_sha256="d" * 64,
+            now="2000-01-01T00:00:01Z",
+        )
+        assert fourth["state"] == "claimed"
+        assert fourth["thread_id"] == "provider-thread"
+        assert ledger.recovery_state(DISPATCH)["continuation_used"] == 4
+
+        ledger._db().execute(
+            "UPDATE recovery_state SET recovery_state = 'recovery_continuation_pending', "
+            "next_eligible_at = '2000-01-01T00:00:00Z' WHERE dispatch_id = ?",
+            (DISPATCH,),
+        )
+        ledger._db().execute(
+            "UPDATE dispatch_queue SET state = 'recovery_continuation_pending' WHERE dispatch_id = ?",
+            (DISPATCH,),
+        )
+        ledger._db().commit()
+        exhausted = ledger.begin_recovery_continuation(
+            DISPATCH,
+            epoch=int(authority["epoch"]),
+            claim_nonce_sha256="e" * 64,
+            now="2000-01-01T00:00:02Z",
+        )
+        assert exhausted["state"] == "human_attention_required"
+        assert ledger.recovery_state(DISPATCH)["continuation_used"] == 4
         ledger.close()
 
 
