@@ -26,6 +26,7 @@ from .domain import (
     Generation,
     LiveWorkerActivity,
     LiveWorkerStatus,
+    ProgramControllerContext,
     ProgramControllerDecisionStatus,
     RecoveryAction,
     RecoveryActionKind,
@@ -77,6 +78,7 @@ _RESPONSE_FIELDS = {
     "controller_reset_generation_delivery": {"version", "ok", "generation"},
     "program_pending": {"version", "ok", "decisions"},
     "program_status": {"version", "ok", "decision"},
+    "program_context": {"version", "ok", "context"},
     "program_claim": {"version", "ok", "claim"},
     "program_submit_actions": {"version", "ok", "receipt"},
     "program_acknowledge": {"version", "ok", "receipt"},
@@ -525,6 +527,15 @@ def _decode_program_status(value: object) -> ProgramControllerDecisionStatus:
         raise ControlClientError("supervisor returned malformed program decision") from exc
 
 
+def _decode_program_context(value: object) -> ProgramControllerContext:
+    if not isinstance(value, dict):
+        raise ControlClientError("supervisor returned malformed program context")
+    try:
+        return ProgramControllerContext.from_json(value)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ControlClientError("supervisor returned malformed program context") from exc
+
+
 def _decode_controller_receipt(value: object) -> ControllerActionReceipt:
     raw = _shape(
         value,
@@ -934,6 +945,22 @@ class ControllerDecisionClient:
     def program_status(self, decision_id: str) -> ProgramControllerDecisionStatus:
         identity = ControllerDecisionId(decision_id)
         return _decode_program_status(self._request("program_status", decision_id=str(identity))["decision"])
+
+    def program_context(
+        self,
+        program_id: str,
+        *,
+        expected_revision: int,
+        expected_trunk_head: str,
+    ) -> ProgramControllerContext:
+        return _decode_program_context(
+            self._request(
+                "program_context",
+                program_id=program_id,
+                expected_revision=expected_revision,
+                expected_trunk_head=expected_trunk_head,
+            )["context"]
+        )
 
     def claim(
         self,

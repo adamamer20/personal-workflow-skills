@@ -64,6 +64,24 @@ def _absolute_lexical(path: Path) -> Path:
         raise WorktreeError(f"workspace path has no canonical physical identity: {path}") from exc
 
 
+def _validate_raw_integration_chain(path: Path) -> None:
+    """Reject aliases before integration paths are physically canonicalized."""
+
+    try:
+        lexical = Path(os.path.abspath(os.fspath(path)))
+    except (OSError, TypeError, ValueError) as exc:
+        raise WorktreeError(f"integration path has no bounded lexical identity: {path}") from exc
+    current = Path(lexical.anchor)
+    for part in lexical.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            raise WorktreeError(f"integration path does not exist: {current}") from None
+        if stat.S_ISLNK(metadata.st_mode):
+            raise WorktreeError(f"integration path must not traverse symlinks: {current}")
+
+
 def _validate_existing_chain(path: Path, *, allow_missing_leaf: bool = False) -> None:
     path = _absolute_lexical(path)
     current = Path(path.anchor)
@@ -253,6 +271,8 @@ class WorktreeManager:
         if not candidate_branch or any(character.isspace() for character in candidate_branch):
             raise WorktreeError("candidate branch is invalid")
 
+        _validate_raw_integration_chain(Path(repository_root))
+        _validate_raw_integration_chain(Path(candidate_workspace))
         repository = _absolute_lexical(Path(repository_root))
         candidate = _absolute_lexical(Path(candidate_workspace))
         _validate_existing_chain(repository)
@@ -268,9 +288,6 @@ class WorktreeManager:
         branch = self._git(candidate, "symbolic-ref", "--quiet", "--short", "HEAD")
         if branch != candidate_branch:
             raise WorkspaceConflict(f"candidate branch is {branch!r}, expected {candidate_branch!r}")
-        before = self._git(repository, "rev-parse", "--verify", "HEAD^{commit}")
-        if before != expected_trunk_head:
-            raise WorkspaceConflict("trunk HEAD changed before integration")
         candidate_head = self._git(candidate, "rev-parse", "--verify", "HEAD^{commit}")
         if candidate_head != candidate_sha:
             raise WorkspaceConflict("candidate workspace HEAD does not match the authorized commit")
@@ -279,6 +296,21 @@ class WorktreeManager:
         ancestry = self._runner(("git", "merge-base", "--is-ancestor", candidate_sha, candidate_branch), candidate)
         if ancestry.returncode != 0:
             raise WorkspaceConflict("candidate commit is not an ancestor of its authorized branch")
+
+        before = self._git(repository, "rev-parse", "--verify", "HEAD^{commit}")
+        if before != expected_trunk_head:
+            recovered = self._recover_applied_integration(
+                repository=repository,
+                candidate=candidate,
+                candidate_branch=candidate_branch,
+                candidate_sha=candidate_sha,
+                expected_trunk_head=expected_trunk_head,
+                actual_trunk_head=before,
+                strategy=strategy,
+            )
+            if recovered is None:
+                raise WorkspaceConflict("trunk HEAD changed before integration")
+            return recovered
 
         preflight = self._runner(("git", "merge-tree", "--write-tree", expected_trunk_head, candidate_sha), repository)
         if preflight.returncode != 0:
@@ -319,6 +351,103 @@ class WorktreeManager:
             "candidate_workspace": str(candidate),
             "strategy": strategy,
         }
+
+    def _recover_applied_integration(
+        self,
+        *,
+        repository: Path,
+        candidate: Path,
+        candidate_branch: str,
+        candidate_sha: str,
+        expected_trunk_head: str,
+        actual_trunk_head: str,
+        strategy: str,
+    ) -> dict[str, object] | None:
+        """Recognize only the exact authorized Git effect after a crash.
+
+        The durable outbox is written before Git changes.  If the supervisor
+        exits after the strategy succeeds but before its receipt commits,
+        replay reaches this read-only discriminator.  Unknown advancement is
+        never treated as success.
+        """
+
+        if strategy == "fast_forward":
+            ancestry = self._runner(
+                ("git", "merge-base", "--is-ancestor", expected_trunk_head, candidate_sha),
+                repository,
+            )
+            matches = actual_trunk_head == candidate_sha and ancestry.returncode == 0
+        else:
+            parents = self._git(
+                repository,
+                "rev-list",
+                "--parents",
+                "-n",
+                "1",
+                actual_trunk_head,
+            ).split()
+            actual_tree = self._git(repository, "rev-parse", "--verify", f"{actual_trunk_head}^{{tree}}")
+            if strategy == "merge":
+                expected_tree = self._merge_tree(repository, expected_trunk_head, candidate_sha)
+                matches = (
+                    parents == [actual_trunk_head, expected_trunk_head, candidate_sha]
+                    and expected_tree is not None
+                    and actual_tree == expected_tree
+                )
+            else:
+                candidate_parents = self._git(
+                    candidate,
+                    "rev-list",
+                    "--parents",
+                    "-n",
+                    "1",
+                    candidate_sha,
+                ).split()
+                if len(candidate_parents) != 2:
+                    return None
+                expected_tree = self._merge_tree(
+                    repository,
+                    expected_trunk_head,
+                    candidate_sha,
+                    merge_base=candidate_parents[1],
+                )
+                matches = (
+                    parents == [actual_trunk_head, expected_trunk_head]
+                    and expected_tree is not None
+                    and actual_tree == expected_tree
+                )
+        if not matches:
+            return None
+        self._require_clean_checkout(repository, label="recovered integrated trunk")
+        return {
+            "before_trunk_head": expected_trunk_head,
+            "after_trunk_head": actual_trunk_head,
+            "candidate_sha": candidate_sha,
+            "candidate_branch": candidate_branch,
+            "candidate_workspace": str(candidate),
+            "strategy": strategy,
+            "recovered": True,
+        }
+
+    def _merge_tree(
+        self,
+        repository: Path,
+        left: str,
+        right: str,
+        *,
+        merge_base: str | None = None,
+    ) -> str | None:
+        arguments = ["git", "merge-tree", "--write-tree"]
+        if merge_base is not None:
+            arguments.extend(("--merge-base", merge_base))
+        arguments.extend((left, right))
+        result = self._runner(tuple(arguments), repository)
+        if result.returncode != 0:
+            return None
+        first_line = result.stdout.splitlines()[0].strip() if result.stdout.splitlines() else ""
+        if len(first_line) != 40 or any(character not in "0123456789abcdef" for character in first_line):
+            return None
+        return first_line
 
     def _require_clean_checkout(self, path: Path, *, label: str) -> None:
         """Require no tracked or untracked bytes before an integration edge."""

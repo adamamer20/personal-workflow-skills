@@ -1210,6 +1210,23 @@ class ModelFacingProgramControllerAction:
             value["reason"] = self.reason
         return value
 
+    @property
+    def external_effects(self) -> tuple[tuple[str, str], ...]:
+        """Return durable effect identities paired with their milestone owner."""
+
+        if self.kind is ProgramControllerActionKind.START_READY_MILESTONES:
+            return tuple((f"start:{milestone_id}", milestone_id) for milestone_id in self.milestone_ids)
+        if self.kind is ProgramControllerActionKind.START_REVIEWS:
+            assert self.milestone_id is not None
+            return tuple((f"review:{self.milestone_id}:{role}", self.milestone_id) for role in self.review_roles)
+        if self.kind is ProgramControllerActionKind.REQUEST_REPAIR:
+            assert self.milestone_id is not None
+            return ((f"repair:{self.milestone_id}", self.milestone_id),)
+        if self.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
+            assert self.milestone_id is not None and self.candidate_sha is not None
+            return ((f"integrate:{self.milestone_id}:{self.candidate_sha}", self.milestone_id),)
+        return ()
+
     @classmethod
     def from_json(cls, value: Mapping[str, object]) -> ModelFacingProgramControllerAction:
         if not isinstance(value, Mapping) or "kind" not in value or not isinstance(value["kind"], str):
@@ -1336,6 +1353,13 @@ class ModelFacingProgramControllerActionBundle:
         """Return the controller-owned stable identity of this immutable bundle."""
 
         return f"program-action/{self.sha256}"
+
+    @property
+    def external_effects(self) -> tuple[tuple[str, str], ...]:
+        effects = tuple(effect for action in self.actions for effect in action.external_effects)
+        if len({effect_id for effect_id, _milestone_id in effects}) != len(effects):
+            raise ValueError("program action bundle external effects are not unique")
+        return effects
 
     @classmethod
     def from_json(cls, value: Mapping[str, object]) -> ModelFacingProgramControllerActionBundle:
@@ -1498,57 +1522,79 @@ def model_facing_program_controller_action_schema() -> JsonObject:
         "items": {"type": "string", "minLength": 1, "maxLength": 256},
     }
     reason = {"type": "string", "minLength": 1, "maxLength": 512, "pattern": _TEXT_PATTERN}
+
+    def action_branch(required: list[str], properties: JsonObject) -> JsonObject:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": required,
+            "properties": properties,
+        }
+
+    # Keep the union itself as the sole keyword at this node.  Each branch is
+    # independently closed, so both the local validator and the provider
+    # projection can preserve the discriminated action authority.
     action = {
-        "type": "object",
-        "additionalProperties": False,
         "oneOf": [
-            {
-                "required": ["kind", "milestone_ids"],
-                "properties": {"kind": {"const": "start_ready_milestones"}, "milestone_ids": ids},
-            },
-            {
-                "required": ["kind", "milestone_id", "candidate_sha", "review_roles"],
-                "properties": {
+            action_branch(
+                ["kind", "milestone_ids"],
+                {
+                    "kind": {"const": "start_ready_milestones"},
+                    "milestone_ids": ids,
+                },
+            ),
+            action_branch(
+                ["kind", "milestone_id", "candidate_sha", "review_roles"],
+                {
                     "kind": {"const": "start_reviews"},
                     "milestone_id": {"type": "string"},
                     "candidate_sha": sha,
                     "review_roles": ids,
                 },
-            },
-            {
-                "required": ["kind", "milestone_id", "candidate_sha", "finding_ids"],
-                "properties": {
+            ),
+            action_branch(
+                ["kind", "milestone_id", "candidate_sha", "finding_ids"],
+                {
                     "kind": {"const": "request_repair"},
                     "milestone_id": {"type": "string"},
                     "candidate_sha": sha,
                     "finding_ids": ids,
                 },
-            },
-            {
-                "required": ["kind", "milestone_id", "candidate_sha", "review_ids"],
-                "properties": {
+            ),
+            action_branch(
+                ["kind", "milestone_id", "candidate_sha", "review_ids"],
+                {
                     "kind": {"const": "promote_candidate"},
                     "milestone_id": {"type": "string"},
                     "candidate_sha": sha,
                     "review_ids": ids,
                 },
-            },
-            {
-                "required": ["kind", "milestone_id", "candidate_sha", "expected_trunk_head", "integration_strategy"],
-                "properties": {
+            ),
+            action_branch(
+                ["kind", "milestone_id", "candidate_sha", "expected_trunk_head", "integration_strategy"],
+                {
                     "kind": {"const": "integrate_candidate"},
                     "milestone_id": {"type": "string"},
                     "candidate_sha": sha,
                     "expected_trunk_head": sha,
                     "integration_strategy": {"type": "string", "enum": ["merge", "fast_forward", "cherry_pick"]},
                 },
-            },
-            {"required": ["kind", "reason"], "properties": {"kind": {"const": "require_replan"}, "reason": reason}},
-            {
-                "required": ["kind", "reason"],
-                "properties": {"kind": {"const": "require_human_attention"}, "reason": reason},
-            },
-            {"required": ["kind"], "properties": {"kind": {"const": "acknowledge_only"}}},
+            ),
+            action_branch(
+                ["kind", "reason"],
+                {
+                    "kind": {"const": "require_replan"},
+                    "reason": reason,
+                },
+            ),
+            action_branch(
+                ["kind", "reason"],
+                {
+                    "kind": {"const": "require_human_attention"},
+                    "reason": reason,
+                },
+            ),
+            action_branch(["kind"], {"kind": {"const": "acknowledge_only"}}),
         ],
     }
     return {

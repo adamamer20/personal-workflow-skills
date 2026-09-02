@@ -63,6 +63,7 @@ from .domain import (
     Sandbox,
     ThreadIdentity,
     strict_json_loads,
+    thaw_json,
 )
 from .ipc import IpcError, send_request
 from .ledger import LedgerError, RecordNotFound, ledger_schema_compatibility
@@ -270,7 +271,7 @@ def _program_decision_payload(status: object) -> dict[str, object]:
         "action_id": status.action_id,
         "action_sha256": status.action_sha256,
         "deadline": status.deadline,
-        "payload": status.payload,
+        "payload": thaw_json(status.payload),
     }
 
 
@@ -395,7 +396,7 @@ def program_decisions(
     """List durable program events awaiting or completing controller work."""
 
     try:
-        decisions = _controller_decision_client(state_root).pending()
+        decisions = _controller_decision_client(state_root).program_pending()
         if program_id is not None:
             decisions = tuple(item for item in decisions if str(item.program_id) == program_id)
         _emit_program_payload([_program_decision_payload(item) for item in decisions], as_json=as_json)

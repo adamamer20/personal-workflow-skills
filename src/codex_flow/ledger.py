@@ -45,6 +45,7 @@ from .domain import (
     DIAGNOSTIC_RING_MAX_ENTRIES,
     DIAGNOSTIC_TEXT_MAX_BYTES,
     TERMINAL_STATES,
+    AcceptanceMode,
     Budget,
     BudgetExhaustion,
     CompatibilityRebind,
@@ -88,7 +89,9 @@ from .domain import (
     PostIdentityExecutionFailure,
     PreIdentityTransportFailure,
     ProgramControllerActionKind,
+    ProgramControllerContext,
     ProgramControllerDecisionStatus,
+    ProgramControllerNodeContext,
     ProgramEventKind,
     ProgramGraph,
     ProgramId,
@@ -4031,6 +4034,10 @@ class Ledger:
                         else {"applied_revision": int(action["expected_revision"]) + 1}
                     ),
                 }
+                if is_program_action and "external_effect_ids" in effect_receipt:
+                    expected_effect_receipt["external_effect_ids"] = [
+                        effect_id for effect_id, _milestone_id in bundle.external_effects
+                    ]
                 if (
                     not isinstance(effect_receipt, dict)
                     or str(action["effect_receipt_json"]) != _encode_json(effect_receipt)
@@ -10297,6 +10304,60 @@ class Ledger:
             raise RecordNotFound(f"program does not exist: {identity}")
         return self._program_status_from_row(row)
 
+    def program_controller_context(
+        self,
+        program_id: ProgramId | str,
+        *,
+        expected_revision: int,
+        expected_trunk_head: str,
+    ) -> ProgramControllerContext:
+        """Read one revision-bound complete controller DAG projection."""
+
+        identity = ProgramId(str(program_id))
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            raise ValueError("program context revision is invalid")
+        if re.fullmatch(r"[0-9a-f]{40}", expected_trunk_head) is None:
+            raise ValueError("program context trunk HEAD is invalid")
+        with self._transaction():
+            row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(identity),)).fetchone()
+            if row is None or row["program_digest"] is None:
+                raise RecordNotFound(f"program does not exist: {identity}")
+            if int(row["program_revision"]) != expected_revision or str(row["trunk_head"]) != expected_trunk_head:
+                raise StaleWriter("program context identity is stale")
+            graph = self.program_graph(identity)
+            status = self._program_status_from_row(row)
+            status_by_id = {node.milestone_id: node for node in status.nodes}
+            ready = set(status.ready_milestones)
+            role_by_mode = {
+                AcceptanceMode.OBJECTIVE: "code-reviewer",
+                AcceptanceMode.VISUAL: "visual-reviewer",
+                AcceptanceMode.ARCHITECTURE: "architecture-reviewer",
+            }
+            nodes = tuple(
+                ProgramControllerNodeContext(
+                    node.milestone_id,
+                    status_by_id[node.milestone_id].state,
+                    node.dependencies,
+                    node.mutable_surfaces,
+                    node.capsule.acceptance_modes,
+                    tuple(sorted(role_by_mode[mode] for mode in node.capsule.acceptance_modes)),
+                    status_by_id[node.milestone_id].candidate_sha,
+                    status_by_id[node.milestone_id].review_ids,
+                    status_by_id[node.milestone_id].finding_ids,
+                    status_by_id[node.milestone_id].integrated,
+                    node.milestone_id in ready,
+                )
+                for node in graph.nodes
+            )
+            return ProgramControllerContext(
+                identity,
+                expected_revision,
+                str(row["program_digest"]),
+                graph.plan_path,
+                expected_trunk_head,
+                nodes,
+            )
+
     def program_graph(self, program_id: ProgramId | str) -> ProgramGraph:
         """Rehydrate the immutable graph projection after a controller restart."""
 
@@ -10498,6 +10559,61 @@ class Ledger:
         )
         return tuple(self._program_decision_status_from_row(row) for row in rows)
 
+    def reconcile_stale_program_controller_decisions(self, *, now: str | None = None) -> int:
+        """Supersede old program revisions and emit one fresh coalesced event."""
+
+        current = now or utc_now()
+        with self._transaction():
+            stale = (
+                self._db()
+                .execute(
+                    "SELECT d.*, r.program_revision AS current_program_revision, r.program_state "
+                    "FROM controller_decisions d JOIN runs r ON r.run_id = d.program_id "
+                    "WHERE d.program_id IS NOT NULL AND d.program_revision < r.program_revision "
+                    "AND d.state IN ('awaiting_claim', 'claimed', 'human_attention_required') "
+                    "AND d.action_id IS NULL ORDER BY d.program_id, d.decision_id"
+                )
+                .fetchall()
+            )
+            by_program: dict[str, list[str]] = {}
+            for row in stale:
+                updated = self._db().execute(
+                    "UPDATE controller_decisions SET state = 'superseded', superseded_at = ?, "
+                    "claim_lease_expires_at = NULL, human_attention_reason = NULL, updated_at = ? "
+                    "WHERE decision_id = ? AND revision = ? AND state IN ('awaiting_claim', 'claimed', 'human_attention_required')",
+                    (current, current, str(row["decision_id"]), int(row["revision"])),
+                )
+                if updated.rowcount == 1:
+                    by_program.setdefault(str(row["program_id"]), []).append(str(row["decision_id"]))
+            for program_id, decision_ids in by_program.items():
+                program = (
+                    self._db()
+                    .execute(
+                        "SELECT program_revision, program_state FROM runs WHERE run_id = ?",
+                        (program_id,),
+                    )
+                    .fetchone()
+                )
+                if program is None or str(program["program_state"]) in {
+                    ProgramState.COMPLETED.value,
+                    ProgramState.FAILED.value,
+                }:
+                    continue
+                revision = int(program["program_revision"])
+                self._ensure_program_decision_in_transaction(
+                    ProgramId(program_id),
+                    event_kind=ProgramEventKind.CHECKPOINT,
+                    event_key=f"revision/{revision}/coalesced",
+                    payload={
+                        "summary": "stale program events coalesced after a revision advance",
+                        "superseded_decision_ids": decision_ids[:128],
+                        "ready_milestones": [
+                            str(item) for item in self.program_ready_milestones(ProgramId(program_id))
+                        ],
+                    },
+                )
+            return len(stale)
+
     def claim_program_controller_decision(
         self,
         decision_id: ControllerDecisionId | str,
@@ -10526,6 +10642,27 @@ class Ledger:
             )
             if row is None:
                 raise RecordNotFound(f"program controller decision does not exist: {identity}")
+            program = (
+                self._db()
+                .execute(
+                    "SELECT program_revision FROM runs WHERE run_id = ?",
+                    (str(row["program_id"]),),
+                )
+                .fetchone()
+            )
+            if program is None or int(row["program_revision"]) != int(program["program_revision"]):
+                raise StaleWriter("program controller decision belongs to a stale program revision")
+            concurrent = (
+                self._db()
+                .execute(
+                    "SELECT decision_id FROM controller_decisions WHERE program_id = ? AND program_revision = ? "
+                    "AND state = 'claimed' AND decision_id != ? LIMIT 1",
+                    (str(row["program_id"]), int(row["program_revision"]), str(identity)),
+                )
+                .fetchone()
+            )
+            if concurrent is not None:
+                raise StaleWriter("another controller generation owns this program revision")
             if generation is not None and int(row["current_generation"]) != int(generation):
                 raise StaleWriter("program controller generation is stale")
             if str(row["state"]) != ControllerDecisionState.AWAITING_CLAIM.value:
@@ -10739,6 +10876,7 @@ class Ledger:
         candidate_sha: str | None,
         terminal_status: str,
         dispatch_id: DispatchId | str | None = None,
+        result_sha256: str | None = None,
     ) -> ProgramStatus:
         """Close one executor queue result and emit its program event once."""
 
@@ -10748,6 +10886,15 @@ class Ledger:
             raise ValueError("program candidate commit is invalid")
         if terminal_status not in {"completed", "failed", "external_blocked", "needs_decision"}:
             raise ValueError("program executor terminal status is unsupported")
+        if result_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", result_sha256) is None:
+            raise ValueError("program executor result digest is invalid")
+        dispatch_value = str(dispatch_id) if dispatch_id is not None else None
+        terminal_fact = {
+            "dispatch_id": dispatch_value,
+            "terminal_status": terminal_status,
+            "candidate_sha": candidate_sha,
+            "result_sha256": result_sha256,
+        }
         with self._transaction():
             row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
             milestone_row = (
@@ -10760,6 +10907,12 @@ class Ledger:
             )
             if row is None or row["program_digest"] is None or milestone_row is None:
                 raise RecordNotFound(f"program executor result does not exist: {program}/{milestone}")
+            for fact in reversed(self.review_lifecycle(program, milestone)):
+                if fact.kind != "executor_terminal" or fact.data.get("dispatch_id") != dispatch_value:
+                    continue
+                if fact.data != terminal_fact:
+                    raise StaleWriter("program executor terminal replay conflicts with its durable result")
+                return self._program_status_from_row(row)
             current = WorkflowState(str(milestone_row["current_state"]))
             if terminal_status == "completed":
                 if candidate_sha is None:
@@ -10810,7 +10963,7 @@ class Ledger:
                     kind="candidate_recorded",
                     data={
                         "candidate_sha": candidate_sha,
-                        "dispatch_id": str(dispatch_id) if dispatch_id is not None else None,
+                        "dispatch_id": dispatch_value,
                     },
                 )
                 self._ensure_program_decision_in_transaction(
@@ -10847,7 +11000,7 @@ class Ledger:
                         str(program),
                     ),
                 )
-                reason = f"executor/{milestone}/{terminal_status}"
+                reason = f"executor/{milestone}/{dispatch_value or 'unbound'}/{terminal_status}"
                 self._ensure_program_decision_in_transaction(
                     program,
                     event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
@@ -10855,12 +11008,46 @@ class Ledger:
                     payload={
                         "milestone_id": str(milestone),
                         "terminal_status": terminal_status,
-                        "dispatch_id": str(dispatch_id) if dispatch_id is not None else None,
+                        "dispatch_id": dispatch_value,
+                        "result_sha256": result_sha256,
                     },
                 )
+            self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.EXECUTION,
+                kind="executor_terminal",
+                data=terminal_fact,
+            )
             refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
             assert refreshed is not None
             return self._program_status_from_row(refreshed)
+
+    def program_executor_terminal_recorded(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        dispatch_id: DispatchId | str,
+        terminal_status: str,
+        result_sha256: str,
+    ) -> bool:
+        """Check exact queue-result projection before reading its workspace."""
+
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        dispatch_value = str(DispatchId(str(dispatch_id)))
+        if terminal_status not in {"completed", "failed", "external_blocked", "needs_decision"}:
+            raise ValueError("program executor terminal status is unsupported")
+        if re.fullmatch(r"[0-9a-f]{64}", result_sha256) is None:
+            raise ValueError("program executor result digest is invalid")
+        for fact in reversed(self.review_lifecycle(program, milestone)):
+            if fact.kind != "executor_terminal" or fact.data.get("dispatch_id") != dispatch_value:
+                continue
+            if fact.data.get("terminal_status") != terminal_status or fact.data.get("result_sha256") != result_sha256:
+                raise StaleWriter("program executor terminal replay conflicts with its durable result")
+            return True
+        return False
 
     def _program_action_effects(
         self,
@@ -11224,6 +11411,7 @@ class Ledger:
                 "bundle_sha256": bundle.sha256,
                 "applied_actions": effects,
                 "program_revision": revision,
+                "external_effect_ids": [effect_id for effect_id, _milestone_id in bundle.external_effects],
             }
             receipt_json = _encode_json(receipt_payload)
             receipt_digest = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
@@ -11324,6 +11512,12 @@ class Ledger:
                 raise StaleWriter("program integration receipt has a stale trunk predecessor")
             if state == "applied" and (not isinstance(after, str) or re.fullmatch(r"[0-9a-f]{40}", after) is None):
                 raise ValueError("applied program integration requires a resolved after trunk HEAD")
+            if (
+                state == "applied"
+                and str(pending["state"]) == "pending"
+                and str(program_row["trunk_head"]) != expected["expected_trunk_head"]
+            ):
+                raise StaleWriter("program integration trunk authority changed before receipt commit")
             if str(pending["state"]) != "pending":
                 if str(pending["receipt_sha256"]) != hashlib.sha256(receipt_json.encode("utf-8")).hexdigest():
                     raise StaleWriter("program integration already has a different terminal receipt")
@@ -11420,6 +11614,102 @@ class Ledger:
             args = (str(ProgramId(str(program_id))),)
         query += " ORDER BY a.committed_at, a.action_id"
         return tuple(self._queue_row(row) for row in self._db().execute(query, args).fetchall())
+
+    def _program_action_effect_binding(
+        self, action_id: str, effect_id: str
+    ) -> tuple[ProgramId, MilestoneId, ModelFacingProgramControllerActionBundle]:
+        row = (
+            self._db()
+            .execute(
+                "SELECT a.bundle_json, d.program_id FROM controller_action_outbox a "
+                "JOIN controller_decisions d ON d.decision_id = a.decision_id "
+                "WHERE a.action_id = ? AND d.program_id IS NOT NULL",
+                (action_id,),
+            )
+            .fetchone()
+        )
+        if row is None:
+            raise RecordNotFound(f"program action does not exist: {action_id}")
+        bundle = ModelFacingProgramControllerActionBundle.from_json_bytes(str(row["bundle_json"]))
+        bindings = dict(bundle.external_effects)
+        milestone_id = bindings.get(effect_id)
+        if milestone_id is None:
+            raise StaleWriter("program action effect is not authorized by its bundle")
+        return ProgramId(str(row["program_id"])), MilestoneId(milestone_id), bundle
+
+    def program_action_effect_state(self, action_id: str, effect_id: str) -> str:
+        """Read one durable external-effect state from existing lifecycle facts."""
+
+        program, milestone, _bundle = self._program_action_effect_binding(action_id, effect_id)
+        for fact in reversed(self.review_lifecycle(program, milestone)):
+            if fact.data.get("action_id") != action_id or fact.data.get("effect_id") != effect_id:
+                continue
+            if fact.kind == "program_effect_applied":
+                return "applied"
+            if fact.kind == "program_effect_failed":
+                return "failed"
+        return "pending"
+
+    def record_program_action_effect(
+        self,
+        action_id: str,
+        effect_id: str,
+        *,
+        state: str,
+        error_code: str | None = None,
+    ) -> str:
+        """Commit one idempotent effect outcome and surface typed failure."""
+
+        if state not in {"applied", "failed"}:
+            raise ValueError("program action effect state is unsupported")
+        if state == "failed":
+            if error_code is None or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", error_code) is None:
+                raise ValueError("program action effect failure code is invalid")
+        elif error_code is not None:
+            raise ValueError("applied program action effect cannot carry an error")
+        with self._transaction():
+            program, milestone, _bundle = self._program_action_effect_binding(action_id, effect_id)
+            existing = self.program_action_effect_state(action_id, effect_id)
+            if existing == state:
+                return existing
+            if existing != "pending":
+                raise StaleWriter("program action effect already has a different terminal outcome")
+            data: JsonObject = {
+                "action_id": action_id,
+                "effect_id": effect_id,
+                "error_code": error_code,
+            }
+            self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.ROUTING,
+                kind=f"program_effect_{state}",
+                data=data,
+            )
+            if state == "failed":
+                current = utc_now()
+                self._db().execute(
+                    "UPDATE controller_decisions SET state = 'human_attention_required', "
+                    "human_attention_reason = ?, claim_lease_expires_at = NULL, updated_at = ? "
+                    "WHERE action_id = ? AND state = 'action_committed'",
+                    (error_code, current, action_id),
+                )
+                self._db().execute(
+                    "UPDATE runs SET program_state = 'needs_decision' WHERE run_id = ?",
+                    (str(program),),
+                )
+                effect_digest = hashlib.sha256(effect_id.encode("utf-8")).hexdigest()[:16]
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                    event_key=f"action-effect/{effect_digest}/failed",
+                    payload={
+                        "action_id": action_id,
+                        "effect_id": effect_id,
+                        "error_code": error_code,
+                    },
+                )
+            return state
 
     def record_program_attention(
         self,
@@ -13354,6 +13644,15 @@ class Ledger:
             )
             if outbox is None or outbox["decision_id"] != str(identity) or outbox["bundle_sha256"] != bundle_sha256:
                 raise StaleWriter("controller action receipt is stale")
+            if row["program_id"] is not None:
+                program_bundle = ModelFacingProgramControllerActionBundle.from_json_bytes(str(outbox["bundle_json"]))
+                incomplete = [
+                    effect_id
+                    for effect_id, _milestone_id in program_bundle.external_effects
+                    if self.program_action_effect_state(action_id, effect_id) != "applied"
+                ]
+                if incomplete:
+                    raise StaleWriter("program controller action has unapplied external effects")
             if allow_recovered:
                 # A committed outbox effect is independently recoverable: a
                 # source process may have crashed after the atomic commit but

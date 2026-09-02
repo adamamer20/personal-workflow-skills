@@ -24,6 +24,7 @@ from .domain import (
     ControllerGenerationStatus,
     ControllerRecoveryInspectionClaim,
     Generation,
+    ProgramControllerContext,
     ProgramControllerDecisionStatus,
     ReasoningEffort,
     thaw_json,
@@ -34,6 +35,14 @@ class ProgramControllerClient(Protocol):
     """The typed IPC operations required by one program generation."""
 
     def program_status(self, decision_id: str) -> ProgramControllerDecisionStatus: ...
+
+    def program_context(
+        self,
+        program_id: str,
+        *,
+        expected_revision: int,
+        expected_trunk_head: str,
+    ) -> ProgramControllerContext: ...
 
     def program_claim(
         self, decision_id: str, *, claimant_id: str, expected_revision: int, generation: int | None = None
@@ -135,8 +144,16 @@ class ProgramControllerGenerationRunner:
         self.model = model
         self.reasoning_effort = reasoning_effort
 
-    def _prompt(self, status: ProgramControllerDecisionStatus, *, revision: int, generation: int) -> str:
+    def _prompt(
+        self,
+        status: ProgramControllerDecisionStatus,
+        context: ProgramControllerContext,
+        *,
+        revision: int,
+        generation: int,
+    ) -> str:
         payload = json.dumps(thaw_json(status.payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        program_context = context.to_json_bytes().decode("utf-8")
         return (
             "Event-driven program controller. Return exactly one JSON object matching the closed program action "
             "bundle schema. The SQLite ledger is the sole dynamic authority; the canonical plan is static intent. "
@@ -149,6 +166,7 @@ class ProgramControllerGenerationRunner:
             f"decision_id={status.decision_id}; program_id={status.program_id}; generation={generation}; "
             f"revision={revision}; event_kind={status.event_kind.value}; event_key={status.event_key}; "
             f"program_payload={payload}\n"
+            f"program_context={program_context}\n"
             f"Schema: {model_facing_program_controller_action_schema()}"
         )
 
@@ -161,12 +179,22 @@ class ProgramControllerGenerationRunner:
             generation=int(status.current_generation),
         )
         generation = int(claim.generation)
-        prompt = self._prompt(status, revision=claim.revision, generation=generation)
-        prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         identity_bound = False
         thread_started = False
         bound_turn_id: str | None = None
         try:
+            summary = thaw_json(status.payload)
+            if not isinstance(summary, dict):
+                raise RuntimeError("program controller decision summary is malformed")
+            context = self.client.program_context(
+                str(status.program_id),
+                expected_revision=summary.get("program_revision"),  # type: ignore[arg-type]
+                expected_trunk_head=summary.get("trunk_head"),  # type: ignore[arg-type]
+            )
+            if context.plan_digest != summary.get("plan_digest"):
+                raise RuntimeError("program controller context plan identity is stale")
+            prompt = self._prompt(status, context, revision=claim.revision, generation=generation)
+            prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
             self.client.prepare_generation(str(self.decision_id), generation=generation, prompt_sha256=prompt_sha256)
             thread = self.adapter.start_thread()
             thread_started = True

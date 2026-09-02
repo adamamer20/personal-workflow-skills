@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
+import codex_flow.cli as cli_module
+from codex_flow.backends.codex_sdk import _provider_output_schema
 from codex_flow.cli import app
-from codex_flow.contracts import ModelFacingProgramControllerAction, ModelFacingProgramControllerActionBundle
+from codex_flow.contracts import (
+    ModelFacingProgramControllerAction,
+    ModelFacingProgramControllerActionBundle,
+    model_facing_program_controller_action_schema,
+)
 from codex_flow.domain import (
     AcceptanceMode,
     ControllerActionReceipt,
@@ -20,7 +27,9 @@ from codex_flow.domain import (
     MilestoneId,
     NativePermissionMode,
     ProgramControllerActionKind,
+    ProgramControllerContext,
     ProgramControllerDecisionStatus,
+    ProgramControllerNodeContext,
     ProgramEventKind,
     ProgramGraph,
     ProgramId,
@@ -34,9 +43,13 @@ from codex_flow.domain import (
     ValidationSpec,
     WorkflowState,
     WorkspaceMode,
+    validate_output_schema,
+    validate_structured_output,
 )
-from codex_flow.ledger import Ledger
+from codex_flow.ledger import Ledger, StaleWriter
 from codex_flow.program_controller import ProgramControllerGenerationRecovery, ProgramControllerGenerationRunner
+from codex_flow.supervisor import Supervisor
+from codex_flow.worktrees import WorkspaceConflict, WorktreeError, WorktreeManager
 
 TRUNK_HEAD = "b" * 40
 PLAN_DIGEST = "c" * 64
@@ -124,6 +137,8 @@ def _claim_and_apply(
         claimant_id=claim.claimant_id,
         token=str(claim.token),
     )
+    for effect_id, _milestone_id in bundle.external_effects:
+        ledger.record_program_action_effect(bundle.action_id, effect_id, state="applied")
     ledger.acknowledge_controller_action(
         status.decision_id,
         action_id=receipt.action_id,
@@ -143,7 +158,7 @@ def _claim_and_apply(
 def test_program_graph_rejects_cycles_and_overlapping_mutable_surfaces(tmp_path: Path) -> None:
     first = _capsule(tmp_path, "first", "src/shared.py")
     second = _capsule(tmp_path, "second", "src/shared.py")
-    with pytest.raises(ValueError, match="owned by both"):
+    with pytest.raises(ValueError, match="concurrent owners"):
         ProgramGraph(
             ProgramId("program"),
             tmp_path / "plan.md",
@@ -151,6 +166,18 @@ def test_program_graph_rejects_cycles_and_overlapping_mutable_surfaces(tmp_path:
             (ProgramNodeSpec("first", first), ProgramNodeSpec("second", second)),
             TRUNK_HEAD,
         )
+
+    serial = ProgramGraph(
+        ProgramId("program"),
+        tmp_path / "plan.md",
+        PLAN_DIGEST,
+        (
+            ProgramNodeSpec("first", first),
+            ProgramNodeSpec("second", second, (MilestoneId("first"),)),
+        ),
+        TRUNK_HEAD,
+    )
+    assert serial.node("second").mutable_surfaces == ("src/shared.py",)
 
     with pytest.raises(ValueError, match="dependency cycle"):
         ProgramGraph(
@@ -276,11 +303,272 @@ def test_program_lifecycle_advances_only_after_exact_review_and_integration(tmp_
         ledger.close()
 
 
+def test_program_executor_terminal_replay_is_idempotent_and_dispatch_bound(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        start = ledger.start_program("program")
+        _claim_and_apply(
+            ledger,
+            start,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+        )
+        dispatch_id = "program/first/executor/1"
+        first = ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=None,
+            terminal_status="failed",
+            dispatch_id=dispatch_id,
+            result_sha256="1" * 64,
+        )
+        replayed = ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=None,
+            terminal_status="failed",
+            dispatch_id=dispatch_id,
+            result_sha256="1" * 64,
+        )
+        assert replayed.revision == first.revision
+        assert ledger.program_executor_terminal_recorded(
+            "program",
+            "first",
+            dispatch_id=dispatch_id,
+            terminal_status="failed",
+            result_sha256="1" * 64,
+        )
+        terminal_facts = [
+            fact for fact in ledger.review_lifecycle("program", "first") if fact.kind == "executor_terminal"
+        ]
+        assert len(terminal_facts) == 1
+        decisions = [
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+        ]
+        assert len(decisions) == 1
+        assert dispatch_id in decisions[0].event_key
+        with pytest.raises(StaleWriter, match="terminal replay conflicts"):
+            ledger.record_program_executor_result(
+                "program",
+                "first",
+                candidate_sha=CANDIDATE_SHA,
+                terminal_status="completed",
+                dispatch_id=dispatch_id,
+                result_sha256="2" * 64,
+            )
+    finally:
+        ledger.close()
+
+
+def test_program_context_contains_exact_graph_and_rejects_stale_revision(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        context = ledger.program_controller_context(
+            "program",
+            expected_revision=0,
+            expected_trunk_head=TRUNK_HEAD,
+        )
+        assert context.plan_path == tmp_path / "canonical-plan.md"
+        assert [str(node.milestone_id) for node in context.nodes] == ["first", "second"]
+        assert context.nodes[0].ready is True
+        assert context.nodes[1].dependencies == (MilestoneId("first"),)
+        assert context.nodes[0].mutable_surfaces == ("src/first.py",)
+        assert context.nodes[0].review_roles == ("architecture-reviewer", "code-reviewer")
+        ledger.start_program("program")
+        with pytest.raises(StaleWriter, match="context identity is stale"):
+            ledger.program_controller_context(
+                "program",
+                expected_revision=0,
+                expected_trunk_head=TRUNK_HEAD,
+            )
+    finally:
+        ledger.close()
+
+
+def test_program_context_ipc_projection_is_typed_and_revision_bound(tmp_path: Path) -> None:
+    supervisor = Supervisor(tmp_path)
+    try:
+        supervisor.ledger.register_program(_graph(tmp_path))
+        response = supervisor._controller_request(
+            {
+                "version": 1,
+                "operation": "program_context",
+                "program_id": "program",
+                "expected_revision": 0,
+                "expected_trunk_head": TRUNK_HEAD,
+            }
+        )
+        context = ProgramControllerContext.from_json(response["context"])  # type: ignore[arg-type]
+        assert context.program_revision == 0
+        assert context.nodes[1].dependencies == (MilestoneId("first"),)
+        supervisor.ledger.start_program("program")
+        with pytest.raises(StaleWriter, match="context identity is stale"):
+            supervisor._controller_request(
+                {
+                    "version": 1,
+                    "operation": "program_context",
+                    "program_id": "program",
+                    "expected_revision": 0,
+                    "expected_trunk_head": TRUNK_HEAD,
+                }
+            )
+    finally:
+        supervisor.close()
+
+
+def test_program_revision_allows_only_one_claim_and_coalesces_stale_events(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        first = ledger.record_program_event("program", ProgramEventKind.CHECKPOINT, "first-event")
+        second = ledger.record_program_event("program", ProgramEventKind.CHECKPOINT, "second-event")
+        claim = ledger.claim_program_controller_decision(
+            first.decision_id,
+            claimant_id="program-controller/first",
+            expected_revision=first.revision,
+            generation=1,
+        )
+        with pytest.raises(StaleWriter, match="another controller generation owns"):
+            ledger.claim_program_controller_decision(
+                second.decision_id,
+                claimant_id="program-controller/second",
+                expected_revision=second.revision,
+                generation=1,
+            )
+        bundle = _bundle(
+            first,
+            claim,
+            ModelFacingProgramControllerAction(ProgramControllerActionKind.ACKNOWLEDGE_ONLY),
+        )
+        ledger.submit_program_controller_actions(bundle, claimant_id=claim.claimant_id, token=str(claim.token))
+        assert ledger.reconcile_stale_program_controller_decisions() == 1
+        assert ledger.program_controller_decision(second.decision_id).state is ControllerDecisionState.SUPERSEDED
+        coalesced = [item for item in ledger.program_controller_decisions() if item.event_key == "revision/1/coalesced"]
+        assert len(coalesced) == 1
+        assert coalesced[0].payload["program_revision"] == 1
+    finally:
+        ledger.close()
+
+
+def test_supervisor_schedules_only_one_program_controller_child_per_program_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = Supervisor(tmp_path)
+    try:
+        supervisor.ledger.register_program(_graph(tmp_path))
+        supervisor.ledger.record_program_event("program", ProgramEventKind.CHECKPOINT, "first-event")
+        supervisor.ledger.record_program_event("program", ProgramEventKind.CHECKPOINT, "second-event")
+        supervisor.epoch = 1
+        spawned: list[str] = []
+
+        def spawn(status: ProgramControllerDecisionStatus, *, recovery: bool = False) -> bool:
+            assert recovery is False
+            spawned.append(str(status.decision_id))
+            return True
+
+        monkeypatch.setattr(supervisor, "_spawn_program_controller_generation", spawn)
+        assert supervisor._schedule_program_controller_generations() is True
+        assert len(spawned) == 1
+    finally:
+        supervisor.close()
+
+
+def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph = ProgramGraph(
+        ProgramId("program"),
+        tmp_path / "canonical-plan.md",
+        PLAN_DIGEST,
+        (
+            ProgramNodeSpec("first", _capsule(tmp_path, "first", "src/first.py")),
+            ProgramNodeSpec("second", _capsule(tmp_path, "second", "src/second.py")),
+        ),
+        TRUNK_HEAD,
+    )
+    supervisor = Supervisor(tmp_path)
+    try:
+        supervisor.ledger.register_program(graph)
+        decision = supervisor.ledger.start_program("program")
+        claim = supervisor.ledger.claim_program_controller_decision(
+            decision.decision_id,
+            claimant_id="program-controller/test",
+            expected_revision=decision.revision,
+            generation=1,
+        )
+        bundle = _bundle(
+            decision,
+            claim,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first", "second"),
+            ),
+        )
+        receipt = supervisor.ledger.submit_program_controller_actions(
+            bundle,
+            claimant_id=claim.claimant_id,
+            token=str(claim.token),
+        )
+        calls: list[str] = []
+
+        def enqueue(*, milestone_id: str, **_facts: object) -> None:
+            calls.append(milestone_id)
+            if milestone_id == "second":
+                raise RuntimeError("bounded enqueue failure")
+
+        monkeypatch.setattr(supervisor, "_enqueue_program_worker", enqueue)
+        with pytest.raises(RuntimeError, match="bounded enqueue failure"):
+            supervisor._apply_program_action_bundle(bundle)
+        assert calls == ["first", "second"]
+        assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:first") == "applied"
+        assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:second") == "failed"
+        status = supervisor.ledger.program_controller_decision(decision.decision_id)
+        assert status.state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED
+        with pytest.raises(StaleWriter, match="unapplied external effects"):
+            supervisor.ledger.acknowledge_controller_action(
+                decision.decision_id,
+                action_id=receipt.action_id,
+                bundle_sha256=bundle.sha256,
+                committed_revision=receipt.expected_revision + 1,
+                claimant_id=claim.claimant_id,
+                token=str(claim.token),
+            )
+    finally:
+        supervisor.close()
+
+    restarted = Supervisor(tmp_path)
+    try:
+        replayed: list[str] = []
+        monkeypatch.setattr(
+            restarted,
+            "_enqueue_program_worker",
+            lambda *, milestone_id, **_facts: replayed.append(milestone_id),
+        )
+        assert restarted._reconcile_program_action_outboxes() is False
+        assert replayed == []
+        attention = [
+            item
+            for item in restarted.ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+            and item.payload.get("payload", {}).get("effect_id") == "start:second"  # type: ignore[union-attr]
+        ]
+        assert len(attention) == 1
+    finally:
+        restarted.close()
+
+
 class _ProgramAdapter:
     def __init__(self, bundle: ModelFacingProgramControllerActionBundle) -> None:
         self.bundle = bundle
         self.thread = ThreadIdentity("program-controller-thread")
         self.bound_turns: list[str] = []
+        self.prompts: list[str] = []
 
     def start_thread(self) -> ThreadIdentity:
         return self.thread
@@ -290,6 +578,7 @@ class _ProgramAdapter:
     ) -> TurnObservation:
         assert output_schema is not None
         assert callable(turn_callback)
+        self.prompts.append(_prompt)
         turn_callback("program-controller-turn")
         return TurnObservation(
             self.thread,
@@ -320,6 +609,18 @@ class _ProgramClient:
 
     def program_status(self, _decision_id: str) -> ProgramControllerDecisionStatus:
         return self.status_value
+
+    def program_context(
+        self,
+        program_id: str,
+        *,
+        expected_revision: int,
+        expected_trunk_head: str,
+    ) -> ProgramControllerContext:
+        assert program_id == str(self.status_value.program_id)
+        assert expected_revision == self.status_value.payload["program_revision"]
+        assert expected_trunk_head == self.status_value.payload["trunk_head"]
+        return _runner_context()
 
     def program_claim(
         self, _decision_id: str, *, claimant_id: str, expected_revision: int, generation: int | None = None
@@ -441,7 +742,32 @@ def _runner_status() -> ProgramControllerDecisionStatus:
         None,
         None,
         "9999-12-31T23:59:59Z",
-        {"program_revision": 0},
+        {"program_revision": 0, "plan_digest": PLAN_DIGEST, "trunk_head": TRUNK_HEAD},
+    )
+
+
+def _runner_context() -> ProgramControllerContext:
+    return ProgramControllerContext(
+        ProgramId("program"),
+        0,
+        PLAN_DIGEST,
+        Path("/tmp/codex-flow-program-plan.md"),
+        TRUNK_HEAD,
+        (
+            ProgramControllerNodeContext(
+                MilestoneId("first"),
+                WorkflowState.PLANNED.value,
+                (),
+                ("src/first.py",),
+                (AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+                ("architecture-reviewer", "code-reviewer"),
+                None,
+                (),
+                (),
+                False,
+                True,
+            ),
+        ),
     )
 
 
@@ -482,6 +808,81 @@ def test_program_generation_acknowledges_and_closes_its_ephemeral_lineage(tmp_pa
     ).run()
     assert result.outcome == "acknowledged"
     assert client.completed == [(str(status.decision_id), 1, ControllerGenerationState.COMPLETED.value)]
+    assert '"mutable_surfaces":["src/first.py"]' in adapter.prompts[0]
+    assert '"review_roles":["architecture-reviewer","code-reviewer"]' in adapter.prompts[0]
+
+
+def test_program_action_schema_is_locally_closed_and_provider_projectable() -> None:
+    schema = model_facing_program_controller_action_schema()
+    validate_output_schema(schema)
+    projected = _provider_output_schema(schema)
+    assert projected is not None
+    actions = projected["properties"]["actions"]  # type: ignore[index]
+    assert isinstance(actions, dict)
+    items = actions["items"]
+    assert isinstance(items, dict)
+    branches = items["anyOf"]
+    assert isinstance(branches, list)
+    assert len(branches) == len(ProgramControllerActionKind)
+    assert all(branch["additionalProperties"] is False for branch in branches)
+
+    status = _runner_status()
+    sample_actions = (
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_READY_MILESTONES,
+            milestone_ids=("first",),
+        ),
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_REVIEWS,
+            milestone_id="first",
+            candidate_sha=CANDIDATE_SHA,
+            review_roles=("code-reviewer",),
+        ),
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.REQUEST_REPAIR,
+            milestone_id="first",
+            candidate_sha=CANDIDATE_SHA,
+            finding_ids=("finding",),
+        ),
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.PROMOTE_CANDIDATE,
+            milestone_id="first",
+            candidate_sha=CANDIDATE_SHA,
+            review_ids=("review",),
+        ),
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.INTEGRATE_CANDIDATE,
+            milestone_id="first",
+            candidate_sha=CANDIDATE_SHA,
+            expected_trunk_head=TRUNK_HEAD,
+            integration_strategy="merge",
+        ),
+        ModelFacingProgramControllerAction(ProgramControllerActionKind.REQUIRE_REPLAN, reason="replan"),
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.REQUIRE_HUMAN_ATTENTION,
+            reason="human authority required",
+        ),
+        ModelFacingProgramControllerAction(ProgramControllerActionKind.ACKNOWLEDGE_ONLY),
+    )
+    for action in sample_actions:
+        bundle = ModelFacingProgramControllerActionBundle(
+            1,
+            status.decision_id,
+            status.program_id,
+            PLAN_DIGEST,
+            Generation(1),
+            status.event_kind,
+            status.event_key,
+            0,
+            TRUNK_HEAD,
+            (action,),
+            "close this event",
+        )
+        validate_structured_output(bundle.to_json(), schema)
+    malformed = bundle.to_json()
+    malformed["actions"] = [{"kind": "acknowledge_only", "reason": "not allowed"}]
+    with pytest.raises(ValueError, match="must match exactly one oneOf branch"):
+        validate_structured_output(malformed, schema)
 
 
 def test_program_recovery_replays_committed_action_without_an_sdk_read() -> None:
@@ -550,3 +951,116 @@ def test_program_command_group_exposes_register_start_status_and_decisions() -> 
     assert result.exit_code == 0, result.stdout
     for command in ("register", "start", "status", "decisions", "decide"):
         assert command in result.stdout
+
+
+def test_program_decisions_uses_program_decision_ipc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class Client:
+        def pending(self) -> object:
+            raise AssertionError("dispatch-local pending endpoint must not be used")
+
+        def program_pending(self) -> tuple[ProgramControllerDecisionStatus, ...]:
+            return (_runner_status(),)
+
+    monkeypatch.setattr(cli_module, "_controller_decision_client", lambda _state_root: Client())
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(
+        app,
+        ["program", "decisions", "--state-root", str(tmp_path), "--json"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert '"program_id":"program"' in result.stdout
+
+
+def _git(cwd: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ("git", *arguments),
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+def _integration_repositories(tmp_path: Path, strategy: str) -> tuple[Path, Path, str, str]:
+    repository = tmp_path / "repository"
+    candidate = tmp_path / "candidate"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "Codex Flow Test")
+    _git(repository, "config", "user.email", "codex-flow@example.invalid")
+    (repository / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repository, "add", "base.txt")
+    _git(repository, "commit", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "worktree", "add", "-b", "agent/candidate", str(candidate), base)
+    (candidate / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    _git(candidate, "add", "candidate.txt")
+    _git(candidate, "commit", "-m", "candidate")
+    candidate_sha = _git(candidate, "rev-parse", "HEAD")
+    if strategy != "fast_forward":
+        (repository / "trunk.txt").write_text("trunk\n", encoding="utf-8")
+        _git(repository, "add", "trunk.txt")
+        _git(repository, "commit", "-m", "trunk")
+    return repository, candidate, _git(repository, "rev-parse", "HEAD"), candidate_sha
+
+
+@pytest.mark.parametrize("strategy", ["fast_forward", "merge", "cherry_pick"])
+def test_program_git_integration_recovers_exact_applied_effect_after_receipt_crash(
+    tmp_path: Path, strategy: str
+) -> None:
+    repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, strategy)
+    manager = WorktreeManager()
+    first = manager.integrate_candidate(
+        repository_root=repository,
+        candidate_workspace=candidate,
+        candidate_branch="agent/candidate",
+        candidate_sha=candidate_sha,
+        expected_trunk_head=expected,
+        strategy=strategy,
+    )
+    recovered = manager.integrate_candidate(
+        repository_root=repository,
+        candidate_workspace=candidate,
+        candidate_branch="agent/candidate",
+        candidate_sha=candidate_sha,
+        expected_trunk_head=expected,
+        strategy=strategy,
+    )
+    assert recovered["recovered"] is True
+    assert recovered["before_trunk_head"] == expected
+    assert recovered["after_trunk_head"] == first["after_trunk_head"]
+
+
+def test_program_git_integration_recovery_rejects_unknown_trunk_advance(tmp_path: Path) -> None:
+    repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "merge")
+    (repository / "unrelated.txt").write_text("unrelated\n", encoding="utf-8")
+    _git(repository, "add", "unrelated.txt")
+    _git(repository, "commit", "-m", "unrelated")
+    with pytest.raises(WorkspaceConflict, match="trunk HEAD changed"):
+        WorktreeManager().integrate_candidate(
+            repository_root=repository,
+            candidate_workspace=candidate,
+            candidate_branch="agent/candidate",
+            candidate_sha=candidate_sha,
+            expected_trunk_head=expected,
+            strategy="merge",
+        )
+
+
+@pytest.mark.parametrize("alias_target", ["repository", "candidate"])
+def test_program_git_integration_rejects_symlinked_authority_paths(tmp_path: Path, alias_target: str) -> None:
+    repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "fast_forward")
+    target = repository if alias_target == "repository" else candidate
+    alias = tmp_path / f"{alias_target}-alias"
+    alias.symlink_to(target, target_is_directory=True)
+    with pytest.raises(WorktreeError, match="integration path must not traverse symlinks"):
+        WorktreeManager().integrate_candidate(
+            repository_root=alias if alias_target == "repository" else repository,
+            candidate_workspace=alias if alias_target == "candidate" else candidate,
+            candidate_branch="agent/candidate",
+            candidate_sha=candidate_sha,
+            expected_trunk_head=expected,
+            strategy="fast_forward",
+        )

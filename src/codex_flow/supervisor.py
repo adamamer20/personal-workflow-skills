@@ -30,6 +30,7 @@ from .backends.codex_sdk import (
 )
 from .contracts import (
     ModelFacingControllerActionBundle,
+    ModelFacingProgramControllerAction,
     ModelFacingProgramControllerActionBundle,
     PluginCapabilitySnapshot,
     PluginRequirement,
@@ -54,6 +55,7 @@ from .domain import (
     NativePermissionMode,
     ProgramControllerActionKind,
     ProgramControllerDecisionStatus,
+    ProgramGraph,
     ReasoningEffort,
     RecoveryActionKind,
     RetryBudgetChange,
@@ -842,105 +844,187 @@ class Supervisor:
         finally:
             controller.close()
 
-    def _apply_program_action_bundle(self, bundle: ModelFacingProgramControllerActionBundle) -> None:
+    def _apply_program_external_effect(
+        self,
+        bundle: ModelFacingProgramControllerActionBundle,
+        effect_id: str,
+        apply: Callable[[], None],
+    ) -> bool:
+        state = self.ledger.program_action_effect_state(bundle.action_id, effect_id)
+        if state in {"applied", "failed"}:
+            return False
+        try:
+            apply()
+        except Exception as exc:
+            try:
+                self.ledger.record_program_action_effect(
+                    bundle.action_id,
+                    effect_id,
+                    state="failed",
+                    error_code=type(exc).__name__,
+                )
+            except LedgerError as record_error:
+                raise SupervisorError("program effect failure could not be recorded") from record_error
+            raise
+        self.ledger.record_program_action_effect(bundle.action_id, effect_id, state="applied")
+        return True
+
+    def _apply_program_integration_effect(
+        self,
+        bundle: ModelFacingProgramControllerActionBundle,
+        action: object,
+        graph: object,
+    ) -> None:
+        if not isinstance(action, ModelFacingProgramControllerAction):
+            raise SupervisorError("program integration effect is not typed")
+        if not isinstance(graph, ProgramGraph):
+            raise SupervisorError("program integration graph is not typed")
+        if (
+            action.milestone_id is None
+            or action.candidate_sha is None
+            or action.expected_trunk_head is None
+            or action.integration_strategy is None
+        ):
+            raise SupervisorError("program integration effect is incomplete")
+        pending = next(
+            (
+                item
+                for item in self.ledger.pending_program_integrations(bundle.program_id)
+                if item.get("milestone_id") == action.milestone_id and item.get("candidate_sha") == action.candidate_sha
+            ),
+            None,
+        )
+        if pending is None:
+            return
+        node = graph.node(action.milestone_id)
+        try:
+            receipt = self._worktrees.integrate_candidate(
+                repository_root=self.state_root,
+                candidate_workspace=node.workspace_path,
+                candidate_branch=node.capsule.branch,
+                candidate_sha=action.candidate_sha,
+                expected_trunk_head=action.expected_trunk_head,
+                strategy=action.integration_strategy,
+            )
+        except WorktreeError as exc:
+            self.ledger.complete_program_integration(
+                bundle.program_id,
+                action.milestone_id,
+                candidate_sha=action.candidate_sha,
+                receipt={
+                    "program_id": str(bundle.program_id),
+                    "milestone_id": action.milestone_id,
+                    "candidate_sha": action.candidate_sha,
+                    "expected_trunk_head": action.expected_trunk_head,
+                    "strategy": action.integration_strategy,
+                    "before_trunk_head": action.expected_trunk_head,
+                    "error": type(exc).__name__,
+                },
+                state="conflict",
+            )
+        else:
+            receipt = {
+                **receipt,
+                "program_id": str(bundle.program_id),
+                "milestone_id": action.milestone_id,
+                "expected_trunk_head": action.expected_trunk_head,
+            }
+            self.ledger.complete_program_integration(
+                bundle.program_id,
+                action.milestone_id,
+                candidate_sha=action.candidate_sha,
+                receipt=receipt,
+            )
+
+    def _apply_program_action_bundle(self, bundle: ModelFacingProgramControllerActionBundle) -> bool:
         """Execute only the typed effects already committed by the ledger."""
 
         graph = self.ledger.program_graph(bundle.program_id)
+        changed = False
         for action in bundle.actions:
             if action.kind is ProgramControllerActionKind.START_READY_MILESTONES:
                 for milestone_id in action.milestone_ids:
-                    self._enqueue_program_worker(
-                        program_id=str(bundle.program_id),
-                        milestone_id=milestone_id,
-                        role="executor",
-                        generation=1,
+                    changed = (
+                        self._apply_program_external_effect(
+                            bundle,
+                            f"start:{milestone_id}",
+                            lambda milestone_id=milestone_id: self._enqueue_program_worker(
+                                program_id=str(bundle.program_id),
+                                milestone_id=milestone_id,
+                                role="executor",
+                                generation=1,
+                            ),
+                        )
+                        or changed
                     )
             elif action.kind is ProgramControllerActionKind.START_REVIEWS:
                 if action.milestone_id is None or action.candidate_sha is None:
                     raise SupervisorError("program review effect is incomplete")
+                milestone_id = action.milestone_id
+                candidate_sha = action.candidate_sha
                 for role in action.review_roles:
-                    self._enqueue_program_worker(
-                        program_id=str(bundle.program_id),
-                        milestone_id=action.milestone_id,
-                        role=role,
-                        generation=1,
-                        action_context={
-                            "program_id": str(bundle.program_id),
-                            "milestone_id": action.milestone_id,
-                            "candidate_sha": action.candidate_sha,
-                            "review_role": role,
-                        },
+                    changed = (
+                        self._apply_program_external_effect(
+                            bundle,
+                            f"review:{milestone_id}:{role}",
+                            lambda role=role, milestone_id=milestone_id, candidate_sha=candidate_sha: (
+                                self._enqueue_program_worker(
+                                    program_id=str(bundle.program_id),
+                                    milestone_id=milestone_id,
+                                    role=role,
+                                    generation=1,
+                                    action_context={
+                                        "program_id": str(bundle.program_id),
+                                        "milestone_id": milestone_id,
+                                        "candidate_sha": candidate_sha,
+                                        "review_role": role,
+                                    },
+                                )
+                            ),
+                        )
+                        or changed
                     )
             elif action.kind is ProgramControllerActionKind.REQUEST_REPAIR:
                 if action.milestone_id is None or action.candidate_sha is None:
                     raise SupervisorError("program repair effect is incomplete")
-                self._enqueue_program_worker(
-                    program_id=str(bundle.program_id),
-                    milestone_id=action.milestone_id,
-                    role="executor",
-                    generation=2,
-                    action_context={
-                        "program_id": str(bundle.program_id),
-                        "milestone_id": action.milestone_id,
-                        "candidate_sha": action.candidate_sha,
-                        "finding_ids": list(action.finding_ids),
-                        "repair": True,
-                    },
+                milestone_id = action.milestone_id
+                candidate_sha = action.candidate_sha
+                finding_ids = action.finding_ids
+                changed = (
+                    self._apply_program_external_effect(
+                        bundle,
+                        f"repair:{milestone_id}",
+                        lambda milestone_id=milestone_id, candidate_sha=candidate_sha, finding_ids=finding_ids: (
+                            self._enqueue_program_worker(
+                                program_id=str(bundle.program_id),
+                                milestone_id=milestone_id,
+                                role="executor",
+                                generation=2,
+                                action_context={
+                                    "program_id": str(bundle.program_id),
+                                    "milestone_id": milestone_id,
+                                    "candidate_sha": candidate_sha,
+                                    "finding_ids": list(finding_ids),
+                                    "repair": True,
+                                },
+                            )
+                        ),
+                    )
+                    or changed
                 )
             elif action.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
-                if (
-                    action.milestone_id is None
-                    or action.candidate_sha is None
-                    or action.expected_trunk_head is None
-                    or action.integration_strategy is None
-                ):
-                    raise SupervisorError("program integration effect is incomplete")
-                pending = next(
-                    (
-                        item
-                        for item in self.ledger.pending_program_integrations(bundle.program_id)
-                        if item.get("milestone_id") == action.milestone_id
-                        and item.get("candidate_sha") == action.candidate_sha
-                    ),
-                    None,
+                assert action.milestone_id is not None and action.candidate_sha is not None
+                changed = (
+                    self._apply_program_external_effect(
+                        bundle,
+                        f"integrate:{action.milestone_id}:{action.candidate_sha}",
+                        lambda action=action: self._apply_program_integration_effect(bundle, action, graph),
+                    )
+                    or changed
                 )
-                if pending is None:
-                    continue
-                node = graph.node(action.milestone_id)
-                try:
-                    receipt = self._worktrees.integrate_candidate(
-                        repository_root=self.state_root,
-                        candidate_workspace=node.workspace_path,
-                        candidate_branch=node.capsule.branch,
-                        candidate_sha=action.candidate_sha,
-                        expected_trunk_head=action.expected_trunk_head,
-                        strategy=action.integration_strategy,
-                    )
-                except WorktreeError as exc:
-                    self.ledger.complete_program_integration(
-                        bundle.program_id,
-                        action.milestone_id,
-                        candidate_sha=action.candidate_sha,
-                        receipt={
-                            "program_id": str(bundle.program_id),
-                            "milestone_id": action.milestone_id,
-                            "candidate_sha": action.candidate_sha,
-                            "expected_trunk_head": action.expected_trunk_head,
-                            "strategy": action.integration_strategy,
-                            "before_trunk_head": action.expected_trunk_head,
-                            "error": type(exc).__name__,
-                        },
-                        state="conflict",
-                    )
-                else:
-                    self.ledger.complete_program_integration(
-                        bundle.program_id,
-                        action.milestone_id,
-                        candidate_sha=action.candidate_sha,
-                        receipt=receipt,
-                    )
+        return changed
 
-    def _apply_program_action_outbox(self, action_id: str) -> None:
+    def _apply_program_action_outbox(self, action_id: str) -> bool:
         rows = self.ledger.program_action_outboxes()
         row = next((item for item in rows if item.get("action_id") == action_id), None)
         if row is None:
@@ -948,7 +1032,7 @@ class Supervisor:
         raw = row.get("bundle_json")
         if not isinstance(raw, str):
             raise SupervisorError("program action outbox bundle is missing")
-        self._apply_program_action_bundle(ModelFacingProgramControllerActionBundle.from_json_bytes(raw))
+        return self._apply_program_action_bundle(ModelFacingProgramControllerActionBundle.from_json_bytes(raw))
 
     def _reconcile_program_action_outboxes(self) -> bool:
         changed = False
@@ -956,26 +1040,37 @@ class Supervisor:
             if row.get("state") != "acknowledged" and row.get("state") != "committed":
                 continue
             try:
-                self._apply_program_action_outbox(str(row["action_id"]))
+                applied = self._apply_program_action_outbox(str(row["action_id"]))
             except (LedgerError, SupervisorError, WorktreeError, TypeError, ValueError):
                 continue
-            changed = True
+            changed = applied or changed
         return changed
 
     def _schedule_program_controller_generations(self) -> bool:
         changed = self._reconcile_program_action_outboxes()
-        for status in self.ledger.program_controller_decisions():
+        changed = bool(self.ledger.reconcile_stale_program_controller_decisions()) or changed
+        statuses = self.ledger.program_controller_decisions()
+        status_by_decision = {str(status.decision_id): status for status in statuses}
+        active_programs = {
+            str(status_by_decision[decision_id].program_id)
+            for decision_id in self._controller_children
+            if decision_id in status_by_decision
+        }
+        for status in statuses:
             if self.ledger.supervisor_refresh_fenced():
                 break
+            program_id = str(status.program_id)
+            if program_id in active_programs:
+                continue
             if status.state is ControllerDecisionState.AWAITING_CLAIM:
                 generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
-                changed = (
-                    self._spawn_program_controller_generation(
-                        status,
-                        recovery=generation.state is not ControllerGenerationState.PREPARED,
-                    )
-                    or changed
+                spawned = self._spawn_program_controller_generation(
+                    status,
+                    recovery=generation.state is not ControllerGenerationState.PREPARED,
                 )
+                changed = spawned or changed
+                if spawned:
+                    active_programs.add(program_id)
             elif status.state is ControllerDecisionState.CLAIMED:
                 if status.claimant_kind is ControllerClaimantKind.HUMAN:
                     continue
@@ -991,17 +1086,19 @@ class Supervisor:
                     }
                     and str(status.decision_id) not in self._controller_children
                 ):
-                    changed = self._spawn_program_controller_generation(status, recovery=True) or changed
+                    spawned = self._spawn_program_controller_generation(status, recovery=True)
+                    changed = spawned or changed
+                    if spawned:
+                        active_programs.add(program_id)
             elif (
-                status.state
-                in {
-                    ControllerDecisionState.ACTION_COMMITTED,
-                    ControllerDecisionState.HUMAN_ATTENTION_REQUIRED,
-                }
+                status.state is ControllerDecisionState.ACTION_COMMITTED
                 and status.action_id is not None
                 and str(status.decision_id) not in self._controller_children
             ):
-                changed = self._spawn_program_controller_generation(status, recovery=True) or changed
+                spawned = self._spawn_program_controller_generation(status, recovery=True)
+                changed = spawned or changed
+                if spawned:
+                    active_programs.add(program_id)
         return changed
 
     def _reap_children(self) -> bool:
@@ -1407,6 +1504,22 @@ class Supervisor:
                 raise IpcError("program status request has an unsupported shape")
             status = self.ledger.program_controller_decision(ControllerDecisionId(payload["decision_id"]))
             return {"version": 1, "ok": True, "decision": self._program_status_payload(status)}
+        if operation == "program_context":
+            required = {
+                "version",
+                "operation",
+                "program_id",
+                "expected_revision",
+                "expected_trunk_head",
+            }
+            if set(payload) != required:
+                raise IpcError("program context request has an unsupported shape")
+            context = self.ledger.program_controller_context(
+                payload["program_id"],
+                expected_revision=payload["expected_revision"],
+                expected_trunk_head=payload["expected_trunk_head"],
+            )
+            return {"version": 1, "ok": True, "context": context.to_json()}
         if operation == "program_claim":
             allowed = {
                 "version",
@@ -2798,6 +2911,17 @@ class Supervisor:
         try:
             if role == "executor":
                 terminal_status = str(row.get("terminal_status"))
+                result_sha256 = row.get("raw_result_sha256")
+                if not isinstance(result_sha256, str):
+                    raise WorktreeError("program executor queue lacks a result digest")
+                if self.ledger.program_executor_terminal_recorded(
+                    program_id,
+                    milestone_id,
+                    dispatch_id=dispatch_id,
+                    terminal_status=terminal_status,
+                    result_sha256=result_sha256,
+                ):
+                    return
                 candidate_sha: str | None = None
                 if terminal_status == "completed":
                     graph = self.ledger.program_graph(program_id)
@@ -2808,6 +2932,7 @@ class Supervisor:
                     candidate_sha=candidate_sha,
                     terminal_status=terminal_status,
                     dispatch_id=dispatch_id,
+                    result_sha256=result_sha256,
                 )
             else:
                 result = review_result_from_agent_message(raw)

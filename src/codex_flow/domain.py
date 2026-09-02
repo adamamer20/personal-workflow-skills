@@ -3394,15 +3394,29 @@ class ProgramGraph:
 
         for node_id in ids:
             visit(node_id)
-        owned_paths: dict[str, MilestoneId] = {}
+        owned_paths: dict[str, list[MilestoneId]] = {}
+
+        def depends_on(node_id: MilestoneId, dependency_id: MilestoneId) -> bool:
+            pending = list(graph[node_id])
+            seen: set[MilestoneId] = set()
+            while pending:
+                current = pending.pop()
+                if current == dependency_id:
+                    return True
+                if current not in seen:
+                    seen.add(current)
+                    pending.extend(graph[current])
+            return False
+
         for node in nodes:
             for surface in node.mutable_surfaces:
-                owner = owned_paths.get(surface)
-                if owner is not None:
-                    raise ValueError(
-                        f"program mutable surface {surface!r} is owned by both {owner} and {node.milestone_id}"
-                    )
-                owned_paths[surface] = node.milestone_id
+                owners = owned_paths.setdefault(surface, [])
+                for owner in owners:
+                    if not depends_on(node.milestone_id, owner) and not depends_on(owner, node.milestone_id):
+                        raise ValueError(
+                            f"program mutable surface {surface!r} has concurrent owners {owner} and {node.milestone_id}"
+                        )
+                owners.append(node.milestone_id)
         object.__setattr__(self, "nodes", nodes)
 
     def node(self, milestone_id: MilestoneId | str) -> ProgramNodeSpec:
@@ -3487,6 +3501,199 @@ class ProgramStatus:
             node.milestone_id
             for node in self.nodes
             if node.ready and all(dependency in integrated for dependency in node.dependencies)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramControllerNodeContext:
+    """Bounded static and dynamic facts for one program-controller node."""
+
+    milestone_id: MilestoneId
+    state: str
+    dependencies: tuple[MilestoneId, ...]
+    mutable_surfaces: tuple[str, ...]
+    acceptance_modes: tuple[AcceptanceMode, ...]
+    review_roles: tuple[str, ...]
+    candidate_sha: str | None
+    review_ids: tuple[str, ...]
+    finding_ids: tuple[str, ...]
+    integrated: bool
+    ready: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.milestone_id, MilestoneId):
+            object.__setattr__(self, "milestone_id", MilestoneId(self.milestone_id))
+        _required_text(self.state, label="program node context state", limit=64)
+        dependencies = tuple(item if isinstance(item, MilestoneId) else MilestoneId(item) for item in self.dependencies)
+        if len(dependencies) != len(set(dependencies)):
+            raise ValueError("program node context dependencies are not unique")
+        object.__setattr__(self, "dependencies", dependencies)
+        surfaces = tuple(self.mutable_surfaces)
+        if (
+            len(surfaces) > 256
+            or len(surfaces) != len(set(surfaces))
+            or any(not isinstance(item, str) or not item or len(item.encode("utf-8")) > 4_096 for item in surfaces)
+        ):
+            raise ValueError("program node context mutable surfaces are invalid")
+        object.__setattr__(self, "mutable_surfaces", surfaces)
+        modes = tuple(
+            item if isinstance(item, AcceptanceMode) else AcceptanceMode(item) for item in self.acceptance_modes
+        )
+        if len(modes) != len(set(modes)):
+            raise ValueError("program node context acceptance modes are not unique")
+        object.__setattr__(self, "acceptance_modes", modes)
+        for label, values in (
+            ("review_roles", self.review_roles),
+            ("review_ids", self.review_ids),
+            ("finding_ids", self.finding_ids),
+        ):
+            checked = tuple(values)
+            if len(checked) != len(set(checked)) or any(
+                not isinstance(item, str) or not item or len(item.encode("utf-8")) > 256 for item in checked
+            ):
+                raise ValueError(f"program node context {label} are invalid")
+            object.__setattr__(self, label, checked)
+        if self.candidate_sha is not None and re.fullmatch(r"[0-9a-f]{40}", self.candidate_sha) is None:
+            raise ValueError("program node context candidate is invalid")
+        if not isinstance(self.integrated, bool) or not isinstance(self.ready, bool):
+            raise ValueError("program node context flags are invalid")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "milestone_id": str(self.milestone_id),
+            "state": self.state,
+            "dependencies": [str(item) for item in self.dependencies],
+            "mutable_surfaces": list(self.mutable_surfaces),
+            "acceptance_modes": [item.value for item in self.acceptance_modes],
+            "review_roles": list(self.review_roles),
+            "candidate_sha": self.candidate_sha,
+            "review_ids": list(self.review_ids),
+            "finding_ids": list(self.finding_ids),
+            "integrated": self.integrated,
+            "ready": self.ready,
+        }
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> ProgramControllerNodeContext:
+        expected = {
+            "milestone_id",
+            "state",
+            "dependencies",
+            "mutable_surfaces",
+            "acceptance_modes",
+            "review_roles",
+            "candidate_sha",
+            "review_ids",
+            "finding_ids",
+            "integrated",
+            "ready",
+        }
+        if set(value) != expected:
+            raise ValueError("program node context shape is unsupported")
+        arrays = {
+            name: value[name]
+            for name in (
+                "dependencies",
+                "mutable_surfaces",
+                "acceptance_modes",
+                "review_roles",
+                "review_ids",
+                "finding_ids",
+            )
+        }
+        if any(
+            not isinstance(items, list) or any(not isinstance(item, str) for item in items) for items in arrays.values()
+        ):
+            raise ValueError("program node context arrays are malformed")
+        return cls(
+            MilestoneId(value["milestone_id"]),  # type: ignore[arg-type]
+            value["state"],  # type: ignore[arg-type]
+            tuple(MilestoneId(item) for item in arrays["dependencies"]),
+            tuple(arrays["mutable_surfaces"]),  # type: ignore[arg-type]
+            tuple(AcceptanceMode(item) for item in arrays["acceptance_modes"]),
+            tuple(arrays["review_roles"]),  # type: ignore[arg-type]
+            value["candidate_sha"],  # type: ignore[arg-type]
+            tuple(arrays["review_ids"]),  # type: ignore[arg-type]
+            tuple(arrays["finding_ids"]),  # type: ignore[arg-type]
+            value["integrated"],  # type: ignore[arg-type]
+            value["ready"],  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramControllerContext:
+    """Exact bounded DAG context read by one ephemeral controller revision."""
+
+    program_id: ProgramId
+    program_revision: int
+    plan_digest: str
+    plan_path: Path
+    trunk_head: str
+    nodes: tuple[ProgramControllerNodeContext, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.program_id, ProgramId):
+            object.__setattr__(self, "program_id", ProgramId(self.program_id))
+        if (
+            isinstance(self.program_revision, bool)
+            or not isinstance(self.program_revision, int)
+            or self.program_revision < 0
+        ):
+            raise ValueError("program controller context revision is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", self.plan_digest) is None:
+            raise ValueError("program controller context plan digest is invalid")
+        plan_path = Path(self.plan_path)
+        if not plan_path.is_absolute() or ".." in plan_path.parts:
+            raise ValueError("program controller context plan path is invalid")
+        object.__setattr__(self, "plan_path", plan_path)
+        if re.fullmatch(r"[0-9a-f]{40}", self.trunk_head) is None:
+            raise ValueError("program controller context trunk HEAD is invalid")
+        nodes = tuple(self.nodes)
+        if not nodes or len(nodes) > 128 or len({item.milestone_id for item in nodes}) != len(nodes):
+            raise ValueError("program controller context nodes are invalid")
+        object.__setattr__(self, "nodes", nodes)
+        if len(self.to_json_bytes()) > 48 * 1024:
+            raise ValueError("program controller context exceeds the IPC prompt boundary")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "schema_version": 1,
+            "program_id": str(self.program_id),
+            "program_revision": self.program_revision,
+            "plan_digest": self.plan_digest,
+            "plan_path": os.fspath(self.plan_path),
+            "trunk_head": self.trunk_head,
+            "nodes": [item.to_json() for item in self.nodes],
+        }
+
+    def to_json_bytes(self) -> bytes:
+        return json.dumps(
+            self.to_json(), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> ProgramControllerContext:
+        expected = {
+            "schema_version",
+            "program_id",
+            "program_revision",
+            "plan_digest",
+            "plan_path",
+            "trunk_head",
+            "nodes",
+        }
+        if set(value) != expected or value.get("schema_version") != 1 or not isinstance(value.get("nodes"), list):
+            raise ValueError("program controller context shape is unsupported")
+        nodes = value["nodes"]
+        if any(not isinstance(item, Mapping) for item in nodes):
+            raise ValueError("program controller context nodes are malformed")
+        return cls(
+            ProgramId(value["program_id"]),  # type: ignore[arg-type]
+            value["program_revision"],  # type: ignore[arg-type]
+            value["plan_digest"],  # type: ignore[arg-type]
+            Path(value["plan_path"]),  # type: ignore[arg-type]
+            value["trunk_head"],  # type: ignore[arg-type]
+            tuple(ProgramControllerNodeContext.from_json(item) for item in nodes),
         )
 
 
