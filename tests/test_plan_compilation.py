@@ -116,12 +116,10 @@ def test_complete_conversation_history_capsule_is_the_frozen_mixed_mode_owner() 
     assert compiled.capsule.plugin_requirements == ()
 
 
-def test_provider_transient_backoff_capsule_is_the_frozen_pre_tui_owner() -> None:
-    compiled = compile_canonical_plan(
-        Path("docs/reviews/peer-thread-workflow.md"), "provider-transient-backoff-and-fresh-e2e-smoke"
-    )
+def test_event_driven_program_controller_capsule_is_the_frozen_pre_tui_owner() -> None:
+    compiled = compile_canonical_plan(Path("docs/reviews/peer-thread-workflow.md"), "event-driven-program-controller")
 
-    assert compiled.source_block_sha256 == "471a570a409c043f14486fb7ecb9dc18badb85f1214e9af1409a666317c9ed48"
+    assert compiled.source_block_sha256 == "dea2dcc10ca25d7d9ffd99fa84901b7cf70d66c35c7f346cadb57052360b6842"
     assert compiled.capsule.acceptance_modes == (
         AcceptanceMode.OBJECTIVE,
         AcceptanceMode.ARCHITECTURE,
@@ -130,9 +128,9 @@ def test_provider_transient_backoff_capsule_is_the_frozen_pre_tui_owner() -> Non
         "code-reviewer",
         "architecture-reviewer",
     )
-    assert "src/codex_flow/ledger.py" in compiled.capsule.mutable_surfaces
-    assert any("same thread" in criterion for criterion in compiled.capsule.acceptance_criteria)
-    assert "attempt-13" in compiled.capsule.prompt
+    assert "src/codex_flow/program_controller.py" in compiled.capsule.mutable_surfaces
+    assert any("controller-model turns" in criterion for criterion in compiled.capsule.acceptance_criteria)
+    assert "event-driven-program-controller" in compiled.capsule.prompt
     assert compiled.capsule.plugin_requirements == ()
 
 

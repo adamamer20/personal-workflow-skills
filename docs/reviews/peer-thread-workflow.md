@@ -7617,14 +7617,16 @@ need for a new durable/public surface returns to planning before implementation.
 
 ### Milestone DAG and promotion
 
-`supervisor-liveness real smoke -> live-coding-agent-terminal-ui -> objective,
-visual and architecture reviews -> ordinary codex-flow use`.  The serial edge
-is an acceptance dependency: live UI traffic cannot be promoted before the
-same production supervisor proves terminal result ingress.  The implementation
-has one mutable owner because worker event projection, IPC backpressure and TUI
-reconciliation share one live protocol.  After the exact candidate freezes,
-independent objective, visual and architecture reviews may run in parallel on
-read-only snapshots; they never own implementation bytes or lifecycle state.
+`supervisor-liveness real smoke -> event-driven-program-controller ->
+live-coding-agent-terminal-ui -> objective and architecture reviews -> ordinary
+codex-flow use`.  The first serial edge is shared schema, state-authority and
+production-entrypoint work: the program controller generalizes the durable
+controller action boundary before the TUI may consume it.  The second edge is
+an acceptance dependency: live UI traffic cannot be promoted before the same
+production supervisor proves terminal result ingress and program-level event
+routing.  Each implementation has one mutable owner.  Read-only objective and
+architecture reviews may overlap only after an exact candidate freezes; the
+user-cancelled visual-promotion review is not reinstated.
 
 ### Latest real-smoke status
 
@@ -7730,7 +7732,7 @@ ready for one managed semantic child lane based on this exact checkpoint; the
 later metadata commit that records this SHA does not change its implementation
 or acceptance boundary.
 
-## Next execution — provider-transient-backoff-and-fresh-e2e-smoke
+## Completed — provider-transient-backoff-and-fresh-e2e-smoke
 
 The next owner repairs only typed transient provider recovery and then runs one
 fresh disposable E2E smoke after installation.  A pre-identity transient may
@@ -7817,6 +7819,266 @@ ModelFacingCapsule(
 )
 ```
 
+### Provider-transient implementation and fresh-smoke checkpoint
+
+The accepted implementation is frozen at program-trunk commit
+`ac438a544d9deb7c2173953c99233de23714cb27`.  It comprises the transient-recovery
+owner commit `6e8d822fb83fe42af08eb06197ed9704ef7f3a02`, the exact delayed-result recovery
+commit `4631ed2008dd40dc64ec1f3b0e99ee6e838216c5`, the terminal-controller
+constraint commit `c6186f0b762b74734d8c5527b4726806f07f926d`, and the bounded grant repairs
+`aa5810b`, `dba1b05` and `ac438a5`.  The recovered historical worker result
+closed without another provider attempt, and its terminal controller generation
+acknowledged the exact result without scheduling a retry.
+
+After canonical installation, one newly created disposable real workflow pilot
+ran with `gpt-5.6-luna` at medium effort.  It reached the packaged
+`codex-flow control` entrypoint, started exactly one worker attempt, changed
+only the authorized `workflow_result.txt`, returned a schema-valid completed
+result, and received durable `controller_acknowledged`.  The protected sentinel
+and Git HEAD remained unchanged; the temporary supervisor shut down cleanly
+and the temporary repository was removed.  The sanitized dispatch identity is
+SHA-256 `eca3178e08d270cf2ba4ebc852ce78901bd0536ebf3e72433168c5a5e2f57ec9` and
+the exact final sentinel SHA-256 is
+`be9e35885d26bab9689ab7a97cac19b9eea7deeb4ba071ab394057229ef9caf7`.
+
+The repair synchronizes provider and continuation budgets in one CAS, binds the
+grant to the current typed provider failure and exact thread, clears stale
+inspection/failure context at ownership transitions, consumes exactly the one
+newly authorized continuation and rejects stale non-provider facts.  The fresh
+production-shaped regression proves initial attempt, three ordinary
+continuations, fourth typed failure, one grant, one final continuation and exact
+exhaustion.  The affected partition passed 230 tests and the final full gate
+passed 787 tests plus Ruff, validator, compileall and pre-commit.
+
+Independent Luna XHigh objective/correctness and Sol Medium architecture
+reviews accepted exact tip `ac438a544d9deb7c2173953c99233de23714cb27` with
+P0=0/P1=0.  No visual review was requested.  Because the accepted repair was
+committed directly on the program trunk, no separate lane integration action is
+required.  The `event-driven-program-controller` successor is ready.
+
+## Next execution — event-driven-program-controller
+
+This milestone is the self-hosting cutover from a manually operated sequence
+of single-milestone dispatches to one codex-flow-owned program lifecycle.  Its
+`provider-transient-backoff-and-fresh-e2e-smoke` prerequisite is accepted and
+integrated at exact trunk tip `ac438a544d9deb7c2173953c99233de23714cb27`.
+The dependency was serial because both
+milestones own the ledger schema, supervisor event loop, controller action
+contract and production CLI.  No second worker may start against these shared
+surfaces.
+
+### Current boundary and selected responsibility split
+
+The existing `codex-flow control --plan-path ... --milestone-id ...` compiles,
+plans and queues one exact milestone.  The detached supervisor already owns
+queueing, leases, worker heartbeats, terminal result ingress, bounded recovery
+and source-controller wake-ups.  Its ephemeral controller generations are
+event-driven, but their closed action contract is dispatch-local: acknowledge,
+checkpoint re-arm, retry, cancellation, retry-budget change or human attention.
+The existing `ReviewWorkflow` proves review/repair policy through in-process
+callbacks, and `authorized_successors` can release only dispatches created and
+authorized in advance.  No production path currently compiles a complete DAG,
+starts independent ready nodes, dispatches detached reviewers, promotes an
+exact reviewed commit, integrates a promoted lane or derives the next ready
+milestones.  Those actions are still performed by the external planning
+controller.
+
+The selected architecture keeps the supervisor non-model and deterministic.
+It owns SQLite, CAS revisions, outboxes, process identity, leases, readiness
+calculation and application of validated effects.  It never judges review
+quality, chooses an implementation strategy, resolves a merge conflict or
+edits the canonical plan.  A short-lived Sol Medium program-controller model is
+started only for a coalesced durable event: implementation terminal result,
+review terminal result, integration completion/conflict, controller-attention
+condition or one explicitly armed checkpoint.  It receives one bounded,
+secretless program summary, commits one closed action bundle and exits.  There
+is no long-lived model, timer-driven model polling, model-owned callback,
+alternate scheduler or App lifecycle dependency.
+
+Implementation and review workers remain capability-bound leaves.  Reviewers
+receive an immutable candidate commit/range and read-only workspace authority
+and return one typed `ReviewResult`.  The controller decides whether to request
+a same-owner repair, replan, promote or require human authority.  Promotion is
+valid only when every declared acceptance authority reviewed the same exact
+candidate and no promotion-blocking P0/P1 remains.  A promoted integration is a
+typed deterministic effect: the supervisor verifies expected trunk HEAD,
+ancestry, lane ownership, clean topology and a conflict-free Git preflight,
+then applies the plan-selected merge strategy through the existing worktree
+authority.  A conflict or validation failure creates a new controller event;
+it is never silently resolved, reverted or blessed.
+
+The canonical Markdown plan remains the static authority for intent, capsules,
+dependencies, ownership and acceptance.  A closed `ProgramGraph` compiler
+projects that plan without executing it and binds its digest plus every capsule
+source digest.  SQLite remains the sole dynamic authority for node state,
+candidate revision, reviews, promotion, integration and controller decisions.
+Ordinary status changes never rewrite the Markdown plan.  A material change to
+intent, public/persisted contract, security/privacy, destructive behavior,
+scope or cost emits a typed replan requirement for the planning authority.
+
+### Program state, events and actions
+
+One registered program progresses through the existing workflow states
+`planned`, `starting`, `running`, `completed`, `reviewing`, `repair_required`
+and `accepted`; integration readiness is an exact revision fact, not a parallel
+lifecycle vocabulary.  The forward migration generalizes the existing
+controller decision subject from one dispatch to either a dispatch or a
+program revision while preserving all prior rows and dispatch-local behavior.
+It adds only the dependency edges and integration outbox needed by the missing
+runtime behavior.  Existing run, milestone, event, execution, review,
+controller-generation and action-receipt authorities are reused rather than
+duplicated.
+
+`ProgramControllerActionKind` is closed to: start one or more currently ready
+milestones, start the missing declared reviews for one exact candidate, request
+a same-owner repair, promote one fully accepted candidate, authorize one exact
+integration, require a bounded replan, require human attention or acknowledge
+without effects.  `ModelFacingProgramControllerActionBundle` binds program id,
+plan digest, decision generation, expected program revision, expected trunk
+HEAD, exact candidate/review/integration identities and all affected milestone
+revisions.  The ledger rejects stale, cross-program, non-ready, overlapping,
+unreviewed, unpromoted or authority-changing bundles before any process or Git
+side effect.
+
+After an integration receipt commits and its proportional checks pass, the
+supervisor deterministically marks the exact node integrated, recomputes ready
+nodes from durable dependency edges and emits at most one coalesced program
+decision.  One controller activation may start multiple ready milestones when
+their mutable surfaces and workspaces are disjoint; each milestone still has
+one owner and one START.  Human-attention worker states first become controller
+attention.  User attention is requested only when intent/authority is genuinely
+underdetermined or an external/destructive prerequisite requires it.
+
+### Architecture map and artifact budget
+
+- **Modify `src/codex_flow/domain.py`:** own typed program graph/state/event,
+  exact candidate/integration identities and `ProgramControllerActionKind`.
+- **Modify `src/codex_flow/contracts.py`:** own the closed model-facing program
+  action/bundle contract and review-result serialization without changing
+  existing capsule/result compatibility.
+- **Modify `src/codex_flow/plan_capsule.py`:** add the non-executing
+  `CompiledProgramGraph` compiler and exact dependency/ownership validation;
+  retain the current single-milestone compiler.
+- **Modify `src/codex_flow/ledger.py`:** own one forward schema migration,
+  program revision CAS, dependency readiness, review/promotion facts and one
+  integration outbox.  Reuse existing lifecycle and controller-generation
+  tables wherever their authority already fits.
+- **Modify `src/codex_flow/controller.py`:** register one compiled program and
+  reuse the existing review policy/types; do not keep an in-process scheduler.
+- **Create `src/codex_flow/program_controller.py`:** own only the ephemeral
+  schema-bound program-controller generation runner.  It accesses durable state
+  and effects solely through the typed client, exactly like dispatch recovery.
+- **Modify `src/codex_flow/controller_recovery.py`:** preserve dispatch recovery
+  and share only its bounded SDK generation mechanics with the new runner.
+- **Modify `src/codex_flow/supervisor.py`:** coalesce program events, spawn at
+  most one generation per program revision, launch ready worker/reviewer roles,
+  drain the integration outbox and acknowledge exact receipts.
+- **Modify `src/codex_flow/worker.py` and
+  `src/codex_flow/backends/codex_sdk.py`:** add the read-only reviewer job/result
+  variant without granting reviewers mutation or lifecycle authority.
+- **Modify `src/codex_flow/worktrees.py`:** verify exact commits, lane ancestry,
+  clean trunk and conflict-free integration before the supervisor applies the
+  authorized strategy.
+- **Modify `src/codex_flow/control_client.py` and `src/codex_flow/cli.py`:** add
+  typed program status/control IPC and one `codex-flow program` command group
+  for register, start, status and bounded human decisions.
+- **Modify the existing workflow-control skill/template, focused controller,
+  ledger, plan, supervisor, worker, worktree, IPC and production-pilot tests,
+  plus one new focused `tests/test_program_controller.py` and retained
+  `docs/reviews/evidence/event-driven-program-controller.json` proof.
+- **Preserve** the App transport, native authentication/profile ownership,
+  TUI modules, live-conversation protocol, service unit, IPC framing ceiling,
+  plugin registry, unrelated evidence, remotes and global state.
+
+The durable-artifact budget is three paths: one production module for the
+ephemeral runner, one focused test module and one retained evidence record.
+The schema migration may add at most two tables (`milestone_dependencies` and
+`integration_outbox`) and must not add a service, daemon, socket, transport,
+database, registry, scheduler or parallel lifecycle authority.  Generated JSON
+schema remains derived from typed contracts rather than a second handwritten
+authority.
+
+### Bootstrap, acceptance and cutover
+
+The external planning controller remains authoritative through this milestone:
+it accepts and integrates the active provider-transient predecessor, invokes
+this capsule once, dispatches its independent objective and architecture
+reviews, repairs at most one concrete blocking set and integrates the accepted
+candidate.  Only then does the explicit `codex-flow program start` cutover
+register the remaining graph and allow codex-flow's event-driven controller to
+start and close `live-coding-agent-terminal-ui`.  Self-hosting evidence must
+show the controller process absent while workers merely run and exactly one
+controller generation per coalesced terminal event.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make codex-flow the event-driven controller for a complete milestone DAG, including "
+        "review, promotion, exact Git integration and successor scheduling without a long-lived model."
+    ),
+    decomposition=(
+        "Compile and durably register one closed canonical program graph while preserving single-milestone callers.",
+        "Generalize the existing controller decision CAS to bounded program events and closed program action bundles.",
+        "Dispatch ready implementation and read-only review workers, promote only exact fully accepted commits and request bounded repair when blocked.",
+        "Apply controller-authorized conflict-free integration through the existing worktree authority and derive readiness only after a verified receipt.",
+        "Prove event-triggered controller generations, parallel starts for disjoint ready nodes, restart recovery and a real self-hosted successor cutover.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The supervisor remains a deterministic non-model process; while work is merely running it consumes zero controller-model turns and never polls a model.",
+        "Implementation completion, review completion, integration outcome, controller-attention and one-shot checkpoint events each produce at most one CAS-bound program decision generation, action receipt and acknowledgement across restart.",
+        "One controller bundle may start every currently ready milestone with disjoint mutable ownership, while shared surfaces, serial dependencies, stale plan revisions and duplicate STARTs fail before thread creation.",
+        "Every declared acceptance authority reviews the same exact candidate commit read-only; promotion rejects stale reviews or any promotion-blocking P0/P1 and routes concrete blockers to one same-owner repair.",
+        "Integration verifies expected trunk HEAD, ancestry, lane ownership, clean topology and conflict-free preflight, applies only the authorized strategy and advances DAG readiness only after exact receipt and proportional validation.",
+        "Human-attention worker states first receive a bounded controller recovery decision; only underdetermined intent, new authority or an external prerequisite is escalated to the user.",
+        "The canonical plan is static intent authority and SQLite is sole dynamic authority; no second scheduler, transport, daemon, database, App lifecycle dependency or model-owned callback is introduced.",
+        "Focused migration/contract/DAG/review/integration/restart tests, affected semantic partitions, full make check, exact-wheel installation and one real self-hosted program smoke close with P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/plan_capsule.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/program_controller.py",
+        "src/codex_flow/controller_recovery.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/worktrees.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/cli.py",
+        "plugins/personal-workflow-skills/skills/workflow-control/SKILL.md",
+        "templates/AGENTS.workflow.md",
+        "tests/test_program_controller.py and existing focused contract, plan, ledger, controller, supervisor, worker, worktree, IPC and production-pilot tests",
+        "docs/reviews/evidence/event-driven-program-controller.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md after this capsule is frozen and AGENTS.md",
+        "TUI modules and live-conversation protocol owned by the blocked successor",
+        "service unit, IPC framing and 64 KiB ceiling, native profile/authentication and App transport",
+        "plugin registry/manifests, unrelated skills/evidence, retained wheels and packaging dependencies",
+        "global Codex/App state, remotes, pushes, rebases, history rewrites, implicit cleanup and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only event-driven-program-controller after the provider-transient "
+        "predecessor is accepted and integrated. Implement the frozen deterministic-supervisor plus "
+        "ephemeral-controller architecture in the existing program trunk. Reuse the single SQLite, SDK, "
+        "review, worktree and supervisor authorities; add no second scheduler, transport, service or App "
+        "dependency. Create the exact bounded artifacts, commit only owned surfaces, run provider-free gates "
+        "before the one authorized self-hosted program smoke, and return one typed terminal result. Do not "
+        "start or modify the live-coding-agent-terminal-ui successor."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
 ## Blocked successor — live-coding-agent-terminal-ui
 
 ```python
@@ -7833,7 +8095,7 @@ ModelFacingCapsule(
         "Update the selected TUI conversation in place, render tool state inline and reconcile terminal or reconnected views from stable Thread.read history.",
         "Prove realistic streaming, slow-consumer loss, reconnect, privacy, controls and exact 80x24 and wide rendering without a timer or polling loop.",
     ),
-    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.VISUAL, AcceptanceMode.ARCHITECTURE),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
         "During one real delayed SDK turn the selected worker's assistant text grows in place and each tool call progresses through typed visible states without manual refresh, one row per token or App APIs.",
         "Cumulative keyframes bind dispatch, generation, attempt, thread, turn and live revision; stale, replaced, replayed, cross-subject or post-terminal frames are discarded before display.",
@@ -7841,7 +8103,7 @@ ModelFacingCapsule(
         "Raw live transcript and tool output are never written to SQLite, logs, evidence or recovery state; redaction, typed path/URL/image presence and memory/frame/subscriber bounds fail closed without altering stable history.",
         "Reconnect and terminalization discard ephemeral state and reconstruct the complete persisted user/agent conversation from official Thread.read in SDK order, without diagnostics or deltas filling gaps.",
         "Wide light/dark and exact 80x24 light/no-color renders retain controller-over-workers hierarchy, readable progressive assistant text, inline tool state, scrolling/load older and safe actions with no important zero-height panel.",
-        "Focused adapter, worker, supervisor, IPC, client and TUI tests, a provider-free slow-consumer stress proof, one authorized real streaming sentinel, affected partitions, full make check, exact-wheel service proof and objective/visual/architecture reviews close with P0=0/P1=0.",
+        "Focused adapter, worker, supervisor, IPC, client and TUI tests, a provider-free slow-consumer stress proof, one authorized real streaming sentinel, affected partitions, full make check, exact-wheel service proof and objective/architecture reviews close with P0=0/P1=0; the cancelled independent visual review is not reinstated.",
     ),
     mutable_surfaces=(
         "src/codex_flow/domain.py only for non-persisted live-view types",
@@ -7865,7 +8127,6 @@ ModelFacingCapsule(
     ),
     authorities=(
         ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
-        ModelAuthority(AcceptanceMode.VISUAL, RoleId("visual-reviewer")),
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
     ),
     prompt=(
@@ -7875,7 +8136,7 @@ ModelFacingCapsule(
         "the official SDK and the single supervisor/SQLite authority; add no polling, alternate TUI, "
         "transport, module, schema, table, dependency or App lifecycle call. Stream only bounded redacted "
         "ephemeral cumulative assistant/tool keyframes, prioritize terminal result ingress, reconcile from "
-        "Thread.read, run the exact objective/visual/architecture gates and return one typed terminal result."
+        "Thread.read, run the exact objective/architecture gates and return one typed terminal result."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000,
