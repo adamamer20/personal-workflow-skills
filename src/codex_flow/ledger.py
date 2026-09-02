@@ -30,7 +30,15 @@ from .app_native import (
     HostReceipt,
     claim_token_sha256,
 )
-from .contracts import ModelFacingControllerActionBundle, ModelFacingResult, ModelResultStatus
+from .contracts import (
+    ModelFacingControllerActionBundle,
+    ModelFacingProgramControllerActionBundle,
+    ModelFacingResult,
+    ModelResultStatus,
+    model_facing_result_schema_sha256,
+    model_facing_review_result_schema_sha256,
+    review_result_from_agent_message,
+)
 from .domain import (
     CONTROL_ACKNOWLEDGEMENT_TERMINAL_STATUSES,
     DIAGNOSTIC_RING_MAX_BYTES,
@@ -79,6 +87,15 @@ from .domain import (
     NativePermissionMode,
     PostIdentityExecutionFailure,
     PreIdentityTransportFailure,
+    ProgramControllerActionKind,
+    ProgramControllerDecisionStatus,
+    ProgramEventKind,
+    ProgramGraph,
+    ProgramId,
+    ProgramNodeSpec,
+    ProgramNodeStatus,
+    ProgramState,
+    ProgramStatus,
     ReasonCode,
     ReasoningEffort,
     RecoveryActionKind,
@@ -110,7 +127,7 @@ from .domain import (
     strict_json_loads,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(17)
+CURRENT_SCHEMA_VERSION = SchemaVersion(18)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -129,6 +146,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(14),
         SchemaVersion(15),
         SchemaVersion(16),
+        SchemaVersion(17),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -1002,6 +1020,79 @@ _V17_TABLE_DDL = {
     "retry_policies": _RETRY_POLICIES_V17_DDL,
 }
 
+# H6-E-W-R3 program authority.  Program identity and revision live on the
+# existing run authority; only dependency edges and the deterministic Git
+# effect outbox are new durable tables.  Controller decisions keep their
+# existing dispatch anchor for backwards compatibility while carrying an
+# explicit program event identity.
+_PROGRAM_RUNS_DDL = """CREATE TABLE runs (
+    run_id TEXT PRIMARY KEY NOT NULL CHECK(length(run_id) BETWEEN 1 AND 128),
+    created_at TEXT NOT NULL,
+    closed_at TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(metadata_json = '{}'),
+    program_digest TEXT CHECK(program_digest IS NULL OR length(program_digest) = 64),
+    program_revision INTEGER NOT NULL DEFAULT 0 CHECK(program_revision >= 0),
+    program_state TEXT CHECK(program_state IS NULL OR program_state IN ('registered', 'running', 'completed', 'needs_decision', 'external_blocked', 'failed')),
+    program_graph_json TEXT,
+    trunk_head TEXT CHECK(trunk_head IS NULL OR length(trunk_head) = 40),
+    CHECK((program_digest IS NULL AND program_state IS NULL AND program_graph_json IS NULL AND trunk_head IS NULL AND program_revision = 0)
+       OR (program_digest IS NOT NULL AND program_state IS NOT NULL AND program_graph_json IS NOT NULL AND trunk_head IS NOT NULL))
+)"""
+_PROGRAM_CONTROLLER_DECISIONS_DDL = (
+    _CONTROLLER_DECISIONS_DDL.replace(
+        "    dispatch_id TEXT NOT NULL,\n",
+        "    dispatch_id TEXT,\n    program_id TEXT,\n    program_revision INTEGER CHECK(program_revision IS NULL OR program_revision >= 0),\n    event_kind TEXT CHECK(event_kind IS NULL OR event_kind IN ('implementation_completed', 'review_completed', 'integration_completed', 'controller_attention', 'checkpoint')),\n    event_key TEXT CHECK(event_key IS NULL OR length(event_key) BETWEEN 1 AND 256),\n",
+        1,
+    )
+    .replace(
+        "    UNIQUE(dispatch_id, kind, cycle_sequence),",
+        "    UNIQUE(dispatch_id, kind, cycle_sequence),\n    UNIQUE(program_id, event_key),",
+    )
+    .replace(
+        "    FOREIGN KEY(dispatch_id) REFERENCES dispatch_queue(dispatch_id) ON DELETE CASCADE\n)",
+        "    CHECK((program_id IS NULL AND program_revision IS NULL AND event_kind IS NULL AND event_key IS NULL)\n       OR (program_id IS NOT NULL AND program_revision IS NOT NULL AND event_kind IS NOT NULL AND event_key IS NOT NULL)),\n    FOREIGN KEY(dispatch_id) REFERENCES dispatch_queue(dispatch_id) ON DELETE CASCADE\n)",
+    )
+)
+_PROGRAM_DISPATCHES_DDL = _DISPATCHES_DDL.replace(
+    "    UNIQUE(run_id, milestone_id, role),",
+    "    UNIQUE(run_id, milestone_id, role, generation),",
+)
+_MILESTONE_DEPENDENCIES_DDL = """CREATE TABLE milestone_dependencies (
+    program_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    dependency_milestone_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(program_id, milestone_id, dependency_milestone_id),
+    CHECK(milestone_id != dependency_milestone_id),
+    FOREIGN KEY(program_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE,
+    FOREIGN KEY(program_id, dependency_milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE
+)"""
+_INTEGRATION_OUTBOX_DDL = """CREATE TABLE integration_outbox (
+    integration_id TEXT PRIMARY KEY NOT NULL CHECK(length(integration_id) BETWEEN 1 AND 512),
+    program_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    candidate_sha TEXT NOT NULL CHECK(length(candidate_sha) = 40),
+    expected_trunk_head TEXT NOT NULL CHECK(length(expected_trunk_head) = 40),
+    strategy TEXT NOT NULL CHECK(strategy IN ('merge', 'fast_forward', 'cherry_pick')),
+    state TEXT NOT NULL CHECK(state IN ('pending', 'applied', 'conflict', 'failed')),
+    receipt_json TEXT,
+    receipt_sha256 TEXT CHECK(receipt_sha256 IS NULL OR length(receipt_sha256) = 64),
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(program_id, milestone_id, candidate_sha),
+    FOREIGN KEY(program_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE,
+    CHECK((receipt_json IS NULL AND receipt_sha256 IS NULL) OR (receipt_json IS NOT NULL AND receipt_sha256 IS NOT NULL)),
+    CHECK((state = 'pending' AND completed_at IS NULL) OR (state IN ('applied', 'conflict', 'failed') AND completed_at IS NOT NULL))
+)"""
+_V18_TABLE_DDL = {
+    **_V17_TABLE_DDL,
+    "dispatches": _PROGRAM_DISPATCHES_DDL,
+    "runs": _PROGRAM_RUNS_DDL,
+    "controller_decisions": _PROGRAM_CONTROLLER_DECISIONS_DDL,
+    "milestone_dependencies": _MILESTONE_DEPENDENCIES_DDL,
+    "integration_outbox": _INTEGRATION_OUTBOX_DDL,
+}
+
 
 def _canonical_ddl(sql: str) -> str:
     """Return exact SQLite DDL modulo whitespace outside quoted values."""
@@ -1027,7 +1118,11 @@ def _canonical_ddl(sql: str) -> str:
                 else:
                     quote = None
         index += 1
-    return "".join(canonical)
+    normalized = "".join(canonical)
+    # SQLite serializes tables rebuilt with ``ALTER TABLE ... RENAME`` using
+    # optional identifier quotes.  Treat that representation as equivalent
+    # to the controller-owned DDL while keeping quoted string literals intact.
+    return re.sub(r'^CREATETABLE"([A-Za-z_][A-Za-z0-9_]*)"', r"CREATETABLE\1", normalized)
 
 
 def _process_birth_identity(pid: int) -> str:
@@ -1098,6 +1193,7 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(15): "codex_flow_controller_decision_recovery_v15",
     SchemaVersion(16): "codex_flow_compatibility_rebind_recovery_v16",
     SchemaVersion(17): "codex_flow_provider_transient_recovery_v17",
+    SchemaVersion(18): "codex_flow_event_driven_program_controller_v18",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -1648,11 +1744,13 @@ class Ledger:
             "controller_decisions",
             "controller_decision_generations",
             "controller_action_outbox",
+            "milestone_dependencies",
+            "integration_outbox",
         ],
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V17_TABLE_DDL:
+        if table not in _V18_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -1749,7 +1847,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V17_TABLE_DDL.values():
+                for statement in _V18_TABLE_DDL.values():
                     self._db().execute(statement)
                 for _name, (_table, statement) in _V15_INDEX_DDL.items():
                     self._db().execute(statement)
@@ -1769,7 +1867,49 @@ class Ledger:
                 raise
             self._ensure_schema()
 
-    def _validate_shape(self, version: SchemaVersion) -> None:
+    def _has_program_schema_residue(self) -> bool:
+        inventory = _schema_inventory(self._db())
+        names = {item[1] for item in inventory if item[0] == "table"}
+        if names & {"milestone_dependencies", "integration_outbox"}:
+            return True
+        if "runs" in names:
+            run_columns = {str(row[1]) for row in self._db().execute("PRAGMA table_info(runs)").fetchall()}
+            if run_columns & {
+                "program_digest",
+                "program_revision",
+                "program_state",
+                "program_graph_json",
+                "trunk_head",
+            }:
+                return True
+        if "controller_decisions" in names:
+            decision_columns = {
+                str(row[1]) for row in self._db().execute("PRAGMA table_info(controller_decisions)").fetchall()
+            }
+            if decision_columns & {"program_id", "program_revision", "event_kind", "event_key"}:
+                return True
+        return False
+
+    def _has_complete_program_schema(self) -> bool:
+        inventory = _schema_inventory(self._db())
+        names = {item[1] for item in inventory if item[0] == "table"}
+        if not {"milestone_dependencies", "integration_outbox", "runs", "controller_decisions"}.issubset(names):
+            return False
+        run_columns = {str(row[1]) for row in self._db().execute("PRAGMA table_info(runs)").fetchall()}
+        decision_columns = {
+            str(row[1]) for row in self._db().execute("PRAGMA table_info(controller_decisions)").fetchall()
+        }
+        return {
+            "program_digest",
+            "program_revision",
+            "program_state",
+            "program_graph_json",
+            "trunk_head",
+        }.issubset(run_columns) and {"program_id", "program_revision", "event_kind", "event_key"}.issubset(
+            decision_columns
+        )
+
+    def _validate_shape(self, version: SchemaVersion, *, allow_program_residue: bool = False) -> None:
         if _schema_inventory(self._db(), temporary=True):
             raise CorruptSchemaError("ledger connection has unexpected temporary schema objects")
         definitions = {
@@ -1790,6 +1930,7 @@ class Ledger:
             SchemaVersion(15): _V15_TABLE_DDL,
             SchemaVersion(16): _V16_TABLE_DDL,
             SchemaVersion(17): _V17_TABLE_DDL,
+            SchemaVersion(18): _V18_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -1802,9 +1943,43 @@ class Ledger:
                     )
                 )
             )
-        if version == SchemaVersion(1):
+        if version == SchemaVersion(1) or version >= SchemaVersion(18):
             actual_inventory = _canonical_inventory(actual_inventory)
             expected_inventory = _canonical_inventory(expected_inventory)
+        program_tables = {"milestone_dependencies", "integration_outbox"}
+        program_columns = {
+            "program_digest",
+            "program_revision",
+            "program_state",
+            "program_graph_json",
+            "trunk_head",
+            "dispatch_id",
+            "program_id",
+            "event_kind",
+            "event_key",
+        }
+        if (allow_program_residue or self._has_program_schema_residue()) and version < SchemaVersion(18):
+            program_dispatch_table = next(
+                (item for item in actual_inventory if item[0] == "table" and item[1] == "dispatches"),
+                None,
+            )
+            actual_inventory = tuple(
+                item
+                for item in actual_inventory
+                if not (item[0] == "table" and item[1] in program_tables | {"runs", "controller_decisions"})
+                and not (item[0] == "index" and item[1] == "controller_decisions_program_id_event_key_idx")
+            )
+            expected_inventory = tuple(
+                item
+                for item in expected_inventory
+                if not (item[0] == "table" and item[1] in program_tables | {"runs", "controller_decisions"})
+            )
+            if program_dispatch_table is not None and program_dispatch_table[3] is not None:
+                if _canonical_ddl(str(program_dispatch_table[3])) == _canonical_ddl(_PROGRAM_DISPATCHES_DDL):
+                    expected_inventory = tuple(
+                        program_dispatch_table if item[0] == "table" and item[1] == "dispatches" else item
+                        for item in expected_inventory
+                    )
         if _inventory_fingerprint(actual_inventory) != _inventory_fingerprint(expected_inventory):
             raise CorruptSchemaError("ledger sqlite_master inventory does not match the canonical owned schema")
 
@@ -2274,13 +2449,69 @@ class Ledger:
             )
             expected["wake_outbox"]["decision_id"] = ("TEXT", 1, 0)
             expected["wake_outbox"]["cycle_sequence"] = ("INTEGER", 1, 0)
+        if version >= SchemaVersion(18):
+            expected["runs"].update(
+                {
+                    "program_digest": ("TEXT", 0, 0),
+                    "program_revision": ("INTEGER", 1, 0),
+                    "program_state": ("TEXT", 0, 0),
+                    "program_graph_json": ("TEXT", 0, 0),
+                    "trunk_head": ("TEXT", 0, 0),
+                }
+            )
+            expected["controller_decisions"].update(
+                {
+                    "dispatch_id": ("TEXT", 0, 0),
+                    "program_id": ("TEXT", 0, 0),
+                    "program_revision": ("INTEGER", 0, 0),
+                    "event_kind": ("TEXT", 0, 0),
+                    "event_key": ("TEXT", 0, 0),
+                }
+            )
+            expected["milestone_dependencies"] = {
+                "program_id": ("TEXT", 1, 1),
+                "milestone_id": ("TEXT", 1, 2),
+                "dependency_milestone_id": ("TEXT", 1, 3),
+                "created_at": ("TEXT", 1, 0),
+            }
+            expected["integration_outbox"] = {
+                "integration_id": ("TEXT", 1, 1),
+                "program_id": ("TEXT", 1, 0),
+                "milestone_id": ("TEXT", 1, 0),
+                "candidate_sha": ("TEXT", 1, 0),
+                "expected_trunk_head": ("TEXT", 1, 0),
+                "strategy": ("TEXT", 1, 0),
+                "state": ("TEXT", 1, 0),
+                "receipt_json": ("TEXT", 0, 0),
+                "receipt_sha256": ("TEXT", 0, 0),
+                "created_at": ("TEXT", 1, 0),
+                "completed_at": ("TEXT", 0, 0),
+            }
         for table, expected_columns in expected.items():
             rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
+            if (allow_program_residue or self._has_program_schema_residue()) and version < SchemaVersion(18):
+                actual = {name: value for name, value in actual.items() if name not in program_columns}
+                expected_columns = {
+                    name: value for name, value in expected_columns.items() if name not in program_columns
+                }
             if actual != expected_columns:
                 raise CorruptSchemaError(f"ledger table {table!r} has an unexpected column contract")
 
-        self._require_unique_index("dispatches", ("run_id", "milestone_id", "role"))
+        dispatch_table = (
+            self._db().execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'").fetchone()
+        )
+        dispatches_use_generation_identity = version >= SchemaVersion(18) or (
+            dispatch_table is not None
+            and dispatch_table[0] is not None
+            and _canonical_ddl(str(dispatch_table[0])) == _canonical_ddl(_PROGRAM_DISPATCHES_DDL)
+        )
+        self._require_unique_index(
+            "dispatches",
+            ("run_id", "milestone_id", "role", "generation")
+            if dispatches_use_generation_identity
+            else ("run_id", "milestone_id", "role"),
+        )
         self._require_unique_index("events", ("run_id", "milestone_id", "sequence"))
         self._require_foreign_keys(
             "milestones",
@@ -2478,6 +2709,28 @@ class Ledger:
                     ("controller_decisions", "decision_id", "decision_id", "CASCADE"),
                 ),
             )
+        if version >= SchemaVersion(18):
+            self._require_unique_index(
+                "milestone_dependencies", ("program_id", "milestone_id", "dependency_milestone_id")
+            )
+            self._require_unique_index("integration_outbox", ("program_id", "milestone_id", "candidate_sha"))
+            self._require_unique_index("controller_decisions", ("program_id", "event_key"))
+            self._require_foreign_keys(
+                "milestone_dependencies",
+                (
+                    ("milestones", "program_id", "run_id", "CASCADE"),
+                    ("milestones", "milestone_id", "milestone_id", "CASCADE"),
+                    ("milestones", "program_id", "run_id", "CASCADE"),
+                    ("milestones", "dependency_milestone_id", "milestone_id", "CASCADE"),
+                ),
+            )
+            self._require_foreign_keys(
+                "integration_outbox",
+                (
+                    ("milestones", "program_id", "run_id", "CASCADE"),
+                    ("milestones", "milestone_id", "milestone_id", "CASCADE"),
+                ),
+            )
         foreign_keys = self._db().execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
@@ -2616,12 +2869,12 @@ class Ledger:
                     if not isinstance(raw, str) or len(raw.encode("utf-8")) > 65_536:
                         raise CorruptSchemaError("queue terminal raw result exceeds its bound")
                     try:
-                        parsed_result = ModelFacingResult.from_agent_message(raw)
+                        parsed_result = self._parse_queue_result(str(queue_row["dispatch_id"]), raw)
                     except (TypeError, ValueError) as exc:
                         raise CorruptSchemaError("queue terminal raw result is malformed") from exc
                     if hashlib.sha256(raw.encode("utf-8")).hexdigest() != queue_row["raw_result_sha256"]:
                         raise CorruptSchemaError("queue terminal raw result digest is invalid")
-                    if parsed_result.status.value != queue_row["terminal_status"]:
+                    if self._queue_result_terminal_status(parsed_result) != queue_row["terminal_status"]:
                         raise CorruptSchemaError("queue terminal status does not match raw result")
             for capability in self._db().execute("SELECT * FROM attempt_capabilities").fetchall():
                 queue_row = (
@@ -3285,10 +3538,19 @@ class Ledger:
                             raise CorruptSchemaError("recovery action compatibility facts are invalid") from exc
 
         has_controller_decisions = any(item[1] == "controller_decisions" for item in _schema_inventory(self._db()))
+        has_program_decisions = has_controller_decisions and any(
+            str(row[1]) == "program_id"
+            for row in self._db().execute("PRAGMA table_info(controller_decisions)").fetchall()
+        )
         if has_controller_decisions:
             orphan_queries.extend(
                 (
-                    "SELECT COUNT(*) FROM controller_decisions d LEFT JOIN dispatch_queue q ON q.dispatch_id = d.dispatch_id WHERE q.dispatch_id IS NULL",
+                    (
+                        "SELECT COUNT(*) FROM controller_decisions d LEFT JOIN dispatch_queue q ON q.dispatch_id = d.dispatch_id "
+                        "WHERE d.program_id IS NULL AND q.dispatch_id IS NULL"
+                        if has_program_decisions
+                        else "SELECT COUNT(*) FROM controller_decisions d LEFT JOIN dispatch_queue q ON q.dispatch_id = d.dispatch_id WHERE q.dispatch_id IS NULL"
+                    ),
                     "SELECT COUNT(*) FROM controller_decision_generations g LEFT JOIN controller_decisions d ON d.decision_id = g.decision_id WHERE d.decision_id IS NULL",
                     "SELECT COUNT(*) FROM controller_action_outbox a LEFT JOIN controller_decisions d ON d.decision_id = a.decision_id WHERE d.decision_id IS NULL",
                     "SELECT COUNT(*) FROM wake_outbox w LEFT JOIN controller_decisions d ON d.decision_id = w.decision_id WHERE d.decision_id IS NULL",
@@ -3296,6 +3558,9 @@ class Ledger:
             )
             decision_rows = self._db().execute("SELECT * FROM controller_decisions ORDER BY decision_id").fetchall()
             for decision in decision_rows:
+                if has_program_decisions and decision["program_id"] is not None:
+                    self._validate_program_decision_row(decision)
+                    continue
                 try:
                     ControllerDecisionId(str(decision["decision_id"]))
                     DispatchId(str(decision["dispatch_id"]))
@@ -3548,6 +3813,7 @@ class Ledger:
                         wake["state"]
                     ) not in {"delivered", "not_applicable", "suppressed", "failed"}:
                         raise CorruptSchemaError("awaiting-claim controller decision has an undelivered wake")
+
             generation_rows = (
                 self._db()
                 .execute("SELECT * FROM controller_decision_generations ORDER BY decision_id, generation")
@@ -3696,10 +3962,17 @@ class Ledger:
             action_rows = self._db().execute("SELECT * FROM controller_action_outbox ORDER BY action_id").fetchall()
             decision_by_id = {str(item["decision_id"]): item for item in decision_rows}
             for action in action_rows:
+                decision = decision_by_id.get(str(action["decision_id"]))
+                if decision is None:
+                    raise CorruptSchemaError("controller action outbox decision is missing")
+                is_program_action = decision["program_id"] is not None
                 try:
                     ControllerDecisionId(str(action["decision_id"]))
                     ControllerClaimantKind(str(action["claimant_kind"]))
-                    ModelFacingControllerActionBundle.from_json_bytes(str(action["bundle_json"]))
+                    if is_program_action:
+                        ModelFacingProgramControllerActionBundle.from_json_bytes(str(action["bundle_json"]))
+                    else:
+                        ModelFacingControllerActionBundle.from_json_bytes(str(action["bundle_json"]))
                 except (TypeError, ValueError) as exc:
                     raise CorruptSchemaError("controller action outbox bundle is malformed") from exc
                 if hashlib.sha256(str(action["bundle_json"]).encode("utf-8")).hexdigest() != action["bundle_sha256"]:
@@ -3713,21 +3986,50 @@ class Ledger:
                     effect_receipt = strict_json_loads(str(action["effect_receipt_json"]), max_bytes=32 * 1024)
                 except ValueError as exc:
                     raise CorruptSchemaError("controller effect receipt is malformed") from exc
-                bundle = ModelFacingControllerActionBundle.from_json_bytes(str(action["bundle_json"]))
+                bundle = (
+                    ModelFacingProgramControllerActionBundle.from_json_bytes(str(action["bundle_json"]))
+                    if is_program_action
+                    else ModelFacingControllerActionBundle.from_json_bytes(str(action["bundle_json"]))
+                )
+                bundle_revision = bundle.expected_program_revision if is_program_action else bundle.expected_revision
                 if (
                     bundle.action_id != str(action["action_id"])
                     or bundle.decision_id != ControllerDecisionId(str(action["decision_id"]))
                     or int(bundle.generation) != int(action["generation"])
-                    or int(bundle.expected_revision) != int(action["expected_revision"])
+                    or int(bundle_revision)
+                    != int(decision["program_revision"] if is_program_action else action["expected_revision"])
                 ):
                     raise CorruptSchemaError("controller action outbox identity is conflicting")
+                if is_program_action:
+                    expected_applied_actions = [
+                        (
+                            f"start:{','.join(item.milestone_ids)}"
+                            if item.kind is ProgramControllerActionKind.START_READY_MILESTONES
+                            else f"review:{item.milestone_id}"
+                            if item.kind is ProgramControllerActionKind.START_REVIEWS
+                            else f"repair:{item.milestone_id}"
+                            if item.kind is ProgramControllerActionKind.REQUEST_REPAIR
+                            else f"promote:{item.milestone_id}"
+                            if item.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE
+                            else f"integrate:{item.milestone_id}"
+                            if item.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE
+                            else item.kind.value
+                        )
+                        for item in bundle.actions
+                    ]
+                else:
+                    expected_applied_actions = [item.kind.value for item in bundle.actions]
                 expected_effect_receipt: JsonObject = {
                     "action_id": bundle.action_id,
                     "decision_id": str(bundle.decision_id),
                     "generation": int(bundle.generation),
                     "bundle_sha256": bundle.sha256,
-                    "applied_actions": [item.kind.value for item in bundle.actions],
-                    "applied_revision": int(action["expected_revision"]) + 1,
+                    "applied_actions": expected_applied_actions,
+                    **(
+                        {"program_revision": int(decision["program_revision"]) + 1}
+                        if is_program_action
+                        else {"applied_revision": int(action["expected_revision"]) + 1}
+                    ),
                 }
                 if (
                     not isinstance(effect_receipt, dict)
@@ -3735,9 +4037,6 @@ class Ledger:
                     or _encode_json(effect_receipt) != _encode_json(expected_effect_receipt)
                 ):
                     raise CorruptSchemaError("controller effect receipt diverges from its committed bundle")
-                decision = decision_by_id.get(str(action["decision_id"]))
-                if decision is None:
-                    raise CorruptSchemaError("controller action outbox decision is missing")
                 generation = (
                     self._db()
                     .execute(
@@ -3806,9 +4105,14 @@ class Ledger:
 
         if any(int(self._db().execute(query).fetchone()[0]) for query in orphan_queries):
             raise CorruptSchemaError("workflow ledger contains orphan rows")
+        dispatch_duplicate_columns = (
+            "run_id, milestone_id, role, generation"
+            if self._has_complete_program_schema()
+            else "run_id, milestone_id, role"
+        )
         duplicate_queries = (
             "SELECT COUNT(*) FROM (SELECT run_id, milestone_id FROM milestones GROUP BY run_id, milestone_id HAVING COUNT(*) > 1)",
-            "SELECT COUNT(*) FROM (SELECT run_id, milestone_id, role FROM dispatches GROUP BY run_id, milestone_id, role HAVING COUNT(*) > 1)",
+            f"SELECT COUNT(*) FROM (SELECT {dispatch_duplicate_columns} FROM dispatches GROUP BY {dispatch_duplicate_columns} HAVING COUNT(*) > 1)",
             "SELECT COUNT(*) FROM (SELECT run_id, milestone_id, sequence FROM events GROUP BY run_id, milestone_id, sequence HAVING COUNT(*) > 1)",
         )
         if any(int(self._db().execute(query).fetchone()[0]) for query in duplicate_queries):
@@ -4087,7 +4391,102 @@ class Ledger:
                     ):
                         raise CorruptSchemaError("Git authority after-state lacks its pre-turn authority")
 
+    def _validate_program_decision_row(self, decision: sqlite3.Row) -> None:
+        """Validate a program decision against the shared controller tables."""
+
+        try:
+            program_id = ProgramId(str(decision["program_id"]))
+            event_kind = ProgramEventKind(str(decision["event_kind"]))
+            decision_id = ControllerDecisionId(str(decision["decision_id"]))
+            state = ControllerDecisionState(str(decision["state"]))
+        except ValueError as exc:
+            raise CorruptSchemaError("program controller decision identity or state is malformed") from exc
+        if decision["dispatch_id"] is not None or decision["program_revision"] is None:
+            raise CorruptSchemaError("program controller decision has a conflicting subject")
+        event_key = decision["event_key"]
+        if not isinstance(event_key, str) or not event_key.strip() or len(event_key) > 256:
+            raise CorruptSchemaError("program controller event key is malformed")
+        if str(decision_id) != f"decision/program/{program_id}/{event_kind.value}/{event_key}":
+            raise CorruptSchemaError("program controller decision identity is not canonical")
+        try:
+            summary = strict_json_loads(str(decision["summary_json"]), max_bytes=16_384)
+        except ValueError as exc:
+            raise CorruptSchemaError("program controller decision summary is invalid") from exc
+        if not isinstance(summary, dict) or hashlib.sha256(
+            str(decision["summary_json"]).encode("utf-8")
+        ).hexdigest() != str(decision["summary_sha256"]):
+            raise CorruptSchemaError("program controller decision summary digest is invalid")
+        if (
+            summary.get("program_id") != str(program_id)
+            or summary.get("event_kind") != event_kind.value
+            or summary.get("event_key") != event_key
+            or summary.get("program_revision") != int(decision["program_revision"])
+        ):
+            raise CorruptSchemaError("program controller decision summary identity is conflicting")
+        claim_fields = tuple(
+            decision[name] for name in ("claimant_kind", "claimant_id", "claim_token_sha256", "claim_started_at")
+        )
+        if any(item is None for item in claim_fields) and not all(item is None for item in claim_fields):
+            raise CorruptSchemaError("program controller claim facts are incomplete")
+        if decision["claimant_kind"] is not None:
+            try:
+                ControllerClaimantKind(str(decision["claimant_kind"]))
+            except ValueError as exc:
+                raise CorruptSchemaError("program controller claimant kind is invalid") from exc
+        action_fields = tuple(
+            decision[name] for name in ("action_id", "action_bundle_json", "action_bundle_sha256", "committed_at")
+        )
+        if any(item is None for item in action_fields) and not all(item is None for item in action_fields):
+            raise CorruptSchemaError("program controller action facts are incomplete")
+        if state is ControllerDecisionState.CLAIMED and (
+            decision["claim_token_sha256"] is None or decision["claim_lease_expires_at"] is None
+        ):
+            raise CorruptSchemaError("claimed program controller decision lacks lease facts")
+        if state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED and not isinstance(
+            decision["human_attention_reason"], str
+        ):
+            raise CorruptSchemaError("human-attention program controller decision lacks a reason")
+        if (
+            state is not ControllerDecisionState.HUMAN_ATTENTION_REQUIRED
+            and decision["human_attention_reason"] is not None
+        ):
+            raise CorruptSchemaError("program controller decision carries an unexpected attention reason")
+        if state in {ControllerDecisionState.ACTION_COMMITTED, ControllerDecisionState.ACKNOWLEDGED} and any(
+            item is None for item in action_fields
+        ):
+            raise CorruptSchemaError("committed program controller decision lacks action facts")
+        if decision["action_id"] is not None:
+            try:
+                bundle = ModelFacingProgramControllerActionBundle.from_json_bytes(str(decision["action_bundle_json"]))
+            except (TypeError, ValueError) as exc:
+                raise CorruptSchemaError("program controller action bundle is malformed") from exc
+            if (
+                bundle.decision_id != decision_id
+                or bundle.program_id != program_id
+                or int(bundle.generation) != int(decision["current_generation"])
+                or bundle.sha256 != str(decision["action_bundle_sha256"])
+            ):
+                raise CorruptSchemaError("program controller action identity is conflicting")
+            outbox = (
+                self._db()
+                .execute(
+                    "SELECT bundle_sha256, state FROM controller_action_outbox WHERE action_id = ?",
+                    (str(decision["action_id"]),),
+                )
+                .fetchone()
+            )
+            expected_state = "acknowledged" if state is ControllerDecisionState.ACKNOWLEDGED else "committed"
+            if (
+                outbox is None
+                or str(outbox["bundle_sha256"]) != str(decision["action_bundle_sha256"])
+                or str(outbox["state"]) != expected_state
+            ):
+                raise CorruptSchemaError("program controller action receipt is inconsistent")
+
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(17):
+            self._migrate_v17_to_v18()
+            return
         if version == SchemaVersion(16):
             self._migrate_v16_to_v17()
             return
@@ -4417,7 +4816,7 @@ class Ledger:
                     if table in present:
                         self._db().execute(f"DROP TABLE {table}")
         self._validate_schema_metadata(SchemaVersion(7))
-        self._validate_shape(SchemaVersion(7))
+        self._validate_shape(SchemaVersion(7), allow_program_residue=True)
         self._validate_rows()
         with self._transaction(validate_authority=False):
             self._db().execute("ALTER TABLE execution_integrity RENAME TO execution_integrity_v7")
@@ -4911,7 +5310,7 @@ class Ledger:
         """Add durable provider-transient retry facts to the existing policy table."""
 
         self._validate_schema_metadata(SchemaVersion(16))
-        self._validate_shape(SchemaVersion(16))
+        self._validate_shape(SchemaVersion(16), allow_program_residue=self._has_program_schema_residue())
         self._validate_rows()
         with self._transaction(validate_authority=False):
             self._fault("before_rename_retry_policies")
@@ -4941,6 +5340,115 @@ class Ledger:
             )
             self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
             self._fault("after_migration")
+        self._migrate_v17_to_v18()
+
+    def _migrate_v17_to_v18(self) -> None:
+        """Add program identity, dependency edges and integration receipts."""
+
+        self._validate_schema_metadata(SchemaVersion(17))
+        if self._has_complete_program_schema():
+            try:
+                self._db().execute("PRAGMA foreign_keys = OFF")
+                with self._transaction(validate_authority=False):
+                    self._migrate_v17_dispatches_to_v18()
+                    self._db().execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+                    self._db().execute(
+                        "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                        (_SCHEMA_IDENTITIES[SchemaVersion(18)],),
+                    )
+                    self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+                    self._fault("after_migration")
+            finally:
+                self._db().execute("PRAGMA foreign_keys = ON")
+            return
+        self._validate_shape(SchemaVersion(17), allow_program_residue=self._has_program_schema_residue())
+        self._validate_rows()
+        legacy_decision_columns = (
+            "decision_id, dispatch_id, kind, cycle_sequence, summary_json, summary_sha256, source_thread_id, state, "
+            "revision, current_generation, generation_budget, generation_used, claimant_kind, claimant_id, "
+            "claim_token_sha256, claim_started_at, claim_lease_expires_at, action_id, action_bundle_json, "
+            "action_bundle_sha256, committed_at, acknowledged_at, superseded_at, deadline, human_attention_reason, "
+            "created_at, updated_at"
+        )
+        try:
+            self._db().execute("PRAGMA foreign_keys = OFF")
+            with self._transaction(validate_authority=False):
+                self._migrate_v17_dispatches_to_v18()
+                for table in ("integration_outbox", "milestone_dependencies"):
+                    residue = (
+                        self._db()
+                        .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,))
+                        .fetchone()
+                    )
+                    if residue is not None:
+                        if int(self._db().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) != 0:
+                            raise CorruptSchemaError("non-empty program schema residue conflicts with a legacy marker")
+                        self._db().execute(f"DROP TABLE {table}")
+                self._fault("before_create_program_runs")
+                legacy_run_rows = (
+                    self._db().execute("SELECT run_id, created_at, closed_at, metadata_json FROM runs").fetchall()
+                )
+                self._db().execute("DROP TABLE runs")
+                self._db().execute(_PROGRAM_RUNS_DDL)
+                self._db().executemany(
+                    "INSERT INTO runs(run_id, created_at, closed_at, metadata_json, program_digest, program_revision, "
+                    "program_state, program_graph_json, trunk_head) VALUES (?, ?, ?, ?, NULL, 0, NULL, NULL, NULL)",
+                    [tuple(row) for row in legacy_run_rows],
+                )
+                self._fault("after_create_program_runs")
+                self._fault("before_create_program_controller_decisions")
+                legacy_decisions = self._db().execute("SELECT * FROM controller_decisions").fetchall()
+                self._db().execute("DROP TABLE controller_decisions")
+                self._db().execute(_PROGRAM_CONTROLLER_DECISIONS_DDL)
+                legacy_names = tuple(item.strip() for item in legacy_decision_columns.split(","))
+                self._db().executemany(
+                    "INSERT INTO controller_decisions(" + legacy_decision_columns + ", program_id, program_revision, "
+                    "event_kind, event_key) VALUES (" + ",".join("?" for _ in range(len(legacy_names) + 4)) + ")",
+                    [(*tuple(row[name] for name in legacy_names), None, None, None, None) for row in legacy_decisions],
+                )
+                self._fault("after_create_program_controller_decisions")
+                self._db().execute(_MILESTONE_DEPENDENCIES_DDL)
+                self._db().execute(_INTEGRATION_OUTBOX_DDL)
+                for _name, (_table, statement) in _V15_INDEX_DDL.items():
+                    if _table == "controller_decisions":
+                        self._db().execute(statement)
+                self._fault("after_create_program_tables")
+                self._db().execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+                self._db().execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                    (_SCHEMA_IDENTITIES[SchemaVersion(18)],),
+                )
+                self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+                self._fault("after_migration")
+        finally:
+            self._db().execute("PRAGMA foreign_keys = ON")
+
+    def _migrate_v17_dispatches_to_v18(self) -> None:
+        """Replace legacy role-only uniqueness with generation identity."""
+
+        row = (
+            self._db().execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'").fetchone()
+        )
+        if row is None or row[0] is None:
+            raise CorruptSchemaError("dispatches table is missing during program migration")
+        actual = _canonical_ddl(str(row[0]))
+        if actual == _canonical_ddl(_PROGRAM_DISPATCHES_DDL):
+            return
+        if actual != _canonical_ddl(_DISPATCHES_DDL):
+            raise CorruptSchemaError("dispatches table has an unsupported pre-program schema")
+        self._fault("before_create_program_dispatches")
+        self._db().execute(
+            _PROGRAM_DISPATCHES_DDL.replace("CREATE TABLE dispatches", "CREATE TABLE dispatches_program_v18", 1)
+        )
+        self._fault("after_create_program_dispatches")
+        self._db().execute(
+            "INSERT INTO dispatches_program_v18(dispatch_id, run_id, milestone_id, role, generation, claimed_at) "
+            "SELECT dispatch_id, run_id, milestone_id, role, generation, claimed_at FROM dispatches ORDER BY rowid"
+        )
+        self._fault("after_copy_program_dispatches")
+        self._db().execute("DROP TABLE dispatches")
+        self._db().execute("ALTER TABLE dispatches_program_v18 RENAME TO dispatches")
+        self._fault("after_replace_program_dispatches")
 
     @contextmanager
     def _transaction(self, *, validate_authority: bool = True) -> Iterator[None]:
@@ -5317,6 +5825,115 @@ class Ledger:
         if row is None:
             raise RecordNotFound(f"dispatch {dispatch} does not exist")
         return self._dispatch_from_row(row)
+
+    def claim_program_review_dispatch(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        role: RoleId | str,
+        generation: Generation | int = 1,
+    ) -> DispatchClaim:
+        """Claim one read-only reviewer without reopening milestone execution."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        role_value = _role(role)
+        generation_value = _generation(generation)
+        if role_value == RoleId("executor"):
+            raise ValueError("program review dispatch must use a reviewer role")
+        dispatch_id = DispatchId.from_parts(run, milestone, role_value, generation_value)
+        now = utc_now()
+        with self._transaction():
+            self.get_run(run)
+            self.get_milestone(run, milestone)
+            existing = (
+                self._db().execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
+            )
+            if existing is not None:
+                return self._verify_dispatch(self._dispatch_from_row(existing))
+            owner = (
+                self._db()
+                .execute(
+                    "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = ?",
+                    (str(run), str(milestone), str(role_value)),
+                )
+                .fetchone()
+            )
+            if owner is not None:
+                raise DispatchConflict(f"milestone {milestone} role {role_value} is owned by {owner['dispatch_id']}")
+            current = self.current_state(run, milestone)
+            if current not in {
+                WorkflowState.COMPLETED,
+                WorkflowState.REVIEWING,
+                WorkflowState.REPAIR_REQUIRED,
+                WorkflowState.ACCEPTED,
+            }:
+                raise InvalidTransition(f"program review claim requires a completed milestone, found {current.value}")
+            expected = DispatchClaim(dispatch_id, run, milestone, role_value, generation_value, now)
+            self._db().execute(
+                "INSERT INTO dispatches(dispatch_id, run_id, milestone_id, role, generation, claimed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (str(dispatch_id), str(run), str(milestone), str(role_value), int(generation_value), now),
+            )
+            return self._verify_dispatch(expected)
+
+    def claim_program_repair_dispatch(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        generation: Generation | int = 2,
+    ) -> DispatchClaim:
+        """Create one bounded same-owner executor repair dispatch."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        generation_value = _generation(generation)
+        if generation_value <= 1:
+            raise ValueError("program repair dispatch must use a successor generation")
+        dispatch_id = DispatchId.from_parts(run, milestone, RoleId("executor"), generation_value)
+        now = utc_now()
+        with self._transaction():
+            self.get_run(run)
+            existing = (
+                self._db().execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
+            )
+            if existing is not None:
+                return self._verify_dispatch(self._dispatch_from_row(existing))
+            owner = (
+                self._db()
+                .execute(
+                    "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = 'executor'",
+                    (str(run), str(milestone)),
+                )
+                .fetchone()
+            )
+            if owner is None:
+                raise StaleWriter("program repair requires the original executor owner")
+            current = self.current_state(run, milestone)
+            if current is not WorkflowState.REPAIR_REQUIRED:
+                raise InvalidTransition(f"program repair dispatch requires REPAIR_REQUIRED, found {current.value}")
+            self._db().execute(
+                "INSERT INTO dispatches(dispatch_id, run_id, milestone_id, role, generation, claimed_at) VALUES (?, ?, ?, 'executor', ?, ?)",
+                (str(dispatch_id), str(run), str(milestone), int(generation_value), now),
+            )
+            self._db().execute(
+                "UPDATE milestones SET current_state = 'STARTING', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (now, str(run), str(milestone)),
+            )
+            self._append_event_in_transaction(
+                run,
+                milestone,
+                from_state=WorkflowState.REPAIR_REQUIRED,
+                to_state=WorkflowState.STARTING,
+                event_type="dispatch_claimed",
+                reason=WorkflowReason(ReasonCode.DISPATCH_CLAIMED),
+                dispatch_id=dispatch_id,
+                data=None,
+            )
+            return self._verify_dispatch(
+                DispatchClaim(dispatch_id, run, milestone, RoleId("executor"), generation_value, now)
+            )
 
     # H6-E detached supervisor queue authority.
     @staticmethod
@@ -6968,9 +7585,7 @@ class Ledger:
     ) -> JsonObject:
         """Accept exactly one capability-bound raw ModelFacingResult."""
 
-        from .contracts import ModelFacingResult
-
-        result = ModelFacingResult.from_agent_message(raw_result)
+        result = self._parse_queue_result(dispatch_id, raw_result)
         raw_bytes = raw_result.encode("utf-8") if isinstance(raw_result, str) else bytes(raw_result)
         digest = hashlib.sha256(raw_bytes).hexdigest()
         with self._transaction():
@@ -6992,7 +7607,7 @@ class Ledger:
         attempt: int,
         token: str,
         raw_bytes: bytes,
-        result: ModelFacingResult,
+        result: object,
         digest: str,
     ) -> JsonObject:
         self._require_exact_worker_process_identity(generation, attempt)
@@ -7073,20 +7688,51 @@ class Ledger:
         self._db().execute(
             "UPDATE dispatch_queue SET state = 'result_submitted', raw_result_json = ?, "
             "raw_result_sha256 = ?, terminal_status = ?, updated_at = ? WHERE dispatch_id = ?",
-            (raw_bytes.decode("utf-8"), digest, result.status.value, now, str(dispatch_id)),
+            (raw_bytes.decode("utf-8"), digest, self._queue_result_terminal_status(result), now, str(dispatch_id)),
         )
         self._db().execute(
             "UPDATE recovery_state SET recovery_state = ?, next_eligible_at = NULL, "
             "human_attention_reason = NULL, updated_at = ? "
             "WHERE dispatch_id = ?",
             (
-                "failed" if result.status.value in {"failed", "external_blocked", "needs_decision"} else "completed",
+                "failed"
+                if self._queue_result_terminal_status(result) in {"failed", "external_blocked", "needs_decision"}
+                else "completed",
                 now,
                 str(dispatch_id),
             ),
         )
         row = self._db().execute("SELECT * FROM dispatch_queue WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
         return self._queue_row(row)
+
+    @staticmethod
+    def _queue_result_terminal_status(result: object) -> str:
+        """Map the two worker result contracts to the shared queue status."""
+
+        if isinstance(result, ModelFacingResult):
+            return result.status.value
+        from .domain import ReviewResult
+
+        if isinstance(result, ReviewResult):
+            return "completed" if result.accepted else "failed"
+        raise TypeError("queue result is not a supported typed worker result")
+
+    def _parse_queue_result(self, dispatch_id: DispatchId | str, raw_result: str | bytes) -> object:
+        """Select the parser from the immutable queue result contract."""
+
+        row = (
+            self._db()
+            .execute("SELECT result_contract_sha256 FROM dispatch_queue WHERE dispatch_id = ?", (str(dispatch_id),))
+            .fetchone()
+        )
+        if row is None:
+            raise RecordNotFound(f"queue dispatch does not exist: {dispatch_id}")
+        contract = str(row["result_contract_sha256"])
+        if contract == model_facing_result_schema_sha256():
+            return ModelFacingResult.from_agent_message(raw_result)
+        if contract == model_facing_review_result_schema_sha256():
+            return review_result_from_agent_message(raw_result)
+        raise ValueError("queue result contract is unsupported")
 
     def _late_result_transport_recovery_allowed_in_transaction(
         self,
@@ -7139,9 +7785,7 @@ class Ledger:
     ) -> JsonObject:
         """Atomically ingest, terminalize, release and wake one worker result."""
 
-        from .contracts import ModelFacingResult
-
-        result = ModelFacingResult.from_agent_message(raw_result)
+        result = self._parse_queue_result(dispatch_id, raw_result)
         raw_bytes = raw_result.encode("utf-8") if isinstance(raw_result, str) else bytes(raw_result)
         if len(raw_bytes) > 65_536:
             raise ValueError("worker raw result exceeds bounded limit")
@@ -7181,9 +7825,7 @@ class Ledger:
         the sole result authority.
         """
 
-        from .contracts import ModelFacingResult
-
-        result = ModelFacingResult.from_agent_message(raw_result)
+        result = self._parse_queue_result(dispatch_id, raw_result)
         raw_bytes = raw_result.encode("utf-8") if isinstance(raw_result, str) else bytes(raw_result)
         if len(raw_bytes) > 65_536:
             raise ValueError("worker raw result exceeds bounded limit")
@@ -7239,7 +7881,7 @@ class Ledger:
         turn or a successor and is idempotent on the exact raw-result digest.
         """
 
-        result = ModelFacingResult.from_agent_message(raw_result)
+        result = self._parse_queue_result(dispatch_id, raw_result)
         raw_bytes = raw_result.encode("utf-8") if isinstance(raw_result, str) else bytes(raw_result)
         if len(raw_bytes) > 65_536:
             raise ValueError("recovered raw result exceeds bounded limit")
@@ -7260,13 +7902,13 @@ class Ledger:
             self._db().execute(
                 "UPDATE dispatch_queue SET state = 'result_submitted', raw_result_json = ?, raw_result_sha256 = ?, "
                 "terminal_status = ?, updated_at = ? WHERE dispatch_id = ?",
-                (raw_bytes.decode("utf-8"), digest, result.status.value, now, str(dispatch_id)),
+                (raw_bytes.decode("utf-8"), digest, self._queue_result_terminal_status(result), now, str(dispatch_id)),
             )
             self._db().execute(
                 "UPDATE recovery_state SET recovery_state = ?, next_eligible_at = NULL, inspected_kind = 'terminal_result', updated_at = ? WHERE dispatch_id = ?",
                 (
                     "failed"
-                    if result.status.value in {"failed", "external_blocked", "needs_decision"}
+                    if self._queue_result_terminal_status(result) in {"failed", "external_blocked", "needs_decision"}
                     else "completed",
                     now,
                     str(dispatch_id),
@@ -8292,8 +8934,7 @@ class Ledger:
                 prior_thread_id=str(queue["thread_id"]) if queue["thread_id"] else None,
                 worker_was_bound=True,
                 allow_ambiguous_inspection=(
-                    classification in {None, "worker-exit", "restart-observed-worker-dead"}
-                    and retry_failure is None
+                    classification in {None, "worker-exit", "restart-observed-worker-dead"} and retry_failure is None
                 ),
             )
             self._fault("after_worker_exit")
@@ -9451,10 +10092,1365 @@ class Ledger:
             decision_summary,
         )
 
+    @staticmethod
+    def _program_graph_projection(program: ProgramGraph) -> JsonObject:
+        """Serialize one executable graph without making the model its authority."""
+
+        # ``capsule_json`` is the existing execution-capsule projection.  The
+        # import is local because controller.py already owns that projection
+        # and ledger.py must not create a second serializer.
+        from .controller import capsule_json
+
+        return {
+            "schema": "codex-flow/program-graph/v1",
+            "program_id": str(program.program_id),
+            "plan_path": os.fspath(program.plan_path),
+            "plan_revision_sha256": program.plan_revision_sha256,
+            "trunk_head": program.trunk_head,
+            "integration_strategy": program.integration_strategy,
+            "nodes": [
+                {
+                    "milestone_id": str(node.milestone_id),
+                    "dependencies": [str(item) for item in node.dependencies],
+                    "mutable_surfaces": list(node.mutable_surfaces),
+                    "capsule": capsule_json(node.capsule),
+                }
+                for node in program.nodes
+            ],
+        }
+
+    @staticmethod
+    def _program_node_payloads(
+        graph_value: Mapping[str, object],
+    ) -> dict[str, dict[str, object]]:
+        if graph_value.get("schema") != "codex-flow/program-graph/v1":
+            raise CorruptSchemaError("program graph schema is invalid")
+        raw_nodes = graph_value.get("nodes")
+        if not isinstance(raw_nodes, list):
+            raise CorruptSchemaError("program graph nodes are invalid")
+        nodes: dict[str, dict[str, object]] = {}
+        for raw in raw_nodes:
+            if not isinstance(raw, dict) or not isinstance(raw.get("milestone_id"), str):
+                raise CorruptSchemaError("program graph node is invalid")
+            node_id = str(raw["milestone_id"])
+            if node_id in nodes:
+                raise CorruptSchemaError("program graph contains duplicate nodes")
+            dependencies = raw.get("dependencies")
+            surfaces = raw.get("mutable_surfaces")
+            if (
+                not isinstance(dependencies, list)
+                or any(not isinstance(item, str) for item in dependencies)
+                or not isinstance(surfaces, list)
+                or any(not isinstance(item, str) for item in surfaces)
+            ):
+                raise CorruptSchemaError("program graph node ownership facts are invalid")
+            nodes[node_id] = raw
+        return nodes
+
+    def _program_status_from_row(self, row: sqlite3.Row) -> ProgramStatus:
+        if row["program_digest"] is None or row["program_graph_json"] is None or row["trunk_head"] is None:
+            raise CorruptSchemaError("run is not a registered program")
+        try:
+            graph_value = strict_json_loads(str(row["program_graph_json"]), max_bytes=2_000_000)
+        except ValueError as exc:
+            raise CorruptSchemaError("program graph projection is invalid") from exc
+        if not isinstance(graph_value, dict):
+            raise CorruptSchemaError("program graph projection is not an object")
+        nodes = self._program_node_payloads(graph_value)
+        statuses: list[ProgramNodeStatus] = []
+        for milestone_id, payload in sorted(nodes.items()):
+            milestone = (
+                self._db()
+                .execute(
+                    "SELECT current_state FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                    (str(row["run_id"]), milestone_id),
+                )
+                .fetchone()
+            )
+            if milestone is None:
+                raise CorruptSchemaError("program graph node has no milestone row")
+            dependencies = tuple(MilestoneId(item) for item in payload["dependencies"])
+            reviews: list[str] = []
+            findings: list[str] = []
+            candidate: str | None = None
+            for fact in self.review_lifecycle(row["run_id"], milestone_id):
+                value = fact.data
+                if isinstance(value.get("candidate_sha"), str):
+                    candidate = str(value["candidate_sha"])
+                review_id = value.get("review_id")
+                if isinstance(review_id, str):
+                    reviews.append(review_id)
+                finding_ids = value.get("finding_ids")
+                if isinstance(finding_ids, list):
+                    findings.extend(item for item in finding_ids if isinstance(item, str))
+            integration = (
+                self._db()
+                .execute(
+                    "SELECT candidate_sha, state FROM integration_outbox WHERE program_id = ? AND milestone_id = ? "
+                    "ORDER BY created_at DESC, integration_id DESC LIMIT 1",
+                    (str(row["run_id"]), milestone_id),
+                )
+                .fetchone()
+            )
+            integrated = integration is not None and str(integration["state"]) == "applied"
+            if integration is not None and candidate is None:
+                candidate = str(integration["candidate_sha"])
+            statuses.append(
+                ProgramNodeStatus(
+                    MilestoneId(milestone_id),
+                    str(milestone["current_state"]),
+                    dependencies,
+                    candidate,
+                    tuple(reviews),
+                    tuple(findings),
+                    integrated,
+                )
+            )
+        try:
+            state = ProgramState(str(row["program_state"]))
+        except ValueError as exc:
+            raise CorruptSchemaError("program state is invalid") from exc
+        return ProgramStatus(
+            ProgramId(str(row["run_id"])),
+            state,
+            int(row["program_revision"]),
+            str(row["program_digest"]),
+            str(row["trunk_head"]),
+            tuple(statuses),
+        )
+
+    def register_program(self, program: ProgramGraph) -> ProgramStatus:
+        """Register one complete graph idempotently on the existing run authority."""
+
+        if not isinstance(program, ProgramGraph):
+            raise TypeError("program must be a typed ProgramGraph")
+        projection = self._program_graph_projection(program)
+        encoded = _encode_json(projection)
+        # The canonical plan is the static intent authority.  The graph bytes
+        # are retained as a closed projection, but must not replace the plan
+        # revision digest in the durable program identity.
+        digest = program.plan_revision_sha256
+        now = utc_now()
+        with self._transaction():
+            existing = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program.program_id),)).fetchone()
+            if existing is not None and existing["program_digest"] is not None:
+                if (
+                    str(existing["program_digest"]) != digest
+                    or str(existing["program_graph_json"]) != encoded
+                    or str(existing["trunk_head"]) != program.trunk_head
+                ):
+                    raise StaleWriter("program registration conflicts with its durable graph")
+                return self._program_status_from_row(existing)
+            if existing is None:
+                self._db().execute(
+                    "INSERT INTO runs(run_id, created_at, closed_at, metadata_json, program_digest, program_revision, "
+                    "program_state, program_graph_json, trunk_head) VALUES (?, ?, NULL, '{}', ?, 0, 'registered', ?, ?)",
+                    (str(program.program_id), now, digest, encoded, program.trunk_head),
+                )
+            else:
+                if (
+                    self._db()
+                    .execute("SELECT 1 FROM dispatches WHERE run_id = ? LIMIT 1", (str(program.program_id),))
+                    .fetchone()
+                    is not None
+                ):
+                    raise StaleWriter("existing run already owns dispatches and cannot become a program")
+                self._db().execute(
+                    "UPDATE runs SET program_digest = ?, program_revision = 0, program_state = 'registered', "
+                    "program_graph_json = ?, trunk_head = ? WHERE run_id = ?",
+                    (digest, encoded, program.trunk_head, str(program.program_id)),
+                )
+            for node in program.nodes:
+                milestone = (
+                    self._db()
+                    .execute(
+                        "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                        (str(program.program_id), str(node.milestone_id)),
+                    )
+                    .fetchone()
+                )
+                if milestone is None:
+                    self._db().execute(
+                        "INSERT INTO milestones(run_id, milestone_id, current_state, created_at, updated_at, metadata_json) "
+                        "VALUES (?, ?, 'PLANNED', ?, ?, '{}')",
+                        (str(program.program_id), str(node.milestone_id), now, now),
+                    )
+                elif str(milestone["current_state"]) != WorkflowState.PLANNED.value:
+                    raise StaleWriter("program registration requires planned milestone rows")
+                for dependency in node.dependencies:
+                    self._db().execute(
+                        "INSERT INTO milestone_dependencies(program_id, milestone_id, dependency_milestone_id, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (str(program.program_id), str(node.milestone_id), str(dependency), now),
+                    )
+            row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program.program_id),)).fetchone()
+            assert row is not None
+            return self._program_status_from_row(row)
+
+    def program_status(self, program_id: ProgramId | str) -> ProgramStatus:
+        identity = ProgramId(str(program_id))
+        row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(identity),)).fetchone()
+        if row is None:
+            raise RecordNotFound(f"program does not exist: {identity}")
+        return self._program_status_from_row(row)
+
+    def program_graph(self, program_id: ProgramId | str) -> ProgramGraph:
+        """Rehydrate the immutable graph projection after a controller restart."""
+
+        identity = ProgramId(str(program_id))
+        row = (
+            self._db()
+            .execute("SELECT * FROM runs WHERE run_id = ? AND program_digest IS NOT NULL", (str(identity),))
+            .fetchone()
+        )
+        if row is None:
+            raise RecordNotFound(f"program does not exist: {identity}")
+        try:
+            graph_value = strict_json_loads(str(row["program_graph_json"]), max_bytes=2_000_000)
+            if not isinstance(graph_value, dict):
+                raise ValueError("program graph is not an object")
+            raw_nodes = self._program_node_payloads(graph_value)
+            from .controller import capsule_from_json
+
+            nodes = tuple(
+                ProgramNodeSpec(
+                    MilestoneId(milestone_id),
+                    capsule_from_json(payload["capsule"]),  # type: ignore[arg-type]
+                    tuple(MilestoneId(item) for item in payload["dependencies"]),
+                )
+                for milestone_id, payload in sorted(raw_nodes.items())
+            )
+            return ProgramGraph(
+                identity,
+                Path(str(graph_value["plan_path"])),
+                str(graph_value["plan_revision_sha256"]),
+                nodes,
+                str(graph_value["trunk_head"]),
+                str(graph_value["integration_strategy"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CorruptSchemaError("program graph projection cannot be rehydrated") from exc
+
+    def program_ready_milestones(self, program_id: ProgramId | str) -> tuple[MilestoneId, ...]:
+        return self.program_status(program_id).ready_milestones
+
+    def start_program(
+        self, program_id: ProgramId | str, *, event_key: str = "start"
+    ) -> ProgramControllerDecisionStatus:
+        identity = ProgramId(str(program_id))
+        with self._transaction():
+            row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(identity),)).fetchone()
+            if row is None:
+                raise RecordNotFound(f"program does not exist: {identity}")
+            if row["program_digest"] is None:
+                raise StaleWriter("run is not registered as a program")
+            current = str(row["program_state"])
+            if current in {ProgramState.COMPLETED.value, ProgramState.FAILED.value}:
+                raise StaleWriter("program is terminal")
+            if current == ProgramState.REGISTERED.value:
+                self._db().execute(
+                    "UPDATE runs SET program_state = 'running', program_revision = program_revision + 1 WHERE run_id = ?",
+                    (str(identity),),
+                )
+            return self._ensure_program_decision_in_transaction(
+                identity,
+                event_kind=ProgramEventKind.CHECKPOINT,
+                event_key=event_key,
+                payload={
+                    "summary": "program start requested",
+                    "ready_milestones": [str(item) for item in self.program_ready_milestones(identity)],
+                },
+            )
+
+    def _ensure_program_decision_in_transaction(
+        self,
+        program_id: ProgramId,
+        *,
+        event_kind: ProgramEventKind,
+        event_key: str,
+        payload: Mapping[str, object],
+        deadline: str | None = None,
+    ) -> ProgramControllerDecisionStatus:
+        if not isinstance(event_key, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:-]{0,255}", event_key):
+            raise ValueError("program event key is invalid")
+        program = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program_id),)).fetchone()
+        if program is None or program["program_digest"] is None:
+            raise RecordNotFound(f"program does not exist: {program_id}")
+        decision_id = ControllerDecisionId(f"decision/program/{program_id}/{event_kind.value}/{event_key}")
+        existing = (
+            self._db()
+            .execute("SELECT * FROM controller_decisions WHERE decision_id = ?", (str(decision_id),))
+            .fetchone()
+        )
+        if existing is not None:
+            return self._program_decision_status_from_row(existing)
+        summary: JsonObject = {
+            "schema_version": 1,
+            "program_id": str(program_id),
+            "event_kind": event_kind.value,
+            "event_key": event_key,
+            "program_revision": int(program["program_revision"]),
+            "plan_digest": str(program["program_digest"]),
+            "trunk_head": str(program["trunk_head"]),
+            "payload": dict(payload),
+        }
+        summary_json = _encode_json(summary)
+        now = utc_now()
+        decision_deadline = deadline or self._expires_after(now, _CONTROLLER_DECISION_WINDOW_SECONDS)
+        self._db().execute(
+            "INSERT INTO controller_decisions(decision_id, dispatch_id, program_id, program_revision, event_kind, event_key, "
+            "kind, cycle_sequence, summary_json, summary_sha256, source_thread_id, state, revision, current_generation, "
+            "generation_budget, generation_used, claimant_kind, claimant_id, claim_token_sha256, claim_started_at, "
+            "claim_lease_expires_at, action_id, action_bundle_json, action_bundle_sha256, committed_at, acknowledged_at, "
+            "superseded_at, deadline, human_attention_reason, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?, 'terminal', 1, ?, ?, NULL, 'awaiting_claim', 0, 1, 2, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, ?, ?)",
+            (
+                str(decision_id),
+                str(program_id),
+                int(program["program_revision"]),
+                event_kind.value,
+                event_key,
+                summary_json,
+                hashlib.sha256(summary_json.encode("utf-8")).hexdigest(),
+                decision_deadline,
+                now,
+                now,
+            ),
+        )
+        self._db().execute(
+            "INSERT INTO controller_decision_generations(decision_id, generation, lineage_id, predecessor_generation, source_kind, state, prompt_sha256, controller_thread_id, controller_turn_id, inspection_started_at, inspection_token_sha256, inspection_lease_expires_at, inspection_completed_at, inspection_outcome, inspection_bundle_json, inspection_bundle_sha256, started_at, terminal_at, created_at, updated_at) VALUES (?, 1, ?, NULL, 'source_controller', 'prepared', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)",
+            (str(decision_id), f"lineage/{decision_id}", now, now),
+        )
+        row = (
+            self._db()
+            .execute("SELECT * FROM controller_decisions WHERE decision_id = ?", (str(decision_id),))
+            .fetchone()
+        )
+        assert row is not None
+        return self._program_decision_status_from_row(row)
+
+    def record_program_event(
+        self,
+        program_id: ProgramId | str,
+        event_kind: ProgramEventKind | str,
+        event_key: str,
+        *,
+        payload: Mapping[str, object] | None = None,
+    ) -> ProgramControllerDecisionStatus:
+        identity = ProgramId(str(program_id))
+        kind = event_kind if isinstance(event_kind, ProgramEventKind) else ProgramEventKind(event_kind)
+        with self._transaction():
+            return self._ensure_program_decision_in_transaction(
+                identity, event_kind=kind, event_key=event_key, payload=payload or {}
+            )
+
+    def _program_decision_status_from_row(self, row: sqlite3.Row) -> ProgramControllerDecisionStatus:
+        if row["program_id"] is None or row["event_kind"] is None or row["event_key"] is None:
+            raise CorruptSchemaError("dispatch decision cannot be projected as a program decision")
+        try:
+            payload = strict_json_loads(str(row["summary_json"]), max_bytes=16_384)
+        except ValueError as exc:
+            raise CorruptSchemaError("program decision summary is invalid") from exc
+        if not isinstance(payload, dict):
+            raise CorruptSchemaError("program decision summary is not an object")
+        try:
+            return ProgramControllerDecisionStatus(
+                ControllerDecisionId(str(row["decision_id"])),
+                ProgramId(str(row["program_id"])),
+                ProgramEventKind(str(row["event_kind"])),
+                str(row["event_key"]),
+                ControllerDecisionState(str(row["state"])),
+                int(row["revision"]),
+                Generation(int(row["current_generation"])),
+                int(row["generation_budget"]),
+                int(row["generation_used"]),
+                ControllerClaimantKind(str(row["claimant_kind"])) if row["claimant_kind"] is not None else None,
+                str(row["claimant_id"]) if row["claimant_id"] is not None else None,
+                str(row["claim_lease_expires_at"]) if row["claim_lease_expires_at"] is not None else None,
+                str(row["action_id"]) if row["action_id"] is not None else None,
+                str(row["action_bundle_sha256"]) if row["action_bundle_sha256"] is not None else None,
+                str(row["deadline"]),
+                payload,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CorruptSchemaError("program decision projection is malformed") from exc
+
+    def program_controller_decision(self, decision_id: ControllerDecisionId | str) -> ProgramControllerDecisionStatus:
+        identity = ControllerDecisionId(str(decision_id))
+        row = (
+            self._db()
+            .execute(
+                "SELECT * FROM controller_decisions WHERE decision_id = ? AND program_id IS NOT NULL", (str(identity),)
+            )
+            .fetchone()
+        )
+        if row is None:
+            raise RecordNotFound(f"program controller decision does not exist: {identity}")
+        return self._program_decision_status_from_row(row)
+
+    def program_controller_decisions(self) -> tuple[ProgramControllerDecisionStatus, ...]:
+        rows = (
+            self._db()
+            .execute("SELECT * FROM controller_decisions WHERE program_id IS NOT NULL ORDER BY deadline, decision_id")
+            .fetchall()
+        )
+        return tuple(self._program_decision_status_from_row(row) for row in rows)
+
+    def claim_program_controller_decision(
+        self,
+        decision_id: ControllerDecisionId | str,
+        *,
+        claimant_id: str,
+        expected_revision: int,
+        generation: int | None = None,
+        claimant_kind: ControllerClaimantKind | str = ControllerClaimantKind.MODEL,
+        lease_seconds: float = 300.0,
+        now: str | None = None,
+    ) -> ControllerDecisionClaim:
+        identity = ControllerDecisionId(str(decision_id))
+        if not isinstance(claimant_id, str) or not claimant_id.strip() or len(claimant_id.encode("utf-8")) > 256:
+            raise ValueError("program controller claimant id is invalid")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            raise ValueError("program controller claim revision is invalid")
+        current = now or utc_now()
+        with self._transaction():
+            row = (
+                self._db()
+                .execute(
+                    "SELECT * FROM controller_decisions WHERE decision_id = ? AND program_id IS NOT NULL",
+                    (str(identity),),
+                )
+                .fetchone()
+            )
+            if row is None:
+                raise RecordNotFound(f"program controller decision does not exist: {identity}")
+            if generation is not None and int(row["current_generation"]) != int(generation):
+                raise StaleWriter("program controller generation is stale")
+            if str(row["state"]) != ControllerDecisionState.AWAITING_CLAIM.value:
+                raise StaleWriter("program controller decision is not claimable")
+            if int(row["revision"]) != expected_revision:
+                raise StaleWriter("program controller decision revision is stale")
+            if str(row["deadline"]) <= current:
+                raise StaleWriter("program controller decision deadline has expired")
+            token = secrets.token_urlsafe(32)
+            token_hash = self._controller_claim_token_hash(token)
+            expires = self._expires_after(current, lease_seconds)
+            kind = (
+                claimant_kind
+                if isinstance(claimant_kind, ControllerClaimantKind)
+                else ControllerClaimantKind(claimant_kind)
+            )
+            self._db().execute(
+                "UPDATE controller_decisions SET state = 'claimed', revision = revision + 1, generation_used = generation_used + 1, claimant_kind = ?, claimant_id = ?, claim_token_sha256 = ?, claim_started_at = ?, claim_lease_expires_at = ?, updated_at = ? WHERE decision_id = ? AND revision = ? AND state = 'awaiting_claim'",
+                (kind.value, claimant_id, token_hash, current, expires, current, str(identity), expected_revision),
+            )
+            updated = (
+                self._db()
+                .execute(
+                    "SELECT revision, current_generation FROM controller_decisions WHERE decision_id = ?",
+                    (str(identity),),
+                )
+                .fetchone()
+            )
+            assert updated is not None
+            return ControllerDecisionClaim(
+                identity,
+                Generation(int(updated["current_generation"])),
+                kind,
+                claimant_id,
+                int(updated["revision"]),
+                expires,
+                token,
+            )
+
+    def record_program_candidate(
+        self, program_id: ProgramId | str, milestone_id: MilestoneId | str, candidate_sha: str
+    ) -> LifecycleRecord:
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+            raise ValueError("program candidate commit is invalid")
+        with self._transaction():
+            existing = self._program_candidate_sha(program, milestone)
+            if existing == candidate_sha:
+                for fact in reversed(self.review_lifecycle(program, milestone)):
+                    if fact.kind == "candidate_recorded" and fact.data.get("candidate_sha") == candidate_sha:
+                        return fact
+            fact = self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.EXECUTION,
+                kind="candidate_recorded",
+                data={"candidate_sha": candidate_sha},
+            )
+            self._ensure_program_decision_in_transaction(
+                program,
+                event_kind=ProgramEventKind.IMPLEMENTATION_COMPLETED,
+                event_key=f"milestone/{milestone}/candidate/{candidate_sha}",
+                payload={"milestone_id": str(milestone), "candidate_sha": candidate_sha},
+            )
+            return fact
+
+    def record_program_review(
+        self, program_id: ProgramId | str, milestone_id: MilestoneId | str, result: object
+    ) -> LifecycleRecord:
+        from .domain import ReviewResult
+
+        if not isinstance(result, ReviewResult):
+            raise TypeError("program review must be a typed ReviewResult")
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        candidate = self._program_candidate_sha(program, milestone)
+        if candidate is None or result.reviewed_revision != candidate or not result.fresh or not result.read_only:
+            raise StaleWriter("review does not cover the exact current candidate")
+        with self._transaction():
+            for fact in reversed(self.review_lifecycle(program, milestone)):
+                if fact.kind == "review_completed" and fact.data.get("review_id") == result.review_id:
+                    return fact
+            data = {
+                "review_id": result.review_id,
+                "reviewer_role": str(result.reviewer_role),
+                "acceptance_mode": result.acceptance_mode.value,
+                "accepted": result.accepted,
+                "candidate_sha": candidate,
+                "finding_ids": [item.finding_id for item in result.findings],
+                "promotion_blocking": (not result.accepted) or any(item.promotion_blocking for item in result.findings),
+            }
+            fact = self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.REVIEW,
+                kind="review_completed",
+                data=data,
+            )
+            graph_value = strict_json_loads(
+                str(
+                    self._db()
+                    .execute("SELECT program_graph_json FROM runs WHERE run_id = ?", (str(program),))
+                    .fetchone()[0]
+                ),
+                max_bytes=2_000_000,
+            )
+            if not isinstance(graph_value, dict):
+                raise CorruptSchemaError("program graph projection is invalid")
+            nodes = self._program_node_payloads(graph_value)
+            capsule = nodes.get(str(milestone), {}).get("capsule")
+            raw_modes = capsule.get("acceptance_modes", []) if isinstance(capsule, dict) else []
+            role_by_mode = {
+                "objective": "code-reviewer",
+                "visual": "visual-reviewer",
+                "architecture": "architecture-reviewer",
+            }
+            expected_roles = {
+                role_by_mode[mode] for mode in raw_modes if isinstance(mode, str) and mode in role_by_mode
+            }
+            completed = {
+                str(item.data.get("reviewer_role"))
+                for item in self.review_lifecycle(program, milestone)
+                if item.kind == "review_completed" and item.data.get("candidate_sha") == candidate
+            }
+            if expected_roles and expected_roles.issubset(completed):
+                review_ids = sorted(
+                    str(item.data["review_id"])
+                    for item in self.review_lifecycle(program, milestone)
+                    if item.kind == "review_completed" and item.data.get("candidate_sha") == candidate
+                )
+                review_digest = hashlib.sha256(_encode_json(review_ids).encode("utf-8")).hexdigest()[:16]
+                blockers = any(
+                    item.kind == "review_completed"
+                    and item.data.get("candidate_sha") == candidate
+                    and item.data.get("promotion_blocking") is True
+                    for item in self.review_lifecycle(program, milestone)
+                )
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.REVIEW_COMPLETED,
+                    event_key=f"milestone/{milestone}/reviews/{review_digest}",
+                    payload={
+                        "milestone_id": str(milestone),
+                        "candidate_sha": candidate,
+                        "review_ids": review_ids,
+                        "promotion_blocking": blockers,
+                    },
+                )
+            return fact
+
+    def _program_candidate_sha(self, program_id: ProgramId | str, milestone_id: MilestoneId | str) -> str | None:
+        facts = self.review_lifecycle(program_id, milestone_id)
+        for fact in reversed(facts):
+            value = fact.data.get("candidate_sha")
+            if isinstance(value, str):
+                return value
+        return None
+
+    def _transition_program_state_in_transaction(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId,
+        target: WorkflowState,
+        *,
+        expected_state: WorkflowState,
+        reason: ReasonCode,
+    ) -> None:
+        """Advance a program milestone while its controller action is open."""
+
+        current = (
+            self._db()
+            .execute(
+                "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                (str(program_id), str(milestone_id)),
+            )
+            .fetchone()
+        )
+        if current is None:
+            raise RecordNotFound(f"program milestone does not exist: {program_id}/{milestone_id}")
+        actual = WorkflowState(str(current["current_state"]))
+        if actual is expected_state and actual is not target:
+            if not is_transition_allowed(actual, target):
+                raise InvalidTransition(f"{actual.value} -> {target.value} is not allowed")
+            now = utc_now()
+            self._db().execute(
+                "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                (target.value, now, str(program_id), str(milestone_id)),
+            )
+            self._append_event_in_transaction(
+                RunId(str(program_id)),
+                milestone_id,
+                from_state=actual,
+                to_state=target,
+                event_type="state_transition",
+                reason=WorkflowReason(reason),
+                dispatch_id=None,
+                data=None,
+            )
+            return
+        if actual is not target:
+            raise StaleWriter(
+                f"program milestone state is stale: expected {expected_state.value}, current {actual.value}"
+            )
+
+    def record_program_executor_result(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        candidate_sha: str | None,
+        terminal_status: str,
+        dispatch_id: DispatchId | str | None = None,
+    ) -> ProgramStatus:
+        """Close one executor queue result and emit its program event once."""
+
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        if candidate_sha is not None and re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+            raise ValueError("program candidate commit is invalid")
+        if terminal_status not in {"completed", "failed", "external_blocked", "needs_decision"}:
+            raise ValueError("program executor terminal status is unsupported")
+        with self._transaction():
+            row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            milestone_row = (
+                self._db()
+                .execute(
+                    "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                    (str(program), str(milestone)),
+                )
+                .fetchone()
+            )
+            if row is None or row["program_digest"] is None or milestone_row is None:
+                raise RecordNotFound(f"program executor result does not exist: {program}/{milestone}")
+            current = WorkflowState(str(milestone_row["current_state"]))
+            if terminal_status == "completed":
+                if candidate_sha is None:
+                    raise ValueError("completed program executor result requires a candidate commit")
+                if current is WorkflowState.STARTING:
+                    now = utc_now()
+                    self._db().execute(
+                        "UPDATE milestones SET current_state = 'RUNNING', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                        (now, str(program), str(milestone)),
+                    )
+                    self._append_event_in_transaction(
+                        RunId(str(program)),
+                        milestone,
+                        from_state=WorkflowState.STARTING,
+                        to_state=WorkflowState.RUNNING,
+                        event_type="state_transition",
+                        reason=WorkflowReason(ReasonCode.EXECUTION_FAILURE),
+                        dispatch_id=None,
+                        data=None,
+                    )
+                    current = WorkflowState.RUNNING
+                if current is WorkflowState.RUNNING:
+                    now = utc_now()
+                    self._db().execute(
+                        "UPDATE milestones SET current_state = 'COMPLETED', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                        (now, str(program), str(milestone)),
+                    )
+                    self._append_event_in_transaction(
+                        RunId(str(program)),
+                        milestone,
+                        from_state=WorkflowState.RUNNING,
+                        to_state=WorkflowState.COMPLETED,
+                        event_type="state_transition",
+                        reason=WorkflowReason(ReasonCode.TERMINAL_OUTCOME),
+                        dispatch_id=None,
+                        data=None,
+                    )
+                    current = WorkflowState.COMPLETED
+                if current is not WorkflowState.COMPLETED:
+                    raise StaleWriter(f"program executor result requires a running milestone, found {current.value}")
+                existing = self._program_candidate_sha(program, milestone)
+                if existing not in {None, candidate_sha}:
+                    raise StaleWriter("program candidate commit changed after executor completion")
+                self._record_program_fact_in_transaction(
+                    program,
+                    milestone,
+                    phase=LifecyclePhase.EXECUTION,
+                    kind="candidate_recorded",
+                    data={
+                        "candidate_sha": candidate_sha,
+                        "dispatch_id": str(dispatch_id) if dispatch_id is not None else None,
+                    },
+                )
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.IMPLEMENTATION_COMPLETED,
+                    event_key=f"milestone/{milestone}/candidate/{candidate_sha}",
+                    payload={"milestone_id": str(milestone), "candidate_sha": candidate_sha},
+                )
+            else:
+                if current in {WorkflowState.STARTING, WorkflowState.RUNNING}:
+                    now = utc_now()
+                    self._db().execute(
+                        "UPDATE milestones SET current_state = 'FAILED', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                        (now, str(program), str(milestone)),
+                    )
+                    self._append_event_in_transaction(
+                        RunId(str(program)),
+                        milestone,
+                        from_state=current,
+                        to_state=WorkflowState.FAILED,
+                        event_type="state_transition",
+                        reason=WorkflowReason(ReasonCode.EXECUTION_FAILURE),
+                        dispatch_id=None,
+                        data=None,
+                    )
+                self._db().execute(
+                    "UPDATE runs SET program_state = ?, program_revision = program_revision + 1 WHERE run_id = ?",
+                    (
+                        ProgramState.NEEDS_DECISION.value
+                        if terminal_status == "needs_decision"
+                        else ProgramState.EXTERNAL_BLOCKED.value
+                        if terminal_status == "external_blocked"
+                        else ProgramState.FAILED.value,
+                        str(program),
+                    ),
+                )
+                reason = f"executor/{milestone}/{terminal_status}"
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                    event_key=reason,
+                    payload={
+                        "milestone_id": str(milestone),
+                        "terminal_status": terminal_status,
+                        "dispatch_id": str(dispatch_id) if dispatch_id is not None else None,
+                    },
+                )
+            refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            assert refreshed is not None
+            return self._program_status_from_row(refreshed)
+
+    def _program_action_effects(
+        self,
+        bundle: ModelFacingProgramControllerActionBundle,
+        *,
+        program: sqlite3.Row,
+        now: str,
+    ) -> list[str]:
+        graph_value = strict_json_loads(str(program["program_graph_json"]), max_bytes=2_000_000)
+        if not isinstance(graph_value, dict):
+            raise CorruptSchemaError("program graph projection is invalid")
+        nodes = self._program_node_payloads(graph_value)
+        effects: list[str] = []
+        role_by_mode = {
+            "objective": "code-reviewer",
+            "visual": "visual-reviewer",
+            "architecture": "architecture-reviewer",
+        }
+        for action in bundle.actions:
+            if action.kind is ProgramControllerActionKind.START_READY_MILESTONES:
+                selected = tuple(action.milestone_ids)
+                ready = {str(item) for item in self.program_status(bundle.program_id).ready_milestones}
+                if not set(selected).issubset(ready):
+                    raise StaleWriter("program start action names a non-ready milestone")
+                seen: set[str] = set()
+                for milestone_id in selected:
+                    if milestone_id not in nodes:
+                        raise StaleWriter("program start action names an unknown milestone")
+                    surfaces = set(nodes[milestone_id].get("mutable_surfaces", []))
+                    if seen & surfaces:
+                        raise StaleWriter("program start action has overlapping mutable ownership")
+                    seen.update(surfaces)
+                    existing = (
+                        self._db()
+                        .execute(
+                            "SELECT 1 FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = 'executor'",
+                            (str(bundle.program_id), milestone_id),
+                        )
+                        .fetchone()
+                    )
+                    if existing is not None:
+                        raise StaleWriter("program start action would duplicate an executor START")
+                effects.append(f"start:{','.join(selected)}")
+            elif action.kind is ProgramControllerActionKind.START_REVIEWS:
+                if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
+                    bundle.program_id, action.milestone_id
+                ):
+                    raise StaleWriter("program review action does not target the exact candidate")
+                capsule = nodes[action.milestone_id].get("capsule")
+                modes = capsule.get("acceptance_modes", []) if isinstance(capsule, dict) else []
+                expected_roles = tuple(
+                    sorted(role_by_mode[mode] for mode in modes if isinstance(mode, str) and mode in role_by_mode)
+                )
+                if tuple(action.review_roles) != expected_roles:
+                    raise StaleWriter("program review action does not name every declared authority")
+                for role in action.review_roles:
+                    existing = (
+                        self._db()
+                        .execute(
+                            "SELECT 1 FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = ?",
+                            (str(bundle.program_id), action.milestone_id, role),
+                        )
+                        .fetchone()
+                    )
+                    if existing is not None:
+                        raise StaleWriter("program review action would duplicate a reviewer START")
+                state = self.current_state(bundle.program_id, action.milestone_id)
+                if state is WorkflowState.COMPLETED:
+                    self._transition_program_state_in_transaction(
+                        bundle.program_id,
+                        MilestoneId(action.milestone_id),
+                        WorkflowState.REVIEWING,
+                        expected_state=WorkflowState.COMPLETED,
+                        reason=ReasonCode.TERMINAL_OUTCOME,
+                    )
+                elif state is not WorkflowState.REVIEWING:
+                    raise StaleWriter("program review action requires a completed or reviewing milestone")
+                effects.append(f"review:{action.milestone_id}")
+            elif action.kind is ProgramControllerActionKind.REQUEST_REPAIR:
+                if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
+                    bundle.program_id, action.milestone_id
+                ):
+                    raise StaleWriter("program repair action does not target the exact candidate")
+                if not action.finding_ids:
+                    raise StaleWriter("program repair action has no concrete findings")
+                facts = self.review_lifecycle(bundle.program_id, action.milestone_id)
+                known_blockers = {
+                    finding_id
+                    for item in facts
+                    if item.kind == "review_completed"
+                    and item.data.get("candidate_sha") == action.candidate_sha
+                    and item.data.get("promotion_blocking") is True
+                    for finding_id in item.data.get("finding_ids", [])
+                    if isinstance(finding_id, str)
+                }
+                if not set(action.finding_ids).issubset(known_blockers):
+                    raise StaleWriter("program repair action names a non-blocking or unknown finding")
+                if not any(
+                    str(item[0]) == "executor"
+                    for item in self._db()
+                    .execute(
+                        "SELECT role FROM dispatches WHERE run_id = ? AND milestone_id = ?",
+                        (str(bundle.program_id), action.milestone_id),
+                    )
+                    .fetchall()
+                ):
+                    raise StaleWriter("program repair requires its original executor owner")
+                state = self.current_state(bundle.program_id, action.milestone_id)
+                if state is WorkflowState.REVIEWING:
+                    self._transition_program_state_in_transaction(
+                        bundle.program_id,
+                        MilestoneId(action.milestone_id),
+                        WorkflowState.REPAIR_REQUIRED,
+                        expected_state=WorkflowState.REVIEWING,
+                        reason=ReasonCode.REVIEW_REJECTED,
+                    )
+                elif state is not WorkflowState.REPAIR_REQUIRED:
+                    raise StaleWriter("program repair requires a reviewing milestone")
+                self._record_program_fact_in_transaction(
+                    bundle.program_id,
+                    action.milestone_id,
+                    phase=LifecyclePhase.REPAIR,
+                    kind="repair_requested",
+                    data={
+                        "candidate_sha": action.candidate_sha,
+                        "finding_ids": list(action.finding_ids),
+                        "same_owner": True,
+                    },
+                )
+                effects.append(f"repair:{action.milestone_id}")
+            elif action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE:
+                if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
+                    bundle.program_id, action.milestone_id
+                ):
+                    raise StaleWriter("program promotion action does not target the exact candidate")
+                facts = self.review_lifecycle(bundle.program_id, action.milestone_id)
+                accepted = {
+                    str(item.data.get("review_id"))
+                    for item in facts
+                    if item.kind == "review_completed"
+                    and item.data.get("accepted") is True
+                    and item.data.get("candidate_sha") == action.candidate_sha
+                }
+                capsule = nodes[action.milestone_id].get("capsule")
+                modes = capsule.get("acceptance_modes", []) if isinstance(capsule, dict) else []
+                expected_roles = {
+                    role_by_mode[mode] for mode in modes if isinstance(mode, str) and mode in role_by_mode
+                }
+                accepted_roles = {
+                    str(item.data.get("reviewer_role"))
+                    for item in facts
+                    if item.kind == "review_completed"
+                    and item.data.get("accepted") is True
+                    and item.data.get("candidate_sha") == action.candidate_sha
+                }
+                if set(action.review_ids) != accepted or not accepted or accepted_roles != expected_roles:
+                    raise StaleWriter("program promotion requires every exact accepted review")
+                if any(
+                    item.kind == "review_completed"
+                    and item.data.get("candidate_sha") == action.candidate_sha
+                    and item.data.get("promotion_blocking") is True
+                    for item in facts
+                ):
+                    raise StaleWriter("program promotion has a promotion-blocking finding")
+                if not any(
+                    item.kind == "promotion_accepted" and item.data.get("candidate_sha") == action.candidate_sha
+                    for item in facts
+                ):
+                    self._record_program_fact_in_transaction(
+                        bundle.program_id,
+                        action.milestone_id,
+                        phase=LifecyclePhase.ACCEPTANCE,
+                        kind="promotion_accepted",
+                        data={"candidate_sha": action.candidate_sha, "review_ids": list(action.review_ids)},
+                    )
+                state = self.current_state(bundle.program_id, action.milestone_id)
+                if state is WorkflowState.REVIEWING:
+                    self._transition_program_state_in_transaction(
+                        bundle.program_id,
+                        MilestoneId(action.milestone_id),
+                        WorkflowState.ACCEPTED,
+                        expected_state=WorkflowState.REVIEWING,
+                        reason=ReasonCode.TERMINAL_OUTCOME,
+                    )
+                elif state is not WorkflowState.ACCEPTED:
+                    raise StaleWriter("program promotion requires a reviewing milestone")
+                effects.append(f"promote:{action.milestone_id}")
+            elif action.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
+                if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
+                    bundle.program_id, action.milestone_id
+                ):
+                    raise StaleWriter("program integration action does not target the exact candidate")
+                if action.expected_trunk_head != str(program["trunk_head"]):
+                    raise StaleWriter("program integration trunk HEAD is stale")
+                facts = self.review_lifecycle(bundle.program_id, action.milestone_id)
+                if not any(
+                    item.kind == "promotion_accepted" and item.data.get("candidate_sha") == action.candidate_sha
+                    for item in facts
+                ):
+                    raise StaleWriter("program integration requires an exact promotion receipt")
+                integration_id = f"integration/{bundle.program_id}/{action.milestone_id}/{action.candidate_sha}"
+                existing = (
+                    self._db()
+                    .execute("SELECT state FROM integration_outbox WHERE integration_id = ?", (integration_id,))
+                    .fetchone()
+                )
+                if existing is None:
+                    self._db().execute(
+                        "INSERT INTO integration_outbox(integration_id, program_id, milestone_id, candidate_sha, expected_trunk_head, strategy, state, receipt_json, receipt_sha256, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL)",
+                        (
+                            integration_id,
+                            str(bundle.program_id),
+                            action.milestone_id,
+                            action.candidate_sha,
+                            action.expected_trunk_head,
+                            action.integration_strategy,
+                            now,
+                        ),
+                    )
+                elif str(existing["state"]) != "pending":
+                    raise StaleWriter("program integration is already terminal")
+                effects.append(f"integrate:{action.milestone_id}")
+            elif action.kind is ProgramControllerActionKind.REQUIRE_REPLAN:
+                self._db().execute(
+                    "UPDATE runs SET program_state = 'needs_decision' WHERE run_id = ?", (str(bundle.program_id),)
+                )
+                effects.append("require_replan")
+            elif action.kind is ProgramControllerActionKind.REQUIRE_HUMAN_ATTENTION:
+                self._db().execute(
+                    "UPDATE runs SET program_state = 'needs_decision' WHERE run_id = ?", (str(bundle.program_id),)
+                )
+                effects.append("require_human_attention")
+            else:
+                effects.append("acknowledge_only")
+        return effects
+
+    def _record_program_fact_in_transaction(
+        self,
+        program_id: ProgramId,
+        milestone_id: MilestoneId | str,
+        *,
+        phase: LifecyclePhase,
+        kind: str,
+        data: Mapping[str, object],
+    ) -> LifecycleRecord:
+        """Append one idempotent H4 fact while a program action is open."""
+
+        milestone = _milestone_id(milestone_id)
+        for fact in self.review_lifecycle(program_id, milestone):
+            if fact.kind == kind and fact.data == dict(data):
+                return fact
+        payload = {"schema": "codex-flow/h4/v1", "phase": phase.value, "kind": kind, "payload": dict(data)}
+        _envelope, encoded = _encode_h4_event_data(payload)
+        sequence = (
+            int(
+                self._db()
+                .execute(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM h4.lifecycle WHERE run_id = ? AND milestone_id = ?",
+                    (str(program_id), str(milestone)),
+                )
+                .fetchone()[0]
+            )
+            + 1
+        )
+        self._db().execute(
+            "INSERT INTO h4.lifecycle(run_id, milestone_id, sequence, phase, kind, data_json, occurred_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (str(program_id), str(milestone), sequence, phase.value, kind, encoded, utc_now()),
+        )
+        return LifecycleRecord(phase, kind, sequence, dict(data))
+
+    def submit_program_controller_actions(
+        self,
+        bundle: ModelFacingProgramControllerActionBundle,
+        *,
+        claimant_id: str,
+        token: str,
+        allow_recovered: bool = False,
+        now: str | None = None,
+    ) -> ControllerActionReceipt:
+        if not isinstance(bundle, ModelFacingProgramControllerActionBundle):
+            raise TypeError("program action bundle must be typed")
+        current = now or utc_now()
+        token_hash = self._controller_claim_token_hash(token) if token else None
+        if token_hash is None and not allow_recovered:
+            raise ValueError("program controller claim token is required")
+        bundle_json = bundle.to_json_bytes().decode("utf-8")
+        with self._transaction():
+            decision = (
+                self._db()
+                .execute(
+                    "SELECT * FROM controller_decisions WHERE decision_id = ? AND program_id IS NOT NULL",
+                    (str(bundle.decision_id),),
+                )
+                .fetchone()
+            )
+            if decision is None:
+                raise RecordNotFound(f"program controller decision does not exist: {bundle.decision_id}")
+            program = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(bundle.program_id),)).fetchone()
+            if program is None:
+                raise RecordNotFound(f"program does not exist: {bundle.program_id}")
+            existing_outbox = (
+                self._db()
+                .execute("SELECT * FROM controller_action_outbox WHERE decision_id = ?", (str(bundle.decision_id),))
+                .fetchone()
+            )
+            if existing_outbox is not None:
+                if str(existing_outbox["bundle_sha256"]) != bundle.sha256:
+                    raise StaleWriter("program controller action is already committed with different bytes")
+                if not allow_recovered and str(existing_outbox["claimant_id"]) != claimant_id:
+                    raise StaleWriter("program controller action replay claimant is stale")
+                return ControllerActionReceipt(
+                    str(existing_outbox["action_id"]),
+                    bundle.decision_id,
+                    Generation(int(existing_outbox["generation"])),
+                    int(existing_outbox["expected_revision"]),
+                    str(existing_outbox["bundle_sha256"]),
+                    cast(JsonObject, strict_json_loads(str(existing_outbox["effect_receipt_json"]))),
+                    str(existing_outbox["state"]),
+                    str(existing_outbox["committed_at"]),
+                    str(existing_outbox["acknowledged_at"]) if existing_outbox["acknowledged_at"] else None,
+                )
+            if not allow_recovered and (
+                str(decision["claim_token_sha256"]) != token_hash or str(decision["claimant_id"]) != claimant_id
+            ):
+                raise StaleWriter("program controller claim is stale")
+            if allow_recovered:
+                if str(decision["state"]) not in {
+                    ControllerDecisionState.CLAIMED.value,
+                    ControllerDecisionState.AWAITING_CLAIM.value,
+                }:
+                    raise StaleWriter("program controller recovery decision is stale")
+                if decision["claimant_kind"] != ControllerClaimantKind.MODEL.value:
+                    raise StaleWriter("program controller recovery claimant is not the model owner")
+            elif str(decision["state"]) != ControllerDecisionState.CLAIMED.value:
+                raise StaleWriter("program controller decision revision is stale")
+            if int(decision["current_generation"]) != int(bundle.generation):
+                raise StaleWriter("program controller generation is stale")
+            if (
+                int(decision["program_revision"]) != bundle.expected_program_revision
+                or int(program["program_revision"]) != bundle.expected_program_revision
+            ):
+                raise StaleWriter("program revision is stale")
+            if str(program["program_digest"]) != bundle.plan_digest:
+                raise StaleWriter("program plan digest is stale")
+            if str(program["trunk_head"]) != bundle.expected_trunk_head:
+                raise StaleWriter("program trunk HEAD is stale")
+            if bundle.event_kind.value != str(decision["event_kind"]) or bundle.event_key != str(decision["event_key"]):
+                raise StaleWriter("program controller event identity is stale")
+            effects = self._program_action_effects(bundle, program=program, now=current)
+            decision_revision = int(decision["revision"])
+            revision = int(program["program_revision"]) + 1
+            self._db().execute(
+                "UPDATE runs SET program_revision = ?, program_state = CASE WHEN program_state = 'registered' THEN 'running' ELSE program_state END WHERE run_id = ?",
+                (revision, str(bundle.program_id)),
+            )
+            receipt_payload: JsonObject = {
+                "action_id": bundle.action_id,
+                "decision_id": str(bundle.decision_id),
+                "generation": int(bundle.generation),
+                "bundle_sha256": bundle.sha256,
+                "applied_actions": effects,
+                "program_revision": revision,
+            }
+            receipt_json = _encode_json(receipt_payload)
+            receipt_digest = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
+            self._db().execute(
+                "INSERT INTO controller_action_outbox(action_id, decision_id, generation, expected_revision, claimant_kind, claimant_id, bundle_json, bundle_sha256, effect_receipt_json, effect_receipt_sha256, state, committed_at, acknowledged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'committed', ?, NULL)",
+                (
+                    bundle.action_id,
+                    str(bundle.decision_id),
+                    int(bundle.generation),
+                    decision_revision,
+                    str(decision["claimant_kind"]),
+                    claimant_id,
+                    bundle_json,
+                    bundle.sha256,
+                    receipt_json,
+                    receipt_digest,
+                    current,
+                ),
+            )
+            self._db().execute(
+                "UPDATE controller_decisions SET state = 'action_committed', revision = ?, action_id = ?, action_bundle_json = ?, action_bundle_sha256 = ?, committed_at = ?, claim_lease_expires_at = NULL, updated_at = ? WHERE decision_id = ? AND revision = ?",
+                (
+                    decision_revision + 1,
+                    bundle.action_id,
+                    bundle_json,
+                    bundle.sha256,
+                    current,
+                    current,
+                    str(bundle.decision_id),
+                    decision_revision,
+                ),
+            )
+            return ControllerActionReceipt(
+                bundle.action_id,
+                bundle.decision_id,
+                bundle.generation,
+                decision_revision,
+                bundle.sha256,
+                receipt_payload,
+                "committed",
+                current,
+            )
+
+    def complete_program_integration(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        candidate_sha: str,
+        receipt: Mapping[str, object],
+        state: str = "applied",
+        now: str | None = None,
+    ) -> ProgramStatus:
+        """Commit one verified Git integration receipt and advance readiness."""
+
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+            raise ValueError("program integration candidate is invalid")
+        if state not in {"applied", "conflict", "failed"}:
+            raise ValueError("program integration state is unsupported")
+        if not isinstance(receipt, Mapping):
+            raise TypeError("program integration receipt must be an object")
+        try:
+            receipt_value = dict(receipt)
+            receipt_json = _encode_json(receipt_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("program integration receipt is not JSON") from exc
+        current = now or utc_now()
+        with self._transaction():
+            program_row = (
+                self._db()
+                .execute("SELECT * FROM runs WHERE run_id = ? AND program_digest IS NOT NULL", (str(program),))
+                .fetchone()
+            )
+            if program_row is None:
+                raise RecordNotFound(f"program does not exist: {program}")
+            integration_id = f"integration/{program}/{milestone}/{candidate_sha}"
+            pending = (
+                self._db()
+                .execute("SELECT * FROM integration_outbox WHERE integration_id = ?", (integration_id,))
+                .fetchone()
+            )
+            if pending is None:
+                raise RecordNotFound(f"program integration does not exist: {integration_id}")
+            expected = {
+                "program_id": str(program),
+                "milestone_id": str(milestone),
+                "candidate_sha": candidate_sha,
+                "expected_trunk_head": str(pending["expected_trunk_head"]),
+                "strategy": str(pending["strategy"]),
+            }
+            if any(receipt_value.get(key) != value for key, value in expected.items()):
+                raise StaleWriter("program integration receipt does not match its authorized outbox")
+            before = receipt_value.get("before_trunk_head")
+            after = receipt_value.get("after_trunk_head")
+            if before != expected["expected_trunk_head"]:
+                raise StaleWriter("program integration receipt has a stale trunk predecessor")
+            if state == "applied" and (not isinstance(after, str) or re.fullmatch(r"[0-9a-f]{40}", after) is None):
+                raise ValueError("applied program integration requires a resolved after trunk HEAD")
+            if str(pending["state"]) != "pending":
+                if str(pending["receipt_sha256"]) != hashlib.sha256(receipt_json.encode("utf-8")).hexdigest():
+                    raise StaleWriter("program integration already has a different terminal receipt")
+                return self._program_status_from_row(program_row)
+            digest = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
+            self._db().execute(
+                "UPDATE integration_outbox SET state = ?, receipt_json = ?, receipt_sha256 = ?, completed_at = ? "
+                "WHERE integration_id = ? AND state = 'pending'",
+                (state, receipt_json, digest, current, integration_id),
+            )
+            if state == "applied":
+                all_integrations = (
+                    self._db()
+                    .execute(
+                        "SELECT COUNT(*) FROM integration_outbox WHERE program_id = ? AND state = 'applied'",
+                        (str(program),),
+                    )
+                    .fetchone()
+                )
+                total_nodes = len(
+                    self._program_node_payloads(strict_json_loads(str(program_row["program_graph_json"])))
+                )
+                next_state = (
+                    ProgramState.COMPLETED.value
+                    if int(all_integrations[0]) == total_nodes
+                    else ProgramState.RUNNING.value
+                )
+                self._db().execute(
+                    "UPDATE runs SET trunk_head = ?, program_revision = program_revision + 1, program_state = ?, "
+                    "closed_at = CASE WHEN ? = 'completed' THEN COALESCE(closed_at, ?) ELSE closed_at END WHERE run_id = ?",
+                    (after, next_state, next_state, current, str(program)),
+                )
+                self._record_program_fact_in_transaction(
+                    program,
+                    milestone,
+                    phase=LifecyclePhase.ACCEPTANCE,
+                    kind="integration_completed",
+                    data={"candidate_sha": candidate_sha, "receipt_sha256": digest, "after_trunk_head": after},
+                )
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.INTEGRATION_COMPLETED,
+                    event_key=f"milestone/{milestone}/integration/{candidate_sha}",
+                    payload={
+                        "milestone_id": str(milestone),
+                        "candidate_sha": candidate_sha,
+                        "receipt_sha256": digest,
+                        "after_trunk_head": after,
+                    },
+                )
+            else:
+                self._db().execute(
+                    "UPDATE runs SET program_state = ? WHERE run_id = ?",
+                    (
+                        ProgramState.NEEDS_DECISION.value if state == "conflict" else ProgramState.FAILED.value,
+                        str(program),
+                    ),
+                )
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                    event_key=f"milestone/{milestone}/integration/{candidate_sha}/{state}",
+                    payload={
+                        "milestone_id": str(milestone),
+                        "candidate_sha": candidate_sha,
+                        "integration_state": state,
+                    },
+                )
+            refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            assert refreshed is not None
+            return self._program_status_from_row(refreshed)
+
+    def pending_program_integrations(self, program_id: ProgramId | str | None = None) -> tuple[JsonObject, ...]:
+        """Read authorized, not-yet-applied Git integration effects."""
+
+        query = "SELECT * FROM integration_outbox WHERE state = 'pending'"
+        args: tuple[object, ...] = ()
+        if program_id is not None:
+            query += " AND program_id = ?"
+            args = (str(ProgramId(str(program_id))),)
+        query += " ORDER BY created_at, integration_id"
+        return tuple(self._queue_row(row) for row in self._db().execute(query, args).fetchall())
+
+    def program_action_outboxes(self, program_id: ProgramId | str | None = None) -> tuple[JsonObject, ...]:
+        """Read durable program action receipts for idempotent effect replay."""
+
+        query = (
+            "SELECT a.*, d.program_id, d.event_kind, d.event_key FROM controller_action_outbox a "
+            "JOIN controller_decisions d ON d.decision_id = a.decision_id WHERE d.program_id IS NOT NULL"
+        )
+        args: tuple[object, ...] = ()
+        if program_id is not None:
+            query += " AND d.program_id = ?"
+            args = (str(ProgramId(str(program_id))),)
+        query += " ORDER BY a.committed_at, a.action_id"
+        return tuple(self._queue_row(row) for row in self._db().execute(query, args).fetchall())
+
+    def record_program_attention(
+        self,
+        program_id: ProgramId | str,
+        *,
+        event_key: str,
+        payload: Mapping[str, object],
+    ) -> ProgramControllerDecisionStatus:
+        """Emit one coalesced controller-attention event."""
+
+        program = ProgramId(str(program_id))
+        with self._transaction():
+            row = self._db().execute("SELECT program_state FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            if row is None:
+                raise RecordNotFound(f"program does not exist: {program}")
+            self._db().execute(
+                "UPDATE runs SET program_state = 'needs_decision' WHERE run_id = ? AND program_state NOT IN ('completed', 'failed', 'external_blocked')",
+                (str(program),),
+            )
+            return self._ensure_program_decision_in_transaction(
+                program,
+                event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                event_key=event_key,
+                payload=payload,
+            )
+
     def controller_decision(self, decision_id: ControllerDecisionId | str) -> ControllerDecisionStatus:
         identity = ControllerDecisionId(str(decision_id))
         row = (
-            self._db().execute("SELECT * FROM controller_decisions WHERE decision_id = ?", (str(identity),)).fetchone()
+            self._db()
+            .execute(
+                "SELECT * FROM controller_decisions WHERE decision_id = ? AND program_id IS NULL", (str(identity),)
+            )
+            .fetchone()
         )
         if row is None:
             raise RecordNotFound(f"controller decision does not exist: {identity}")
@@ -9463,13 +11459,13 @@ class Ledger:
     def controller_decisions(
         self, *, state: ControllerDecisionState | str | None = None
     ) -> tuple[ControllerDecisionStatus, ...]:
-        query = "SELECT * FROM controller_decisions"
+        query = "SELECT * FROM controller_decisions WHERE program_id IS NULL"
         args: tuple[object, ...] = ()
         if state is not None:
             state_value = (
                 state.value if isinstance(state, ControllerDecisionState) else ControllerDecisionState(state).value
             )
-            query += " WHERE state = ?"
+            query += " AND state = ?"
             args = (state_value,)
         query += " ORDER BY deadline, decision_id"
         return tuple(self._decision_status_from_row(row) for row in self._db().execute(query, args).fetchall())
@@ -11280,6 +13276,49 @@ class Ledger:
             now=now,
         )
 
+    def submit_recovered_program_controller_actions(
+        self,
+        decision_id: ControllerDecisionId | str,
+        *,
+        now: str | None = None,
+    ) -> ControllerActionReceipt:
+        """Commit the exact program bundle retained by one recovery read."""
+
+        identity = ControllerDecisionId(str(decision_id))
+        row = (
+            self._db()
+            .execute(
+                "SELECT inspection_completed_at, inspection_outcome, inspection_bundle_json, inspection_bundle_sha256 "
+                "FROM controller_decision_generations "
+                "WHERE decision_id = ? AND generation = (SELECT current_generation FROM controller_decisions WHERE decision_id = ?)",
+                (str(identity), str(identity)),
+            )
+            .fetchone()
+        )
+        if (
+            row is None
+            or row["inspection_completed_at"] is None
+            or row["inspection_outcome"] != ControllerGenerationState.COMPLETED.value
+            or row["inspection_bundle_json"] is None
+            or row["inspection_bundle_sha256"] is None
+        ):
+            raise StaleWriter("program controller recovery has no persisted inspected bundle")
+        try:
+            persisted = ModelFacingProgramControllerActionBundle.from_json_bytes(str(row["inspection_bundle_json"]))
+        except (TypeError, ValueError) as exc:
+            raise CorruptSchemaError("program controller recovery bundle is malformed") from exc
+        if hashlib.sha256(str(row["inspection_bundle_json"]).encode("utf-8")).hexdigest() != str(
+            row["inspection_bundle_sha256"]
+        ) or persisted.sha256 != str(row["inspection_bundle_sha256"]):
+            raise CorruptSchemaError("program controller recovery bundle digest is invalid")
+        return self.submit_program_controller_actions(
+            persisted,
+            claimant_id="recovery-inspection",
+            token="",
+            allow_recovered=True,
+            now=now,
+        )
+
     def acknowledge_controller_action(
         self,
         decision_id: ControllerDecisionId | str,
@@ -11580,7 +13619,7 @@ class Ledger:
         inspection_outcome: str,
         claim: ControllerRecoveryInspectionClaim | None = None,
         token: str | None = None,
-        bundle: ModelFacingControllerActionBundle | None = None,
+        bundle: ModelFacingControllerActionBundle | ModelFacingProgramControllerActionBundle | None = None,
         now: str | None = None,
     ) -> ControllerGenerationStatus:
         """Persist one SDK inspection and, when safe, roll to generation two."""
@@ -11650,11 +13689,16 @@ class Ledger:
             ):
                 raise StaleWriter("controller recovery inspection claim is stale or expired")
             if outcome is ControllerGenerationState.COMPLETED:
-                if not isinstance(bundle, ModelFacingControllerActionBundle):
+                if not isinstance(bundle, ModelFacingControllerActionBundle | ModelFacingProgramControllerActionBundle):
                     raise ValueError("completed controller inspection requires its typed action bundle")
                 if bundle.decision_id != identity or int(bundle.generation) != int(generation["generation"]):
                     raise StaleWriter("controller inspection bundle identity is stale")
-                if int(bundle.expected_revision) != int(decision["revision"]):
+                bundle_revision = (
+                    bundle.expected_revision
+                    if isinstance(bundle, ModelFacingControllerActionBundle)
+                    else bundle.expected_program_revision
+                )
+                if int(bundle_revision) != int(decision["revision"]):
                     raise StaleWriter("controller inspection bundle revision is stale")
                 bundle_json = bundle.to_json_bytes().decode("utf-8")
                 bundle_sha256 = bundle.sha256

@@ -20,12 +20,21 @@ from .domain import (
     ControllerActionKind,
     ControllerDecisionId,
     DispatchId,
+    FindingCausalClass,
     Generation,
     JsonObject,
     LocalImageInput,
+    MilestoneId,
+    ProgramControllerActionKind,
+    ProgramEventKind,
+    ProgramId,
     RetryBudgetChange,
+    ReviewFinding,
+    ReviewResult,
     RoleId,
+    Severity,
     strict_json_loads,
+    thaw_json,
 )
 
 _MAX_TEXT = 16_384
@@ -623,6 +632,200 @@ class ModelFacingResult:
         return cls.from_json(decoded)
 
 
+def review_result_to_json(result: ReviewResult) -> JsonObject:
+    """Project one read-only reviewer result at the worker boundary."""
+
+    if not isinstance(result, ReviewResult):
+        raise TypeError("review result must be typed")
+    return {
+        "schema_version": 1,
+        "review_id": result.review_id,
+        "reviewer_role": str(result.reviewer_role),
+        "accepted": result.accepted,
+        "findings": [
+            {
+                "finding_id": finding.finding_id,
+                "causal_class": finding.causal_class.value,
+                "severity": finding.severity.value,
+                "promotion_blocking": finding.promotion_blocking,
+                "promotion_reason": finding.promotion_reason,
+                "evidence": thaw_json(finding.evidence),
+                "criterion": finding.criterion,
+                "defer_to": finding.defer_to,
+                "survives_prior_repair": finding.survives_prior_repair,
+            }
+            for finding in result.findings
+        ],
+        "reviewed_revision": result.reviewed_revision,
+        "fresh": result.fresh,
+        "read_only": result.read_only,
+        "prior_review_id": result.prior_review_id,
+        "acceptance_mode": result.acceptance_mode.value,
+        "evidence_ids": list(result.evidence_ids),
+    }
+
+
+def review_result_from_json(value: Mapping[str, object]) -> ReviewResult:
+    """Parse the closed reviewer result without accepting prose or aliases."""
+
+    expected = {
+        "schema_version",
+        "review_id",
+        "reviewer_role",
+        "accepted",
+        "findings",
+        "reviewed_revision",
+        "fresh",
+        "read_only",
+        "prior_review_id",
+        "acceptance_mode",
+        "evidence_ids",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ValueError("review result keys are unsupported")
+    if value["schema_version"] != 1 or not isinstance(value["schema_version"], int):
+        raise ValueError("review result schema version is unsupported")
+    raw_findings = value["findings"]
+    if not isinstance(raw_findings, list):
+        raise ValueError("review result findings must be an array")
+    findings: list[ReviewFinding] = []
+    finding_keys = {
+        "finding_id",
+        "causal_class",
+        "severity",
+        "promotion_blocking",
+        "promotion_reason",
+        "evidence",
+        "criterion",
+        "defer_to",
+        "survives_prior_repair",
+    }
+    for raw in raw_findings:
+        if not isinstance(raw, Mapping) or set(raw) != finding_keys:
+            raise ValueError("review finding shape is unsupported")
+        evidence = raw["evidence"]
+        if not isinstance(evidence, Mapping):
+            raise ValueError("review finding evidence must be an object")
+        try:
+            findings.append(
+                ReviewFinding(
+                    raw["finding_id"],  # type: ignore[arg-type]
+                    FindingCausalClass(raw["causal_class"]),  # type: ignore[arg-type]
+                    Severity(raw["severity"]),  # type: ignore[arg-type]
+                    raw["promotion_blocking"],  # type: ignore[arg-type]
+                    raw["promotion_reason"],  # type: ignore[arg-type]
+                    dict(evidence),
+                    raw["criterion"],  # type: ignore[arg-type]
+                    raw["defer_to"],  # type: ignore[arg-type]
+                    raw["survives_prior_repair"],  # type: ignore[arg-type]
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("review finding values are invalid") from exc
+    raw_evidence_ids = value["evidence_ids"]
+    if not isinstance(raw_evidence_ids, list) or any(not isinstance(item, str) for item in raw_evidence_ids):
+        raise ValueError("review result evidence ids are malformed")
+    try:
+        return ReviewResult(
+            value["review_id"],  # type: ignore[arg-type]
+            RoleId(value["reviewer_role"]),  # type: ignore[arg-type]
+            value["accepted"],  # type: ignore[arg-type]
+            tuple(findings),
+            value["reviewed_revision"],  # type: ignore[arg-type]
+            value["fresh"],  # type: ignore[arg-type]
+            value["read_only"],  # type: ignore[arg-type]
+            value["prior_review_id"],  # type: ignore[arg-type]
+            AcceptanceMode(value["acceptance_mode"]),  # type: ignore[arg-type]
+            tuple(raw_evidence_ids),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("review result values are invalid") from exc
+
+
+def review_result_from_agent_message(value: str | bytes | bytearray) -> ReviewResult:
+    """Decode one exact reviewer agent message."""
+
+    decoded = strict_json_loads(value, max_bytes=_MAX_AGENT_MESSAGE_BYTES)
+    if not isinstance(decoded, Mapping):
+        raise ValueError("review result root must be an object")
+    return review_result_from_json(decoded)
+
+
+def model_facing_review_result_schema() -> JsonObject:
+    """Return the closed schema used by read-only reviewer workers."""
+
+    text = {"type": "string", "minLength": 1, "maxLength": _MAX_TEXT, "pattern": _TEXT_PATTERN}
+    finding_text = {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": _TEXT_PATTERN}
+    finding = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "finding_id",
+            "causal_class",
+            "severity",
+            "promotion_blocking",
+            "promotion_reason",
+            "evidence",
+            "criterion",
+            "defer_to",
+            "survives_prior_repair",
+        ],
+        "properties": {
+            "finding_id": text,
+            "causal_class": {"type": "string", "enum": [item.value for item in FindingCausalClass]},
+            "severity": {"type": "string", "enum": [item.value for item in Severity]},
+            "promotion_blocking": {"type": "boolean"},
+            "promotion_reason": finding_text,
+            "evidence": {"type": "object"},
+            "criterion": finding_text,
+            "defer_to": {"type": ["string", "null"], "maxLength": 256, "pattern": _TEXT_PATTERN},
+            "survives_prior_repair": {"type": "boolean"},
+        },
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://personal-workflow-skills.invalid/schemas/review-result.schema.json",
+        "title": "Read-only reviewer result",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "schema_version",
+            "review_id",
+            "reviewer_role",
+            "accepted",
+            "findings",
+            "reviewed_revision",
+            "fresh",
+            "read_only",
+            "prior_review_id",
+            "acceptance_mode",
+            "evidence_ids",
+        ],
+        "properties": {
+            "schema_version": {"type": "integer", "const": 1},
+            "review_id": text,
+            "reviewer_role": text,
+            "accepted": {"type": "boolean"},
+            "findings": {"type": "array", "maxItems": _MAX_ITEMS, "items": finding},
+            "reviewed_revision": text,
+            "fresh": {"type": "boolean", "const": True},
+            "read_only": {"type": "boolean", "const": True},
+            "prior_review_id": {"type": ["string", "null"], "maxLength": 256, "pattern": _TEXT_PATTERN},
+            "acceptance_mode": {"type": "string", "enum": [item.value for item in AcceptanceMode]},
+            "evidence_ids": {"type": "array", "maxItems": _MAX_ITEMS, "uniqueItems": True, "items": text},
+        },
+    }
+
+
+def model_facing_review_result_schema_sha256() -> str:
+    """Return the reviewer result contract digest bound into its queue."""
+
+    encoded = json.dumps(
+        model_facing_review_result_schema(), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Closed controller-decision action contract (schema version 1)
 # ---------------------------------------------------------------------------
@@ -883,6 +1086,299 @@ class ModelFacingControllerActionBundle:
         return cls.from_json(decoded)
 
 
+@dataclass(frozen=True, slots=True)
+class ModelFacingProgramControllerAction:
+    """One closed effect selected for a program revision."""
+
+    kind: ProgramControllerActionKind
+    milestone_ids: tuple[str, ...] = ()
+    milestone_id: str | None = None
+    candidate_sha: str | None = None
+    expected_trunk_head: str | None = None
+    review_roles: tuple[str, ...] = ()
+    review_ids: tuple[str, ...] = ()
+    finding_ids: tuple[str, ...] = ()
+    integration_strategy: str | None = None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ProgramControllerActionKind):
+            object.__setattr__(self, "kind", ProgramControllerActionKind(self.kind))
+        ids = tuple(self.milestone_ids)
+        if len(ids) > 128 or len(set(ids)) != len(ids):
+            raise ValueError("program milestone ids must be unique and bounded")
+        for item in ids:
+            MilestoneId(item)
+        object.__setattr__(self, "milestone_ids", tuple(sorted(ids)))
+        if self.milestone_id is not None:
+            MilestoneId(self.milestone_id)
+        if self.candidate_sha is not None and re.fullmatch(r"[0-9a-f]{40}", self.candidate_sha) is None:
+            raise ValueError("program candidate commit is invalid")
+        if self.expected_trunk_head is not None and re.fullmatch(r"[0-9a-f]{40}", self.expected_trunk_head) is None:
+            raise ValueError("program expected trunk HEAD is invalid")
+        for label, values in (
+            ("review roles", self.review_roles),
+            ("review ids", self.review_ids),
+            ("finding ids", self.finding_ids),
+        ):
+            checked = tuple(values)
+            if (
+                len(checked) > 128
+                or len(set(checked)) != len(checked)
+                or any(not isinstance(item, str) or not item.strip() for item in checked)
+            ):
+                raise ValueError(f"program {label} are invalid")
+            object.__setattr__(self, label.replace(" ", "_"), tuple(sorted(checked)))
+        if self.integration_strategy is not None and self.integration_strategy not in {
+            "merge",
+            "fast_forward",
+            "cherry_pick",
+        }:
+            raise ValueError("program integration strategy is unsupported")
+        if self.reason is not None:
+            _text(self.reason, label="program action reason", limit=512)
+        if self.kind is ProgramControllerActionKind.START_READY_MILESTONES:
+            if not ids or any(
+                value is not None
+                for value in (
+                    self.milestone_id,
+                    self.candidate_sha,
+                    self.expected_trunk_head,
+                    self.integration_strategy,
+                    self.reason,
+                )
+            ):
+                raise ValueError("start_ready_milestones requires only milestone_ids")
+        elif self.kind is ProgramControllerActionKind.START_REVIEWS:
+            if self.milestone_id is None or self.candidate_sha is None or not self.review_roles:
+                raise ValueError("start_reviews requires candidate and review roles")
+        elif self.kind is ProgramControllerActionKind.REQUEST_REPAIR:
+            if self.milestone_id is None or self.candidate_sha is None or not self.finding_ids:
+                raise ValueError("request_repair requires candidate and finding ids")
+        elif self.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE:
+            if self.milestone_id is None or self.candidate_sha is None or not self.review_ids:
+                raise ValueError("promote_candidate requires candidate and review ids")
+        elif self.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
+            if (
+                self.milestone_id is None
+                or self.candidate_sha is None
+                or self.expected_trunk_head is None
+                or self.integration_strategy is None
+            ):
+                raise ValueError("integrate_candidate requires candidate, trunk HEAD and strategy")
+        elif self.kind in {
+            ProgramControllerActionKind.REQUIRE_REPLAN,
+            ProgramControllerActionKind.REQUIRE_HUMAN_ATTENTION,
+        }:
+            if self.reason is None:
+                raise ValueError("program attention actions require a reason")
+        elif any(
+            value not in (None, (), "")
+            for value in (
+                self.milestone_ids,
+                self.milestone_id,
+                self.candidate_sha,
+                self.expected_trunk_head,
+                self.review_roles,
+                self.review_ids,
+                self.finding_ids,
+                self.integration_strategy,
+                self.reason,
+            )
+        ):
+            raise ValueError("acknowledge_only cannot carry program action parameters")
+
+    def to_json(self) -> JsonObject:
+        value: JsonObject = {"kind": self.kind.value}
+        if self.milestone_ids:
+            value["milestone_ids"] = list(self.milestone_ids)
+        if self.milestone_id is not None:
+            value["milestone_id"] = self.milestone_id
+        if self.candidate_sha is not None:
+            value["candidate_sha"] = self.candidate_sha
+        if self.expected_trunk_head is not None:
+            value["expected_trunk_head"] = self.expected_trunk_head
+        if self.review_roles:
+            value["review_roles"] = list(self.review_roles)
+        if self.review_ids:
+            value["review_ids"] = list(self.review_ids)
+        if self.finding_ids:
+            value["finding_ids"] = list(self.finding_ids)
+        if self.integration_strategy is not None:
+            value["integration_strategy"] = self.integration_strategy
+        if self.reason is not None:
+            value["reason"] = self.reason
+        return value
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> ModelFacingProgramControllerAction:
+        if not isinstance(value, Mapping) or "kind" not in value or not isinstance(value["kind"], str):
+            raise ValueError("program action must contain a string kind")
+        try:
+            kind = ProgramControllerActionKind(value["kind"])
+        except ValueError as exc:
+            raise ValueError("program action kind is unsupported") from exc
+        allowed = {
+            ProgramControllerActionKind.START_READY_MILESTONES: {"kind", "milestone_ids"},
+            ProgramControllerActionKind.START_REVIEWS: {"kind", "milestone_id", "candidate_sha", "review_roles"},
+            ProgramControllerActionKind.REQUEST_REPAIR: {"kind", "milestone_id", "candidate_sha", "finding_ids"},
+            ProgramControllerActionKind.PROMOTE_CANDIDATE: {"kind", "milestone_id", "candidate_sha", "review_ids"},
+            ProgramControllerActionKind.INTEGRATE_CANDIDATE: {
+                "kind",
+                "milestone_id",
+                "candidate_sha",
+                "expected_trunk_head",
+                "integration_strategy",
+            },
+            ProgramControllerActionKind.REQUIRE_REPLAN: {"kind", "reason"},
+            ProgramControllerActionKind.REQUIRE_HUMAN_ATTENTION: {"kind", "reason"},
+            ProgramControllerActionKind.ACKNOWLEDGE_ONLY: {"kind"},
+        }[kind]
+        if set(value) != allowed:
+            raise ValueError("program action has an unsupported shape")
+        arrays: dict[str, tuple[str, ...]] = {}
+        for name in ("milestone_ids", "review_roles", "review_ids", "finding_ids"):
+            raw = value.get(name, [])
+            if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+                raise ValueError("program action collection is malformed")
+            arrays[name] = tuple(raw)
+        return cls(
+            kind,
+            arrays["milestone_ids"],
+            value.get("milestone_id"),  # type: ignore[arg-type]
+            value.get("candidate_sha"),  # type: ignore[arg-type]
+            value.get("expected_trunk_head"),  # type: ignore[arg-type]
+            arrays["review_roles"],
+            arrays["review_ids"],
+            arrays["finding_ids"],
+            value.get("integration_strategy"),  # type: ignore[arg-type]
+            value.get("reason"),  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelFacingProgramControllerActionBundle:
+    """The only model-authored mutation envelope for a program decision."""
+
+    schema_version: int
+    decision_id: ControllerDecisionId
+    program_id: ProgramId
+    plan_digest: str
+    generation: Generation
+    event_kind: ProgramEventKind
+    event_key: str
+    expected_program_revision: int
+    expected_trunk_head: str
+    actions: tuple[ModelFacingProgramControllerAction, ...]
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.schema_version, bool) or self.schema_version != 1:
+            raise ValueError("unsupported program action schema version")
+        if not isinstance(self.decision_id, ControllerDecisionId):
+            object.__setattr__(self, "decision_id", ControllerDecisionId(self.decision_id))
+        if not isinstance(self.program_id, ProgramId):
+            object.__setattr__(self, "program_id", ProgramId(self.program_id))
+        if not isinstance(self.plan_digest, str) or _SHA256_PATTERN.fullmatch(self.plan_digest) is None:
+            raise ValueError("program plan digest is invalid")
+        if not isinstance(self.generation, Generation):
+            object.__setattr__(self, "generation", Generation(self.generation))
+        if not isinstance(self.event_kind, ProgramEventKind):
+            object.__setattr__(self, "event_kind", ProgramEventKind(self.event_kind))
+        _text(self.event_key, label="program event key", limit=256)
+        if (
+            isinstance(self.expected_program_revision, bool)
+            or not isinstance(self.expected_program_revision, int)
+            or self.expected_program_revision < 0
+        ):
+            raise ValueError("program revision is invalid")
+        if re.fullmatch(r"[0-9a-f]{40}", self.expected_trunk_head) is None:
+            raise ValueError("program trunk HEAD is invalid")
+        actions = tuple(self.actions)
+        if not 1 <= len(actions) <= 16 or any(
+            not isinstance(item, ModelFacingProgramControllerAction) for item in actions
+        ):
+            raise ValueError("program action bundle must contain one to sixteen typed actions")
+        kinds = {item.kind for item in actions}
+        if len(kinds) != len(actions) or (ProgramControllerActionKind.ACKNOWLEDGE_ONLY in kinds and len(actions) != 1):
+            raise ValueError("program action kinds must be unique and acknowledge_only is exclusive")
+        object.__setattr__(self, "actions", actions)
+        _text(self.rationale, label="program bundle rationale", limit=4_096)
+        if len(self.to_json_bytes()) > 32 * 1024:
+            raise ValueError("program action bundle exceeds its byte limit")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "schema_version": self.schema_version,
+            "decision_id": str(self.decision_id),
+            "program_id": str(self.program_id),
+            "plan_digest": self.plan_digest,
+            "generation": int(self.generation),
+            "event_kind": self.event_kind.value,
+            "event_key": self.event_key,
+            "expected_program_revision": self.expected_program_revision,
+            "expected_trunk_head": self.expected_trunk_head,
+            "actions": [item.to_json() for item in self.actions],
+            "rationale": self.rationale,
+        }
+
+    def to_json_bytes(self) -> bytes:
+        return json.dumps(
+            self.to_json(), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.to_json_bytes()).hexdigest()
+
+    @property
+    def action_id(self) -> str:
+        """Return the controller-owned stable identity of this immutable bundle."""
+
+        return f"program-action/{self.sha256}"
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> ModelFacingProgramControllerActionBundle:
+        expected = {
+            "schema_version",
+            "decision_id",
+            "program_id",
+            "plan_digest",
+            "generation",
+            "event_kind",
+            "event_key",
+            "expected_program_revision",
+            "expected_trunk_head",
+            "actions",
+            "rationale",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ValueError("program action bundle keys are unsupported")
+        actions = value["actions"]
+        if not isinstance(actions, list) or any(not isinstance(item, Mapping) for item in actions):
+            raise ValueError("program action bundle actions are malformed")
+        return cls(
+            value["schema_version"],  # type: ignore[arg-type]
+            value["decision_id"],  # type: ignore[arg-type]
+            value["program_id"],  # type: ignore[arg-type]
+            value["plan_digest"],  # type: ignore[arg-type]
+            value["generation"],  # type: ignore[arg-type]
+            value["event_kind"],  # type: ignore[arg-type]
+            value["event_key"],  # type: ignore[arg-type]
+            value["expected_program_revision"],  # type: ignore[arg-type]
+            value["expected_trunk_head"],  # type: ignore[arg-type]
+            tuple(ModelFacingProgramControllerAction.from_json(item) for item in actions),
+            value["rationale"],  # type: ignore[arg-type]
+        )
+
+    @classmethod
+    def from_json_bytes(cls, value: str | bytes | bytearray) -> ModelFacingProgramControllerActionBundle:
+        decoded = strict_json_loads(value, max_bytes=32 * 1024)
+        if not isinstance(decoded, Mapping):
+            raise ValueError("program action bundle root must be an object")
+        return cls.from_json(decoded)
+
+
 def model_facing_capsule_schema() -> JsonObject:
     """Return the closed JSON schema used when serializing a capsule."""
 
@@ -988,6 +1484,105 @@ def model_facing_capsule_schema() -> JsonObject:
             version_schema(2, include_plugins=True),
             version_schema(3, include_plugins=True, image_paths=True, optional_plugins=True),
         ],
+    }
+
+
+def model_facing_program_controller_action_schema() -> JsonObject:
+    """Return the closed schema for one program-controller generation."""
+
+    sha = {"type": "string", "pattern": r"^[0-9a-f]{40}$"}
+    ids = {
+        "type": "array",
+        "maxItems": 128,
+        "uniqueItems": True,
+        "items": {"type": "string", "minLength": 1, "maxLength": 256},
+    }
+    reason = {"type": "string", "minLength": 1, "maxLength": 512, "pattern": _TEXT_PATTERN}
+    action = {
+        "type": "object",
+        "additionalProperties": False,
+        "oneOf": [
+            {
+                "required": ["kind", "milestone_ids"],
+                "properties": {"kind": {"const": "start_ready_milestones"}, "milestone_ids": ids},
+            },
+            {
+                "required": ["kind", "milestone_id", "candidate_sha", "review_roles"],
+                "properties": {
+                    "kind": {"const": "start_reviews"},
+                    "milestone_id": {"type": "string"},
+                    "candidate_sha": sha,
+                    "review_roles": ids,
+                },
+            },
+            {
+                "required": ["kind", "milestone_id", "candidate_sha", "finding_ids"],
+                "properties": {
+                    "kind": {"const": "request_repair"},
+                    "milestone_id": {"type": "string"},
+                    "candidate_sha": sha,
+                    "finding_ids": ids,
+                },
+            },
+            {
+                "required": ["kind", "milestone_id", "candidate_sha", "review_ids"],
+                "properties": {
+                    "kind": {"const": "promote_candidate"},
+                    "milestone_id": {"type": "string"},
+                    "candidate_sha": sha,
+                    "review_ids": ids,
+                },
+            },
+            {
+                "required": ["kind", "milestone_id", "candidate_sha", "expected_trunk_head", "integration_strategy"],
+                "properties": {
+                    "kind": {"const": "integrate_candidate"},
+                    "milestone_id": {"type": "string"},
+                    "candidate_sha": sha,
+                    "expected_trunk_head": sha,
+                    "integration_strategy": {"type": "string", "enum": ["merge", "fast_forward", "cherry_pick"]},
+                },
+            },
+            {"required": ["kind", "reason"], "properties": {"kind": {"const": "require_replan"}, "reason": reason}},
+            {
+                "required": ["kind", "reason"],
+                "properties": {"kind": {"const": "require_human_attention"}, "reason": reason},
+            },
+            {"required": ["kind"], "properties": {"kind": {"const": "acknowledge_only"}}},
+        ],
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://personal-workflow-skills.invalid/schemas/program-controller-action.schema.json",
+        "title": "Program controller action bundle",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "schema_version",
+            "decision_id",
+            "program_id",
+            "plan_digest",
+            "generation",
+            "event_kind",
+            "event_key",
+            "expected_program_revision",
+            "expected_trunk_head",
+            "actions",
+            "rationale",
+        ],
+        "properties": {
+            "schema_version": {"type": "integer", "const": 1},
+            "decision_id": {"type": "string", "pattern": r"^decision/[A-Za-z0-9][A-Za-z0-9_./-]*$"},
+            "program_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "plan_digest": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
+            "generation": {"type": "integer", "minimum": 1, "maximum": 2},
+            "event_kind": {"type": "string", "enum": [item.value for item in ProgramEventKind]},
+            "event_key": {"type": "string", "minLength": 1, "maxLength": 256},
+            "expected_program_revision": {"type": "integer", "minimum": 0},
+            "expected_trunk_head": sha,
+            "actions": {"type": "array", "minItems": 1, "maxItems": 16, "items": action},
+            "rationale": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": _TEXT_PATTERN},
+        },
     }
 
 

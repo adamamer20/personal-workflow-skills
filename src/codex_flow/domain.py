@@ -33,6 +33,19 @@ MAX_JSON_BYTES = 16 * 1_048_576
 DIAGNOSTIC_RING_MAX_ENTRIES = 128
 DIAGNOSTIC_RING_MAX_BYTES = 64 * 1024
 DIAGNOSTIC_TEXT_MAX_BYTES = 8 * 1024
+# Only lifecycle boundaries have durable diagnostic value.  Progress deltas
+# are intentionally acknowledged at the IPC boundary without entering the
+# SQLite ring: the worker heartbeat remains the lease authority and terminal
+# result ingress remains the lifecycle authority.
+WORKER_DIAGNOSTIC_RETAINED_METHODS = frozenset(
+    {
+        "turn/started",
+        "turn/completed",
+        "turn/failed",
+        "turn/interrupted",
+        "item/completed",
+    }
+)
 STEER_TEXT_MAX_BYTES = 8 * 1024
 CONTROL_ACKNOWLEDGEMENT_TERMINAL_STATUSES = frozenset(
     {"completed", "needs_decision", "external_blocked", "failed", "interrupted"}
@@ -400,6 +413,12 @@ def redact_diagnostic_text(value: str, *, limit: int = DIAGNOSTIC_TEXT_MAX_BYTES
         encoded = encoded[:limit]
         text = encoded.decode("utf-8", errors="ignore")
     return text
+
+
+def is_lossy_worker_diagnostic_method(method: str) -> bool:
+    """Return whether one worker event is safe to acknowledge without storage."""
+
+    return method not in WORKER_DIAGNOSTIC_RETAINED_METHODS
 
 
 def redact_control_text(value: str, *, limit: int = STEER_TEXT_MAX_BYTES) -> str:
@@ -3254,6 +3273,270 @@ class ExecutionCapsule:
             raise ValueError("execution capsule version 3 requires local images")
         _relative_paths(image_paths, label="execution local image paths")
         object.__setattr__(self, "local_image_paths", image_paths)
+
+
+class ProgramId(_ValidatedIdentifier):
+    """Stable identifier for one registered program graph."""
+
+    label = "program id"
+
+
+class ProgramEventKind(str, Enum):
+    """Durable events that may wake one ephemeral program controller."""
+
+    IMPLEMENTATION_COMPLETED = "implementation_completed"
+    REVIEW_COMPLETED = "review_completed"
+    INTEGRATION_COMPLETED = "integration_completed"
+    CONTROLLER_ATTENTION = "controller_attention"
+    CHECKPOINT = "checkpoint"
+
+
+class ProgramControllerActionKind(str, Enum):
+    """Closed effects a program-controller generation may authorize."""
+
+    START_READY_MILESTONES = "start_ready_milestones"
+    START_REVIEWS = "start_reviews"
+    REQUEST_REPAIR = "request_repair"
+    PROMOTE_CANDIDATE = "promote_candidate"
+    INTEGRATE_CANDIDATE = "integrate_candidate"
+    REQUIRE_REPLAN = "require_replan"
+    REQUIRE_HUMAN_ATTENTION = "require_human_attention"
+    ACKNOWLEDGE_ONLY = "acknowledge_only"
+
+
+class ProgramState(str, Enum):
+    """Dynamic program projection kept separately from static plan intent."""
+
+    REGISTERED = "registered"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    NEEDS_DECISION = "needs_decision"
+    EXTERNAL_BLOCKED = "external_blocked"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramNodeSpec:
+    """One executable graph node with immutable ownership and dependencies."""
+
+    milestone_id: MilestoneId
+    capsule: ExecutionCapsule
+    dependencies: tuple[MilestoneId, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.milestone_id, MilestoneId):
+            object.__setattr__(self, "milestone_id", MilestoneId(self.milestone_id))
+        if not isinstance(self.capsule, ExecutionCapsule):
+            raise ValueError("program node capsule must be an ExecutionCapsule")
+        if self.capsule.milestone_id != self.milestone_id:
+            raise ValueError("program node milestone does not match its capsule")
+        dependencies = tuple(item if isinstance(item, MilestoneId) else MilestoneId(item) for item in self.dependencies)
+        if self.milestone_id in dependencies or len(dependencies) != len(set(dependencies)):
+            raise ValueError("program node dependencies must be unique and acyclic at the node boundary")
+        object.__setattr__(self, "dependencies", dependencies)
+
+    @property
+    def mutable_surfaces(self) -> tuple[str, ...]:
+        return self.capsule.mutable_paths
+
+    @property
+    def workspace_path(self) -> Path:
+        return self.capsule.workspace_path
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramGraph:
+    """Closed executable graph compiled from one canonical plan revision."""
+
+    program_id: ProgramId
+    plan_path: Path
+    plan_revision_sha256: str
+    nodes: tuple[ProgramNodeSpec, ...]
+    trunk_head: str
+    integration_strategy: str = "merge"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.program_id, ProgramId):
+            object.__setattr__(self, "program_id", ProgramId(self.program_id))
+        plan_path = Path(self.plan_path)
+        if not plan_path.is_absolute() or ".." in plan_path.parts:
+            raise ValueError("program plan path must be an absolute canonical path")
+        object.__setattr__(self, "plan_path", plan_path)
+        if re.fullmatch(r"[0-9a-f]{64}", self.plan_revision_sha256) is None:
+            raise ValueError("program plan revision digest is invalid")
+        if re.fullmatch(r"[0-9a-f]{40}", self.trunk_head) is None:
+            raise ValueError("program trunk HEAD is invalid")
+        if self.integration_strategy not in {"merge", "fast_forward", "cherry_pick"}:
+            raise ValueError("program integration strategy is unsupported")
+        nodes = tuple(self.nodes)
+        if not nodes or len(nodes) > 128:
+            raise ValueError("program graph must contain one to 128 nodes")
+        ids = tuple(node.milestone_id for node in nodes)
+        if len(set(ids)) != len(ids):
+            raise ValueError("program graph milestone ids must be unique")
+        known = set(ids)
+        if any(dependency not in known for node in nodes for dependency in node.dependencies):
+            raise ValueError("program graph dependency is not declared")
+        graph = {node.milestone_id: set(node.dependencies) for node in nodes}
+        visiting: set[MilestoneId] = set()
+        visited: set[MilestoneId] = set()
+
+        def visit(node_id: MilestoneId) -> None:
+            if node_id in visiting:
+                raise ValueError("program graph contains a dependency cycle")
+            if node_id in visited:
+                return
+            visiting.add(node_id)
+            for dependency in graph[node_id]:
+                visit(dependency)
+            visiting.remove(node_id)
+            visited.add(node_id)
+
+        for node_id in ids:
+            visit(node_id)
+        owned_paths: dict[str, MilestoneId] = {}
+        for node in nodes:
+            for surface in node.mutable_surfaces:
+                owner = owned_paths.get(surface)
+                if owner is not None:
+                    raise ValueError(
+                        f"program mutable surface {surface!r} is owned by both {owner} and {node.milestone_id}"
+                    )
+                owned_paths[surface] = node.milestone_id
+        object.__setattr__(self, "nodes", nodes)
+
+    def node(self, milestone_id: MilestoneId | str) -> ProgramNodeSpec:
+        target = milestone_id if isinstance(milestone_id, MilestoneId) else MilestoneId(milestone_id)
+        for node in self.nodes:
+            if node.milestone_id == target:
+                return node
+        raise KeyError(target)
+
+    @property
+    def ready_roots(self) -> tuple[ProgramNodeSpec, ...]:
+        return tuple(node for node in self.nodes if not node.dependencies)
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramNodeStatus:
+    """Durable dynamic projection for one program node."""
+
+    milestone_id: MilestoneId
+    state: str
+    dependencies: tuple[MilestoneId, ...] = ()
+    candidate_sha: str | None = None
+    review_ids: tuple[str, ...] = ()
+    finding_ids: tuple[str, ...] = ()
+    integrated: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.milestone_id, MilestoneId):
+            object.__setattr__(self, "milestone_id", MilestoneId(self.milestone_id))
+        if not isinstance(self.state, str) or not self.state.strip() or len(self.state) > 64:
+            raise ValueError("program node state is invalid")
+        dependencies = tuple(item if isinstance(item, MilestoneId) else MilestoneId(item) for item in self.dependencies)
+        if len(dependencies) != len(set(dependencies)):
+            raise ValueError("program node dependencies are not unique")
+        object.__setattr__(self, "dependencies", dependencies)
+        for label, values in (("review ids", self.review_ids), ("finding ids", self.finding_ids)):
+            checked = tuple(values)
+            if any(not isinstance(value, str) or not value.strip() for value in checked):
+                raise ValueError(f"program {label} are invalid")
+            object.__setattr__(self, label.replace(" ", "_"), tuple(sorted(set(checked))))
+        if self.candidate_sha is not None and re.fullmatch(r"[0-9a-f]{40}", self.candidate_sha) is None:
+            raise ValueError("program candidate commit is invalid")
+        if not isinstance(self.integrated, bool):
+            raise ValueError("program integration state is invalid")
+
+    @property
+    def ready(self) -> bool:
+        return self.state == WorkflowState.PLANNED.value and not self.integrated
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramStatus:
+    """Closed read projection of one registered program."""
+
+    program_id: ProgramId
+    state: ProgramState
+    revision: int
+    plan_digest: str
+    trunk_head: str
+    nodes: tuple[ProgramNodeStatus, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.program_id, ProgramId):
+            object.__setattr__(self, "program_id", ProgramId(self.program_id))
+        if not isinstance(self.state, ProgramState):
+            object.__setattr__(self, "state", ProgramState(self.state))
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("program revision is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", self.plan_digest) is None:
+            raise ValueError("program plan digest is invalid")
+        if re.fullmatch(r"[0-9a-f]{40}", self.trunk_head) is None:
+            raise ValueError("program trunk HEAD is invalid")
+        nodes = tuple(self.nodes)
+        if not nodes or len(nodes) > 128 or len({node.milestone_id for node in nodes}) != len(nodes):
+            raise ValueError("program node projection is invalid")
+        object.__setattr__(self, "nodes", nodes)
+
+    @property
+    def ready_milestones(self) -> tuple[MilestoneId, ...]:
+        integrated = {node.milestone_id for node in self.nodes if node.integrated}
+        return tuple(
+            node.milestone_id
+            for node in self.nodes
+            if node.ready and all(dependency in integrated for dependency in node.dependencies)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramControllerDecisionStatus:
+    """Program subject projection over the shared controller decision rows."""
+
+    decision_id: ControllerDecisionId
+    program_id: ProgramId
+    event_kind: ProgramEventKind
+    event_key: str
+    state: ControllerDecisionState
+    revision: int
+    current_generation: Generation
+    generation_budget: int
+    generation_used: int
+    claimant_kind: ControllerClaimantKind | None
+    claimant_id: str | None
+    claim_expires_at: str | None
+    action_id: str | None
+    action_sha256: str | None
+    deadline: str
+    payload: JsonObject
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision_id, ControllerDecisionId):
+            object.__setattr__(self, "decision_id", ControllerDecisionId(self.decision_id))
+        if not isinstance(self.program_id, ProgramId):
+            object.__setattr__(self, "program_id", ProgramId(self.program_id))
+        if not isinstance(self.event_kind, ProgramEventKind):
+            object.__setattr__(self, "event_kind", ProgramEventKind(self.event_kind))
+        _required_text(self.event_key, label="program event key", limit=256)
+        if not isinstance(self.state, ControllerDecisionState):
+            object.__setattr__(self, "state", ControllerDecisionState(self.state))
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
+            raise ValueError("program decision revision is invalid")
+        if not isinstance(self.current_generation, Generation):
+            object.__setattr__(self, "current_generation", Generation(self.current_generation))
+        if isinstance(self.generation_budget, bool) or not 1 <= self.generation_budget <= 2:
+            raise ValueError("program generation budget is invalid")
+        if isinstance(self.generation_used, bool) or not 0 <= self.generation_used <= self.generation_budget:
+            raise ValueError("program generation usage is invalid")
+        if self.claimant_kind is not None and not isinstance(self.claimant_kind, ControllerClaimantKind):
+            object.__setattr__(self, "claimant_kind", ControllerClaimantKind(self.claimant_kind))
+        if self.claimant_id is not None:
+            _required_text(self.claimant_id, label="program claimant id", limit=256)
+        _required_text(self.deadline, label="program decision deadline", limit=64)
+        if self.action_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", self.action_sha256) is None:
+            raise ValueError("program action digest is invalid")
+        object.__setattr__(self, "payload", _owned_json_object(self.payload, label="program decision payload"))
 
 
 def canonicalize_execution_capsule(capsule: ExecutionCapsule) -> ExecutionCapsule:

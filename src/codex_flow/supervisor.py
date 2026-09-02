@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,7 +28,13 @@ from .backends.codex_sdk import (
     WakeDeliveryAmbiguous,
     WakeDeliveryUnavailable,
 )
-from .contracts import ModelFacingControllerActionBundle, PluginCapabilitySnapshot, PluginRequirement
+from .contracts import (
+    ModelFacingControllerActionBundle,
+    ModelFacingProgramControllerActionBundle,
+    PluginCapabilitySnapshot,
+    PluginRequirement,
+    review_result_from_agent_message,
+)
 from .domain import (
     CONVERSATION_MAX_CONCURRENT_READS,
     CONVERSATION_READ_DEADLINE_SECONDS,
@@ -44,7 +50,10 @@ from .domain import (
     ConversationHistoryRequest,
     ConversationHistoryStatus,
     ConversationSubjectKind,
+    DispatchId,
     NativePermissionMode,
+    ProgramControllerActionKind,
+    ProgramControllerDecisionStatus,
     ReasoningEffort,
     RecoveryActionKind,
     RetryBudgetChange,
@@ -52,6 +61,7 @@ from .domain import (
     ThreadIdentity,
     WorkerResultRejectionCode,
     conversation_history_page_from_json,
+    is_lossy_worker_diagnostic_method,
     redact_diagnostic_text,
     strict_json_loads,
 )
@@ -82,6 +92,7 @@ from .worker import (
     recovery_continuation_prompt,
     write_capability,
 )
+from .worktrees import WorktreeError, WorktreeManager
 
 
 class SupervisorError(RuntimeError):
@@ -159,6 +170,8 @@ QUEUE_TRIGGERING_OPERATIONS = frozenset(
         "recovery_action",
         "controller_submit_actions",
         "controller_submit_recovered_actions",
+        "program_submit_actions",
+        "program_submit_recovered_actions",
     }
 )
 
@@ -291,6 +304,7 @@ class Supervisor:
         lease_seconds: float = 30.0,
         worker_command: Sequence[str] | None = None,
         controller_command: Sequence[str] | None = None,
+        program_controller_command: Sequence[str] | None = None,
         wake_delivery: WakeDelivery | None = None,
         thread_inspector: ThreadInspector | None = None,
     ) -> None:
@@ -303,6 +317,10 @@ class Supervisor:
         self.controller_command = tuple(
             controller_command or (sys.executable, "-m", "codex_flow.cli", "controller-generation")
         )
+        self.program_controller_command = tuple(
+            program_controller_command or (sys.executable, "-m", "codex_flow.cli", "program-controller-generation")
+        )
+        self._worktrees = WorktreeManager()
         self._wake_delivery = wake_delivery
         self._thread_inspector = thread_inspector
         self.ledger = Ledger(self.state_dir / "workflow.db")
@@ -373,16 +391,32 @@ class Supervisor:
             if return_code == WORKER_EXIT_PROFILE:
                 try:
                     status = self.ledger.controller_decision(decision_id)
-                    self.ledger.record_controller_profile_drift(
-                        decision_id,
-                        generation=int(status.current_generation),
-                    )
-                except LedgerError as exc:
-                    # The child crossed a known terminal boundary, but the
-                    # corresponding durable closure did not.  Keep lifecycle
-                    # authority fail-closed instead of silently allowing the
-                    # scheduler to retry the same incompatible profile.
-                    raise SupervisorError("controller profile-drift terminalization failed") from exc
+                except RecordNotFound:
+                    try:
+                        status = self.ledger.program_controller_decision(decision_id)
+                        self.ledger.record_program_attention(
+                            status.program_id,
+                            event_key=f"controller/{decision_id}/profile-drift",
+                            payload={
+                                "decision_id": decision_id,
+                                "generation": int(status.current_generation),
+                                "reason": "controller native profile drift",
+                            },
+                        )
+                    except LedgerError as exc:
+                        raise SupervisorError("program controller profile-drift terminalization failed") from exc
+                else:
+                    try:
+                        self.ledger.record_controller_profile_drift(
+                            decision_id,
+                            generation=int(status.current_generation),
+                        )
+                    except LedgerError as exc:
+                        # The child crossed a known terminal boundary, but the
+                        # corresponding durable closure did not.  Keep lifecycle
+                        # authority fail-closed instead of silently allowing the
+                        # scheduler to retry the same incompatible profile.
+                        raise SupervisorError("controller profile-drift terminalization failed") from exc
             self._controller_children.pop(decision_id, None)
             changed = True
         return changed
@@ -521,6 +555,105 @@ class Supervisor:
         self._controller_children[decision_id] = child
         return True
 
+    def _program_controller_permission_args(self, status: ProgramControllerDecisionStatus) -> tuple[str, ...]:
+        """Forward one program's first node native authority to its controller."""
+
+        try:
+            graph = self.ledger.program_graph(status.program_id)
+            capsule = graph.nodes[0].capsule
+            home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve(strict=True)
+            profile = NativeProfileProjection.load(home)
+            profile.verify_sources()
+            effective = profile.effective_authority(capsule.permission_mode)
+        except (IndexError, OSError, RuntimeError, ValueError):
+            # Provider-free ledger fixtures intentionally omit native profile
+            # facts.  The private runner remains read-only in that seam; a
+            # production profile failure is raised by its own typed boundary.
+            return ()
+        encoded = json.dumps(effective.facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return (
+            "--effective-permission-json",
+            encoded,
+            "--native-compatibility-sha256",
+            profile.worker_compatibility_sha256,
+        )
+
+    def _spawn_program_controller_generation(
+        self, status: ProgramControllerDecisionStatus, *, recovery: bool = False
+    ) -> bool:
+        """Launch one ephemeral program-controller generation without a queue row."""
+
+        if self.epoch is None:
+            return False
+        decision_id = str(status.decision_id)
+        if decision_id in self._controller_children:
+            return False
+        generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
+        launchable_recovery = {
+            ControllerGenerationState.DELIVERY_STARTING,
+            ControllerGenerationState.ACTIVE,
+            ControllerGenerationState.COMPLETED,
+            ControllerGenerationState.FAILED,
+            ControllerGenerationState.INTERRUPTED,
+        }
+        if recovery:
+            if generation.state not in launchable_recovery:
+                return False
+        elif generation.state is not ControllerGenerationState.PREPARED:
+            return False
+        if not recovery:
+            self.ledger.prepare_controller_generation(
+                status.decision_id, generation=status.current_generation, prompt_sha256=None
+            )
+        model, effort = self._controller_model_and_effort({})
+        command = (
+            *self.program_controller_command,
+            *(("--recover",) if recovery else ()),
+            "--decision-id",
+            decision_id,
+            "--state-root",
+            str(self.state_root),
+            "--cwd",
+            str(self.state_root),
+            "--model",
+            model,
+            "--reasoning-effort",
+            effort,
+            *self._program_controller_permission_args(status),
+        )
+        try:
+            authority = self.ledger._controller_generation_launch_authority(
+                status.decision_id, generation=status.current_generation
+            )
+        except LedgerError:
+            return False
+        try:
+            child = subprocess.Popen(command, start_new_session=True, close_fds=True)
+        except OSError:
+            if not recovery:
+                try:
+                    self.ledger.reset_controller_generation_delivery(
+                        status.decision_id,
+                        generation=status.current_generation,
+                        expected_revision=status.revision,
+                        claimant_id="",
+                        token="",
+                    )
+                except LedgerError:
+                    pass
+            return False
+        try:
+            self.ledger._bind_controller_generation_launch(
+                status.decision_id,
+                generation=status.current_generation,
+                expected_authority_sha256=authority,
+            )
+        except LedgerError:
+            self._stop_unowned_controller_child(child)
+            return False
+        self._controller_children[decision_id] = child
+        return True
+
     @staticmethod
     def _stop_unowned_controller_child(child: subprocess.Popen[bytes]) -> None:
         """Boundedly reap a process that lost durable launch authority."""
@@ -573,6 +706,7 @@ class Supervisor:
         if self.ledger.supervisor_refresh_fenced():
             return False
         changed = self._reap_controller_generations()
+        changed = self._schedule_program_controller_generations() or changed
         for status in self.ledger.controller_decisions():
             if self.ledger.supervisor_refresh_fenced():
                 break
@@ -662,6 +796,212 @@ class Supervisor:
                 # outbox without inspecting or launching an SDK writer.
                 if str(status.decision_id) not in self._controller_children:
                     changed = self._spawn_controller_generation(status, recovery=True) or changed
+        return changed
+
+    def _program_dispatch_exists(self, dispatch_id: str) -> bool:
+        try:
+            self.ledger.queue_dispatch(dispatch_id)
+        except RecordNotFound:
+            return False
+        return True
+
+    def _enqueue_program_worker(
+        self,
+        *,
+        program_id: str,
+        milestone_id: str,
+        role: str,
+        generation: int,
+        action_context: Mapping[str, object] | None = None,
+    ) -> None:
+        """Reuse the canonical Controller enqueue boundary for one effect."""
+
+        from .controller import Controller
+
+        graph = self.ledger.program_graph(program_id)
+        node = graph.node(milestone_id)
+        dispatch_id = str(DispatchId.from_parts(program_id, milestone_id, role, generation))
+        if self._program_dispatch_exists(dispatch_id):
+            return
+        action_json = (
+            json.dumps(dict(action_context), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if action_context is not None
+            else None
+        )
+        controller = Controller(self.state_root, worktrees=self._worktrees)
+        try:
+            controller.enqueue(
+                node.capsule,
+                role=role,
+                generation=generation,
+                backend="sdk_headless",
+                action_json=action_json,
+                plan_path=graph.plan_path,
+                plan_revision_sha256=graph.plan_revision_sha256,
+            )
+        finally:
+            controller.close()
+
+    def _apply_program_action_bundle(self, bundle: ModelFacingProgramControllerActionBundle) -> None:
+        """Execute only the typed effects already committed by the ledger."""
+
+        graph = self.ledger.program_graph(bundle.program_id)
+        for action in bundle.actions:
+            if action.kind is ProgramControllerActionKind.START_READY_MILESTONES:
+                for milestone_id in action.milestone_ids:
+                    self._enqueue_program_worker(
+                        program_id=str(bundle.program_id),
+                        milestone_id=milestone_id,
+                        role="executor",
+                        generation=1,
+                    )
+            elif action.kind is ProgramControllerActionKind.START_REVIEWS:
+                if action.milestone_id is None or action.candidate_sha is None:
+                    raise SupervisorError("program review effect is incomplete")
+                for role in action.review_roles:
+                    self._enqueue_program_worker(
+                        program_id=str(bundle.program_id),
+                        milestone_id=action.milestone_id,
+                        role=role,
+                        generation=1,
+                        action_context={
+                            "program_id": str(bundle.program_id),
+                            "milestone_id": action.milestone_id,
+                            "candidate_sha": action.candidate_sha,
+                            "review_role": role,
+                        },
+                    )
+            elif action.kind is ProgramControllerActionKind.REQUEST_REPAIR:
+                if action.milestone_id is None or action.candidate_sha is None:
+                    raise SupervisorError("program repair effect is incomplete")
+                self._enqueue_program_worker(
+                    program_id=str(bundle.program_id),
+                    milestone_id=action.milestone_id,
+                    role="executor",
+                    generation=2,
+                    action_context={
+                        "program_id": str(bundle.program_id),
+                        "milestone_id": action.milestone_id,
+                        "candidate_sha": action.candidate_sha,
+                        "finding_ids": list(action.finding_ids),
+                        "repair": True,
+                    },
+                )
+            elif action.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
+                if (
+                    action.milestone_id is None
+                    or action.candidate_sha is None
+                    or action.expected_trunk_head is None
+                    or action.integration_strategy is None
+                ):
+                    raise SupervisorError("program integration effect is incomplete")
+                pending = next(
+                    (
+                        item
+                        for item in self.ledger.pending_program_integrations(bundle.program_id)
+                        if item.get("milestone_id") == action.milestone_id
+                        and item.get("candidate_sha") == action.candidate_sha
+                    ),
+                    None,
+                )
+                if pending is None:
+                    continue
+                node = graph.node(action.milestone_id)
+                try:
+                    receipt = self._worktrees.integrate_candidate(
+                        repository_root=self.state_root,
+                        candidate_workspace=node.workspace_path,
+                        candidate_branch=node.capsule.branch,
+                        candidate_sha=action.candidate_sha,
+                        expected_trunk_head=action.expected_trunk_head,
+                        strategy=action.integration_strategy,
+                    )
+                except WorktreeError as exc:
+                    self.ledger.complete_program_integration(
+                        bundle.program_id,
+                        action.milestone_id,
+                        candidate_sha=action.candidate_sha,
+                        receipt={
+                            "program_id": str(bundle.program_id),
+                            "milestone_id": action.milestone_id,
+                            "candidate_sha": action.candidate_sha,
+                            "expected_trunk_head": action.expected_trunk_head,
+                            "strategy": action.integration_strategy,
+                            "before_trunk_head": action.expected_trunk_head,
+                            "error": type(exc).__name__,
+                        },
+                        state="conflict",
+                    )
+                else:
+                    self.ledger.complete_program_integration(
+                        bundle.program_id,
+                        action.milestone_id,
+                        candidate_sha=action.candidate_sha,
+                        receipt=receipt,
+                    )
+
+    def _apply_program_action_outbox(self, action_id: str) -> None:
+        rows = self.ledger.program_action_outboxes()
+        row = next((item for item in rows if item.get("action_id") == action_id), None)
+        if row is None:
+            raise RecordNotFound(f"program action outbox does not exist: {action_id}")
+        raw = row.get("bundle_json")
+        if not isinstance(raw, str):
+            raise SupervisorError("program action outbox bundle is missing")
+        self._apply_program_action_bundle(ModelFacingProgramControllerActionBundle.from_json_bytes(raw))
+
+    def _reconcile_program_action_outboxes(self) -> bool:
+        changed = False
+        for row in self.ledger.program_action_outboxes():
+            if row.get("state") != "acknowledged" and row.get("state") != "committed":
+                continue
+            try:
+                self._apply_program_action_outbox(str(row["action_id"]))
+            except (LedgerError, SupervisorError, WorktreeError, TypeError, ValueError):
+                continue
+            changed = True
+        return changed
+
+    def _schedule_program_controller_generations(self) -> bool:
+        changed = self._reconcile_program_action_outboxes()
+        for status in self.ledger.program_controller_decisions():
+            if self.ledger.supervisor_refresh_fenced():
+                break
+            if status.state is ControllerDecisionState.AWAITING_CLAIM:
+                generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
+                changed = (
+                    self._spawn_program_controller_generation(
+                        status,
+                        recovery=generation.state is not ControllerGenerationState.PREPARED,
+                    )
+                    or changed
+                )
+            elif status.state is ControllerDecisionState.CLAIMED:
+                if status.claimant_kind is ControllerClaimantKind.HUMAN:
+                    continue
+                generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
+                if (
+                    generation.state
+                    in {
+                        ControllerGenerationState.DELIVERY_STARTING,
+                        ControllerGenerationState.ACTIVE,
+                        ControllerGenerationState.COMPLETED,
+                        ControllerGenerationState.FAILED,
+                        ControllerGenerationState.INTERRUPTED,
+                    }
+                    and str(status.decision_id) not in self._controller_children
+                ):
+                    changed = self._spawn_program_controller_generation(status, recovery=True) or changed
+            elif (
+                status.state
+                in {
+                    ControllerDecisionState.ACTION_COMMITTED,
+                    ControllerDecisionState.HUMAN_ATTENTION_REQUIRED,
+                }
+                and status.action_id is not None
+                and str(status.decision_id) not in self._controller_children
+            ):
+                changed = self._spawn_program_controller_generation(status, recovery=True) or changed
         return changed
 
     def _reap_children(self) -> bool:
@@ -957,6 +1297,31 @@ class Supervisor:
         }
 
     @staticmethod
+    def _program_status_payload(status: object) -> dict[str, object]:
+        """Project a program decision without manufacturing a dispatch id."""
+
+        if not isinstance(status, ProgramControllerDecisionStatus):
+            raise IpcError("program decision status is not typed")
+        return {
+            "decision_id": str(status.decision_id),
+            "program_id": str(status.program_id),
+            "event_kind": status.event_kind.value,
+            "event_key": status.event_key,
+            "state": status.state.value,
+            "revision": status.revision,
+            "current_generation": int(status.current_generation),
+            "generation_budget": status.generation_budget,
+            "generation_used": status.generation_used,
+            "claimant_kind": status.claimant_kind.value if status.claimant_kind else None,
+            "claimant_id": status.claimant_id,
+            "claim_expires_at": status.claim_expires_at,
+            "action_id": status.action_id,
+            "action_sha256": status.action_sha256,
+            "deadline": status.deadline,
+            "payload": status.payload,
+        }
+
+    @staticmethod
     def _controller_claim_payload(claim: object) -> dict[str, object]:
         from .domain import ControllerDecisionClaim
 
@@ -1027,6 +1392,102 @@ class Supervisor:
 
     def _controller_request(self, payload: dict[str, object]) -> dict[str, object]:
         operation = payload.get("operation")
+        if operation == "program_pending":
+            if set(payload) != {"version", "operation"}:
+                raise IpcError("program pending request has an unsupported shape")
+            return {
+                "version": 1,
+                "ok": True,
+                "decisions": [
+                    self._program_status_payload(item) for item in self.ledger.program_controller_decisions()
+                ],
+            }
+        if operation == "program_status":
+            if set(payload) != {"version", "operation", "decision_id"}:
+                raise IpcError("program status request has an unsupported shape")
+            status = self.ledger.program_controller_decision(ControllerDecisionId(payload["decision_id"]))
+            return {"version": 1, "ok": True, "decision": self._program_status_payload(status)}
+        if operation == "program_claim":
+            allowed = {
+                "version",
+                "operation",
+                "decision_id",
+                "claimant_kind",
+                "claimant_id",
+                "expected_revision",
+                "generation",
+            }
+            required = {"version", "operation", "decision_id", "claimant_kind", "claimant_id", "expected_revision"}
+            if set(payload) - allowed or not required.issubset(payload):
+                raise IpcError("program claim request has an unsupported shape")
+            claim = self.ledger.claim_program_controller_decision(
+                ControllerDecisionId(payload["decision_id"]),
+                claimant_kind=payload["claimant_kind"],
+                claimant_id=payload["claimant_id"],
+                expected_revision=payload["expected_revision"],
+                generation=payload.get("generation"),
+            )
+            return {"version": 1, "ok": True, "claim": self._controller_claim_payload(claim)}
+        if operation == "program_submit_actions":
+            required = {"version", "operation", "bundle", "claimant_id", "token"}
+            if set(payload) != required or not isinstance(payload["bundle"], dict):
+                raise IpcError("program action submission has an unsupported shape")
+            bundle = ModelFacingProgramControllerActionBundle.from_json(payload["bundle"])
+            receipt = self.ledger.submit_program_controller_actions(
+                bundle,
+                claimant_id=payload["claimant_id"],
+                token=payload["token"],
+            )
+            self._apply_program_action_bundle(bundle)
+            return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
+        if operation == "program_submit_recovered_actions":
+            required = {"version", "operation", "decision_id"}
+            if set(payload) != required:
+                raise IpcError("recovered program action submission has an unsupported shape")
+            identity = ControllerDecisionId(payload["decision_id"])
+            receipt = self.ledger.submit_recovered_program_controller_actions(identity)
+            self._apply_program_action_outbox(receipt.action_id)
+            return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
+        if operation == "program_acknowledge":
+            required = {
+                "version",
+                "operation",
+                "decision_id",
+                "action_id",
+                "bundle_sha256",
+                "committed_revision",
+                "claimant_id",
+                "token",
+            }
+            if set(payload) != required:
+                raise IpcError("program acknowledgement has an unsupported shape")
+            receipt = self.ledger.acknowledge_controller_action(
+                ControllerDecisionId(payload["decision_id"]),
+                action_id=payload["action_id"],
+                bundle_sha256=payload["bundle_sha256"],
+                committed_revision=payload["committed_revision"],
+                claimant_id=payload["claimant_id"],
+                token=payload["token"],
+            )
+            return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
+        if operation == "program_acknowledge_recovered":
+            required = {
+                "version",
+                "operation",
+                "decision_id",
+                "action_id",
+                "bundle_sha256",
+                "committed_revision",
+            }
+            if set(payload) != required:
+                raise IpcError("recovered program acknowledgement has an unsupported shape")
+            receipt = self.ledger.acknowledge_recovered_controller_action(
+                ControllerDecisionId(payload["decision_id"]),
+                action_id=payload["action_id"],
+                bundle_sha256=payload["bundle_sha256"],
+                committed_revision=payload["committed_revision"],
+            )
+            return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
         if operation == "controller_pending":
             if set(payload) != {"version", "operation"}:
                 raise IpcError("controller pending request has an unsupported shape")
@@ -1307,7 +1768,7 @@ class Supervisor:
                 self.ledger.request_supervisor_shutdown(epoch=self.epoch, owner_nonce_sha256=self.owner_nonce_sha256)
                 self._stop = True
                 return {"version": 1, "ok": True, "operation": "shutdown"}
-            if operation.startswith("controller_"):
+            if operation.startswith(("controller_", "program_")):
                 return self._controller_request(payload)
             if operation == "status":
                 if set(payload) - {"version", "operation", "dispatch_id"}:
@@ -1857,6 +2318,14 @@ class Supervisor:
                 or hashlib.sha256(redact_diagnostic_text(text).encode("utf-8")).hexdigest() != payload_sha256
             ):
                 raise IpcError("worker event payload digest conflicts with text")
+        if is_lossy_worker_diagnostic_method(kind):
+            # Progress is useful to an interactive observer but is not
+            # lifecycle authority.  Acknowledge it after identity validation
+            # without renewing or writing the SQLite ledger.  Heartbeat owns
+            # the lease and submit_result owns terminal ingress, so a noisy
+            # model stream cannot serialize either boundary behind a ring
+            # transaction.
+            return {"version": 1, "ok": True, "event": None, "evicted": True}
         try:
             event = self.ledger.append_worker_diagnostic(
                 str(row["dispatch_id"]),
@@ -2248,6 +2717,7 @@ class Supervisor:
             code = WorkerResultRejectionCode.MALFORMED_OUTPUT
             self._record_worker_result_rejection(str(row["dispatch_id"]), code)
             raise WorkerResultRejected(code) from None
+        self._record_program_queue_result(terminal)
         active = getattr(self, "_active_turns", {}).get(str(row["dispatch_id"]))
         if active is not None:
             _generation, _attempt, _thread_id, active_turn_id = active
@@ -2308,6 +2778,64 @@ class Supervisor:
             # The rejection itself remains fail-closed even if diagnostic
             # retention loses a race with terminalization or cancellation.
             pass
+
+    def _record_program_queue_result(self, row: Mapping[str, object]) -> None:
+        """Translate one already-terminal queue row into one program event."""
+
+        program_id = row.get("run_id")
+        milestone_id = row.get("milestone_id")
+        raw = row.get("raw_result_json")
+        if not isinstance(program_id, str) or not isinstance(milestone_id, str) or not isinstance(raw, str):
+            return
+        try:
+            self.ledger.program_status(program_id)
+        except RecordNotFound:
+            return
+        except LedgerError:
+            return
+        dispatch_id = str(row.get("dispatch_id"))
+        role = str(row.get("role"))
+        try:
+            if role == "executor":
+                terminal_status = str(row.get("terminal_status"))
+                candidate_sha: str | None = None
+                if terminal_status == "completed":
+                    graph = self.ledger.program_graph(program_id)
+                    candidate_sha = self._worktrees.candidate_head(graph.node(milestone_id).capsule)
+                self.ledger.record_program_executor_result(
+                    program_id,
+                    milestone_id,
+                    candidate_sha=candidate_sha,
+                    terminal_status=terminal_status,
+                    dispatch_id=dispatch_id,
+                )
+            else:
+                result = review_result_from_agent_message(raw)
+                context_raw = row.get("action_json")
+                if not isinstance(context_raw, str):
+                    raise WorktreeError("program review queue lacks candidate context")
+                context = strict_json_loads(context_raw, max_bytes=16_384)
+                if (
+                    not isinstance(context, dict)
+                    or context.get("candidate_sha") != result.reviewed_revision
+                    or context.get("review_role") != str(result.reviewer_role)
+                ):
+                    raise WorktreeError("program review result is not bound to its queue context")
+                self.ledger.record_program_review(program_id, milestone_id, result)
+        except (LedgerError, TypeError, ValueError, WorktreeError) as exc:
+            try:
+                self.ledger.record_program_attention(
+                    program_id,
+                    event_key=f"dispatch/{dispatch_id}/result-processing",
+                    payload={
+                        "dispatch_id": dispatch_id,
+                        "milestone_id": milestone_id,
+                        "role": role,
+                        "reason": type(exc).__name__,
+                    },
+                )
+            except LedgerError:
+                pass
 
     def _accept_connection(self, connection: socket.socket) -> str | None:
         operation: str | None = None
@@ -2976,9 +3504,17 @@ class Supervisor:
         for row in self.ledger.queue_dispatches():
             if row.get("state") == "result_submitted":
                 try:
-                    self.ledger.finalize_queue_result(str(row["dispatch_id"]))
+                    finalized = self.ledger.finalize_queue_result(str(row["dispatch_id"]))
+                    self._record_program_queue_result(finalized)
                 except LedgerError:
                     pass
+
+        # A crash may have occurred after queue terminalization but before the
+        # event-driven program projection was recorded.  This is a bounded
+        # startup recovery scan, not a steady-state poll.
+        for row in self.ledger.queue_dispatches():
+            if row.get("state") in {"completed", "failed"}:
+                self._record_program_queue_result(row)
 
         # A worker can finish and persist its exact result while synchronous
         # diagnostic traffic delays IPC until after the exit classification.
@@ -3137,6 +3673,7 @@ class Supervisor:
             token=str(capability["token"]),
             raw_result=raw_result,
         )
+        self._record_program_queue_result(terminal)
         return terminal["state"] in {"completed", "failed"}
 
     def _deliver_wakes(self) -> bool:
@@ -3211,30 +3748,38 @@ class Supervisor:
                     connection, _ = endpoint.accept()
                     operation = self._accept_connection(connection)
                     self._renew_supervisor_lease_if_due()
-                    # A producer wake or a worker terminal submission is the
-                    # only normal queue-read trigger after startup.
+                    # Queue and controller action ingress are the only normal
+                    # steady-state lifecycle triggers.  In particular,
+                    # worker_event, heartbeat, status, and control polling
+                    # remain cheap IPC acknowledgements and never cause a
+                    # repository-wide queue/controller scan.
                     if operation in QUEUE_TRIGGERING_OPERATIONS:
                         self._process_queue_event()
-                    self._deliver_wakes()
-                    self._schedule_controller_generations()
-                    self._refresh_checkpoint_deadline()
+                        self._deliver_wakes()
+                        self._schedule_controller_generations()
+                        self._refresh_checkpoint_deadline()
                 now_monotonic = time.monotonic()
                 if self._next_renewal_monotonic is not None and now_monotonic >= self._next_renewal_monotonic:
                     self._renew_supervisor_lease_if_due()
-                    if self._reap_children():
+                    children_reaped = self._reap_children()
+                    controller_reaped = self._reap_controller_generations()
+                    if children_reaped:
                         self.recover_once()
                         self._process_queue_event()
+                    if children_reaped or controller_reaped:
+                        self._deliver_wakes()
+                        self._schedule_controller_generations()
                     self._refresh_checkpoint_deadline()
                 if (
                     self._next_checkpoint_deadline is not None
                     and self._next_checkpoint_deadline <= datetime.now(timezone.utc)
                     and self.epoch is not None
                 ):
-                    self.ledger.claim_due_checkpoint(epoch=int(self.epoch))
-                    self._deliver_wakes()
-                    self._schedule_controller_generations()
+                    checkpoint = self.ledger.claim_due_checkpoint(epoch=int(self.epoch))
+                    if checkpoint is not None:
+                        self._deliver_wakes()
+                        self._schedule_controller_generations()
                     self._refresh_checkpoint_deadline()
-                self._schedule_controller_generations()
         finally:
             self.close()
 

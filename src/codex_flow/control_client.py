@@ -7,7 +7,7 @@ import re
 import uuid
 from pathlib import Path
 
-from .contracts import ModelFacingControllerActionBundle
+from .contracts import ModelFacingControllerActionBundle, ModelFacingProgramControllerActionBundle
 from .domain import (
     CONTROL_ACKNOWLEDGEMENT_TERMINAL_STATUSES,
     CompatibilityRebind,
@@ -26,6 +26,7 @@ from .domain import (
     Generation,
     LiveWorkerActivity,
     LiveWorkerStatus,
+    ProgramControllerDecisionStatus,
     RecoveryAction,
     RecoveryActionKind,
     RetryBudgetChange,
@@ -74,6 +75,13 @@ _RESPONSE_FIELDS = {
     "controller_bind_generation_turn": {"version", "ok", "generation"},
     "controller_complete_generation": {"version", "ok", "generation"},
     "controller_reset_generation_delivery": {"version", "ok", "generation"},
+    "program_pending": {"version", "ok", "decisions"},
+    "program_status": {"version", "ok", "decision"},
+    "program_claim": {"version", "ok", "claim"},
+    "program_submit_actions": {"version", "ok", "receipt"},
+    "program_acknowledge": {"version", "ok", "receipt"},
+    "program_submit_recovered_actions": {"version", "ok", "receipt"},
+    "program_acknowledge_recovered": {"version", "ok", "receipt"},
     "conversation_history": {"version", "ok", "page"},
 }
 
@@ -470,6 +478,53 @@ def _decode_controller_claim(value: object) -> ControllerDecisionClaim:
         raise ControlClientError("supervisor returned malformed controller claim") from exc
 
 
+def _decode_program_status(value: object) -> ProgramControllerDecisionStatus:
+    raw = _shape(
+        value,
+        {
+            "decision_id",
+            "program_id",
+            "event_kind",
+            "event_key",
+            "state",
+            "revision",
+            "current_generation",
+            "generation_budget",
+            "generation_used",
+            "claimant_kind",
+            "claimant_id",
+            "claim_expires_at",
+            "action_id",
+            "action_sha256",
+            "deadline",
+            "payload",
+        },
+    )
+    if not isinstance(raw["payload"], dict):
+        raise ControlClientError("supervisor returned malformed program payload")
+    try:
+        return ProgramControllerDecisionStatus(
+            ControllerDecisionId(raw["decision_id"]),  # type: ignore[arg-type]
+            raw["program_id"],  # type: ignore[arg-type]
+            raw["event_kind"],  # type: ignore[arg-type]
+            raw["event_key"],  # type: ignore[arg-type]
+            ControllerDecisionState(raw["state"]),  # type: ignore[arg-type]
+            raw["revision"],  # type: ignore[arg-type]
+            Generation(raw["current_generation"]),  # type: ignore[arg-type]
+            raw["generation_budget"],  # type: ignore[arg-type]
+            raw["generation_used"],  # type: ignore[arg-type]
+            ControllerClaimantKind(raw["claimant_kind"]) if raw["claimant_kind"] is not None else None,  # type: ignore[arg-type]
+            raw["claimant_id"],  # type: ignore[arg-type]
+            raw["claim_expires_at"],  # type: ignore[arg-type]
+            raw["action_id"],  # type: ignore[arg-type]
+            raw["action_sha256"],  # type: ignore[arg-type]
+            raw["deadline"],  # type: ignore[arg-type]
+            raw["payload"],  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ControlClientError("supervisor returned malformed program decision") from exc
+
+
 def _decode_controller_receipt(value: object) -> ControllerActionReceipt:
     raw = _shape(
         value,
@@ -862,10 +917,23 @@ class ControllerDecisionClient:
             raise ControlClientError("supervisor returned malformed controller decisions")
         return tuple(_decode_controller_status(item) for item in decisions)
 
+    def program_pending(self) -> tuple[ProgramControllerDecisionStatus, ...]:
+        """Read all durable program events that still need controller work."""
+
+        response = self._request("program_pending")
+        decisions = response["decisions"]
+        if not isinstance(decisions, list):
+            raise ControlClientError("supervisor returned malformed program decisions")
+        return tuple(_decode_program_status(item) for item in decisions)
+
     def status(self, decision_id: str) -> ControllerDecisionStatus:
         identity = ControllerDecisionId(decision_id)
         response = self._request("controller_status", decision_id=str(identity))
         return _decode_controller_status(response["decision"])
+
+    def program_status(self, decision_id: str) -> ProgramControllerDecisionStatus:
+        identity = ControllerDecisionId(decision_id)
+        return _decode_program_status(self._request("program_status", decision_id=str(identity))["decision"])
 
     def claim(
         self,
@@ -891,6 +959,28 @@ class ControllerDecisionClient:
         if token is not None:
             facts["token"] = token
         return _decode_controller_claim(self._request("controller_claim", **facts)["claim"])
+
+    def program_claim(
+        self,
+        decision_id: str,
+        *,
+        claimant_id: str,
+        expected_revision: int,
+        generation: int | None = None,
+        claimant_kind: ControllerClaimantKind | str = ControllerClaimantKind.MODEL,
+    ) -> ControllerDecisionClaim:
+        identity = ControllerDecisionId(decision_id)
+        facts: dict[str, object] = {
+            "decision_id": str(identity),
+            "claimant_kind": claimant_kind.value
+            if isinstance(claimant_kind, ControllerClaimantKind)
+            else claimant_kind,
+            "claimant_id": claimant_id,
+            "expected_revision": expected_revision,
+        }
+        if generation is not None:
+            facts["generation"] = generation
+        return _decode_controller_claim(self._request("program_claim", **facts)["claim"])
 
     def renew_claim(
         self, decision_id: str, *, claimant_id: str, token: str, expected_revision: int
@@ -939,6 +1029,20 @@ class ControllerDecisionClient:
         )
         return _decode_controller_receipt(response["receipt"])
 
+    def submit_program_actions(
+        self,
+        bundle: ModelFacingProgramControllerActionBundle,
+        *,
+        claimant_id: str,
+        token: str,
+    ) -> ControllerActionReceipt:
+        if not isinstance(bundle, ModelFacingProgramControllerActionBundle):
+            raise ValueError("program controller action bundle must be typed")
+        response = self._request(
+            "program_submit_actions", bundle=bundle.to_json(), claimant_id=claimant_id, token=token
+        )
+        return _decode_controller_receipt(response["receipt"])
+
     def acknowledge(
         self,
         decision_id: str,
@@ -952,6 +1056,28 @@ class ControllerDecisionClient:
         identity = ControllerDecisionId(decision_id)
         response = self._request(
             "controller_acknowledge",
+            decision_id=str(identity),
+            action_id=action_id,
+            bundle_sha256=bundle_sha256,
+            committed_revision=committed_revision,
+            claimant_id=claimant_id,
+            token=token,
+        )
+        return _decode_controller_receipt(response["receipt"])
+
+    def acknowledge_program(
+        self,
+        decision_id: str,
+        *,
+        action_id: str,
+        bundle_sha256: str,
+        committed_revision: int,
+        claimant_id: str,
+        token: str,
+    ) -> ControllerActionReceipt:
+        identity = ControllerDecisionId(decision_id)
+        response = self._request(
+            "program_acknowledge",
             decision_id=str(identity),
             action_id=action_id,
             bundle_sha256=bundle_sha256,
@@ -978,6 +1104,11 @@ class ControllerDecisionClient:
         response = self._request("controller_submit_recovered_actions", **payload)
         return _decode_controller_receipt(response["receipt"])
 
+    def submit_program_recovered_actions(self, decision_id: str) -> ControllerActionReceipt:
+        identity = ControllerDecisionId(decision_id)
+        response = self._request("program_submit_recovered_actions", decision_id=str(identity))
+        return _decode_controller_receipt(response["receipt"])
+
     def acknowledge_recovered(
         self,
         decision_id: str,
@@ -991,6 +1122,24 @@ class ControllerDecisionClient:
         identity = ControllerDecisionId(decision_id)
         response = self._request(
             "controller_acknowledge_recovered",
+            decision_id=str(identity),
+            action_id=action_id,
+            bundle_sha256=bundle_sha256,
+            committed_revision=committed_revision,
+        )
+        return _decode_controller_receipt(response["receipt"])
+
+    def acknowledge_program_recovered(
+        self,
+        decision_id: str,
+        *,
+        action_id: str,
+        bundle_sha256: str,
+        committed_revision: int,
+    ) -> ControllerActionReceipt:
+        identity = ControllerDecisionId(decision_id)
+        response = self._request(
+            "program_acknowledge_recovered",
             decision_id=str(identity),
             action_id=action_id,
             bundle_sha256=bundle_sha256,
@@ -1126,7 +1275,7 @@ class ControllerDecisionClient:
         *,
         inspection_outcome: str,
         claim: ControllerRecoveryInspectionClaim,
-        bundle: ModelFacingControllerActionBundle | None = None,
+        bundle: ModelFacingControllerActionBundle | ModelFacingProgramControllerActionBundle | None = None,
     ) -> ControllerGenerationStatus:
         identity = ControllerDecisionId(decision_id)
         if not isinstance(inspection_outcome, str) or not inspection_outcome.strip() or len(inspection_outcome) > 64:

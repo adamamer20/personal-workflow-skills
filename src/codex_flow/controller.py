@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from .app_native import AppNativeDispatchRecord, AppNativeState, AppNativeTaskAction, HostIdentity, HostReceipt
 from .artifacts import write_owned_artifact, write_review_artifact
@@ -35,6 +35,8 @@ from .contracts import (
     format_model_facing_result_prompt,
     model_facing_result_schema,
     model_facing_result_schema_sha256,
+    model_facing_review_result_schema,
+    model_facing_review_result_schema_sha256,
 )
 from .domain import (
     AcceptanceMode,
@@ -55,6 +57,9 @@ from .domain import (
     MilestoneId,
     NativePermissionAuthority,
     NativePermissionMode,
+    ProgramGraph,
+    ProgramId,
+    ProgramStatus,
     ReasonCode,
     ReasoningEffort,
     RecoveryDecision,
@@ -65,6 +70,7 @@ from .domain import (
     ReviewFinding,
     ReviewLifecycleResult,
     ReviewResult,
+    RoleId,
     RunId,
     Schema,
     SkillInput,
@@ -98,6 +104,9 @@ from .plugin_capabilities import (
     verify_plugin_requirements,
 )
 from .worktrees import WorktreeManager
+
+if TYPE_CHECKING:
+    from .plan_capsule import CompiledProgramGraph
 
 
 class ControllerError(RuntimeError):
@@ -664,6 +673,42 @@ class Controller:
 
         return ReviewWorkflow(self.ledger, self.state_root, config)
 
+    def register_program(
+        self, program: ProgramGraph | CompiledProgramGraph, *, trunk_head: str | None = None
+    ) -> ProgramStatus:
+        """Compile and durably register one complete program graph.
+
+        Registration is a plan-time operation. It creates the ordinary
+        execution and milestone projections first, then binds the graph to
+        the single SQLite authority; no worker or controller process starts.
+        """
+
+        from .plan_capsule import CompiledProgramGraph
+
+        with self._mutation_lock():
+            if isinstance(program, CompiledProgramGraph):
+                graph = program.to_program_graph(self.state_root, trunk_head=trunk_head)
+            elif isinstance(program, ProgramGraph):
+                graph = program
+            else:
+                raise TypeError("program must be a typed compiled or executable graph")
+            for node in graph.nodes:
+                if node.capsule.run_id != RunId(str(graph.program_id)):
+                    raise ControllerError("program node capsule run identity does not match its graph")
+                self._plan(node.capsule)
+            return self.ledger.register_program(graph)
+
+    def program_status(self, program_id: ProgramId | str) -> ProgramStatus:
+        """Read one durable program projection without starting a scheduler."""
+
+        return self.ledger.program_status(program_id)
+
+    def start_program(self, program_id: ProgramId | str, *, event_key: str = "start") -> object:
+        """Emit one coalesced program start event for the detached supervisor."""
+
+        with self._mutation_lock():
+            return self.ledger.start_program(program_id, event_key=event_key)
+
     def _fault(self, stage: str) -> None:
         if self._fault_injector is not None:
             self._fault_injector(stage)
@@ -754,6 +799,8 @@ class Controller:
         self,
         capsule: ExecutionCapsule,
         *,
+        role: RoleId | str = "executor",
+        generation: int = 1,
         backend: str = "sdk_headless",
         action_json: str | None = None,
         plan_path: Path | str = "internal",
@@ -763,6 +810,9 @@ class Controller:
     ) -> dict[str, object]:
         """Durably claim and queue a dispatch for the detached supervisor."""
 
+        role_value = role if isinstance(role, RoleId) else RoleId(str(role))
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise ValueError("dispatch generation must be a positive integer")
         source_thread_id = os.environ.get("CODEX_THREAD_ID") or None
         if source_thread_id is not None:
             try:
@@ -777,7 +827,7 @@ class Controller:
             existing_dispatch = None
             try:
                 existing_dispatch = self.ledger.get_dispatch(
-                    DispatchId.from_parts(planned.run_id, planned.milestone_id, "executor", 1)
+                    DispatchId.from_parts(planned.run_id, planned.milestone_id, role_value, generation)
                 )
             except RecordNotFound:
                 pass
@@ -807,6 +857,15 @@ class Controller:
                 native_compatibility_sha256 = (
                     profile.worker_compatibility_sha256 if backend == "sdk_headless" else profile.compatibility_sha256
                 )
+            model = capsule.model
+            reasoning_effort = capsule.reasoning_effort
+            if role_value != RoleId("executor"):
+                try:
+                    reviewer_route = load_workflow_config(self.state_root / "workflow.toml").route(role_value)
+                except (AuthorityUnavailable, KeyError, ValueError) as exc:
+                    raise ControllerError(f"reviewer route is unavailable for {role_value}") from exc
+                model = reviewer_route.model
+                reasoning_effort = reviewer_route.reasoning_effort
             try:
                 plugin_requirements = tuple(PluginRequirement.from_json(item) for item in capsule.plugin_requirements)
                 if plugin_requirements and backend != "sdk_headless":
@@ -818,9 +877,9 @@ class Controller:
             except PluginCapabilityError as exc:
                 raise ControllerError(f"plugin capability is unavailable: {exc}") from exc
             route = {
-                "role": "executor",
-                "model": capsule.model,
-                "reasoning_effort": capsule.reasoning_effort.value,
+                "role": str(role_value),
+                "model": model,
+                "reasoning_effort": reasoning_effort.value,
                 "effective_permission": effective_permission.facts,
                 "native_profile_sha256": native_profile_sha256,
                 "native_compatibility_sha256": native_compatibility_sha256,
@@ -844,19 +903,48 @@ class Controller:
                 ),
             }
             queue_projection = capsule_json(capsule)
-            queue_projection["prompt"] = _leaf_worker_prompt(str(queue_projection["prompt"]))
+            result_contract_sha256 = model_facing_result_schema_sha256()
+            if role_value != RoleId("executor"):
+                # Reviewers receive a separate closed result contract and a
+                # controller-authored candidate binding.  Their queue route
+                # remains read-only and cannot create a second executor.
+                queue_projection["output_schema"] = model_facing_review_result_schema()
+                candidate_context = action_json or "{}"
+                review_schema_json = json.dumps(
+                    model_facing_review_result_schema(), sort_keys=True, separators=(",", ":")
+                )
+                queue_projection["prompt"] = (
+                    "Read-only acceptance review. Inspect only the exact candidate and declared acceptance "
+                    "authority named by the controller. Do not edit files, run mutable commands, or create "
+                    "workflow state. Return exactly one JSON reviewer result object and no prose.\n"
+                    f"controller_candidate={candidate_context}\n"
+                    f"review_schema={review_schema_json}"
+                )
+                result_contract_sha256 = model_facing_review_result_schema_sha256()
+            else:
+                queue_projection["prompt"] = _leaf_worker_prompt(str(queue_projection["prompt"]))
             projected = _canonical_json(queue_projection).decode("utf-8")
             if existing_dispatch is None:
                 # Bind all native/profile and generated projection facts before
                 # creating the execution dispatch authority.
-                self.ledger.claim_dispatch(planned.run_id, planned.milestone_id, "executor", 1)
+                if role_value == RoleId("executor"):
+                    if generation == 1:
+                        self.ledger.claim_dispatch(planned.run_id, planned.milestone_id, role_value, generation)
+                    else:
+                        self.ledger.claim_program_repair_dispatch(
+                            planned.run_id, planned.milestone_id, generation=generation
+                        )
+                else:
+                    self.ledger.claim_program_review_dispatch(
+                        planned.run_id, planned.milestone_id, role_value, generation
+                    )
             return self.ledger.enqueue_dispatch(
-                DispatchId.from_parts(planned.run_id, planned.milestone_id, "executor", 1),
+                DispatchId.from_parts(planned.run_id, planned.milestone_id, role_value, generation),
                 backend=backend,
                 capsule_json=projected,
                 route_json=json.dumps(route, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                 workspace_path=capsule.workspace_path,
-                result_contract_sha256=model_facing_result_schema_sha256(),
+                result_contract_sha256=result_contract_sha256,
                 action_json=action_json,
                 plan_path=plan_path,
                 plan_revision_sha256=plan_revision_sha256,

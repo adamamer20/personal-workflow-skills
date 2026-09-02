@@ -3638,58 +3638,9 @@ def test_worker_event_storm_keeps_short_supervisor_lease_and_terminal_result_liv
                 }
             )
             assert response["ok"] is True
-        replay = supervisor._worker_event(
-            {
-                "version": 1,
-                "operation": "worker_event",
-                "dispatch_id": DISPATCH,
-                "generation": 1,
-                "attempt": 1,
-                "token": token,
-                "thread_id": "thread-storm",
-                "turn_id": "turn-storm",
-                "sequence": 2_000,
-                "kind": "item/commandExecution/outputDelta",
-                "text": "x" * 64,
-                "payload_sha256": hashlib.sha256(("x" * 64).encode()).hexdigest(),
-            }
-        )
-        evicted_replay = supervisor._worker_event(
-            {
-                "version": 1,
-                "operation": "worker_event",
-                "dispatch_id": DISPATCH,
-                "generation": 1,
-                "attempt": 1,
-                "token": token,
-                "thread_id": "thread-storm",
-                "turn_id": "turn-storm",
-                "sequence": 1,
-                "kind": "item/commandExecution/outputDelta",
-                "text": "x" * 64,
-                "payload_sha256": hashlib.sha256(("x" * 64).encode()).hexdigest(),
-            }
-        )
-        assert replay["event"] is not None
-        assert evicted_replay["evicted"] is True
-        with pytest.raises(IpcError, match="capability or sequence"):
-            supervisor._worker_event(
-                {
-                    "version": 1,
-                    "operation": "worker_event",
-                    "dispatch_id": DISPATCH,
-                    "generation": 1,
-                    "attempt": 1,
-                    "token": token,
-                    "thread_id": "thread-storm",
-                    "turn_id": "turn-storm",
-                    "sequence": 2_002,
-                    "kind": "turn/completed",
-                    "text": "gap",
-                    "payload_sha256": hashlib.sha256(b"gap").hexdigest(),
-                }
-            )
-        assert 0 < whole_ledger_validations < 2_000
+        assert response["event"] is None
+        assert response["evicted"] is True
+        assert whole_ledger_validations < 32
         live_authority = ledger.supervisor_authority()
         assert live_authority is not None
         assert int(live_authority["epoch"]) == epoch
@@ -3748,6 +3699,142 @@ def test_high_volume_worker_events_are_lossy_but_terminal_boundaries_are_not() -
     assert not worker_module._is_lossy_worker_diagnostic(
         worker_module.LifecycleEvent(4_002, "turn/completed", "turn-1")
     )
+
+
+def test_foreground_worker_event_volume_does_not_rescan_and_result_ingress_stays_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ledger = _queued_ledger(tmp_path)
+    authority = _supervisor(ledger, tmp_path)
+    epoch = int(authority["epoch"])
+    supervisor = _configured_supervisor(ledger, tmp_path, epoch)
+    supervisor.lease_seconds = 30.0
+    token = "foreground-event-token"
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="b" * 64)
+    ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
+    ledger.issue_attempt_capability(
+        DISPATCH,
+        generation=1,
+        attempt=1,
+        operation="submit_result",
+        schema_sha256=model_facing_result_schema_sha256(),
+        workspace_path=tmp_path,
+        backend="sdk_headless",
+        token_sha256=token_hash,
+        expires_at="9999-12-31T23:59:59Z",
+    )
+    ledger.bind_worker_liveness(
+        DISPATCH,
+        epoch=epoch,
+        generation=1,
+        attempt=1,
+        pid=os.getpid(),
+        process_birth_identity="foreground-event-worker",
+        lease_token_sha256=token_hash,
+    )
+    ledger.bind_worker_thread(
+        DISPATCH,
+        epoch=epoch,
+        generation=1,
+        attempt=1,
+        token=token,
+        thread_id="foreground-event-thread",
+    )
+    supervisor._active_turns = {DISPATCH: (1, 1, "foreground-event-thread", "foreground-event-turn")}
+
+    class ReadyEndpoint:
+        def accept(self) -> tuple[object, None]:
+            return object(), None
+
+    endpoint = ReadyEndpoint()
+    accepted = 0
+    scheduling_calls = 0
+    queue_triggers = 0
+    terminal_ingress = 0
+
+    def fake_acquire() -> None:
+        supervisor.epoch = epoch
+        supervisor._socket = endpoint  # type: ignore[assignment]
+
+    def fake_accept(_connection: object) -> str:
+        nonlocal accepted, terminal_ingress
+        accepted += 1
+        if accepted <= 200:
+            text = "progress"
+            response = supervisor._worker_event(
+                {
+                    "version": 1,
+                    "operation": "worker_event",
+                    "dispatch_id": DISPATCH,
+                    "generation": 1,
+                    "attempt": 1,
+                    "token": token,
+                    "thread_id": "foreground-event-thread",
+                    "turn_id": "foreground-event-turn",
+                    "sequence": accepted,
+                    "kind": "item/commandExecution/outputDelta",
+                    "text": text,
+                    "payload_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                }
+            )
+            assert response == {"version": 1, "ok": True, "event": None, "evicted": True}
+            return "worker_event"
+        terminal_ingress += 1
+        response = supervisor._submit_result(
+            {
+                "version": 1,
+                "operation": "submit_result",
+                "dispatch_id": DISPATCH,
+                "generation": 1,
+                "attempt": 1,
+                "backend": "sdk_headless",
+                "workspace_path": str(tmp_path),
+                "schema_sha256": model_facing_result_schema_sha256(),
+                "token": token,
+                "raw_result": _completed_worker_result(),
+            }
+        )
+        assert response["ok"] is True
+        return "submit_result"
+
+    def fake_process_queue_event() -> bool:
+        nonlocal queue_triggers
+        queue_triggers += 1
+        return False
+
+    def count_schedule() -> bool:
+        nonlocal scheduling_calls
+        scheduling_calls += 1
+        return False
+
+    monkeypatch.setattr(supervisor, "acquire", fake_acquire)
+    monkeypatch.setattr(supervisor, "close", lambda: None)
+    monkeypatch.setattr(supervisor, "recover_once", lambda: None)
+    monkeypatch.setattr(supervisor, "_accept_connection", fake_accept)
+    monkeypatch.setattr(supervisor, "_process_queue_event", fake_process_queue_event)
+    monkeypatch.setattr(supervisor, "_schedule_controller_generations", count_schedule)
+    monkeypatch.setattr(supervisor, "_deliver_wakes", lambda: False)
+    monkeypatch.setattr(supervisor, "_refresh_checkpoint_deadline", lambda: None)
+    monkeypatch.setattr(supervisor, "_renew_supervisor_lease_if_due", lambda: None)
+    monkeypatch.setattr(supervisor, "_reap_children", lambda: False)
+    monkeypatch.setattr(supervisor, "_reap_controller_generations", lambda: False)
+    monkeypatch.setattr(supervisor, "_select_timeout", lambda _timeout: 0.0)
+    monkeypatch.setattr(
+        supervisor_module.select, "select", lambda readable, _write, _error, _timeout: (readable, [], [])
+    )
+
+    supervisor.run_foreground(timeout=0.0, max_cycles=201)
+
+    assert accepted == 201
+    assert terminal_ingress == 1
+    assert queue_triggers == 2
+    # Startup and the one terminal queue event are lifecycle triggers; the
+    # 200 noisy worker events do not perform another program/controller scan.
+    assert scheduling_calls == 2
+    assert ledger.queue_dispatch(DISPATCH)["state"] == "completed"
+    ledger.close()
 
 
 def test_worker_diagnostic_fails_closed_after_explicit_supervisor_authority_loss() -> None:

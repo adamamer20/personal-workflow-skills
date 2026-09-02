@@ -145,7 +145,10 @@ def _noninternal_inventory(path: Path) -> list[tuple[str, str, str, str | None]]
         "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE substr(name, 1, 7) != 'sqlite_' ORDER BY type, name"
     ).fetchall()
     connection.close()
-    return rows
+    return [
+        (object_type, name, table, ledger_module._canonical_ddl(sql) if sql is not None else None)
+        for object_type, name, table, sql in rows
+    ]
 
 
 class LedgerTests(unittest.TestCase):

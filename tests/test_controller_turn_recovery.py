@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from codex_flow.backends.codex_sdk import ControllerThreadInspection, ControllerThreadInspectionKind
-from codex_flow.contracts import ModelFacingControllerAction, ModelFacingControllerActionBundle
+from codex_flow.contracts import (
+    ModelFacingControllerAction,
+    ModelFacingControllerActionBundle,
+    model_facing_result_schema_sha256,
+)
 from codex_flow.controller_recovery import ControllerGenerationRecovery, ControllerGenerationRunner
 from codex_flow.domain import (
     ControllerActionKind,
@@ -48,7 +52,7 @@ def _queue(ledger: Ledger, root: Path) -> str:
             sort_keys=True,
         ),
         workspace_path=root,
-        result_contract_sha256="0" * 64,
+        result_contract_sha256=model_facing_result_schema_sha256(),
         source_thread_id="source-thread",
     )
     return dispatch
@@ -350,7 +354,7 @@ def test_terminal_controller_prompt_forbids_retry_and_requires_acknowledgement(t
         generation=1,
         attempt=1,
         operation="submit_result",
-        schema_sha256="0" * 64,
+        schema_sha256=model_facing_result_schema_sha256(),
         workspace_path=tmp_path,
         backend="sdk_headless",
         token_sha256=hashlib.sha256(token.encode()).hexdigest(),

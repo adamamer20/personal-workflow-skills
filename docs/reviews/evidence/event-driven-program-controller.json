@@ -1,0 +1,133 @@
+{
+  "schema": "codex-flow/event-driven-program-controller/v1",
+  "status": "provider_free_verified",
+  "milestone": "event-driven-program-controller",
+  "candidate": {
+    "base_sha": "650f5bc0772e9b568a4633e7bbfa68e92caa06e5",
+    "candidate_digest_sha256": "6f4616ca4749f99c59ef73785473de96c53fc52697b3fe09ff16e4703364356a",
+    "digest_basis": "SHA-256 over codex-flow/event-driven-program-controller-candidate/v1 newline, --tracked-diff-- newline plus raw git diff --binary HEAD --, followed by sorted non-ignored untracked paths excluding this evidence record, each framed by --untracked-path-- newline, UTF-8 path newline, decimal byte length newline, raw bytes, and --untracked-end-- newline.",
+    "digest_scope_count": 18,
+    "digest_scope": [
+      "config/test-partitions.toml",
+      "src/codex_flow/cli.py",
+      "src/codex_flow/contracts.py",
+      "src/codex_flow/control_client.py",
+      "src/codex_flow/controller.py",
+      "src/codex_flow/domain.py",
+      "src/codex_flow/ledger.py",
+      "src/codex_flow/plan_capsule.py",
+      "src/codex_flow/program_controller.py",
+      "src/codex_flow/supervisor.py",
+      "src/codex_flow/worker.py",
+      "src/codex_flow/worktrees.py",
+      "tests/test_controller_execution.py",
+      "tests/test_controller_turn_recovery.py",
+      "tests/test_ledger_integrity.py",
+      "tests/test_production_pilots.py",
+      "tests/test_program_controller.py",
+      "tests/test_supervisor_recovery.py"
+    ],
+    "changed_surfaces": [
+      "config/test-partitions.toml",
+      "src/codex_flow/cli.py",
+      "src/codex_flow/contracts.py",
+      "src/codex_flow/control_client.py",
+      "src/codex_flow/controller.py",
+      "src/codex_flow/domain.py",
+      "src/codex_flow/ledger.py",
+      "src/codex_flow/plan_capsule.py",
+      "src/codex_flow/program_controller.py",
+      "src/codex_flow/supervisor.py",
+      "src/codex_flow/worker.py",
+      "src/codex_flow/worktrees.py",
+      "tests/test_controller_execution.py",
+      "tests/test_controller_turn_recovery.py",
+      "tests/test_ledger_integrity.py",
+      "tests/test_production_pilots.py",
+      "tests/test_program_controller.py",
+      "tests/test_supervisor_recovery.py",
+      "docs/reviews/evidence/event-driven-program-controller.json"
+    ],
+    "new_artifacts": [
+      "src/codex_flow/program_controller.py",
+      "tests/test_program_controller.py",
+      "docs/reviews/evidence/event-driven-program-controller.json"
+    ],
+    "provider_calls": 0,
+    "app_api_calls": 0,
+    "controller_model_calls": 0,
+    "unrelated_dirty_bytes_preserved": true
+  },
+  "outcome": {
+    "deterministic_supervisor": true,
+    "controller_model_turns_while_work_runs": 0,
+    "model_polling": false,
+    "single_sqlite_authority": true,
+    "program_graph_and_dag": true,
+    "review_promotion_and_integration_boundaries": true,
+    "restart_recovery": true
+  },
+  "ipc_starvation_regression": {
+    "lossy_worker_events": 200,
+    "diagnostic_sqlite_transactions": 0,
+    "queue_triggering_events": 2,
+    "controller_schedule_scans": 2,
+    "terminal_submit_result_ingress": "accepted and durably completed",
+    "supervisor_lease_remained_live": true,
+    "status_and_heartbeat_paths_remain_separate": true,
+    "lossy_worker_diagnostic_ack": "bounded acknowledgement without diagnostic SQLite write"
+  },
+  "validation": {
+    "focused_program_controller": "5 passed",
+    "starvation_and_terminal_ingress": "focused supervisor regressions passed",
+    "contracts_partition": "84 passed",
+    "controller_partition": "480 passed",
+    "workers_partition": "60 passed",
+    "integrations_partition": "69 passed",
+    "full_pytest": "798 passed",
+    "make_check": "passed: format, Ruff, pytest, validator, compileall, pre-commit",
+    "git_diff_check": "passed",
+    "self_review": {
+      "p0": 0,
+      "p1": 0,
+      "result": "No open promotion-blocking findings in the owned implementation or IPC starvation repair."
+    }
+  },
+  "exact_wheel": {
+    "build_tool": "uv",
+    "package": "codex-flow",
+    "version": "0.2.0",
+    "python": "3.12.13",
+    "sdk": "openai-codex 0.147.0",
+    "wheel_sha256": "cea82cca90a7667656231b049ea5d151ffb225004447f78f28b4917ee80b0f15",
+    "wheel_bytes": 411715,
+    "temporary_virtualenv_install": "passed",
+    "installed_imports": "passed from site-packages with source imports bypassed",
+    "installed_cli_help": "passed for codex-flow and codex-flow program",
+    "provider_free_foreground_service": "passed current candidate 0/1/2-worker matrix with restart/adoption, control, terminal ingress, recovery, cleanup and zero provider/App/controller calls",
+    "global_tool_or_plugin_state_changed": false
+  },
+  "provider_gate": {
+    "status": "not_run",
+    "attempted_in_this_milestone": false,
+    "reason": "This recovery retained provider-free execution and did not start or retry a real SDK/model turn."
+  },
+  "protected_surface_hashes": {
+    "AGENTS.md": "53ec41ce9afb2f4d70971b2fe88c58cb43f5d797f3bb3919cbac932309e44f2e",
+    "docs/reviews/peer-thread-workflow.md": "73b6ecc9a30780243d6a2873c96f322be35ca8490cff7d0fecc49942b56b2fe4",
+    "src/codex_flow/ipc.py": "123bea2979f148649b2eeb6dd6f979bc525ed1390f1355c7ff0be021cbba8f04",
+    "src/codex_flow/service.py": "823bff565bca293c9c6d605febf5fecb3c353f15e99eeaa949348b62312240bb",
+    "pyproject.toml": "c42b58cdbccec3e87641cddb26589cfa4be082294bb54c32f6d4b807f2dbcb9f",
+    "uv.lock": "986364657fb9fc5bbd93643222bae627e15910fb77c9b698e3c4506bc4679dd6",
+    "Makefile": "2d357b9265d8fc21da7b4bb661b9bf08d1547e7143d843797dac1d3d01fa9cb3",
+    "src/codex_flow/__init__.py": "19a564dcaa9d042136dd5399c1493bd7551342ac0a20740e23f43fc118ba7100"
+  },
+  "sanitized": true,
+  "secrets_or_raw_prompts_or_results_retained": false,
+  "reviews": {
+    "objective_self_review": "passed with P0=0/P1=0",
+    "architecture_self_review": "passed with P0=0/P1=0; SQLite, SDK, supervisor, worker and IPC authority boundaries preserved",
+    "independent_promotion_review": "pending planner/controller routing"
+  },
+  "next_promotion_action": "Bind independent objective and architecture reviews to the committed candidate; keep the later terminal-UI successor closed until program-level promotion is recorded."
+}

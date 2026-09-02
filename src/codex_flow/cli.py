@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -16,6 +17,7 @@ from .backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeCo
 from .config import WorkflowConfigError
 from .contracts import (
     ModelFacingControllerActionBundle,
+    ModelFacingProgramControllerActionBundle,
     ModelFacingResult,
     model_facing_capsule_schema,
     model_facing_result_schema,
@@ -40,6 +42,7 @@ from .domain import (
     ControlAcknowledgement,
     ControlCommand,
     ControllerCheckpoint,
+    ControllerClaimantKind,
     ConversationHistoryPage,
     ConversationSubjectKind,
     DiagnosticEvent,
@@ -51,6 +54,8 @@ from .domain import (
     NativePermissionAuthority,
     NativePermissionMode,
     ProfileFailure,
+    ProgramControllerDecisionStatus,
+    ProgramStatus,
     ReasoningEffort,
     RecoveryAction,
     RetryBudgetChange,
@@ -63,13 +68,14 @@ from .ipc import IpcError, send_request
 from .ledger import LedgerError, RecordNotFound, ledger_schema_compatibility
 from .live_control_sentinel import run_live_control_sentinel, write_live_control_evidence
 from .native_profile import NativeProfileError, NativeProfileProjection
-from .plan_capsule import PlanCapsuleError, compile_canonical_plan
+from .plan_capsule import PlanCapsuleError, compile_canonical_plan, compile_program_graph
 from .production_pilots import (
     PilotError,
     build_visible_worker_capsule,
     run_production_pilots,
     write_production_evidence,
 )
+from .program_controller import ProgramControllerGenerationRecovery, ProgramControllerGenerationRunner
 from .projection import load_control_capsule, project_model_facing_capsule
 from .review_pilots import run_multi_authority_review_pilot, run_review_pilot
 from .sdk_compatibility_sentinel import (
@@ -96,10 +102,12 @@ supervisor_app = typer.Typer(no_args_is_help=True, help="Detached repository sup
 live_app = typer.Typer(no_args_is_help=True, help="Bounded live-worker observation and control.")
 diagnostics_app = typer.Typer(no_args_is_help=True, help="Read-only compatibility, sentinel, and pilot diagnostics.")
 controller_decision_app = typer.Typer(no_args_is_help=True, help="Typed controller decision claims and recovery.")
+program_app = typer.Typer(no_args_is_help=True, help="Register and operate complete event-driven milestone programs.")
 app.add_typer(supervisor_app, name="supervisor")
 app.add_typer(live_app, name="live")
 app.add_typer(diagnostics_app, name="diagnostics")
 app.add_typer(controller_decision_app, name="controller-decision", hidden=True)
+app.add_typer(program_app, name="program")
 _DEFAULT_STATE_ROOT = Path(".")
 
 
@@ -212,6 +220,240 @@ def _emit_app_native(record: AppNativeDispatchRecord, *, as_json: bool) -> None:
         typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False))
     else:
         typer.echo(f"{record.action.dispatch_id} state={record.state.value} recovery={record.recovery}")
+
+
+def _program_status_payload(status: object) -> dict[str, object]:
+    """Project one durable program status without exposing SQLite rows."""
+
+    if not isinstance(status, ProgramStatus):
+        raise ControlClientError("program status is not typed")
+    return {
+        "program_id": str(status.program_id),
+        "state": status.state.value,
+        "revision": status.revision,
+        "plan_digest": status.plan_digest,
+        "trunk_head": status.trunk_head,
+        "nodes": [
+            {
+                "milestone_id": str(node.milestone_id),
+                "state": node.state,
+                "dependencies": [str(item) for item in node.dependencies],
+                "candidate_sha": node.candidate_sha,
+                "review_ids": list(node.review_ids),
+                "finding_ids": list(node.finding_ids),
+                "integrated": node.integrated,
+            }
+            for node in status.nodes
+        ],
+        "ready_milestones": [str(item) for item in status.ready_milestones],
+    }
+
+
+def _program_decision_payload(status: object) -> dict[str, object]:
+    """Project one event-driven program decision for operators."""
+
+    if not isinstance(status, ProgramControllerDecisionStatus):
+        raise ControlClientError("program decision status is not typed")
+    return {
+        "decision_id": str(status.decision_id),
+        "program_id": str(status.program_id),
+        "event_kind": status.event_kind.value,
+        "event_key": status.event_key,
+        "state": status.state.value,
+        "revision": status.revision,
+        "current_generation": int(status.current_generation),
+        "generation_budget": status.generation_budget,
+        "generation_used": status.generation_used,
+        "claimant_kind": status.claimant_kind.value if status.claimant_kind else None,
+        "claimant_id": status.claimant_id,
+        "claim_expires_at": status.claim_expires_at,
+        "action_id": status.action_id,
+        "action_sha256": status.action_sha256,
+        "deadline": status.deadline,
+        "payload": status.payload,
+    }
+
+
+def _parse_program_dependencies(values: list[str] | None) -> dict[str, tuple[str, ...]]:
+    """Parse repeated ``milestone=dependency[,dependency]`` graph options."""
+
+    parsed: dict[str, tuple[str, ...]] = {}
+    for value in values or []:
+        milestone, separator, dependencies = value.partition("=")
+        if not separator or not milestone or not dependencies:
+            raise ValueError("--dependency must be milestone=dependency[,dependency]")
+        items = tuple(item for item in dependencies.split(",") if item)
+        if not items or milestone in parsed:
+            raise ValueError("--dependency entries must name one unique milestone and dependency list")
+        parsed[milestone] = items
+    return parsed
+
+
+def _emit_program_payload(payload: object, *, as_json: bool) -> None:
+    if as_json:
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    else:
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+
+
+@program_app.command("register")
+def program_register(
+    program_id: Annotated[str, typer.Option(help="Stable program identity.")],
+    plan_path: Annotated[
+        Path, typer.Option(exists=True, dir_okay=False, help="Canonical plan containing the typed milestone capsules.")
+    ],
+    milestone_ids: Annotated[
+        list[str] | None,
+        typer.Option("--milestone-id", help="Milestone id; repeat once for each program node."),
+    ] = None,
+    dependencies: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--dependency",
+            help="Dependency edge as milestone=dependency[,dependency]; repeat for each dependent milestone.",
+        ),
+    ] = None,
+    trunk_head: Annotated[
+        str | None, typer.Option(help="Expected trunk commit; default is the current Git HEAD.")
+    ] = None,
+    integration_strategy: Annotated[
+        str, typer.Option(help="Git integration strategy for promoted candidates.")
+    ] = "merge",
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit stable machine-readable JSON.")] = False,
+) -> None:
+    """Compile and durably register one closed milestone DAG."""
+
+    controller: Controller | None = None
+    try:
+        compiled = compile_program_graph(
+            plan_path,
+            program_id,
+            tuple(milestone_ids) if milestone_ids is not None else None,
+            _parse_program_dependencies(dependencies),
+        )
+        graph = compiled.to_program_graph(state_root.resolve(), trunk_head=trunk_head)
+        graph = replace(graph, integration_strategy=integration_strategy)
+        controller = _controller(state_root)
+        _emit_program_payload(_program_status_payload(controller.register_program(graph)), as_json=as_json)
+    except (ControllerError, ControlClientError, PlanCapsuleError, ValueError, OSError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        if controller is not None:
+            controller.close()
+
+
+@program_app.command("start")
+def program_start(
+    program_id: Annotated[str, typer.Option(help="Stable program identity.")],
+    event_key: Annotated[str, typer.Option(help="Idempotent start event key.")] = "start",
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit stable machine-readable JSON.")] = False,
+) -> None:
+    """Emit one coalesced start event to the detached supervisor."""
+
+    controller: Controller | None = None
+    try:
+        controller = _controller(state_root)
+        decision = controller.start_program(program_id, event_key=event_key)
+        _emit_program_payload(_program_decision_payload(decision), as_json=as_json)
+    except (ControllerError, ControlClientError, ValueError, OSError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        if controller is not None:
+            controller.close()
+
+
+@program_app.command("status")
+def program_status(
+    program_id: Annotated[str, typer.Option(help="Stable program identity.")],
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit stable machine-readable JSON.")] = False,
+) -> None:
+    """Read one durable program projection without starting a worker."""
+
+    controller: Controller | None = None
+    try:
+        controller = _controller(state_root)
+        _emit_program_payload(_program_status_payload(controller.program_status(program_id)), as_json=as_json)
+    except (ControllerError, ControlClientError, ValueError, OSError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        if controller is not None:
+            controller.close()
+
+
+@program_app.command("decisions")
+def program_decisions(
+    program_id: Annotated[str | None, typer.Option(help="Optional stable program identity filter.")] = None,
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit stable machine-readable JSON.")] = False,
+) -> None:
+    """List durable program events awaiting or completing controller work."""
+
+    try:
+        decisions = _controller_decision_client(state_root).pending()
+        if program_id is not None:
+            decisions = tuple(item for item in decisions if str(item.program_id) == program_id)
+        _emit_program_payload([_program_decision_payload(item) for item in decisions], as_json=as_json)
+    except (ControlClientError, ValueError, OSError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+
+@program_app.command("decide")
+def program_decide(
+    decision_id: Annotated[str, typer.Option(help="Exact durable decision/<wake> identity.")],
+    bundle: Annotated[Path, typer.Option(exists=True, dir_okay=False, help="Closed program action bundle JSON.")],
+    revision: Annotated[int, typer.Option(help="Expected decision revision for the human CAS claim.")],
+    claimant_id: Annotated[str, typer.Option(help="Stable human claimant identity.")] = "program-human",
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit stable machine-readable JSON.")] = False,
+) -> None:
+    """Claim, submit, and acknowledge one bounded human program decision."""
+
+    try:
+        raw = strict_json_loads(bundle.read_bytes(), max_bytes=32 * 1024)
+        if not isinstance(raw, dict):
+            raise ValueError("program bundle must be an object")
+        typed_bundle = ModelFacingProgramControllerActionBundle.from_json(raw)
+        client = _controller_decision_client(state_root)
+        claim = client.program_claim(
+            decision_id,
+            claimant_id=claimant_id,
+            expected_revision=revision,
+            generation=int(typed_bundle.generation),
+            claimant_kind=ControllerClaimantKind.HUMAN,
+        )
+        receipt = client.submit_program_actions(typed_bundle, claimant_id=claim.claimant_id, token=str(claim.token))
+        acknowledged = client.acknowledge_program(
+            decision_id,
+            action_id=receipt.action_id,
+            bundle_sha256=typed_bundle.sha256,
+            committed_revision=receipt.expected_revision + 1,
+            claimant_id=claim.claimant_id,
+            token=str(claim.token),
+        )
+        _emit_program_payload(
+            {
+                "action_id": acknowledged.action_id,
+                "decision_id": str(acknowledged.decision_id),
+                "generation": int(acknowledged.generation),
+                "expected_revision": acknowledged.expected_revision,
+                "state": acknowledged.state,
+                "bundle_sha256": acknowledged.bundle_sha256,
+                "effect_receipt": acknowledged.effect_receipt,
+                "committed_at": acknowledged.committed_at,
+                "acknowledged_at": acknowledged.acknowledged_at,
+            },
+            as_json=as_json,
+        )
+    except (ControlClientError, ValueError, OSError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
 
 
 @diagnostics_app.command("schema-compatibility")
@@ -1567,6 +1809,70 @@ def controller_generation_service(
                     adapter,
                     decision_id=decision_id,
                     claimant_id=f"controller-generation/{os.getpid()}",
+                    cwd=selected_cwd,
+                    model=model,
+                    reasoning_effort=effort,
+                ).run()
+        finally:
+            adapter.close()
+        typer.echo(
+            json.dumps(
+                {
+                    "decision_id": str(result.decision_id),
+                    "generation": int(result.generation),
+                    "outcome": result.outcome,
+                    "action_id": result.action_id,
+                    "detail": result.detail,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    except ProfileFailure as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=WORKER_EXIT_PROFILE) from exc
+    except (ControlClientError, ValueError, OSError, RuntimeError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+
+@app.command("program-controller-generation", hidden=True)
+def program_controller_generation_service(
+    decision_id: Annotated[str, typer.Option(help="Exact durable program decision identity.")],
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
+    cwd: Annotated[Path | None, typer.Option(help="Repository cwd selected by the supervisor.")] = None,
+    model: Annotated[str, typer.Option(help="Explicit ephemeral controller model.")] = "gpt-5.6-sol",
+    reasoning_effort: Annotated[str, typer.Option(help="Explicit controller reasoning effort.")] = "medium",
+    recover: Annotated[bool, typer.Option("--recover", help="Inspect the persisted generation once.")] = False,
+    effective_permission_json: Annotated[str | None, typer.Option("--effective-permission-json", hidden=True)] = None,
+    native_compatibility_sha256: Annotated[
+        str | None, typer.Option("--native-compatibility-sha256", hidden=True)
+    ] = None,
+) -> None:
+    """Private supervisor entrypoint for one ephemeral program decision generation."""
+
+    client = ControllerDecisionClient.for_state_root(state_root)
+    selected_cwd = (cwd or state_root).resolve()
+    try:
+        effort = ReasoningEffort(reasoning_effort)
+        adapter = CodexSdkAdapter(
+            _controller_generation_config(
+                model=model,
+                effort=effort,
+                cwd=selected_cwd,
+                effective_permission_json=effective_permission_json,
+                native_compatibility_sha256=native_compatibility_sha256,
+            )
+        )
+        try:
+            if recover:
+                result = ProgramControllerGenerationRecovery(client, adapter).recover(decision_id)
+            else:
+                result = ProgramControllerGenerationRunner(
+                    client,
+                    adapter,
+                    decision_id=decision_id,
+                    claimant_id=f"program-controller-generation/{os.getpid()}",
                     cwd=selected_cwd,
                     model=model,
                     reasoning_effort=effort,

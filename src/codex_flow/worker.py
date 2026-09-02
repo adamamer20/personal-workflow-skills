@@ -26,7 +26,13 @@ from .backends.codex_sdk import (
     ResponseChainInvalid,
     SchemaOutputInvalid,
 )
-from .contracts import ModelFacingResult, PluginCapabilitySnapshot, PluginRequirement
+from .contracts import (
+    ModelFacingResult,
+    PluginCapabilitySnapshot,
+    PluginRequirement,
+    model_facing_review_result_schema_sha256,
+    review_result_from_agent_message,
+)
 from .domain import (
     AuthenticationFailure,
     ConversationHistoryRequest,
@@ -52,6 +58,7 @@ from .domain import (
     UnknownSdkFailureBeforeIdentity,
     UnsupportedCapability,
     WorkerResultRejectionCode,
+    is_lossy_worker_diagnostic_method,
     redact_diagnostic_text,
     strict_json_loads,
     validate_local_image_inputs,
@@ -408,7 +415,10 @@ def _submit_result(
     raw = _read_private_file(result_file, max_bytes=65_536)
     # Parse locally before sending, but preserve exact bytes for the digest and
     # controller-owned strict parser.
-    ModelFacingResult.from_agent_message(raw)
+    if str(capability["schema_sha256"]) == model_facing_review_result_schema_sha256():
+        review_result_from_agent_message(raw)
+    else:
+        ModelFacingResult.from_agent_message(raw)
     endpoint = socket_path or Path(str(capability["socket_path"]))
     request = {
         "version": 1,
@@ -926,11 +936,7 @@ def _is_lossy_worker_diagnostic(event: LifecycleEvent) -> bool:
     deliberately absent from this set.
     """
 
-    return event.method.rsplit("/", 1)[-1] == "outputDelta" or event.method in {
-        "item/agentMessage/delta",
-        "thread/tokenUsage/updated",
-        "turn/diff/updated",
-    }
+    return is_lossy_worker_diagnostic_method(event.method)
 
 
 __all__ = [

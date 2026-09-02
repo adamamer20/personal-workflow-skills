@@ -12,12 +12,16 @@ import ast
 import hashlib
 import re
 import stat
-from dataclasses import dataclass
+import subprocess
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from .contracts import ModelAuthority, ModelFacingCapsule, PluginRequirement
-from .domain import AcceptanceMode, RoleId
+from .domain import AcceptanceMode, ProgramId, RoleId
+
+if TYPE_CHECKING:
+    from .domain import ProgramGraph
 
 _MAX_PLAN_BYTES: Final[int] = 4 * 1024 * 1024
 _NEXT_EXECUTION: Final[re.Pattern[str]] = re.compile(
@@ -38,6 +42,121 @@ class CompiledPlanCapsule:
     plan_path: Path
     plan_revision_sha256: str
     source_block_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledProgramNode:
+    """One plan-backed node in a non-executing program projection."""
+
+    milestone_id: str
+    capsule: CompiledPlanCapsule
+    dependencies: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        from .domain import MilestoneId
+
+        MilestoneId(self.milestone_id)
+        if self.capsule.capsule is None:  # pragma: no cover - defensive typed guard
+            raise PlanCapsuleError("program node capsule is missing")
+        dependencies = tuple(self.dependencies)
+        if len(dependencies) > 128 or len(set(dependencies)) != len(dependencies):
+            raise PlanCapsuleError("program node dependencies are not unique")
+        for dependency in dependencies:
+            MilestoneId(dependency)
+        object.__setattr__(self, "dependencies", dependencies)
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledProgramGraph:
+    """Static program graph; it never creates ledger rows or starts workers."""
+
+    program_id: ProgramId
+    plan_path: Path
+    plan_revision_sha256: str
+    nodes: tuple[CompiledProgramNode, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.program_id, ProgramId):
+            object.__setattr__(self, "program_id", ProgramId(self.program_id))
+        nodes = tuple(self.nodes)
+        if not nodes or len(nodes) > 128:
+            raise PlanCapsuleError("program graph must contain one to 128 nodes")
+        ids = tuple(node.milestone_id for node in nodes)
+        if len(ids) != len(set(ids)):
+            raise PlanCapsuleError("program graph milestone ids must be unique")
+        known = set(ids)
+        if any(dependency not in known for node in nodes for dependency in node.dependencies):
+            raise PlanCapsuleError("program graph contains an unknown dependency")
+        edges = {node.milestone_id: set(node.dependencies) for node in nodes}
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(node_id: str) -> None:
+            if node_id in visiting:
+                raise PlanCapsuleError("program graph contains a dependency cycle")
+            if node_id in visited:
+                return
+            visiting.add(node_id)
+            for dependency in edges[node_id]:
+                visit(dependency)
+            visiting.remove(node_id)
+            visited.add(node_id)
+
+        for node_id in ids:
+            visit(node_id)
+        object.__setattr__(self, "nodes", nodes)
+
+    def node(self, milestone_id: str) -> CompiledProgramNode:
+        for node in self.nodes:
+            if node.milestone_id == milestone_id:
+                return node
+        raise KeyError(milestone_id)
+
+    def to_program_graph(self, state_root: Path, *, trunk_head: str | None = None) -> ProgramGraph:
+        """Bind static model intent to the existing execution capsule boundary.
+
+        ``ModelFacingCapsule`` intentionally has no runtime identity.  A
+        compiled graph therefore remains a static projection until this
+        method is called by the controller, which binds repository, checkout,
+        route and validation facts exactly once for every node.
+        """
+
+        from .domain import MilestoneId, ProgramGraph, ProgramNodeSpec, RunId
+        from .projection import project_model_facing_capsule
+
+        selected_root = Path(state_root).resolve(strict=True)
+        if trunk_head is None:
+            result = subprocess.run(
+                ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+                cwd=selected_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                raise PlanCapsuleError("unable to resolve the program trunk HEAD")
+            trunk_head = result.stdout.strip()
+        bound_nodes = []
+        for node in self.nodes:
+            projected = project_model_facing_capsule(node.capsule.capsule, state_root=selected_root)
+            bound_nodes.append(
+                ProgramNodeSpec(
+                    MilestoneId(node.milestone_id),
+                    replace(
+                        projected,
+                        run_id=RunId(str(self.program_id)),
+                        milestone_id=MilestoneId(node.milestone_id),
+                    ),
+                    tuple(MilestoneId(item) for item in node.dependencies),
+                )
+            )
+        return ProgramGraph(
+            self.program_id,
+            self.plan_path,
+            self.plan_revision_sha256,
+            tuple(bound_nodes),
+            trunk_head,
+        )
 
 
 def _safe_plan_path(path: Path) -> Path:
@@ -172,4 +291,52 @@ def compile_canonical_plan(path: Path, milestone_id: str) -> CompiledPlanCapsule
     )
 
 
-__all__ = ["CompiledPlanCapsule", "PlanCapsuleError", "compile_canonical_plan"]
+def compile_program_graph(
+    path: Path,
+    program_id: str,
+    milestone_ids: tuple[str, ...] | list[str] | None = None,
+    dependencies: dict[str, tuple[str, ...]] | None = None,
+) -> CompiledProgramGraph:
+    """Compile a bounded set of canonical plan capsules into one closed DAG.
+
+    The default is deliberately conservative and compiles only the requested
+    active milestone.  A program caller may name additional plan sections and
+    their dependency edges explicitly; this keeps historical plan sections
+    from becoming executable merely because they remain in the Markdown file.
+    """
+
+    selected = tuple(milestone_ids) if milestone_ids is not None else (program_id,)
+    if not selected:
+        raise PlanCapsuleError("program graph requires at least one milestone")
+    edge_map = dependencies or {}
+    nodes = tuple(
+        CompiledProgramNode(
+            milestone_id,
+            compile_canonical_plan(path, milestone_id),
+            tuple(edge_map.get(milestone_id, ())),
+        )
+        for milestone_id in selected
+    )
+    first = nodes[0].capsule
+    if any(node.capsule.plan_revision_sha256 != first.plan_revision_sha256 for node in nodes):
+        raise PlanCapsuleError("program graph nodes do not share one plan revision")
+    return CompiledProgramGraph(
+        ProgramId(program_id),
+        first.plan_path,
+        first.plan_revision_sha256,
+        nodes,
+    )
+
+
+compile_canonical_program = compile_program_graph
+
+
+__all__ = [
+    "CompiledPlanCapsule",
+    "CompiledProgramGraph",
+    "CompiledProgramNode",
+    "PlanCapsuleError",
+    "compile_canonical_plan",
+    "compile_canonical_program",
+    "compile_program_graph",
+]

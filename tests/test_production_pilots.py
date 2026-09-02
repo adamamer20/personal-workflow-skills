@@ -677,9 +677,11 @@ from codex_flow.supervisor import Supervisor as ProductionSupervisor
 
 class IntegratedSupervisor(ProductionSupervisor):
     # This is the production Supervisor and CLI entrypoint; only the worker
-    # command is injected so provider-free behavior can be observed safely.
+    # and controller commands are injected so provider-free behavior can be
+    # observed safely without accidentally starting a model turn.
     def __init__(self, state_root, *args, **kwargs):
         kwargs["worker_command"] = (sys.executable, {os.fspath(fake_worker)!r})
+        kwargs["controller_command"] = ("provider-must-not-run",)
         kwargs["lease_seconds"] = {lease_seconds!r}
         kwargs["wake_delivery"] = lambda source_thread_id, payload: "fake-wake-turn-" + source_thread_id
         super().__init__(state_root, *args, **kwargs)
