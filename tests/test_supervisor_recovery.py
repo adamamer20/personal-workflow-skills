@@ -2819,6 +2819,54 @@ def test_provider_transient_grant_is_exact_idempotent_and_preserves_usage() -> N
         ledger.close()
 
 
+def test_provider_transient_grant_rejects_stale_facts_after_non_provider_attention() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger = _queued_ledger(root)
+        ledger._db().execute(
+            "UPDATE dispatch_queue SET state = 'claimed', thread_id = 'provider-thread' WHERE dispatch_id = ?",
+            (DISPATCH,),
+        )
+        ledger._db().execute(
+            "UPDATE recovery_state SET recovery_state = 'none', inspection_used = 3, "
+            "continuation_budget = 3, continuation_used = 3, inspected_thread_id = 'provider-thread', "
+            "inspected_turn_id = 'stale-failed-turn', inspected_kind = 'transient_failed_turn' "
+            "WHERE dispatch_id = ?",
+            (DISPATCH,),
+        )
+        ledger._db().execute(
+            "UPDATE retry_policies SET provider_transient_used = 3, last_failure = 'provider_transient', "
+            "strategy = 'none' WHERE dispatch_id = ?",
+            (DISPATCH,),
+        )
+        ledger._db().commit()
+
+        ledger.mark_human_attention_required(
+            DISPATCH,
+            reason="worker spawn failed before a durable live-worker binding",
+        )
+
+        policy = ledger.retry_policy(DISPATCH)
+        recovery = ledger.recovery_state(DISPATCH)
+        assert policy["last_failure"] is None
+        assert recovery["inspected_kind"] is None
+        revision = int(policy["revision"])
+        with pytest.raises(StaleWriter, match="exact one-step authorization"):
+            ledger.apply_recovery_action(
+                DISPATCH,
+                action_id="stale-provider-grant",
+                expected_revision=revision,
+                action_kind=RecoveryActionKind.BUDGET_CHANGE,
+                reason="must not reuse stale provider facts",
+                requested_budget=RetryBudgetChange(5, 1, 2, 1, 4),
+            )
+        assert ledger.retry_policy(DISPATCH)["provider_transient_budget"] == 3
+        assert ledger.retry_policy(DISPATCH)["provider_transient_grant_used"] == 0
+        assert ledger.recovery_state(DISPATCH)["continuation_budget"] == 3
+        assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
+        ledger.close()
+
+
 def test_human_attention_exit_arms_exactly_one_controller_checkpoint() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)

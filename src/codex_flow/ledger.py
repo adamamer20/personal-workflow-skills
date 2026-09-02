@@ -8669,13 +8669,16 @@ class Ledger:
                     raise StaleWriter("human-attention recovery is not pending")
                 now = utc_now()
                 self._db().execute(
-                    "UPDATE recovery_state SET recovery_state = 'human_attention_required', human_attention_reason = ?, next_eligible_at = NULL, updated_at = ? WHERE dispatch_id = ?",
+                    "UPDATE recovery_state SET recovery_state = 'human_attention_required', human_attention_reason = ?, "
+                    "next_eligible_at = NULL, inspected_thread_id = NULL, inspected_turn_id = NULL, "
+                    "inspected_kind = NULL, updated_at = ? WHERE dispatch_id = ?",
                     (reason, now, str(dispatch_id)),
                 )
                 self._db().execute(
-                    "UPDATE retry_policies SET revision = revision + 1, last_failure = COALESCE(?, last_failure), "
+                    "UPDATE retry_policies SET revision = revision + 1, last_failure = ?, "
                     "strategy = 'human_attention_required', "
-                    "next_eligible_at = NULL, human_attention_reason = ?, updated_at = ? "
+                    "next_eligible_at = NULL, prior_thread_id = NULL, prior_turn_id = NULL, "
+                    "human_attention_reason = ?, updated_at = ? "
                     "WHERE dispatch_id = ?",
                     (failure, reason, now, str(dispatch_id)),
                 )
@@ -8786,7 +8789,9 @@ class Ledger:
             # old descriptor cannot remain attached to the active queue.
             self._db().execute("DELETE FROM attempt_capabilities WHERE dispatch_id = ?", (str(dispatch_id),))
             self._db().execute(
-                "UPDATE recovery_state SET continuation_used = continuation_used + 1, fresh_thread_used = fresh_thread_used + ?, recovery_state = 'none', next_eligible_at = NULL, updated_at = ? WHERE dispatch_id = ?",
+                "UPDATE recovery_state SET continuation_used = continuation_used + 1, fresh_thread_used = fresh_thread_used + ?, "
+                "recovery_state = 'none', next_eligible_at = NULL, inspected_thread_id = NULL, inspected_turn_id = NULL, "
+                "inspected_kind = NULL, human_attention_reason = NULL, updated_at = ? WHERE dispatch_id = ?",
                 (1 if fresh else 0, current, str(dispatch_id)),
             )
             # Retire the exited worker binding before the continuation claim.
@@ -8795,7 +8800,8 @@ class Ledger:
             # newly claimed active queue state.
             self._db().execute("DELETE FROM worker_liveness WHERE dispatch_id = ?", (str(dispatch_id),))
             self._db().execute(
-                "UPDATE retry_policies SET revision = revision + 1, strategy = 'none', next_eligible_at = NULL, "
+                "UPDATE retry_policies SET revision = revision + 1, last_failure = NULL, strategy = 'none', "
+                "next_eligible_at = NULL, prior_thread_id = NULL, prior_turn_id = NULL, "
                 "human_attention_reason = NULL, updated_at = ? WHERE dispatch_id = ?",
                 (current, str(dispatch_id)),
             )
@@ -8939,7 +8945,11 @@ class Ledger:
                         int(policy["provider_transient_budget"]) != 3
                         or int(policy["provider_transient_grant_used"]) != 0
                         or int(policy["provider_transient_used"]) < 3
+                        or policy["last_failure"] != RetryFailureClass.PROVIDER_TRANSIENT.value
                         or int(recovery["continuation_budget"]) != 3
+                        or recovery["inspected_kind"] != "transient_failed_turn"
+                        or recovery["inspected_thread_id"] is None
+                        or recovery["inspected_thread_id"] != queue["thread_id"]
                         or provider_budget != 4
                         or any(int(requested[name]) != int(policy[name]) for name in used)
                     ):
