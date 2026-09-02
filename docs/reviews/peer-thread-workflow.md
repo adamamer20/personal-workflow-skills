@@ -8079,6 +8079,124 @@ ModelFacingCapsule(
 )
 ```
 
+## Next execution — event-driven-program-controller-review-repair
+
+The fixed implementation commit
+`43901ab2f9e42e95e483a2eea5a954706cc873a8` passed the independent
+architecture/provenance review with P0=0/P1=0, but its independent
+objective/correctness review found four promotion-blocking lifecycle and
+concurrency defects.  This is one bounded same-owner repair before the
+self-hosted cutover.  It does not reopen the accepted program-controller
+architecture, start the terminal-UI successor, or add another scheduler,
+transport, database, service, public command group or durable artifact.
+
+The supervisor must remain event driven when recovery inspection observes an
+active SDK writer: that durable `active` outcome suppresses further recovery
+children until a terminal callback or explicitly armed checkpoint creates a
+new event.  An external program action effect may finish as applied or failed;
+both are terminal effect facts.  Once every effect is terminal, the original
+committed action is acknowledged exactly once, while one coalesced typed
+controller-attention event owns any recovery from failed effects.  Restart
+must neither repeat applied/failed effects nor strand the original outbox.
+
+Expected worktree, controller or integration failures are typed control-plane
+outcomes.  They must be redacted at the authenticated IPC boundary and may
+never escape the request handler or terminate the foreground supervisor loop.
+Git integration remains fail closed under concurrency: serialize codex-flow
+integration attempts through the existing controller mutation authority,
+revalidate the exact predecessor immediately before mutation, and verify the
+strategy-specific resulting HEAD, parents and tree before committing a success
+receipt.  A non-cooperating external Git mutation is detected as conflict and
+is never accepted, reverted, or rewritten by codex-flow.
+
+The implementation architecture map is:
+
+- **Modify `src/codex_flow/supervisor.py`:** gate program recovery scheduling
+  on terminal inspection state; terminalize/reconcile effect application; and
+  close the program IPC exception boundary without weakening typed errors.
+- **Modify `src/codex_flow/ledger.py`:** make all-terminal applied/failed
+  effect sets acknowledgeable exactly once and preserve one coalesced recovery
+  attention fact using the existing decision, outbox and lifecycle tables.
+- **Modify `src/codex_flow/worktrees.py`:** bind integration mutation and its
+  receipt to the exact expected predecessor and strategy-specific post-state,
+  without reverting an unknown concurrent advancement.
+- **Modify focused existing tests only:**
+  `tests/test_program_controller.py`, `tests/test_supervisor_recovery.py` and,
+  only if needed for the existing mutation-lock boundary,
+  `tests/test_controller_execution.py`.
+- **Modify** the existing retained
+  `docs/reviews/evidence/event-driven-program-controller.json` after all gates
+  pass.  Create no new production module, schema table, evidence path, lock
+  authority, CLI entrypoint or package dependency.
+- **Preserve** the canonical plan after this capsule is frozen, AGENTS.md,
+  program graph/action public contracts, TUI/live-conversation modules,
+  service/IPC framing, native profile/authentication, plugin authority,
+  unrelated evidence, remotes and global App/Codex state.
+
+The semantic delta is limited to three existing invariants: an inspected active
+writer is deferred rather than polled; an effect is terminal when applied or
+failed; and an integration receipt proves the actual strategy-specific Git
+post-state.  No new public class, protocol, enum, state vocabulary or synonym
+result family is authorized.  If the existing types cannot express one of
+those facts without ambiguity, return a bounded replan before adding
+vocabulary.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close the event-driven program controller's active-recovery, failed-effect, IPC and Git "
+        "concurrency defects without changing its accepted authority model."
+    ),
+    decomposition=(
+        "Defer an inspected active controller writer until a new durable event instead of respawning recovery children.",
+        "Terminalize applied and failed external effects exactly once, acknowledge the original action and emit one recovery attention event.",
+        "Contain expected program-effect failures at the authenticated IPC boundary while keeping the supervisor available.",
+        "Bind integration mutation and success receipts to the exact expected predecessor and strategy-specific post-state under concurrency.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "An active SDK controller writer produces at most one recovery inspection and no repeated child spawn until a terminal callback or explicitly armed checkpoint changes durable state.",
+        "Applied and failed effect facts are replay-idempotent; once every effect is terminal the original outbox closes exactly once and one coalesced controller-attention decision owns failed-effect recovery.",
+        "Expected controller, worktree and integration effect failures return one closed redacted IPC rejection, leave durable recovery facts and do not exit or starve the supervisor foreground loop.",
+        "Each merge, fast-forward or cherry-pick success receipt proves the authorized predecessor plus exact resulting HEAD, parents and tree; concurrent unknown advancement is a conflict and is never accepted or reverted.",
+        "Focused active-writer, restart, partial-effect, live-IPC and concurrent-Git adversaries pass together with affected partitions, full make check, exact-wheel parity and P0=0/P1=0 objective and architecture reviews.",
+        "The worker creates one coherent local commit over only owned surfaces, performs no provider-independent successor dispatch and returns one raw schema-v1 ModelFacingResult."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/worktrees.py",
+        "tests/test_program_controller.py",
+        "tests/test_supervisor_recovery.py",
+        "tests/test_controller_execution.py only if required by the existing mutation-lock boundary",
+        "docs/reviews/evidence/event-driven-program-controller.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md after this capsule is frozen and AGENTS.md",
+        "domain and model-facing public contracts, plan compiler, controller and worker modules",
+        "TUI/live-conversation modules, service and IPC framing, native profile/authentication and plugin authority",
+        "schemas, migrations, new production modules or entrypoints, dependencies and unrelated evidence",
+        "global Codex/App state, remotes, pushes, rebases, history rewrites, implicit cleanup and unrelated dirty bytes",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only event-driven-program-controller-review-repair in the existing "
+        "python-sdk-controller integration trunk. Start from exact predecessor 43901ab2f9e42e95e483a2eea5a954706cc873a8 "
+        "and close PROGRAM-ACTIVE-RECOVERY-LOOP-001, PROGRAM-EFFECT-ACK-STUCK-001, "
+        "PROGRAM-IPC-CRASH-ON-EFFECT-ERROR-001 and PROGRAM-INTEGRATION-TOCTOU-001. Preserve the "
+        "deterministic supervisor, single SQLite authority and closed public contracts; create no new "
+        "module, schema table, command group, service or transport. Commit only owned surfaces, run all "
+        "named gates, do not start the terminal-UI successor, and return exactly one typed terminal result."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
 ## Blocked successor — live-coding-agent-terminal-ui
 
 ```python
