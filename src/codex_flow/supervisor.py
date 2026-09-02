@@ -149,6 +149,8 @@ class WorkerResultRejected(IpcError):
 
 IPC_ACCEPTED_FRAME_TIMEOUT_SECONDS = 2.0
 WORKER_CANCELLATION_STOP_TIMEOUT_SECONDS = 2.0
+STATUS_RECENT_ACTIVITY_LIMIT = 4
+STATUS_ACTIVITY_TEXT_MAX_BYTES = 512
 
 
 WorkerCommand = Callable[[dict[str, object], Path, Path, Path], subprocess.Popen[bytes]]
@@ -191,6 +193,16 @@ def _public_activity(row: dict[str, object]) -> dict[str, object]:
         "text": row["text"],
         "payload_sha256": row["payload_sha256"],
     }
+
+
+def _public_status_activity(row: dict[str, object]) -> dict[str, object]:
+    """Project a compact diagnostic summary for the non-diagnostic status API."""
+
+    activity = _public_activity(row)
+    text = activity["text"]
+    if isinstance(text, str):
+        activity["text"] = redact_diagnostic_text(text, limit=STATUS_ACTIVITY_TEXT_MAX_BYTES)
+    return activity
 
 
 def _public_retry_policy(row: dict[str, object]) -> dict[str, object]:
@@ -1302,7 +1314,10 @@ class Supervisor:
                     item = {key: row[key] for key in _PUBLIC_QUEUE_FIELDS if key in row}
                     item["retry_policy"] = _public_retry_policy(self.ledger.retry_policy(str(row["dispatch_id"])))
                     item["recent_activity"] = [
-                        _public_activity(activity) for activity in self.ledger.recent_activity(str(row["dispatch_id"]))
+                        _public_status_activity(activity)
+                        for activity in self.ledger.recent_activity(
+                            str(row["dispatch_id"]), limit=STATUS_RECENT_ACTIVITY_LIMIT
+                        )
                     ]
                     active = active_turns.get(str(row["dispatch_id"]))
                     item["active_turn_id"] = active[3] if active is not None else None
@@ -2317,15 +2332,26 @@ class Supervisor:
         except (IpcError, OSError, LedgerError):
             response = {"version": 1, "ok": False, "error": "request_rejected"}
         try:
-            connection.sendall(encode_frame(response))
-        except OSError:
-            # A rejected or disconnected peer owns only its socket.  Failure
-            # to deliver the bounded rejection must never escape the
-            # foreground supervisor loop.
-            pass
+            self._send_response(connection, response)
         finally:
             connection.close()
         return operation
+
+    @staticmethod
+    def _send_response(connection: socket.socket, response: dict[str, object]) -> None:
+        """Send one bounded response without allowing projection size to kill the owner."""
+
+        try:
+            frame = encode_frame(response)
+        except IpcError:
+            frame = encode_frame({"version": 1, "ok": False, "error": "response_too_large"})
+        try:
+            connection.sendall(frame)
+        except OSError:
+            # A rejected or disconnected peer owns only its socket.  Failure
+            # to deliver the bounded response must never escape the
+            # foreground supervisor loop.
+            pass
 
     def _serve_conversation_connection(self, connection: socket.socket, request: dict[str, object]) -> None:
         """Resolve one history read off the foreground lifecycle loop."""
@@ -2342,9 +2368,7 @@ class Supervisor:
         except (IpcError, OSError, LedgerError):
             response = {"version": 1, "ok": False, "error": "request_rejected"}
         try:
-            connection.sendall(encode_frame(response))
-        except OSError:
-            pass
+            self._send_response(connection, response)
         finally:
             connection.close()
 

@@ -3473,6 +3473,89 @@ def test_broken_rejection_peer_cannot_escape_the_supervisor_loop(monkeypatch: py
     assert peer.closed is True
 
 
+def test_oversized_response_is_bounded_and_next_request_remains_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = object.__new__(Supervisor)
+    supervisor.lease_seconds = 30.0
+    supervisor._next_renewal_monotonic = None
+
+    def response(request: dict[str, object]) -> dict[str, object]:
+        if request["operation"] == "status":
+            return {"version": 1, "ok": True, "payload": "x" * 70_000}
+        return {"version": 1, "ok": True, "operation": request["operation"]}
+
+    monkeypatch.setattr(supervisor, "_request_ack", response)
+    monkeypatch.setattr(supervisor, "_renew_supervisor_lease_if_due", lambda: None)
+
+    first_client, first_server = socket.socketpair()
+    try:
+        first_client.sendall(encode_frame({"version": 1, "operation": "status"}))
+        assert supervisor._accept_connection(first_server) == "status"
+        assert decode_frame(first_client) == {"version": 1, "ok": False, "error": "response_too_large"}
+    finally:
+        first_client.close()
+
+    second_client, second_server = socket.socketpair()
+    try:
+        second_client.sendall(encode_frame({"version": 1, "operation": "wake"}))
+        assert supervisor._accept_connection(second_server) == "wake"
+        assert decode_frame(second_client) == {"version": 1, "ok": True, "operation": "wake"}
+    finally:
+        second_client.close()
+
+
+def test_status_compacts_large_diagnostic_history_before_ipc() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger = _queued_ledger(root)
+        authority = _supervisor(ledger, root)
+        supervisor = _configured_supervisor(ledger, root, int(authority["epoch"]))
+        for sequence in range(1, 17):
+            ledger.append_diagnostic(
+                DISPATCH,
+                kind="large_diagnostic",
+                text=f"event-{sequence}:" + ("x" * 8_000),
+                sequence=sequence,
+            )
+
+        client, server = socket.socketpair()
+        try:
+            client.sendall(encode_frame({"version": 1, "operation": "status"}))
+            assert supervisor._accept_connection(server) == "status"
+            response = decode_frame(client)
+        finally:
+            client.close()
+
+        assert response["ok"] is True
+        queue = response["queue"]
+        assert isinstance(queue, list) and len(queue) == 1
+        activity = queue[0]["recent_activity"]
+        assert [item["sequence"] for item in activity] == [13, 14, 15, 16]
+        assert all(len(item["text"].encode("utf-8")) <= 512 for item in activity)
+        supervisor.close()
+
+
+def test_conversation_response_overflow_returns_bounded_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = object.__new__(Supervisor)
+    monkeypatch.setattr(
+        supervisor,
+        "_request_ack",
+        lambda _request: {"version": 1, "ok": True, "page": {"fragments": ["x" * 70_000]}},
+    )
+    client, server = socket.socketpair()
+    try:
+        supervisor._serve_conversation_connection(
+            server,
+            {"version": 1, "operation": "conversation_history"},
+        )
+        assert decode_frame(client) == {"version": 1, "ok": False, "error": "response_too_large"}
+    finally:
+        client.close()
+
+
 def test_worker_event_storm_keeps_short_supervisor_lease_and_terminal_result_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
