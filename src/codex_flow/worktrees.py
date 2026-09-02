@@ -7,10 +7,12 @@ deletes worktrees automatically.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import stat
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,8 +105,33 @@ def _validate_existing_chain(path: Path, *, allow_missing_leaf: bool = False) ->
 class WorktreeManager:
     """Validate or create exactly the workspace selected by a capsule."""
 
-    def __init__(self, *, runner: CommandRunner = _run) -> None:
+    def __init__(self, *, runner: CommandRunner = _run, mutation_lock_path: Path | None = None) -> None:
         self._runner = runner
+        self._mutation_lock_path = Path(mutation_lock_path) if mutation_lock_path is not None else None
+
+    @contextmanager
+    def _mutation_lock(self) -> Iterator[None]:
+        """Serialize Git effects through the existing controller lock."""
+
+        path = self._mutation_lock_path
+        if path is None:
+            yield
+            return
+        try:
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            raise WorktreeError("integration mutation authority is unavailable") from exc
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise WorktreeError("integration mutation authority is unavailable") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
     def _git(self, cwd: Path, *arguments: str) -> str:
         result = self._runner(("git", *arguments), cwd)
@@ -252,6 +279,29 @@ class WorktreeManager:
         expected_trunk_head: str,
         strategy: str,
     ) -> dict[str, object]:
+        """Serialize and apply one controller-authorized Git integration."""
+
+        _validate_raw_integration_chain(Path(repository_root))
+        with self._mutation_lock():
+            return self._integrate_candidate(
+                repository_root=repository_root,
+                candidate_workspace=candidate_workspace,
+                candidate_branch=candidate_branch,
+                candidate_sha=candidate_sha,
+                expected_trunk_head=expected_trunk_head,
+                strategy=strategy,
+            )
+
+    def _integrate_candidate(
+        self,
+        *,
+        repository_root: Path,
+        candidate_workspace: Path,
+        candidate_branch: str,
+        candidate_sha: str,
+        expected_trunk_head: str,
+        strategy: str,
+    ) -> dict[str, object]:
         """Verify and apply one controller-authorized Git integration.
 
         All topology, identity, cleanliness, and conflict checks happen before
@@ -271,7 +321,6 @@ class WorktreeManager:
         if not candidate_branch or any(character.isspace() for character in candidate_branch):
             raise WorktreeError("candidate branch is invalid")
 
-        _validate_raw_integration_chain(Path(repository_root))
         _validate_raw_integration_chain(Path(candidate_workspace))
         repository = _absolute_lexical(Path(repository_root))
         candidate = _absolute_lexical(Path(candidate_workspace))
@@ -338,10 +387,29 @@ class WorktreeManager:
             detail = applied.stderr.strip() or applied.stdout.strip() or f"exit {applied.returncode}"
             raise WorktreeError(f"Git integration failed: {detail}")
         after = self._git(repository, "rev-parse", "--verify", "HEAD^{commit}")
-        if strategy == "fast_forward" and after != candidate_sha:
-            raise WorktreeError("fast-forward integration produced an unexpected trunk HEAD")
         if after == before:
-            raise WorktreeError("Git integration did not advance the trunk")
+            raise WorkspaceConflict("Git integration did not advance the trunk")
+        parents = self._commit_parents(repository, after)
+        tree = self._git(repository, "rev-parse", "--verify", f"{after}^{{tree}}")
+        if strategy == "fast_forward":
+            if after != candidate_sha:
+                raise WorkspaceConflict("fast-forward integration produced an unexpected trunk HEAD")
+        elif strategy == "merge":
+            expected_tree = self._merge_tree(repository, expected_trunk_head, candidate_sha)
+            if parents != [before, candidate_sha] or expected_tree is None or tree != expected_tree:
+                raise WorkspaceConflict("merge integration produced an unexpected Git post-state")
+        else:
+            candidate_parents = self._commit_parents(candidate, candidate_sha)
+            if len(candidate_parents) != 1:
+                raise WorkspaceConflict("cherry-pick integration requires a single-parent candidate")
+            expected_tree = self._merge_tree(
+                repository,
+                expected_trunk_head,
+                candidate_sha,
+                merge_base=candidate_parents[0],
+            )
+            if parents != [before] or expected_tree is None or tree != expected_tree:
+                raise WorkspaceConflict("cherry-pick integration produced an unexpected Git post-state")
         self._require_clean_checkout(repository, label="integrated trunk")
         return {
             "before_trunk_head": before,
@@ -350,6 +418,8 @@ class WorktreeManager:
             "candidate_branch": candidate_branch,
             "candidate_workspace": str(candidate),
             "strategy": strategy,
+            "parents": parents,
+            "tree": tree,
         }
 
     def _recover_applied_integration(
@@ -371,6 +441,8 @@ class WorktreeManager:
         never treated as success.
         """
 
+        parents = self._commit_parents(repository, actual_trunk_head)
+        actual_tree = self._git(repository, "rev-parse", "--verify", f"{actual_trunk_head}^{{tree}}")
         if strategy == "fast_forward":
             ancestry = self._runner(
                 ("git", "merge-base", "--is-ancestor", expected_trunk_head, candidate_sha),
@@ -378,19 +450,10 @@ class WorktreeManager:
             )
             matches = actual_trunk_head == candidate_sha and ancestry.returncode == 0
         else:
-            parents = self._git(
-                repository,
-                "rev-list",
-                "--parents",
-                "-n",
-                "1",
-                actual_trunk_head,
-            ).split()
-            actual_tree = self._git(repository, "rev-parse", "--verify", f"{actual_trunk_head}^{{tree}}")
             if strategy == "merge":
                 expected_tree = self._merge_tree(repository, expected_trunk_head, candidate_sha)
                 matches = (
-                    parents == [actual_trunk_head, expected_trunk_head, candidate_sha]
+                    parents == [expected_trunk_head, candidate_sha]
                     and expected_tree is not None
                     and actual_tree == expected_tree
                 )
@@ -412,9 +475,7 @@ class WorktreeManager:
                     merge_base=candidate_parents[1],
                 )
                 matches = (
-                    parents == [actual_trunk_head, expected_trunk_head]
-                    and expected_tree is not None
-                    and actual_tree == expected_tree
+                    parents == [expected_trunk_head] and expected_tree is not None and actual_tree == expected_tree
                 )
         if not matches:
             return None
@@ -427,7 +488,15 @@ class WorktreeManager:
             "candidate_workspace": str(candidate),
             "strategy": strategy,
             "recovered": True,
+            "parents": parents,
+            "tree": actual_tree,
         }
+
+    def _commit_parents(self, repository: Path, commit: str) -> list[str]:
+        values = self._git(repository, "rev-list", "--parents", "-n", "1", commit).split()
+        if not values or values[0] != commit:
+            raise WorktreeError("Git commit parent receipt is invalid")
+        return values[1:]
 
     def _merge_tree(
         self,

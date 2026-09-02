@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import socket
 import subprocess
 from pathlib import Path
 
@@ -46,15 +48,17 @@ from codex_flow.domain import (
     validate_output_schema,
     validate_structured_output,
 )
+from codex_flow.ipc import decode_frame, encode_frame
 from codex_flow.ledger import Ledger, StaleWriter
 from codex_flow.program_controller import ProgramControllerGenerationRecovery, ProgramControllerGenerationRunner
 from codex_flow.supervisor import Supervisor
-from codex_flow.worktrees import WorkspaceConflict, WorktreeError, WorktreeManager
+from codex_flow.worktrees import CommandResult, WorkspaceConflict, WorktreeError, WorktreeManager
 
 TRUNK_HEAD = "b" * 40
 PLAN_DIGEST = "c" * 64
 CANDIDATE_SHA = "d" * 40
 NEXT_TRUNK_HEAD = "e" * 40
+INTEGRATION_TREE = "f" * 40
 
 
 def _capsule(root: Path, milestone_id: str, mutable_path: str) -> ExecutionCapsule:
@@ -293,6 +297,8 @@ def test_program_lifecycle_advances_only_after_exact_review_and_integration(tmp_
             "strategy": "merge",
             "before_trunk_head": TRUNK_HEAD,
             "after_trunk_head": NEXT_TRUNK_HEAD,
+            "parents": [TRUNK_HEAD, CANDIDATE_SHA],
+            "tree": INTEGRATION_TREE,
         }
         integrated = ledger.complete_program_integration(
             "program", "first", candidate_sha=CANDIDATE_SHA, receipt=receipt
@@ -479,6 +485,51 @@ def test_supervisor_schedules_only_one_program_controller_child_per_program_revi
         supervisor.close()
 
 
+def test_active_recovery_inspection_defers_without_repeated_controller_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = Supervisor(tmp_path)
+    try:
+        supervisor.ledger.register_program(_graph(tmp_path))
+        decision = supervisor.ledger.start_program("program")
+        claim = supervisor.ledger.claim_program_controller_decision(
+            decision.decision_id,
+            claimant_id="program-controller/test",
+            expected_revision=decision.revision,
+            generation=1,
+        )
+        supervisor.ledger.prepare_controller_generation(decision.decision_id, generation=1)
+        supervisor.ledger.bind_controller_generation_thread(
+            decision.decision_id,
+            generation=1,
+            controller_thread_id="active-program-controller",
+        )
+        inspection = supervisor.ledger.reserve_controller_recovery_inspection(decision.decision_id)
+        supervisor.ledger.complete_controller_recovery_inspection(
+            decision.decision_id,
+            inspection_outcome=ControllerGenerationState.ACTIVE.value,
+            claim=inspection,
+        )
+        spawned: list[bool] = []
+
+        def spawn(_status: ProgramControllerDecisionStatus, *, recovery: bool = False) -> bool:
+            spawned.append(recovery)
+            return True
+
+        monkeypatch.setattr(supervisor, "_spawn_program_controller_generation", spawn)
+        assert supervisor._schedule_program_controller_generations() is False
+        assert supervisor._schedule_program_controller_generations() is False
+        assert spawned == []
+        assert supervisor.ledger.controller_generation(decision.decision_id).inspection_outcome == (
+            ControllerGenerationState.ACTIVE.value
+        )
+        with pytest.raises(StaleWriter, match="already consumed"):
+            supervisor.ledger.reserve_controller_recovery_inspection(decision.decision_id)
+        assert claim.claimant_id == "program-controller/test"
+    finally:
+        supervisor.close()
+
+
 def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -530,15 +581,22 @@ def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
         assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:second") == "failed"
         status = supervisor.ledger.program_controller_decision(decision.decision_id)
         assert status.state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED
-        with pytest.raises(StaleWriter, match="unapplied external effects"):
-            supervisor.ledger.acknowledge_controller_action(
-                decision.decision_id,
-                action_id=receipt.action_id,
-                bundle_sha256=bundle.sha256,
-                committed_revision=receipt.expected_revision + 1,
-                claimant_id=claim.claimant_id,
-                token=str(claim.token),
+        assert supervisor.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
+        acknowledged = supervisor.ledger.acknowledge_controller_action(
+            decision.decision_id,
+            action_id=receipt.action_id,
+            bundle_sha256=bundle.sha256,
+            committed_revision=receipt.expected_revision + 1,
+            claimant_id=claim.claimant_id,
+            token=str(claim.token),
+        )
+        assert acknowledged.state == "acknowledged"
+        assert (
+            supervisor.ledger.record_program_action_effect(
+                bundle.action_id, "start:second", state="failed", error_code="RuntimeError"
             )
+            == "failed"
+        )
     finally:
         supervisor.close()
 
@@ -561,6 +619,81 @@ def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
         assert len(attention) == 1
     finally:
         restarted.close()
+
+
+def test_program_effect_failure_is_redacted_at_live_ipc_and_keeps_supervisor_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = Supervisor(tmp_path)
+    try:
+        supervisor.ledger.register_program(
+            ProgramGraph(
+                ProgramId("program"),
+                tmp_path / "canonical-plan.md",
+                PLAN_DIGEST,
+                (
+                    ProgramNodeSpec("first", _capsule(tmp_path, "first", "src/first.py")),
+                    ProgramNodeSpec("second", _capsule(tmp_path, "second", "src/second.py")),
+                ),
+                TRUNK_HEAD,
+            )
+        )
+        decision = supervisor.ledger.start_program("program")
+        claim = supervisor.ledger.claim_program_controller_decision(
+            decision.decision_id,
+            claimant_id="program-controller/ipc-test",
+            expected_revision=decision.revision,
+            generation=1,
+        )
+        bundle = _bundle(
+            decision,
+            claim,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first", "second"),
+            ),
+        )
+        calls: list[str] = []
+
+        def enqueue(*, milestone_id: str, **_facts: object) -> None:
+            calls.append(milestone_id)
+            if milestone_id == "second":
+                raise RuntimeError("secret enqueue detail")
+
+        monkeypatch.setattr(supervisor, "_enqueue_program_worker", enqueue)
+        client, server = socket.socketpair()
+        try:
+            client.sendall(
+                encode_frame(
+                    {
+                        "version": 1,
+                        "operation": "program_submit_actions",
+                        "bundle": bundle.to_json(),
+                        "claimant_id": claim.claimant_id,
+                        "token": str(claim.token),
+                    }
+                )
+            )
+            assert supervisor._accept_connection(server) == "program_submit_actions"
+            response = decode_frame(client)
+        finally:
+            client.close()
+        assert response == {"version": 1, "ok": False, "error": "request_rejected"}
+        assert "secret enqueue detail" not in json.dumps(response)
+        assert calls == ["first", "second"]
+        assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:first") == "applied"
+        assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:second") == "failed"
+        assert supervisor.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
+
+        next_client, next_server = socket.socketpair()
+        try:
+            next_client.sendall(encode_frame({"version": 1, "operation": "wake"}))
+            assert supervisor._accept_connection(next_server) == "wake"
+            assert decode_frame(next_client) == {"version": 1, "ok": True, "operation": "wake"}
+        finally:
+            next_client.close()
+    finally:
+        supervisor.close()
 
 
 class _ProgramAdapter:
@@ -1020,6 +1153,14 @@ def test_program_git_integration_recovers_exact_applied_effect_after_receipt_cra
         expected_trunk_head=expected,
         strategy=strategy,
     )
+    expected_parents = {
+        "fast_forward": _git(repository, "rev-list", "--parents", "-n", "1", candidate_sha).split()[1:],
+        "merge": [expected, candidate_sha],
+        "cherry_pick": [expected],
+    }[strategy]
+    assert first["before_trunk_head"] == expected
+    assert first["parents"] == expected_parents
+    assert first["tree"] == _git(repository, "rev-parse", "--verify", f"{first['after_trunk_head']}^{{tree}}")
     recovered = manager.integrate_candidate(
         repository_root=repository,
         candidate_workspace=candidate,
@@ -1031,6 +1172,8 @@ def test_program_git_integration_recovers_exact_applied_effect_after_receipt_cra
     assert recovered["recovered"] is True
     assert recovered["before_trunk_head"] == expected
     assert recovered["after_trunk_head"] == first["after_trunk_head"]
+    assert recovered["parents"] == first["parents"]
+    assert recovered["tree"] == first["tree"]
 
 
 def test_program_git_integration_recovery_rejects_unknown_trunk_advance(tmp_path: Path) -> None:
@@ -1047,6 +1190,38 @@ def test_program_git_integration_recovery_rejects_unknown_trunk_advance(tmp_path
             expected_trunk_head=expected,
             strategy="merge",
         )
+
+
+def test_program_git_integration_detects_concurrent_advance_after_preflight(tmp_path: Path) -> None:
+    repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "merge")
+    head_reads = 0
+    injected = False
+
+    def runner(argv: tuple[str, ...] | list[str], cwd: Path) -> CommandResult:
+        nonlocal head_reads, injected
+        completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
+        if cwd == repository and tuple(argv) == ("git", "rev-parse", "--verify", "HEAD^{commit}"):
+            head_reads += 1
+            if head_reads == 2 and not injected:
+                injected = True
+                (repository / "concurrent.txt").write_text("external advancement\n", encoding="utf-8")
+                _git(repository, "add", "concurrent.txt")
+                _git(repository, "commit", "-m", "external advancement")
+        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+    with pytest.raises(WorkspaceConflict, match="unexpected Git post-state"):
+        WorktreeManager(runner=runner).integrate_candidate(
+            repository_root=repository,
+            candidate_workspace=candidate,
+            candidate_branch="agent/candidate",
+            candidate_sha=candidate_sha,
+            expected_trunk_head=expected,
+            strategy="merge",
+        )
+    assert injected is True
+    assert head_reads >= 2
+    assert _git(repository, "rev-parse", "--verify", "HEAD^{commit}") != expected
+    assert (repository / "concurrent.txt").read_text(encoding="utf-8") == "external advancement\n"
 
 
 @pytest.mark.parametrize("alias_target", ["repository", "candidate"])

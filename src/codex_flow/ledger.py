@@ -4482,12 +4482,34 @@ class Ledger:
                 )
                 .fetchone()
             )
-            expected_state = "acknowledged" if state is ControllerDecisionState.ACKNOWLEDGED else "committed"
-            if (
-                outbox is None
-                or str(outbox["bundle_sha256"]) != str(decision["action_bundle_sha256"])
-                or str(outbox["state"]) != expected_state
-            ):
+            if outbox is None or str(outbox["bundle_sha256"]) != str(decision["action_bundle_sha256"]):
+                raise CorruptSchemaError("program controller action receipt is inconsistent")
+            outbox_state = str(outbox["state"])
+            if state is ControllerDecisionState.ACKNOWLEDGED:
+                expected_states = {"acknowledged"}
+            elif state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED:
+                # A failed program effect owns the attention decision but is
+                # still terminal.  Its all-terminal action outbox is closed
+                # atomically, so the attention state may legitimately pair
+                # with an acknowledged outbox.  Pending effects retain the
+                # committed outbox until the final effect fact arrives.
+                lifecycle_store_attached = any(
+                    str(database[1]) == "h4" for database in self._db().execute("PRAGMA database_list").fetchall()
+                )
+                if lifecycle_store_attached:
+                    pending_effect = any(
+                        self.program_action_effect_state(bundle.action_id, effect_id) == "pending"
+                        for effect_id, _milestone_id in bundle.external_effects
+                    )
+                    expected_states = {"committed"} if pending_effect else {"acknowledged"}
+                else:
+                    # The main ledger is validated before its existing H4
+                    # sidecar is attached during startup.  Defer this
+                    # cross-store check until the next transaction.
+                    expected_states = {"committed", "acknowledged"}
+            else:
+                expected_states = {"committed"}
+            if outbox_state not in expected_states:
                 raise CorruptSchemaError("program controller action receipt is inconsistent")
 
     def _migrate(self, version: SchemaVersion) -> None:
@@ -11512,6 +11534,27 @@ class Ledger:
                 raise StaleWriter("program integration receipt has a stale trunk predecessor")
             if state == "applied" and (not isinstance(after, str) or re.fullmatch(r"[0-9a-f]{40}", after) is None):
                 raise ValueError("applied program integration requires a resolved after trunk HEAD")
+            if state == "applied":
+                parents = receipt_value.get("parents")
+                tree = receipt_value.get("tree")
+                if (
+                    not isinstance(parents, list)
+                    or not parents
+                    or any(
+                        not isinstance(parent, str) or re.fullmatch(r"[0-9a-f]{40}", parent) is None
+                        for parent in parents
+                    )
+                ):
+                    raise ValueError("applied program integration requires exact commit parents")
+                if not isinstance(tree, str) or re.fullmatch(r"[0-9a-f]{40}", tree) is None:
+                    raise ValueError("applied program integration requires an exact commit tree")
+                strategy = expected["strategy"]
+                if strategy == "fast_forward" and after != candidate_sha:
+                    raise StaleWriter("fast-forward integration receipt has an unexpected resulting HEAD")
+                if strategy == "merge" and parents != [expected["expected_trunk_head"], candidate_sha]:
+                    raise StaleWriter("merge integration receipt has unexpected commit parents")
+                if strategy == "cherry_pick" and parents != [expected["expected_trunk_head"]]:
+                    raise StaleWriter("cherry-pick integration receipt has unexpected commit parents")
             if (
                 state == "applied"
                 and str(pending["state"]) == "pending"
@@ -11668,12 +11711,14 @@ class Ledger:
         elif error_code is not None:
             raise ValueError("applied program action effect cannot carry an error")
         with self._transaction():
-            program, milestone, _bundle = self._program_action_effect_binding(action_id, effect_id)
+            program, milestone, bundle = self._program_action_effect_binding(action_id, effect_id)
             existing = self.program_action_effect_state(action_id, effect_id)
             if existing == state:
+                self._acknowledge_program_action_if_terminal_in_transaction(action_id, bundle)
                 return existing
             if existing != "pending":
                 raise StaleWriter("program action effect already has a different terminal outcome")
+            current = utc_now()
             data: JsonObject = {
                 "action_id": action_id,
                 "effect_id": effect_id,
@@ -11687,7 +11732,6 @@ class Ledger:
                 data=data,
             )
             if state == "failed":
-                current = utc_now()
                 self._db().execute(
                     "UPDATE controller_decisions SET state = 'human_attention_required', "
                     "human_attention_reason = ?, claim_lease_expires_at = NULL, updated_at = ? "
@@ -11698,18 +11742,50 @@ class Ledger:
                     "UPDATE runs SET program_state = 'needs_decision' WHERE run_id = ?",
                     (str(program),),
                 )
-                effect_digest = hashlib.sha256(effect_id.encode("utf-8")).hexdigest()[:16]
                 self._ensure_program_decision_in_transaction(
                     program,
                     event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
-                    event_key=f"action-effect/{effect_digest}/failed",
+                    event_key=f"action-effect/{action_id}/failed",
                     payload={
                         "action_id": action_id,
                         "effect_id": effect_id,
                         "error_code": error_code,
                     },
                 )
+            self._acknowledge_program_action_if_terminal_in_transaction(action_id, bundle, now=current)
             return state
+
+    def _acknowledge_program_action_if_terminal_in_transaction(
+        self,
+        action_id: str,
+        bundle: ModelFacingProgramControllerActionBundle,
+        *,
+        now: str | None = None,
+    ) -> bool:
+        """Close a program action once every authorized external effect is terminal."""
+
+        if not bundle.external_effects:
+            return False
+        if any(
+            self.program_action_effect_state(action_id, effect_id) == "pending"
+            for effect_id, _milestone_id in bundle.external_effects
+        ):
+            return False
+        current = now or utc_now()
+        updated = self._db().execute(
+            "UPDATE controller_action_outbox SET state = 'acknowledged', acknowledged_at = ? "
+            "WHERE action_id = ? AND state = 'committed'",
+            (current, action_id),
+        )
+        if updated.rowcount == 1:
+            self._db().execute(
+                "UPDATE controller_decisions SET state = CASE WHEN state = 'human_attention_required' "
+                "THEN 'human_attention_required' ELSE 'acknowledged' END, acknowledged_at = ?, "
+                "claim_lease_expires_at = NULL, updated_at = ? "
+                "WHERE action_id = ? AND state IN ('action_committed', 'human_attention_required')",
+                (current, current, action_id),
+            )
+        return updated.rowcount == 1
 
     def record_program_attention(
         self,
@@ -13649,10 +13725,10 @@ class Ledger:
                 incomplete = [
                     effect_id
                     for effect_id, _milestone_id in program_bundle.external_effects
-                    if self.program_action_effect_state(action_id, effect_id) != "applied"
+                    if self.program_action_effect_state(action_id, effect_id) == "pending"
                 ]
                 if incomplete:
-                    raise StaleWriter("program controller action has unapplied external effects")
+                    raise StaleWriter("program controller action has nonterminal external effects")
             if allow_recovered:
                 # A committed outbox effect is independently recoverable: a
                 # source process may have crashed after the atomic commit but

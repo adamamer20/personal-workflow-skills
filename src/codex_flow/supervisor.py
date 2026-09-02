@@ -322,7 +322,7 @@ class Supervisor:
         self.program_controller_command = tuple(
             program_controller_command or (sys.executable, "-m", "codex_flow.cli", "program-controller-generation")
         )
-        self._worktrees = WorktreeManager()
+        self._worktrees = WorktreeManager(mutation_lock_path=self.state_dir / "controller.lock")
         self._wake_delivery = wake_delivery
         self._thread_inspector = thread_inspector
         self.ledger = Ledger(self.state_dir / "workflow.db")
@@ -895,7 +895,13 @@ class Supervisor:
             None,
         )
         if pending is None:
-            return
+            status = self.ledger.program_status(bundle.program_id)
+            if any(str(item.milestone_id) == action.milestone_id and item.integrated for item in status.nodes):
+                # Git may have advanced successfully before the process lost
+                # the effect fact.  The durable program projection is the
+                # existing success discriminator for this replay.
+                return
+            raise WorktreeError("program integration is already terminal without a successful receipt")
         node = graph.node(action.milestone_id)
         try:
             receipt = self._worktrees.integrate_candidate(
@@ -922,6 +928,11 @@ class Supervisor:
                 },
                 state="conflict",
             )
+            # The integration outbox is durably terminal, but the external
+            # action itself failed.  Preserve that failed-effect fact so the
+            # authenticated IPC caller receives one bounded rejection and
+            # replay cannot attempt the Git mutation again.
+            raise
         else:
             receipt = {
                 **receipt,
@@ -1044,6 +1055,22 @@ class Supervisor:
             except (LedgerError, SupervisorError, WorktreeError, TypeError, ValueError):
                 continue
             changed = applied or changed
+            if row.get("state") == "committed":
+                try:
+                    bundle = ModelFacingProgramControllerActionBundle.from_json_bytes(str(row["bundle_json"]))
+                    if bundle.external_effects and all(
+                        self.ledger.program_action_effect_state(bundle.action_id, effect_id) != "pending"
+                        for effect_id, _milestone_id in bundle.external_effects
+                    ):
+                        self.ledger.acknowledge_recovered_controller_action(
+                            ControllerDecisionId(str(row["decision_id"])),
+                            action_id=str(row["action_id"]),
+                            bundle_sha256=str(row["bundle_sha256"]),
+                            committed_revision=int(row["expected_revision"]) + 1,
+                        )
+                        changed = True
+                except (LedgerError, TypeError, ValueError):
+                    continue
         return changed
 
     def _schedule_program_controller_generations(self) -> bool:
@@ -1062,8 +1089,14 @@ class Supervisor:
             program_id = str(status.program_id)
             if program_id in active_programs:
                 continue
+            generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
+            if generation.inspection_outcome == ControllerGenerationState.ACTIVE.value:
+                # An authoritative active-writer inspection is itself the
+                # durable deferral event.  Lease expiry or a steady-state
+                # scheduler cycle must not create a second SDK writer; a
+                # later program event creates a fresh decision/generation.
+                continue
             if status.state is ControllerDecisionState.AWAITING_CLAIM:
-                generation = self.ledger.controller_generation(status.decision_id, int(status.current_generation))
                 spawned = self._spawn_program_controller_generation(
                     status,
                     recovery=generation.state is not ControllerGenerationState.PREPARED,
@@ -1551,7 +1584,10 @@ class Supervisor:
                 claimant_id=payload["claimant_id"],
                 token=payload["token"],
             )
-            self._apply_program_action_bundle(bundle)
+            try:
+                self._apply_program_action_bundle(bundle)
+            except RuntimeError as exc:
+                raise IpcError("program action effect failed") from exc
             return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
         if operation == "program_submit_recovered_actions":
             required = {"version", "operation", "decision_id"}
@@ -1559,7 +1595,10 @@ class Supervisor:
                 raise IpcError("recovered program action submission has an unsupported shape")
             identity = ControllerDecisionId(payload["decision_id"])
             receipt = self.ledger.submit_recovered_program_controller_actions(identity)
-            self._apply_program_action_outbox(receipt.action_id)
+            try:
+                self._apply_program_action_outbox(receipt.action_id)
+            except RuntimeError as exc:
+                raise IpcError("program action effect failed") from exc
             return {"version": 1, "ok": True, "receipt": self._controller_receipt_payload(receipt)}
         if operation == "program_acknowledge":
             required = {
