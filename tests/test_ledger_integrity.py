@@ -14,9 +14,12 @@ import codex_flow.artifacts as artifacts_module
 import codex_flow.domain as domain_module
 import codex_flow.ledger as ledger_module
 from codex_flow.artifacts import ArtifactError, ArtifactProjector, UnsafeArtifactPath, rebuild_projections
+from codex_flow.contracts import ModelFacingControllerAction, ModelFacingControllerActionBundle
 from codex_flow.domain import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATES,
+    ControllerActionKind,
+    ControllerClaimantKind,
     DispatchId,
     PostIdentityExecutionFailure,
     PreIdentityTransportFailure,
@@ -35,7 +38,9 @@ from codex_flow.ledger import (
     _SCHEMA_IDENTITY,
     _STATES_SQL,
     _V2_TABLE_DDL,
+    _V15_INDEX_DDL,
     _V16_TABLE_DDL,
+    _V17_TABLE_DDL,
     CURRENT_SCHEMA_VERSION,
     CorruptSchemaError,
     DispatchConflict,
@@ -833,6 +838,92 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(migrated.retry_policy("run/milestone/executor/1")["provider_transient_budget"], 3)
             self.assertEqual(migrated.retry_policy("run/milestone/executor/1")["provider_transient_used"], 0)
             self.assertEqual(migrated._db().execute("SELECT COUNT(*) FROM recovery_controls").fetchone()[0], 1)
+            migrated.close()
+
+    def test_schema_v17_to_v18_migration_preserves_legacy_controller_action(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "workflow.db"
+            ledger = Ledger(path)
+            ledger.create_run("run")
+            ledger.create_milestone("run", "milestone")
+            claim = ledger.claim_dispatch("run", "milestone", "executor", 1)
+            ledger.enqueue_dispatch(
+                claim.dispatch_id,
+                backend="sdk_headless",
+                capsule_json='{"model":"test","prompt":"bounded"}',
+                route_json="{}",
+                workspace_path=root,
+                result_contract_sha256="a" * 64,
+            )
+            decision = ledger.create_controller_decision(claim.dispatch_id, kind="checkpoint")
+            decision_claim = ledger.claim_controller_decision(
+                decision.decision_id,
+                claimant_kind=ControllerClaimantKind.HUMAN,
+                claimant_id="migration-test",
+                expected_revision=decision.revision,
+            )
+            bundle = ModelFacingControllerActionBundle(
+                1,
+                decision.decision_id,
+                decision_claim.generation,
+                "preserved-controller-action",
+                decision_claim.revision,
+                (),
+                (ModelFacingControllerAction(ControllerActionKind.ACKNOWLEDGE_ONLY),),
+                "preserve legacy controller action during program migration",
+            )
+            ledger.submit_controller_actions(
+                bundle,
+                claimant_id=decision_claim.claimant_id,
+                token=str(decision_claim.token),
+            )
+            ledger.close()
+
+            connection = sqlite3.connect(path)
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("PRAGMA legacy_alter_table = ON")
+            connection.execute("DROP TABLE integration_outbox")
+            connection.execute("DROP TABLE milestone_dependencies")
+            legacy_columns = {
+                "runs": "run_id, created_at, closed_at, metadata_json",
+                "dispatches": "dispatch_id, run_id, milestone_id, role, generation, claimed_at",
+                "controller_decisions": (
+                    "decision_id, dispatch_id, kind, cycle_sequence, summary_json, summary_sha256, "
+                    "source_thread_id, state, revision, current_generation, generation_budget, generation_used, "
+                    "claimant_kind, claimant_id, claim_token_sha256, claim_started_at, claim_lease_expires_at, "
+                    "action_id, action_bundle_json, action_bundle_sha256, committed_at, acknowledged_at, "
+                    "superseded_at, deadline, human_attention_reason, created_at, updated_at"
+                ),
+            }
+            for table, columns in legacy_columns.items():
+                connection.execute(f"ALTER TABLE {table} RENAME TO {table}_v18")
+                connection.execute(_V17_TABLE_DDL[table])
+                connection.execute(f"INSERT INTO {table}({columns}) SELECT {columns} FROM {table}_v18")
+                connection.execute(f"DROP TABLE {table}_v18")
+            for _name, (table, statement) in _V15_INDEX_DDL.items():
+                if table == "controller_decisions":
+                    connection.execute(statement)
+            connection.execute("UPDATE schema_meta SET value = '17' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(17)],),
+            )
+            connection.commit()
+            connection.close()
+
+            migrated = Ledger(path)
+            self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
+            self.assertEqual(
+                migrated._db()
+                .execute(
+                    "SELECT action_id FROM controller_action_outbox WHERE decision_id = ?",
+                    (str(decision.decision_id),),
+                )
+                .fetchone()[0],
+                bundle.action_id,
+            )
+            self.assertIn("program_id", migrated.schema_columns("controller_decisions"))
             migrated.close()
 
     def test_counterfeit_constraintless_v2_is_rejected(self) -> None:

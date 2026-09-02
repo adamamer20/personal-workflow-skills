@@ -3965,7 +3965,7 @@ class Ledger:
                 decision = decision_by_id.get(str(action["decision_id"]))
                 if decision is None:
                     raise CorruptSchemaError("controller action outbox decision is missing")
-                is_program_action = decision["program_id"] is not None
+                is_program_action = has_program_decisions and decision["program_id"] is not None
                 try:
                     ControllerDecisionId(str(action["decision_id"]))
                     ControllerClaimantKind(str(action["claimant_kind"]))
