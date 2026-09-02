@@ -175,6 +175,17 @@ class ControllerGenerationRunner:
 
     def _prompt(self, status: ControllerDecisionStatus, *, revision: int) -> str:
         context = json.dumps(status.summary.context_json(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if status.summary.dispatch_state in {"completed", "failed", "cancelled", "result_submitted", "finalizing"}:
+            decision_guidance = (
+                "The dispatch is already terminal or terminalizing. Return acknowledge_only; retry, cancellation, "
+                "budget changes, checkpoint re-arming and human-attention effects are stale and forbidden."
+            )
+        else:
+            decision_guidance = (
+                "human_attention_required means this controller must make the explicit recovery decision. "
+                "An automatic-retry prohibition does not prohibit a reasoned retry_dispatch action when the "
+                "durable worker-exit and activity facts support it."
+            )
         return (
             "Controller decision recovery. Return exactly one JSON object matching the closed action bundle schema.\n"
             f"decision_id={status.decision_id}; generation={int(status.current_generation)}; revision={revision}; "
@@ -182,9 +193,7 @@ class ControllerGenerationRunner:
             f"summary={status.summary.summary}; "
             f"expected_successor_dispatch_ids={list(status.summary.expected_successor_dispatch_ids)}\n"
             f"recovery_context={context}\n"
-            "human_attention_required means this controller must make the explicit recovery decision. "
-            "An automatic-retry prohibition does not prohibit a reasoned retry_dispatch action when the "
-            "durable worker-exit and activity facts support it.\n"
+            f"{decision_guidance}\n"
             "No prose, transcript replay, successor invention or filesystem/database access.\n"
             f"Schema: {model_facing_controller_action_schema()}"
         )

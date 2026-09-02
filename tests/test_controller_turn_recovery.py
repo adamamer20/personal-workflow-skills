@@ -330,6 +330,62 @@ def test_controller_prompt_receives_actionable_human_attention_context(tmp_path:
     ledger.close()
 
 
+def test_terminal_controller_prompt_forbids_retry_and_requires_acknowledgement(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    dispatch = _queue(ledger, tmp_path)
+    authority = ledger.acquire_supervisor(
+        repository_root=tmp_path,
+        state_root=tmp_path,
+        pid=1,
+        process_birth_identity="terminal-prompt-supervisor",
+        executable_digest="a" * 64,
+        version="test",
+        owner_nonce_sha256="b" * 64,
+    )
+    ledger.claim_queue_dispatch(epoch=int(authority["epoch"]), claim_nonce_sha256="c" * 64)
+    ledger.set_queue_state(dispatch, "starting", epoch=int(authority["epoch"]))
+    token = "terminal-prompt-token"
+    ledger.issue_attempt_capability(
+        dispatch,
+        generation=1,
+        attempt=1,
+        operation="submit_result",
+        schema_sha256="0" * 64,
+        workspace_path=tmp_path,
+        backend="sdk_headless",
+        token_sha256=hashlib.sha256(token.encode()).hexdigest(),
+        expires_at="9999-12-31T23:59:59Z",
+    )
+    ledger.commit_queue_result(
+        dispatch,
+        generation=1,
+        attempt=1,
+        token=token,
+        raw_result=json.dumps(
+            {
+                "changed_surfaces": [],
+                "durable_status": "done",
+                "next_action": None,
+                "schema_version": 1,
+                "status": "completed",
+                "summary": "done",
+                "validations": [],
+            }
+        ),
+    )
+    decision = ledger.create_controller_decision(dispatch, kind="terminal", source_thread_id="source-thread")
+    status = ledger.controller_decision(decision.decision_id)
+
+    runner = ControllerGenerationRunner.__new__(ControllerGenerationRunner)
+    prompt = runner._prompt(status, revision=status.revision)
+
+    assert '"dispatch_state":"completed"' in prompt
+    assert "Return acknowledge_only" in prompt
+    assert "retry, cancellation, budget changes, checkpoint re-arming" in prompt
+    assert "reasoned retry_dispatch" not in prompt
+    ledger.close()
+
+
 def test_exhausted_source_notification_does_not_block_model_controller(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path / "workflow.db")
     dispatch = _queue(ledger, tmp_path)
