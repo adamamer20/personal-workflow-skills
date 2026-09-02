@@ -36,6 +36,7 @@ from codex_flow.domain import (
     NativePermissionMode,
     RecoveryActionKind,
     RetryBudgetChange,
+    RetryFailureClass,
     TerminalFailureAfterIdentity,
     ThreadIdentity,
     WorkerResultRejectionCode,
@@ -2711,6 +2712,89 @@ def test_provider_transient_recovery_has_three_increasing_same_thread_continuati
         assert final_claim["attempt"] == 4
         assert final_claim["thread_id"] == "provider-thread"
         assert ledger.recovery_state(DISPATCH)["continuation_used"] == 3
+
+        ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
+        fourth_token_sha256 = hashlib.sha256(b"provider-worker-4").hexdigest()
+        ledger.issue_attempt_capability(
+            DISPATCH,
+            generation=1,
+            attempt=4,
+            operation="submit_result",
+            schema_sha256=model_facing_result_schema_sha256(),
+            workspace_path=root,
+            backend="sdk_headless",
+            token_sha256=fourth_token_sha256,
+            expires_at="9999-12-31T23:59:59Z",
+        )
+        ledger.bind_worker_liveness(
+            DISPATCH,
+            epoch=epoch,
+            generation=1,
+            attempt=4,
+            pid=os.getpid(),
+            process_birth_identity="provider-worker-4",
+            lease_token_sha256=fourth_token_sha256,
+        )
+        supervisor._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
+        supervisor._resumed_children = {DISPATCH}
+        assert supervisor._reap_children() is True
+        exhausted_policy = ledger.retry_policy(DISPATCH)
+        assert exhausted_policy["provider_transient_used"] == 3
+        assert exhausted_policy["last_failure"] == "provider_transient"
+        assert exhausted_policy["prior_thread_id"] == "provider-thread"
+        assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
+        assert ledger.recovery_state(DISPATCH)["inspected_kind"] is None
+
+        ledger.apply_recovery_action(
+            DISPATCH,
+            action_id="provider-fourth-recovery-grant",
+            expected_revision=int(exhausted_policy["revision"]),
+            action_kind=RecoveryActionKind.BUDGET_CHANGE,
+            reason="authorize one final provider continuation",
+            requested_budget=RetryBudgetChange(5, 1, 2, 1, 4),
+        )
+        granted_policy = ledger.retry_policy(DISPATCH)
+        assert granted_policy["provider_transient_budget"] == 4
+        assert granted_policy["provider_transient_used"] == 4
+        assert supervisor._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
+        granted_claim = ledger.begin_recovery_continuation(
+            DISPATCH,
+            epoch=epoch,
+            claim_nonce_sha256="e" * 64,
+            now="9999-01-01T00:00:00Z",
+        )
+        assert granted_claim["attempt"] == 5
+        assert granted_claim["thread_id"] == "provider-thread"
+        assert ledger.recovery_state(DISPATCH)["continuation_used"] == 4
+
+        ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
+        fifth_token_sha256 = hashlib.sha256(b"provider-worker-5").hexdigest()
+        ledger.issue_attempt_capability(
+            DISPATCH,
+            generation=1,
+            attempt=5,
+            operation="submit_result",
+            schema_sha256=model_facing_result_schema_sha256(),
+            workspace_path=root,
+            backend="sdk_headless",
+            token_sha256=fifth_token_sha256,
+            expires_at="9999-12-31T23:59:59Z",
+        )
+        ledger.bind_worker_liveness(
+            DISPATCH,
+            epoch=epoch,
+            generation=1,
+            attempt=5,
+            pid=os.getpid(),
+            process_birth_identity="provider-worker-5",
+            lease_token_sha256=fifth_token_sha256,
+        )
+        supervisor._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
+        supervisor._resumed_children = {DISPATCH}
+        assert supervisor._reap_children() is True
+        assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
+        assert ledger.retry_policy(DISPATCH)["provider_transient_used"] == 4
+        assert ledger.recovery_state(DISPATCH)["continuation_used"] == 4
         ledger.close()
 
 
@@ -2720,24 +2804,28 @@ def test_provider_transient_grant_is_exact_idempotent_and_preserves_usage() -> N
         ledger = _queued_ledger(root)
         authority = _supervisor(ledger, root)
         ledger._db().execute(
-            "UPDATE dispatch_queue SET state = 'human_attention_required', thread_id = 'provider-thread' "
+            "UPDATE dispatch_queue SET state = 'claimed', thread_id = 'provider-thread' WHERE dispatch_id = ?",
+            (DISPATCH,),
+        )
+        ledger._db().execute(
+            "UPDATE recovery_state SET recovery_state = 'none', inspection_used = 3, "
+            "continuation_budget = 3, continuation_used = 3, inspected_thread_id = NULL, "
+            "inspected_turn_id = NULL, inspected_kind = NULL, human_attention_reason = NULL "
             "WHERE dispatch_id = ?",
             (DISPATCH,),
         )
         ledger._db().execute(
-            "UPDATE recovery_state SET recovery_state = 'human_attention_required', inspection_used = 3, "
-            "continuation_budget = 3, continuation_used = 3, inspected_thread_id = 'provider-thread', "
-            "inspected_turn_id = 'failed-turn', inspected_kind = 'transient_failed_turn', "
-            "human_attention_reason = 'provider transient retry ceiling exhausted' WHERE dispatch_id = ?",
-            (DISPATCH,),
-        )
-        ledger._db().execute(
-            "UPDATE retry_policies SET provider_transient_used = 3, last_failure = 'provider_transient', "
-            "strategy = 'human_attention_required', human_attention_reason = 'provider transient retry ceiling exhausted' "
+            "UPDATE retry_policies SET provider_transient_used = 3, last_failure = NULL, "
+            "strategy = 'none', prior_thread_id = NULL, human_attention_reason = NULL "
             "WHERE dispatch_id = ?",
             (DISPATCH,),
         )
         ledger._db().commit()
+        ledger.record_retry_failure(
+            DISPATCH,
+            failure=RetryFailureClass.PROVIDER_TRANSIENT,
+            prior_thread_id="provider-thread",
+        )
         revision = int(ledger.retry_policy(DISPATCH)["revision"])
         requested = RetryBudgetChange(5, 1, 2, 1, 4)
 
@@ -2752,7 +2840,7 @@ def test_provider_transient_grant_is_exact_idempotent_and_preserves_usage() -> N
         receipt = json.loads(str(action["requested_budget_json"]))
         assert receipt["provider_transient_budget"] == 4
         policy = ledger.retry_policy(DISPATCH)
-        assert policy["provider_transient_used"] == 3
+        assert policy["provider_transient_used"] == 4
         assert policy["provider_transient_budget"] == 4
         assert policy["provider_transient_grant_used"] == 1
         recovery = ledger.recovery_state(DISPATCH)

@@ -8946,17 +8946,20 @@ class Ledger:
                         or int(policy["provider_transient_grant_used"]) != 0
                         or int(policy["provider_transient_used"]) < 3
                         or policy["last_failure"] != RetryFailureClass.PROVIDER_TRANSIENT.value
+                        or policy["prior_thread_id"] is None
+                        or policy["prior_thread_id"] != queue["thread_id"]
                         or int(recovery["continuation_budget"]) != 3
-                        or recovery["inspected_kind"] != "transient_failed_turn"
-                        or recovery["inspected_thread_id"] is None
-                        or recovery["inspected_thread_id"] != queue["thread_id"]
+                        or recovery["inspected_thread_id"] is not None
+                        or recovery["inspected_turn_id"] is not None
+                        or recovery["inspected_kind"] is not None
                         or provider_budget != 4
                         or any(int(requested[name]) != int(policy[name]) for name in used)
                     ):
                         raise StaleWriter("provider grant is not the exact one-step authorization")
                     self._db().execute(
                         "UPDATE retry_policies SET revision = ?, provider_transient_budget = 4, "
-                        "provider_transient_grant_used = 1, strategy = 'same_thread_continuation', "
+                        "provider_transient_used = 4, provider_transient_grant_used = 1, "
+                        "strategy = 'same_thread_continuation', "
                         "next_eligible_at = NULL, human_attention_reason = NULL, updated_at = ? "
                         "WHERE dispatch_id = ?",
                         (applied_revision, now, str(dispatch_id)),
