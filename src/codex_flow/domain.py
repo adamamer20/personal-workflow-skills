@@ -736,6 +736,7 @@ class RetryFailureClass(str, Enum):
     INVALID_RESPONSE_CHAIN = "invalid_response_chain"
     SCHEMA_ENVELOPE = "schema_envelope"
     POST_IDENTITY_LOSS = "post_identity_loss"
+    PROVIDER_TRANSIENT = "provider_transient"
     AUTHENTICATION = "authentication"
     PERMISSION = "permission"
     CAPABILITY = "capability"
@@ -827,10 +828,13 @@ class RetryPolicyFacts:
     invalid_chain_budget: int = 1
     schema_envelope_budget: int = 2
     post_identity_loss_budget: int = 1
+    provider_transient_budget: int = 3
     pre_identity_used: int = 0
     invalid_chain_used: int = 0
     schema_envelope_used: int = 0
     post_identity_loss_used: int = 0
+    provider_transient_used: int = 0
+    provider_transient_grant_used: int = 0
     last_failure: RetryFailureClass | None = None
     strategy: RecoveryStrategy = RecoveryStrategy.NONE
     next_eligible_at: str | None = None
@@ -848,10 +852,13 @@ class RetryPolicyFacts:
             "invalid_chain_budget",
             "schema_envelope_budget",
             "post_identity_loss_budget",
+            "provider_transient_budget",
             "pre_identity_used",
             "invalid_chain_used",
             "schema_envelope_used",
             "post_identity_loss_used",
+            "provider_transient_used",
+            "provider_transient_grant_used",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -864,6 +871,14 @@ class RetryPolicyFacts:
             raise ValueError("schema-envelope retry budget is consumed beyond its limit")
         if self.post_identity_loss_used > self.post_identity_loss_budget:
             raise ValueError("post-identity retry budget is consumed beyond its limit")
+        if self.provider_transient_budget > 4:
+            raise ValueError("provider transient retry budget exceeds its absolute ceiling")
+        if self.provider_transient_used > self.provider_transient_budget:
+            raise ValueError("provider transient retry budget is consumed beyond its limit")
+        if self.provider_transient_grant_used not in {0, 1}:
+            raise ValueError("provider transient grant state is invalid")
+        if self.provider_transient_budget > 3 and self.provider_transient_grant_used != 1:
+            raise ValueError("provider transient budget above the default requires its grant fact")
         if self.last_failure is not None and not isinstance(self.last_failure, RetryFailureClass):
             object.__setattr__(self, "last_failure", RetryFailureClass(self.last_failure))
         if not isinstance(self.strategy, RecoveryStrategy):
@@ -880,6 +895,7 @@ class RetryPolicyFacts:
             RetryFailureClass.INVALID_RESPONSE_CHAIN: (self.invalid_chain_budget, self.invalid_chain_used),
             RetryFailureClass.SCHEMA_ENVELOPE: (self.schema_envelope_budget, self.schema_envelope_used),
             RetryFailureClass.POST_IDENTITY_LOSS: (self.post_identity_loss_budget, self.post_identity_loss_used),
+            RetryFailureClass.PROVIDER_TRANSIENT: (self.provider_transient_budget, self.provider_transient_used),
         }
         return mapping.get(target, (0, 0))
 
@@ -891,10 +907,13 @@ class RetryPolicyFacts:
             "invalid_chain_budget": self.invalid_chain_budget,
             "schema_envelope_budget": self.schema_envelope_budget,
             "post_identity_loss_budget": self.post_identity_loss_budget,
+            "provider_transient_budget": self.provider_transient_budget,
             "pre_identity_used": self.pre_identity_used,
             "invalid_chain_used": self.invalid_chain_used,
             "schema_envelope_used": self.schema_envelope_used,
             "post_identity_loss_used": self.post_identity_loss_used,
+            "provider_transient_used": self.provider_transient_used,
+            "provider_transient_grant_used": self.provider_transient_grant_used,
             "last_failure": self.last_failure.value if self.last_failure is not None else None,
             "strategy": self.strategy.value,
             "next_eligible_at": self.next_eligible_at,
@@ -1122,6 +1141,11 @@ class RetryBudgetChange:
     invalid_chain_budget: int
     schema_envelope_budget: int
     post_identity_loss_budget: int
+    # This optional field belongs only to the low-level recovery-control
+    # surface.  ``to_json`` intentionally retains the model-facing four-field
+    # contract; ``to_control_json`` carries this exact one-step grant without
+    # changing controller action semantics.
+    provider_transient_budget: int | None = None
 
     def __post_init__(self) -> None:
         limits = {
@@ -1133,6 +1157,12 @@ class RetryBudgetChange:
         for name, (value, maximum) in limits.items():
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
                 raise ValueError(f"{name} is outside its accepted ceiling")
+        if self.provider_transient_budget is not None and (
+            isinstance(self.provider_transient_budget, bool)
+            or not isinstance(self.provider_transient_budget, int)
+            or not 0 <= self.provider_transient_budget <= 4
+        ):
+            raise ValueError("provider_transient_budget is outside its accepted ceiling")
 
     def to_json(self) -> JsonObject:
         return {
@@ -1141,6 +1171,14 @@ class RetryBudgetChange:
             "schema_envelope_budget": self.schema_envelope_budget,
             "post_identity_loss_budget": self.post_identity_loss_budget,
         }
+
+    def to_control_json(self) -> JsonObject:
+        """Project the existing typed control request, including one grant fact."""
+
+        value = self.to_json()
+        if self.provider_transient_budget is not None:
+            value["provider_transient_budget"] = self.provider_transient_budget
+        return value
 
 
 @dataclass(frozen=True, slots=True)

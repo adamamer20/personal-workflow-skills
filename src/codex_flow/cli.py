@@ -812,6 +812,9 @@ def live_budget_change(
     invalid_chain_budget: Annotated[int, typer.Option(help="Absolute invalid-chain retry ceiling (0-1).")],
     schema_envelope_budget: Annotated[int, typer.Option(help="Absolute schema-envelope retry ceiling (0-2).")],
     post_identity_loss_budget: Annotated[int, typer.Option(help="Absolute post-identity retry ceiling (0-1).")],
+    provider_transient_budget: Annotated[
+        int | None, typer.Option(help="Exact provider-transient ceiling; 4 is the one authorized grant.")
+    ] = None,
     state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
@@ -823,6 +826,7 @@ def live_budget_change(
             invalid_chain_budget=invalid_chain_budget,
             schema_envelope_budget=schema_envelope_budget,
             post_identity_loss_budget=post_identity_loss_budget,
+            provider_transient_budget=provider_transient_budget,
         )
         result = LiveWorkerControlClient.for_state_root(state_root).change_budget(
             dispatch_id,

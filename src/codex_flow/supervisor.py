@@ -111,6 +111,31 @@ class WorkerCompatibilityDrift(SupervisorError):
         )
 
 
+def _merged_recovery_deadline(
+    persisted_deadline: object,
+    provider_reset_deadline: str | None,
+    *,
+    fallback: str,
+) -> str:
+    """Keep the durable backoff and honor a later typed provider reset."""
+
+    candidates = [fallback]
+    for value in (persisted_deadline, provider_reset_deadline):
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value:
+            raise ValueError("recovery deadline is malformed")
+        normalized = value.removesuffix("Z") + ("+00:00" if value.endswith("Z") else "")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError("recovery deadline is malformed") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("recovery deadline must be timezone-aware")
+        candidates.append(parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))
+    return max(candidates)
+
+
 class WorkerResultRejected(IpcError):
     """A worker result was rejected with a bounded, sanitized reason code."""
 
@@ -177,10 +202,13 @@ def _public_retry_policy(row: dict[str, object]) -> dict[str, object]:
             "invalid_chain_budget",
             "schema_envelope_budget",
             "post_identity_loss_budget",
+            "provider_transient_budget",
             "pre_identity_used",
             "invalid_chain_used",
             "schema_envelope_used",
             "post_identity_loss_used",
+            "provider_transient_used",
+            "provider_transient_grant_used",
             "last_failure",
             "strategy",
             "next_eligible_at",
@@ -1956,11 +1984,24 @@ class Supervisor:
             if not isinstance(raw_budget, dict):
                 raise IpcError("recovery action budget is invalid")
             try:
-                if set(raw_budget) != {
-                    "pre_identity_budget",
-                    "invalid_chain_budget",
-                    "schema_envelope_budget",
-                    "post_identity_loss_budget",
+                if set(raw_budget) not in {
+                    frozenset(
+                        {
+                            "pre_identity_budget",
+                            "invalid_chain_budget",
+                            "schema_envelope_budget",
+                            "post_identity_loss_budget",
+                        }
+                    ),
+                    frozenset(
+                        {
+                            "pre_identity_budget",
+                            "invalid_chain_budget",
+                            "schema_envelope_budget",
+                            "post_identity_loss_budget",
+                            "provider_transient_budget",
+                        }
+                    ),
                 }:
                     raise ValueError("budget shape is invalid")
                 requested = RetryBudgetChange(**raw_budget)
@@ -2794,19 +2835,48 @@ class Supervisor:
             policy = self.ledger.retry_policy(dispatch_id)
             if (
                 inspection.kind is ThreadInspectionKind.FAILED_TURN
-                and policy.get("last_failure") == "post_identity_loss"
+                and policy.get("last_failure") in {"post_identity_loss", "provider_transient"}
                 and policy.get("strategy") == "same_thread_continuation"
-                and 0 < int(policy.get("post_identity_loss_used", 0)) <= int(policy.get("post_identity_loss_budget", 0))
+                and (
+                    0
+                    < int(
+                        policy.get(
+                            "provider_transient_used"
+                            if policy.get("last_failure") == "provider_transient"
+                            else "post_identity_loss_used",
+                            0,
+                        )
+                    )
+                    <= int(
+                        policy.get(
+                            "provider_transient_budget"
+                            if policy.get("last_failure") == "provider_transient"
+                            else "post_identity_loss_budget",
+                            0,
+                        )
+                    )
+                )
             ):
                 self.ledger.unresolved_control_commands(dispatch_id)
+                try:
+                    next_eligible_at = _merged_recovery_deadline(
+                        policy.get("next_eligible_at"),
+                        inspection.retry_at if policy.get("last_failure") == "provider_transient" else None,
+                        fallback=datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                    )
+                except ValueError:
+                    self.ledger.mark_human_attention_required(
+                        dispatch_id,
+                        reason="typed provider recovery deadline was malformed",
+                        failure_class="provider_transient",
+                    )
+                    return True
                 self.ledger.record_recovery_inspection(
                     dispatch_id,
                     kind="transient_failed_turn",
                     thread_id=thread_id,
                     turn_id=inspection.turn_id,
-                    next_eligible_at=datetime.now(timezone.utc)
-                    .isoformat(timespec="microseconds")
-                    .replace("+00:00", "Z"),
+                    next_eligible_at=next_eligible_at,
                 )
                 return True
             if (

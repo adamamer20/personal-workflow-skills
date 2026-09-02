@@ -21,16 +21,21 @@ from codex_flow.domain import (
     PostIdentityExecutionFailure,
     PreIdentityTransportFailure,
     ReasonCode,
+    RecoveryActionKind,
+    RetryBudgetChange,
     ReviewRejected,
+    SchemaVersion,
     TerminalFailureAfterIdentity,
     WorkflowState,
 )
 from codex_flow.ledger import (
     _EVENT_TYPES_SQL,
     _REASON_CODES_SQL,
+    _SCHEMA_IDENTITIES,
     _SCHEMA_IDENTITY,
     _STATES_SQL,
     _V2_TABLE_DDL,
+    _V16_TABLE_DDL,
     CURRENT_SCHEMA_VERSION,
     CorruptSchemaError,
     DispatchConflict,
@@ -753,6 +758,79 @@ class LedgerTests(unittest.TestCase):
             connection.close()
             with self.assertRaises(UnsupportedSchemaVersion):
                 Ledger(path)
+
+    def test_schema_v16_to_v17_migration_is_atomic_and_preserves_recovery_facts(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            ledger = Ledger(path)
+            ledger.create_run("run")
+            ledger.create_milestone("run", "milestone")
+            ledger.claim_dispatch("run", "milestone", "executor", 1)
+            ledger.enqueue_dispatch(
+                "run/milestone/executor/1",
+                backend="sdk_headless",
+                capsule_json='{"model":"test","prompt":"bounded"}',
+                route_json="{}",
+                workspace_path=Path(directory),
+                result_contract_sha256="a" * 64,
+            )
+            ledger.mark_human_attention_required("run/milestone/executor/1", reason="operator review")
+            ledger.apply_recovery_action(
+                "run/milestone/executor/1",
+                action_id="preserved-budget-action",
+                expected_revision=int(ledger.retry_policy("run/milestone/executor/1")["revision"]),
+                action_kind=RecoveryActionKind.BUDGET_CHANGE,
+                reason="preserve recovery receipt",
+                requested_budget=RetryBudgetChange(5, 1, 2, 1),
+            )
+            ledger.close()
+
+            connection = sqlite3.connect(path)
+            connection.execute("ALTER TABLE retry_policies RENAME TO retry_policies_v17")
+            connection.execute(_V16_TABLE_DDL["retry_policies"])
+            connection.execute(
+                "INSERT INTO retry_policies(dispatch_id, revision, policy_version, pre_identity_budget, "
+                "invalid_chain_budget, schema_envelope_budget, post_identity_loss_budget, pre_identity_used, "
+                "invalid_chain_used, schema_envelope_used, post_identity_loss_used, last_failure, strategy, "
+                "next_eligible_at, prior_thread_id, prior_turn_id, human_attention_reason, created_at, updated_at) "
+                "SELECT dispatch_id, revision, policy_version, pre_identity_budget, invalid_chain_budget, "
+                "schema_envelope_budget, post_identity_loss_budget, pre_identity_used, invalid_chain_used, "
+                "schema_envelope_used, post_identity_loss_used, last_failure, strategy, next_eligible_at, "
+                "prior_thread_id, prior_turn_id, human_attention_reason, created_at, updated_at "
+                "FROM retry_policies_v17"
+            )
+            connection.execute("DROP TABLE retry_policies_v17")
+            connection.execute("UPDATE schema_meta SET value = '16' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(16)],),
+            )
+            connection.commit()
+            connection.close()
+
+            def fault(stage: str) -> None:
+                if stage == "after_copy_retry_policies":
+                    raise RuntimeError(stage)
+
+            with self.assertRaisesRegex(RuntimeError, "after_copy_retry_policies"):
+                Ledger(path, fault_injector=fault)
+            connection = sqlite3.connect(path)
+            self.assertEqual(
+                connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0], "16"
+            )
+            self.assertNotIn(
+                "provider_transient_budget",
+                {row[1] for row in connection.execute("PRAGMA table_info(retry_policies)")},
+            )
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM recovery_controls").fetchone()[0], 1)
+            connection.close()
+
+            migrated = Ledger(path)
+            self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
+            self.assertEqual(migrated.retry_policy("run/milestone/executor/1")["provider_transient_budget"], 3)
+            self.assertEqual(migrated.retry_policy("run/milestone/executor/1")["provider_transient_used"], 0)
+            self.assertEqual(migrated._db().execute("SELECT COUNT(*) FROM recovery_controls").fetchone()[0], 1)
+            migrated.close()
 
     def test_counterfeit_constraintless_v2_is_rejected(self) -> None:
         with TemporaryDirectory() as directory:

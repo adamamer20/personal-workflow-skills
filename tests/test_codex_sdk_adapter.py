@@ -1053,7 +1053,37 @@ class CodexSdkAdapterTests(unittest.TestCase):
         with self.assertRaises(TransientFailureAfterIdentity):
             adapter.run_turn(identity, "continue")
 
-    def test_typed_usage_limit_uses_three_immediate_codex_lb_retries(self) -> None:
+    def test_canonical_retryable_provider_statuses_are_typed_after_identity(self) -> None:
+        for status in (429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                client = FakeClient()
+                error = SimpleNamespace(
+                    message=f"unexpected status {status} Provider failure: retry later.",
+                    codex_error_info=SimpleNamespace(root=SimpleNamespace(value="other")),
+                )
+                events = [
+                    _event("turn/started", SimpleNamespace(turn=SimpleNamespace(id=f"turn-{status}"))),
+                    _event(
+                        "turn/completed",
+                        SimpleNamespace(
+                            turn=SimpleNamespace(
+                                id=f"turn-{status}",
+                                status=SimpleNamespace(value="failed"),
+                                error=error,
+                            )
+                        ),
+                    ),
+                ]
+                client.thread.turn = lambda input, events=events, status=status, **kwargs: FakeTurn(
+                    f"turn-{status}", events
+                )
+                adapter = CodexSdkAdapter(self.config(), client_factory=lambda client=client: client, sdk=_sdk())
+                identity = adapter.start_thread()
+
+                with self.assertRaises(TransientFailureAfterIdentity):
+                    adapter.run_turn(identity, "continue")
+
+    def test_typed_usage_limit_surfaces_once_without_prompt_replay(self) -> None:
         client = FakeClient()
         calls: list[str] = []
         turn_ids: list[str] = []
@@ -1092,7 +1122,7 @@ class CodexSdkAdapterTests(unittest.TestCase):
         with self.assertRaises(TemporaryRateLimitAfterIdentity) as raised:
             adapter.run_turn(identity, "continue", turn_callback=turn_ids.append)
 
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(turn_ids, calls)
         self.assertRegex(raised.exception.retry_at, r"\A[0-9T:+-]+Z\Z")
 

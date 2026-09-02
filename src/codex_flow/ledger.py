@@ -110,7 +110,7 @@ from .domain import (
     strict_json_loads,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(16)
+CURRENT_SCHEMA_VERSION = SchemaVersion(17)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -128,6 +128,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(13),
         SchemaVersion(14),
         SchemaVersion(15),
+        SchemaVersion(16),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -960,6 +961,47 @@ _V16_TABLE_DDL = {
     "recovery_controls": _RECOVERY_CONTROLS_V16_DDL,
 }
 
+# H6-E-W-R2 provider-transient recovery.  The existing retry-policy table is
+# the sole authority: three default same-thread continuations are tracked
+# separately from result-loss recovery, and one explicit control action may
+# authorize exactly one additional continuation without resetting usage.
+_RETRY_POLICIES_V17_DDL = """CREATE TABLE retry_policies (
+    dispatch_id TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision >= 0),
+    policy_version INTEGER NOT NULL CHECK(policy_version = 1),
+    pre_identity_budget INTEGER NOT NULL CHECK(pre_identity_budget BETWEEN 0 AND 5),
+    invalid_chain_budget INTEGER NOT NULL CHECK(invalid_chain_budget BETWEEN 0 AND 1),
+    schema_envelope_budget INTEGER NOT NULL CHECK(schema_envelope_budget BETWEEN 0 AND 2),
+    post_identity_loss_budget INTEGER NOT NULL CHECK(post_identity_loss_budget BETWEEN 0 AND 1),
+    pre_identity_used INTEGER NOT NULL CHECK(pre_identity_used >= 0),
+    invalid_chain_used INTEGER NOT NULL CHECK(invalid_chain_used >= 0),
+    schema_envelope_used INTEGER NOT NULL CHECK(schema_envelope_used >= 0),
+    post_identity_loss_used INTEGER NOT NULL CHECK(post_identity_loss_used >= 0),
+    last_failure TEXT,
+    strategy TEXT NOT NULL CHECK(strategy IN ('none', 'backoff', 'fresh_thread', 'same_thread_schema_correction', 'same_thread_continuation', 'human_attention_required')),
+    next_eligible_at TEXT,
+    prior_thread_id TEXT,
+    prior_turn_id TEXT,
+    human_attention_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    provider_transient_budget INTEGER NOT NULL DEFAULT 3 CHECK(provider_transient_budget BETWEEN 0 AND 4),
+    provider_transient_used INTEGER NOT NULL DEFAULT 0 CHECK(provider_transient_used >= 0),
+    provider_transient_grant_used INTEGER NOT NULL DEFAULT 0 CHECK(provider_transient_grant_used IN (0, 1)),
+    CHECK(pre_identity_used <= pre_identity_budget),
+    CHECK(invalid_chain_used <= invalid_chain_budget),
+    CHECK(schema_envelope_used <= schema_envelope_budget),
+    CHECK(post_identity_loss_used <= post_identity_loss_budget),
+    CHECK(provider_transient_used <= provider_transient_budget),
+    CHECK(provider_transient_budget <= 3 + provider_transient_grant_used),
+    CHECK((strategy = 'human_attention_required' AND human_attention_reason IS NOT NULL) OR (strategy != 'human_attention_required' AND human_attention_reason IS NULL)),
+    FOREIGN KEY(dispatch_id) REFERENCES dispatch_queue(dispatch_id) ON DELETE CASCADE
+)"""
+_V17_TABLE_DDL = {
+    **_V16_TABLE_DDL,
+    "retry_policies": _RETRY_POLICIES_V17_DDL,
+}
+
 
 def _canonical_ddl(sql: str) -> str:
     """Return exact SQLite DDL modulo whitespace outside quoted values."""
@@ -1055,6 +1097,7 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(14): "codex_flow_h6f_live_control_conformance_v14",
     SchemaVersion(15): "codex_flow_controller_decision_recovery_v15",
     SchemaVersion(16): "codex_flow_compatibility_rebind_recovery_v16",
+    SchemaVersion(17): "codex_flow_provider_transient_recovery_v17",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -1609,7 +1652,7 @@ class Ledger:
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V16_TABLE_DDL:
+        if table not in _V17_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -1706,7 +1749,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V16_TABLE_DDL.values():
+                for statement in _V17_TABLE_DDL.values():
                     self._db().execute(statement)
                 for _name, (_table, statement) in _V15_INDEX_DDL.items():
                     self._db().execute(statement)
@@ -1746,6 +1789,7 @@ class Ledger:
             SchemaVersion(14): _V14_TABLE_DDL,
             SchemaVersion(15): _V15_TABLE_DDL,
             SchemaVersion(16): _V16_TABLE_DDL,
+            SchemaVersion(17): _V17_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -2149,6 +2193,14 @@ class Ledger:
                 expected.pop("recovery_controls")
             if version >= SchemaVersion(16):
                 expected["recovery_controls"]["compatibility_rebind_json"] = ("TEXT", 0, 0)
+            if version >= SchemaVersion(17):
+                expected["retry_policies"].update(
+                    {
+                        "provider_transient_budget": ("INTEGER", 1, 0),
+                        "provider_transient_used": ("INTEGER", 1, 0),
+                        "provider_transient_grant_used": ("INTEGER", 1, 0),
+                    }
+                )
         if version >= SchemaVersion(15):
             expected.update(
                 {
@@ -3061,14 +3113,23 @@ class Ledger:
             if {str(row["dispatch_id"]) for row in retry_rows} != queue_ids:
                 raise CorruptSchemaError("every queue dispatch must have one live-worker retry policy")
             for retry in retry_rows:
-                for used, budget in (
+                retry_budgets = [
                     (retry["pre_identity_used"], retry["pre_identity_budget"]),
                     (retry["invalid_chain_used"], retry["invalid_chain_budget"]),
                     (retry["schema_envelope_used"], retry["schema_envelope_budget"]),
                     (retry["post_identity_loss_used"], retry["post_identity_loss_budget"]),
-                ):
+                ]
+                provider_retry_schema = "provider_transient_budget" in retry.keys()
+                if provider_retry_schema:
+                    retry_budgets.append((retry["provider_transient_used"], retry["provider_transient_budget"]))
+                for used, budget in retry_budgets:
                     if int(used) < 0 or int(used) > int(budget):
                         raise CorruptSchemaError("retry policy consumed count exceeds its immutable budget")
+                if provider_retry_schema:
+                    if int(retry["provider_transient_grant_used"]) not in {0, 1}:
+                        raise CorruptSchemaError("provider transient grant fact is invalid")
+                    if int(retry["provider_transient_budget"]) > 3 + int(retry["provider_transient_grant_used"]):
+                        raise CorruptSchemaError("provider transient budget lacks its grant fact")
                 if retry["last_failure"] is not None:
                     try:
                         RetryFailureClass(str(retry["last_failure"]))
@@ -4027,6 +4088,9 @@ class Ledger:
                         raise CorruptSchemaError("Git authority after-state lacks its pre-turn authority")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(16):
+            self._migrate_v16_to_v17()
+            return
         if version == SchemaVersion(15):
             self._migrate_v15_to_v16()
             return
@@ -4841,6 +4905,42 @@ class Ledger:
             )
             self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
             self._fault("after_migration")
+        self._migrate_v16_to_v17()
+
+    def _migrate_v16_to_v17(self) -> None:
+        """Add durable provider-transient retry facts to the existing policy table."""
+
+        self._validate_schema_metadata(SchemaVersion(16))
+        self._validate_shape(SchemaVersion(16))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._fault("before_rename_retry_policies")
+            self._db().execute("ALTER TABLE retry_policies RENAME TO retry_policies_v16")
+            self._fault("after_rename_retry_policies")
+            self._db().execute(_RETRY_POLICIES_V17_DDL)
+            self._fault("after_create_retry_policies")
+            self._db().execute(
+                "INSERT INTO retry_policies(dispatch_id, revision, policy_version, pre_identity_budget, "
+                "invalid_chain_budget, schema_envelope_budget, post_identity_loss_budget, pre_identity_used, "
+                "invalid_chain_used, schema_envelope_used, post_identity_loss_used, last_failure, strategy, "
+                "next_eligible_at, prior_thread_id, prior_turn_id, human_attention_reason, created_at, updated_at, "
+                "provider_transient_budget, provider_transient_used, provider_transient_grant_used) "
+                "SELECT dispatch_id, revision, policy_version, pre_identity_budget, invalid_chain_budget, "
+                "schema_envelope_budget, post_identity_loss_budget, pre_identity_used, invalid_chain_used, "
+                "schema_envelope_used, post_identity_loss_used, last_failure, strategy, next_eligible_at, "
+                "prior_thread_id, prior_turn_id, human_attention_reason, created_at, updated_at, 3, 0, 0 "
+                "FROM retry_policies_v16 ORDER BY rowid"
+            )
+            self._fault("after_copy_retry_policies")
+            self._db().execute("DROP TABLE retry_policies_v16")
+            self._fault("after_drop_retry_policies")
+            self._db().execute("UPDATE schema_meta SET value = '17' WHERE key = 'schema_version'")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(17)],),
+            )
+            self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+            self._fault("after_migration")
 
     @contextmanager
     def _transaction(self, *, validate_authority: bool = True) -> Iterator[None]:
@@ -4916,7 +5016,7 @@ class Ledger:
                 .execute("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?", (table,))
                 .fetchone()
             )
-            expected = _V16_TABLE_DDL[table]
+            expected = _V17_TABLE_DDL[table]
             if actual is None or actual[0] is None or _canonical_ddl(str(actual[0])) != _canonical_ddl(expected):
                 raise CorruptSchemaError(f"diagnostic transaction table identity changed: {table}")
 
@@ -5459,8 +5559,9 @@ class Ledger:
                 "INSERT INTO retry_policies(dispatch_id, revision, policy_version, pre_identity_budget, invalid_chain_budget, "
                 "schema_envelope_budget, post_identity_loss_budget, pre_identity_used, invalid_chain_used, "
                 "schema_envelope_used, post_identity_loss_used, last_failure, strategy, next_eligible_at, "
-                "prior_thread_id, prior_turn_id, human_attention_reason, created_at, updated_at) "
-                "VALUES (?, 0, 1, 5, 1, 2, 1, 0, 0, 0, 0, NULL, 'none', NULL, NULL, NULL, NULL, ?, ?)",
+                "prior_thread_id, prior_turn_id, human_attention_reason, created_at, updated_at, "
+                "provider_transient_budget, provider_transient_used, provider_transient_grant_used) "
+                "VALUES (?, 0, 1, 5, 1, 2, 1, 0, 0, 0, 0, NULL, 'none', NULL, NULL, NULL, NULL, ?, ?, 3, 0, 0)",
                 (str(dispatch.dispatch_id), now, now),
             )
             return self._queue_row(row)
@@ -5820,6 +5921,7 @@ class Ledger:
             RetryFailureClass.INVALID_RESPONSE_CHAIN,
             RetryFailureClass.SCHEMA_ENVELOPE,
             RetryFailureClass.POST_IDENTITY_LOSS,
+            RetryFailureClass.PROVIDER_TRANSIENT,
         }
         column_by_failure = {
             RetryFailureClass.PRE_IDENTITY_TRANSPORT: (
@@ -5840,6 +5942,11 @@ class Ledger:
             RetryFailureClass.POST_IDENTITY_LOSS: (
                 "post_identity_loss_used",
                 "post_identity_loss_budget",
+                RecoveryStrategy.SAME_THREAD_CONTINUATION,
+            ),
+            RetryFailureClass.PROVIDER_TRANSIENT: (
+                "provider_transient_used",
+                "provider_transient_budget",
                 RecoveryStrategy.SAME_THREAD_CONTINUATION,
             ),
         }
@@ -5864,7 +5971,10 @@ class Ledger:
                 used_column, budget_column, next_state = column_by_failure[target]
                 if int(row[used_column]) < int(row[budget_column]):
                     used = int(row[used_column]) + 1
-                    if next_eligible_at is None and next_state is RecoveryStrategy.BACKOFF:
+                    if next_eligible_at is None and next_state in {
+                        RecoveryStrategy.BACKOFF,
+                        RecoveryStrategy.SAME_THREAD_CONTINUATION,
+                    }:
                         # Deterministic bounded jitter avoids synchronized
                         # retries without making tests or recovery opaque.
                         jitter = int(hashlib.sha256(f"{dispatch_id}:{used}".encode()).hexdigest()[:4], 16) / 65535
@@ -5893,6 +6003,15 @@ class Ledger:
                             "fresh_thread_budget = MAX(fresh_thread_budget, 1), updated_at = ? "
                             "WHERE dispatch_id = ? AND fresh_thread_used = 0",
                             (now, str(dispatch_id)),
+                        )
+                    if target is RetryFailureClass.PROVIDER_TRANSIENT:
+                        # The common recovery continuation budget is raised
+                        # only to the durable provider ceiling.  This is a
+                        # monotonic sufficiency repair, never a counter reset.
+                        self._db().execute(
+                            "UPDATE recovery_state SET continuation_budget = MAX(continuation_budget, ?), updated_at = ? "
+                            "WHERE dispatch_id = ?",
+                            (int(row[budget_column]), now, str(dispatch_id)),
                         )
                     # A pre-identity transport failure has no SDK thread to
                     # inspect.  Once its worker exit is durably observed, it
@@ -7978,6 +8097,7 @@ class Ledger:
                 raise CorruptSchemaError("worker exit lacks v12 recovery authority")
             inspections = int(recovery["inspection_used"])
             budget = int(recovery["inspection_budget"])
+            provider_transient_exit = classification == "transient-after-identity" or exit_code == 79
             next_state = "recovery_inspection_pending" if inspections < budget else "human_attention_required"
             reason = None if next_state != "human_attention_required" else "inspection budget exhausted at worker exit"
             self._db().execute(
@@ -7988,7 +8108,11 @@ class Ledger:
                     classification or (f"exit-{exit_code}" if exit_code is not None else "worker-exit"),
                     exit_code,
                     next_state,
-                    inspections + (1 if inspections < budget else 0),
+                    # Provider failures are already terminally typed by the
+                    # worker. Count the subsequent persisted-thread read as
+                    # the inspection, so four reads support three automatic
+                    # continuations plus one final failed turn.
+                    inspections + (0 if provider_transient_exit else (1 if inspections < budget else 0)),
                     reason,
                     now,
                     now,
@@ -8015,7 +8139,7 @@ class Ledger:
                 "transport-before-identity": RetryFailureClass.PRE_IDENTITY_TRANSPORT,
                 "response-chain-invalid": RetryFailureClass.INVALID_RESPONSE_CHAIN,
                 "schema-output-invalid": RetryFailureClass.SCHEMA_ENVELOPE,
-                "transient-after-identity": RetryFailureClass.POST_IDENTITY_LOSS,
+                "transient-after-identity": RetryFailureClass.PROVIDER_TRANSIENT,
                 "authentication-failure": RetryFailureClass.AUTHENTICATION,
                 "permission-failure": RetryFailureClass.PERMISSION,
                 "capability-failure": RetryFailureClass.CAPABILITY,
@@ -8106,13 +8230,18 @@ class Ledger:
                 "post_identity_loss_budget",
                 RecoveryStrategy.SAME_THREAD_CONTINUATION,
             ),
+            RetryFailureClass.PROVIDER_TRANSIENT: (
+                "provider_transient_used",
+                "provider_transient_budget",
+                RecoveryStrategy.SAME_THREAD_CONTINUATION,
+            ),
         }
         selected = retry_columns.get(failure)
         if selected is not None and int(row[selected[0]]) < int(row[selected[1]]):
-            used_column, _budget_column, strategy = selected
+            used_column, budget_column, strategy = selected
             used = int(row[used_column]) + 1
             eligible = None
-            if strategy is RecoveryStrategy.BACKOFF:
+            if strategy in {RecoveryStrategy.BACKOFF, RecoveryStrategy.SAME_THREAD_CONTINUATION}:
                 jitter = int(hashlib.sha256(f"{dispatch_id}:{used}".encode()).hexdigest()[:4], 16) / 65535
                 eligible = self._expires_after(now, min(300.0, (2 ** (used - 1)) + jitter))
             self._db().execute(
@@ -8123,6 +8252,12 @@ class Ledger:
                 self._db().execute(
                     "UPDATE recovery_state SET fresh_thread_after_idle = 1, fresh_thread_budget = MAX(fresh_thread_budget, 1), updated_at = ? WHERE dispatch_id = ? AND fresh_thread_used = 0",
                     (now, str(dispatch_id)),
+                )
+            if failure is RetryFailureClass.PROVIDER_TRANSIENT:
+                self._db().execute(
+                    "UPDATE recovery_state SET continuation_budget = MAX(continuation_budget, ?), updated_at = ? "
+                    "WHERE dispatch_id = ?",
+                    (int(row[budget_column]), now, str(dispatch_id)),
                 )
             if failure is RetryFailureClass.PRE_IDENTITY_TRANSPORT:
                 # The process is already durably exited, so a pre-identity
@@ -8587,7 +8722,7 @@ class Ledger:
             raise ValueError("compatibility-rebind action requires exact compatibility facts")
         if kind is not RecoveryActionKind.COMPATIBILITY_REBIND and compatibility_rebind is not None:
             raise ValueError("only compatibility-rebind action may carry compatibility facts")
-        budget_json = _encode_json(requested_budget.to_json()) if requested_budget is not None else None
+        budget_json = _encode_json(requested_budget.to_control_json()) if requested_budget is not None else None
         rebind_json = _encode_json(compatibility_rebind.to_json()) if compatibility_rebind is not None else None
         with self._transaction():
             existing = (
@@ -8640,22 +8775,75 @@ class Ledger:
                     "schema_envelope_budget": int(policy["schema_envelope_used"]),
                     "post_identity_loss_budget": int(policy["post_identity_loss_used"]),
                 }
-                requested = requested_budget.to_json()
+                requested = requested_budget.to_control_json()
                 if any(int(requested[name]) < used[name] for name in used):
                     raise StaleWriter("recovery budget cannot fall below consumed retries")
-                self._db().execute(
-                    "UPDATE retry_policies SET revision = ?, pre_identity_budget = ?, invalid_chain_budget = ?, "
-                    "schema_envelope_budget = ?, post_identity_loss_budget = ?, updated_at = ? WHERE dispatch_id = ?",
-                    (
-                        applied_revision,
-                        requested_budget.pre_identity_budget,
-                        requested_budget.invalid_chain_budget,
-                        requested_budget.schema_envelope_budget,
-                        requested_budget.post_identity_loss_budget,
-                        now,
-                        str(dispatch_id),
-                    ),
-                )
+                provider_budget = requested_budget.provider_transient_budget
+                if provider_budget is None:
+                    self._db().execute(
+                        "UPDATE retry_policies SET revision = ?, pre_identity_budget = ?, invalid_chain_budget = ?, "
+                        "schema_envelope_budget = ?, post_identity_loss_budget = ?, updated_at = ? WHERE dispatch_id = ?",
+                        (
+                            applied_revision,
+                            requested_budget.pre_identity_budget,
+                            requested_budget.invalid_chain_budget,
+                            requested_budget.schema_envelope_budget,
+                            requested_budget.post_identity_loss_budget,
+                            now,
+                            str(dispatch_id),
+                        ),
+                    )
+                else:
+                    recovery = (
+                        self._db()
+                        .execute("SELECT * FROM recovery_state WHERE dispatch_id = ?", (str(dispatch_id),))
+                        .fetchone()
+                    )
+                    live = (
+                        self._db()
+                        .execute("SELECT exited_at FROM worker_liveness WHERE dispatch_id = ?", (str(dispatch_id),))
+                        .fetchone()
+                    )
+                    if recovery is None:
+                        raise CorruptSchemaError("provider grant recovery authority is missing")
+                    if (
+                        str(queue["state"]) != "human_attention_required"
+                        or str(policy["strategy"]) != RecoveryStrategy.HUMAN_ATTENTION.value
+                        or str(recovery["recovery_state"]) != "human_attention_required"
+                    ):
+                        raise StaleWriter("provider grant requires human-attention state")
+                    if live is not None and live["exited_at"] is None:
+                        raise StaleWriter("provider grant rejects an active worker lease")
+                    if recovery["inspected_kind"] in {"active_writer", "ambiguous", "malformed"}:
+                        raise StaleWriter("provider grant rejects an active or ambiguous writer")
+                    if int(recovery["inspection_used"]) >= int(recovery["inspection_budget"]):
+                        raise StaleWriter("provider grant lacks one remaining thread inspection")
+                    if (
+                        int(policy["provider_transient_budget"]) != 3
+                        or int(policy["provider_transient_grant_used"]) != 0
+                        or int(policy["provider_transient_used"]) < 3
+                        or provider_budget != 4
+                        or any(int(requested[name]) != int(policy[name]) for name in used)
+                    ):
+                        raise StaleWriter("provider grant is not the exact one-step authorization")
+                    self._db().execute(
+                        "UPDATE retry_policies SET revision = ?, provider_transient_budget = 4, "
+                        "provider_transient_grant_used = 1, strategy = 'same_thread_continuation', "
+                        "next_eligible_at = NULL, human_attention_reason = NULL, updated_at = ? "
+                        "WHERE dispatch_id = ?",
+                        (applied_revision, now, str(dispatch_id)),
+                    )
+                    self._db().execute(
+                        "UPDATE recovery_state SET recovery_state = 'recovery_inspection_pending', "
+                        "next_eligible_at = NULL, human_attention_reason = NULL, updated_at = ? "
+                        "WHERE dispatch_id = ?",
+                        (now, str(dispatch_id)),
+                    )
+                    self._db().execute(
+                        "UPDATE dispatch_queue SET state = 'recovery_inspection_pending', updated_at = ? "
+                        "WHERE dispatch_id = ? AND state = 'human_attention_required'",
+                        (now, str(dispatch_id)),
+                    )
             elif kind is RecoveryActionKind.RETRY:
                 if (
                     str(queue["state"]) != "human_attention_required"

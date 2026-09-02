@@ -127,6 +127,7 @@ class ThreadInspection:
     turn_id: str | None = None
     raw_result: str | None = None
     detail: str | None = None
+    retry_at: str | None = None
 
 
 class ControllerThreadInspectionKind(str, Enum):
@@ -443,6 +444,7 @@ def _terminal_from_thread_snapshot(snapshot: object, thread_id: str) -> ThreadIn
     latest_turn_id: str | None = None
     latest_candidates: list[tuple[str, str]] = []
     latest_invalid_agent_message = False
+    latest_retry_at: str | None = None
     for index, turn in enumerate(turns):
         turn_id = _read(turn, "id", missing)
         if not isinstance(turn_id, str) or not turn_id or any(character.isspace() for character in turn_id):
@@ -492,6 +494,7 @@ def _terminal_from_thread_snapshot(snapshot: object, thread_id: str) -> ThreadIn
             latest_turn_id = turn_id
             latest_candidates = candidates
             latest_invalid_agent_message = invalid_agent_message
+            latest_retry_at = _temporary_usage_limit_retry_at(_read(turn, "error"))
 
     if latest_status in {"inProgress", "in_progress", "active", "running"}:
         # A successful read does not prove ownership.  Only the exact RPC
@@ -515,6 +518,7 @@ def _terminal_from_thread_snapshot(snapshot: object, thread_id: str) -> ThreadIn
                 ThreadInspectionKind.FAILED_TURN,
                 turn_id=latest_turn_id,
                 detail="latest SDK turn failed",
+                retry_at=latest_retry_at,
             )
         return ThreadInspection(thread_id, ThreadInspectionKind.AMBIGUOUS, detail="latest turn is not completed")
     if len(latest_candidates) > 1:
@@ -811,7 +815,6 @@ def _is_invalid_previous_response_error(value: object) -> bool:
 
 
 _RETRYABLE_PROVIDER_STATUSES = frozenset({429, 500, 502, 503, 504})
-RATE_LIMIT_IMMEDIATE_RETRY_BUDGET = 3
 _CANONICAL_PROVIDER_STATUS_ERROR = re.compile(
     r"\Aunexpected status (?P<status>[1-5][0-9]{2}) [^:\r\n]{1,64}: [^\r\n]{1,512}\Z"
 )
@@ -1791,22 +1794,16 @@ class CodexSdkAdapter:
         event_callback: Callable[[LifecycleEvent], None] | None = None,
         turn_callback: Callable[[str], None] | None = None,
     ) -> TurnObservation:
-        """Run one logical turn with three immediate codex-lb limit retries."""
+        """Run one logical turn; recovery owns any later provider continuation."""
 
-        for retry in range(RATE_LIMIT_IMMEDIATE_RETRY_BUDGET + 1):
-            try:
-                return self._run_turn_once(
-                    thread,
-                    input,
-                    local_image_inputs=local_image_inputs,
-                    output_schema=output_schema,
-                    event_callback=event_callback,
-                    turn_callback=turn_callback,
-                )
-            except TemporaryRateLimitAfterIdentity:
-                if retry >= RATE_LIMIT_IMMEDIATE_RETRY_BUDGET:
-                    raise
-        raise CodexFlowError("rate-limit retry accounting failed")  # pragma: no cover
+        return self._run_turn_once(
+            thread,
+            input,
+            local_image_inputs=local_image_inputs,
+            output_schema=output_schema,
+            event_callback=event_callback,
+            turn_callback=turn_callback,
+        )
 
     def _run_turn_once(
         self,

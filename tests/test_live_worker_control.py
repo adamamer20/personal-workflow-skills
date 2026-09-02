@@ -522,6 +522,40 @@ def test_live_control_client_decodes_legacy_compatibility_receipt_without_invent
     assert action.compatibility_rebind.to_json() == legacy
 
 
+def test_live_control_client_decodes_one_provider_transient_grant_receipt() -> None:
+    action = _decode_action(
+        {
+            "action_id": "provider-one-step-grant",
+            "dispatch_id": DISPATCH,
+            "expected_revision": 3,
+            "action_kind": "budget_change",
+            "reason": "authorize one provider continuation",
+            "requested_budget_json": json.dumps(
+                {
+                    "pre_identity_budget": 5,
+                    "invalid_chain_budget": 1,
+                    "schema_envelope_budget": 2,
+                    "post_identity_loss_budget": 1,
+                    "provider_transient_budget": 4,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "compatibility_rebind_json": None,
+            "applied_revision": 4,
+            "created_at": "2026-09-01T00:00:00Z",
+        }
+    )
+    assert action.requested_budget is not None
+    assert action.requested_budget.provider_transient_budget == 4
+    assert action.to_json()["requested_budget"] == {
+        "pre_identity_budget": 5,
+        "invalid_chain_budget": 1,
+        "schema_envelope_budget": 2,
+        "post_identity_loss_budget": 1,
+    }
+
+
 class _DelayedTurn:
     def __init__(self) -> None:
         self.id = "turn-1"

@@ -126,10 +126,13 @@ def _decode_retry_policy(value: object) -> RetryPolicyFacts:
         "invalid_chain_budget",
         "schema_envelope_budget",
         "post_identity_loss_budget",
+        "provider_transient_budget",
         "pre_identity_used",
         "invalid_chain_used",
         "schema_envelope_used",
         "post_identity_loss_used",
+        "provider_transient_used",
+        "provider_transient_grant_used",
         "last_failure",
         "strategy",
         "next_eligible_at",
@@ -327,7 +330,12 @@ def _decode_action(value: object) -> RecoveryAction:
                 "schema_envelope_budget",
                 "post_identity_loss_budget",
             }
-            budget_values = _shape(requested_raw, budget_fields)
+            if not isinstance(requested_raw, dict) or set(requested_raw) not in {
+                frozenset(budget_fields),
+                frozenset((*budget_fields, "provider_transient_budget")),
+            }:
+                raise ValueError("recovery budget shape is invalid")
+            budget_values = requested_raw
             requested = RetryBudgetChange(**budget_values)  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
             raise ControlClientError("supervisor returned malformed recovery budget") from exc
@@ -749,7 +757,7 @@ class LiveWorkerControlClient:
             "reason": reason,
         }
         if requested_budget is not None:
-            facts["requested_budget"] = requested_budget.to_json()
+            facts["requested_budget"] = requested_budget.to_control_json()
         if compatibility_rebind is not None:
             facts["compatibility_rebind"] = compatibility_rebind.to_json()
         response = self._request("recovery_action", **facts)
