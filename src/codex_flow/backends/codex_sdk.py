@@ -1373,7 +1373,8 @@ def _decode_schema_output(response: str | None, schema: Schema | None) -> JsonOb
     try:
         validate_structured_output(decoded, schema)
     except ValueError as exc:
-        raise TerminalFailureAfterIdentity("schema-bounded turn output does not match its schema") from exc
+        detail = redact_diagnostic_text(str(exc), limit=256)
+        raise TerminalFailureAfterIdentity(f"schema-bounded turn output does not match its schema: {detail}") from exc
     return cast(JsonObject, decoded)
 
 

@@ -1239,6 +1239,112 @@ def _completed_worker_result() -> str:
     )
 
 
+def test_terminal_result_preserves_contiguous_checkpoint_audit_with_middle_action() -> None:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger = _queued_ledger(root)
+        ledger._db().execute(
+            "UPDATE queue_bindings SET source_thread_id = 'source-thread' WHERE dispatch_id = ?",
+            (DISPATCH,),
+        )
+        ledger._db().commit()
+        epoch = int(_supervisor(ledger, root)["epoch"])
+        token = "worker-token"
+        token_sha256 = hashlib.sha256(token.encode("ascii")).hexdigest()
+        ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
+        ledger.issue_attempt_capability(
+            DISPATCH,
+            generation=1,
+            attempt=1,
+            operation="submit_result",
+            schema_sha256=model_facing_result_schema_sha256(),
+            workspace_path=root,
+            backend="sdk_headless",
+            token_sha256=token_sha256,
+            expires_at="9999-12-31T23:59:59Z",
+        )
+        ledger.bind_worker_liveness(
+            DISPATCH,
+            epoch=epoch,
+            generation=1,
+            attempt=1,
+            pid=os.getpid(),
+            process_birth_identity="checkpoint-result-worker",
+            lease_token_sha256=token_sha256,
+        )
+
+        first = ledger.claim_due_checkpoint(epoch=epoch, now="9999-01-01T00:00:00Z")
+        assert first is not None
+        for _ in range(2):
+            assert ledger.claim_wake(str(first["delivery_id"])) is not None
+            ledger.record_wake_delivery(str(first["delivery_id"]), outcome="failed")
+
+        ledger.rearm_checkpoint(DISPATCH, seconds=1)
+        second = ledger.claim_due_checkpoint(epoch=epoch, now="9999-01-01T00:00:01Z")
+        assert second is not None
+        claimed_wake = ledger.claim_wake(str(second["delivery_id"]))
+        assert claimed_wake is not None
+        ledger.record_wake_delivery(
+            str(second["delivery_id"]),
+            outcome="delivered",
+            source_turn_id="controller-turn",
+        )
+        decision = ledger.controller_decision(str(second["decision_id"]))
+        claim = ledger.claim_controller_decision(
+            decision.decision_id,
+            claimant_kind=ControllerClaimantKind.HUMAN,
+            claimant_id="operator",
+            expected_revision=decision.revision,
+        )
+        bundle = ModelFacingControllerActionBundle(
+            1,
+            decision.decision_id,
+            claim.generation,
+            "middle-checkpoint-action",
+            claim.revision,
+            (),
+            (ModelFacingControllerAction(ControllerActionKind.ACKNOWLEDGE_ONLY),),
+            "retain this acknowledged audit fact",
+        )
+        receipt = ledger.submit_controller_actions(bundle, claimant_id="operator", token=str(claim.token))
+        ledger.acknowledge_controller_action(
+            decision.decision_id,
+            action_id=bundle.action_id,
+            bundle_sha256=bundle.sha256,
+            committed_revision=receipt.expected_revision + 1,
+            claimant_id="operator",
+            token=str(claim.token),
+        )
+
+        ledger.rearm_checkpoint(DISPATCH, seconds=1)
+        third = ledger.claim_due_checkpoint(epoch=epoch, now="9999-01-01T00:00:02Z")
+        assert third is not None
+
+        terminal = ledger.commit_queue_result(
+            DISPATCH,
+            generation=1,
+            attempt=1,
+            token=token,
+            raw_result=_completed_worker_result(),
+        )
+
+        assert terminal["state"] == "completed"
+        checkpoints = [
+            item for item in ledger.wake_outbox() if item["dispatch_id"] == DISPATCH and item["kind"] == "checkpoint"
+        ]
+        assert [int(item["cycle_sequence"]) for item in checkpoints] == [1, 2, 3]
+        assert [item["state"] for item in checkpoints] == ["suppressed", "delivered", "suppressed"]
+        assert ledger.controller_decision(str(first["decision_id"])).state is ControllerDecisionState.SUPERSEDED
+        assert ledger.controller_decision(str(second["decision_id"])).state is ControllerDecisionState.ACKNOWLEDGED
+        assert ledger.controller_decision(str(third["decision_id"])).state is ControllerDecisionState.SUPERSEDED
+        assert [item["kind"] for item in ledger.wake_outbox(state="pending")] == ["terminal"]
+        ledger.close()
+
+        reopened = Ledger(root / "workflow.db")
+        assert reopened.queue_dispatch(DISPATCH)["state"] == "completed"
+        reopened.close()
+
+
 def _prepare_result_transport_attention(
     ledger: Ledger,
     root: Path,
@@ -3006,8 +3112,17 @@ def test_explicit_retry_uses_fresh_thread_recovery_prompt(monkeypatch: pytest.Mo
         assert supervisor.process_once() is True
         assert captured == [(2, True)]
 
-        same_thread = recovery_continuation_prompt(workspace=root, resume_same_thread=True)
-        fresh_thread = recovery_continuation_prompt(workspace=root, resume_same_thread=False)
+        original_prompt = "Implement the original durable milestone objective."
+        same_thread = recovery_continuation_prompt(
+            workspace=root,
+            resume_same_thread=True,
+            original_prompt=original_prompt,
+        )
+        fresh_thread = recovery_continuation_prompt(
+            workspace=root,
+            resume_same_thread=False,
+            original_prompt=original_prompt,
+        )
         assert "retains changes made by the prior worker" in same_thread
         assert "Resume the existing SDK thread" in same_thread
         assert "retains changes made by the prior worker" in fresh_thread
@@ -3015,6 +3130,8 @@ def test_explicit_retry_uses_fresh_thread_recovery_prompt(monkeypatch: pytest.Mo
         assert "recover context from the worktree" in fresh_thread
         assert "this dispatch's active row" in fresh_thread
         assert "not conflicting owners" in fresh_thread
+        assert same_thread.endswith(original_prompt)
+        assert fresh_thread.endswith(original_prompt)
         ledger.close()
 
 

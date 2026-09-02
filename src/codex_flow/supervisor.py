@@ -3133,9 +3133,13 @@ class Supervisor:
             raise
         created_paths.append(cap_path)
         if recovery_continuation:
+            original_prompt = capsule_value.get("prompt")
+            if not isinstance(original_prompt, str):
+                raise SupervisorError("worker recovery capsule lacks its original prompt")
             capsule_value["prompt"] = recovery_continuation_prompt(
                 workspace=Path(str(row["workspace_path"])),
                 resume_same_thread=row.get("thread_id") is not None,
+                original_prompt=original_prompt,
                 observed_state="idle-no-result",
             )
         capsule_payload = json.dumps(capsule_value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(

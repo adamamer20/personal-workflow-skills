@@ -121,13 +121,26 @@ RECOVERY_CONTINUATION_PREAMBLE = (
 )
 
 
-def recovery_continuation_prompt(*, workspace: Path, resume_same_thread: bool, observed_state: str = "idle") -> str:
+def recovery_continuation_prompt(
+    *,
+    workspace: Path,
+    resume_same_thread: bool,
+    original_prompt: str,
+    observed_state: str = "idle",
+) -> str:
     """Build the bounded, inspect-before-mutate continuation instruction."""
 
     if not workspace.is_absolute() or not workspace.exists():
         raise WorkerError("recovery workspace is unavailable")
     if not observed_state or len(observed_state) > 128 or "\x00" in observed_state:
         raise WorkerError("recovery observation fact is invalid")
+    if (
+        not isinstance(original_prompt, str)
+        or not original_prompt.strip()
+        or "\x00" in original_prompt
+        or len(original_prompt.encode("utf-8")) > 2_000_000
+    ):
+        raise WorkerError("original recovery prompt is invalid")
     thread_instruction = (
         "Resume the existing SDK thread and use its retained context."
         if resume_same_thread
@@ -135,7 +148,8 @@ def recovery_continuation_prompt(*, workspace: Path, resume_same_thread: bool, o
     )
     return (
         f"{RECOVERY_CONTINUATION_PREAMBLE} {thread_instruction} "
-        f"Workspace: {workspace}. Observed state: {observed_state}."
+        f"Workspace: {workspace}. Observed state: {observed_state}.\n\n"
+        f"Original durable milestone prompt follows unchanged:\n{original_prompt}"
     )
 
 

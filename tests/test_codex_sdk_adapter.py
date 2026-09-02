@@ -1231,6 +1231,7 @@ class CodexSdkAdapterTests(unittest.TestCase):
         self.assertEqual(len(prompts), SCHEMA_CORRECTION_BUDGET + 1)
         self.assertEqual(prompts[0], "implement milestone")
         self.assertTrue(all("Do not repeat repository work" in str(item) for item in prompts[1:]))
+        self.assertTrue(all("output.ok" in str(item) for item in prompts[1:]))
 
     def test_worker_stops_after_schema_correction_budget(self) -> None:
         client = FakeClient()

@@ -8155,10 +8155,11 @@ class Ledger:
             ),
         )
         # Terminal closure supersedes only checkpoint decisions that never
-        # committed an action.  An action-bearing human-attention decision and
-        # its already-consumed wake are one immutable audit pair; retaining the
-        # decision while deleting that wake is structurally incomplete.  Only
-        # the fresh terminal wake remains deliverable.
+        # committed an action.  Preserve every checkpoint wake as immutable
+        # cycle/audit history: deleting only the actionless rows can leave an
+        # action-bearing middle cycle behind and violate contiguous sequence
+        # authority.  Suppression makes unresolved actionless deliveries
+        # non-deliverable while retaining the complete ordered cycle history.
         self._db().execute(
             "UPDATE controller_decisions SET state = 'superseded', superseded_at = ?, claim_lease_expires_at = NULL, updated_at = ? "
             "WHERE dispatch_id = ? AND kind = 'checkpoint' AND action_id IS NULL "
@@ -8166,9 +8167,10 @@ class Ledger:
             (now, now, str(dispatch_id)),
         )
         self._db().execute(
-            "DELETE FROM wake_outbox WHERE dispatch_id = ? AND kind = 'checkpoint' "
+            "UPDATE wake_outbox SET state = 'suppressed', source_turn_id = NULL, updated_at = ? "
+            "WHERE dispatch_id = ? AND kind = 'checkpoint' AND state != 'delivered' "
             "AND decision_id IN (SELECT decision_id FROM controller_decisions WHERE action_id IS NULL)",
-            (str(dispatch_id),),
+            (now, str(dispatch_id)),
         )
         wake_payload = {
             "schema_version": 1,
