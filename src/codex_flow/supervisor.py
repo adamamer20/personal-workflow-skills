@@ -3114,8 +3114,13 @@ class Supervisor:
 
         try:
             frame = encode_frame(response)
-        except IpcError:
-            frame = encode_frame({"version": 1, "ok": False, "error": IpcReasonCode.RESPONSE_TOO_LARGE.value})
+        except IpcError as exc:
+            reason = (
+                IpcReasonCode.RESPONSE_NOT_JSON.value
+                if exc.reason_code == IpcReasonCode.REQUEST_NOT_JSON.value
+                else IpcReasonCode.RESPONSE_TOO_LARGE.value
+            )
+            frame = encode_frame({"version": 1, "ok": False, "error": reason})
         try:
             connection.sendall(frame)
         except OSError:

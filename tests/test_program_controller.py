@@ -52,7 +52,7 @@ from codex_flow.domain import (
     validate_output_schema,
     validate_structured_output,
 )
-from codex_flow.ipc import IpcError, IpcReasonCode, decode_frame, encode_frame
+from codex_flow.ipc import MAX_FRAME_BYTES, IpcError, IpcReasonCode, decode_frame, encode_frame
 from codex_flow.ledger import Ledger, StaleWriter
 from codex_flow.program_controller import ProgramControllerGenerationRecovery, ProgramControllerGenerationRunner
 from codex_flow.supervisor import Supervisor
@@ -661,6 +661,21 @@ def test_program_start_client_emits_one_typed_ipc_request(monkeypatch: pytest.Mo
         "program_id": "program",
         "event_key": "operator-start",
     }
+
+
+def test_send_response_distinguishes_malformed_and_oversized_payloads() -> None:
+    cases = (
+        ({"payload": float("nan")}, "response_not_json"),
+        ({"payload": "x" * MAX_FRAME_BYTES}, "response_too_large"),
+    )
+    for response, expected_error in cases:
+        sender, receiver = socket.socketpair()
+        try:
+            Supervisor._send_response(sender, response)
+            assert decode_frame(receiver) == {"version": 1, "ok": False, "error": expected_error}
+        finally:
+            sender.close()
+            receiver.close()
 
 
 def test_program_revision_allows_only_one_claim_and_coalesces_stale_events(tmp_path: Path) -> None:
