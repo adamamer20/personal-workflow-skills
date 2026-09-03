@@ -183,7 +183,7 @@ def _terminal_snapshot(*, connected: bool = True) -> TerminalUiSnapshot:
         "turn-01",
         "not exposed by control API",
         "not exposed by control API",
-        "control: authenticated local supervisor; execution: not exposed",
+        "control: authenticated local harness; execution: not exposed",
         "not exposed by control API",
         "2m 18s",
         "not exposed by control API",
@@ -213,7 +213,7 @@ def _terminal_snapshot(*, connected: bool = True) -> TerminalUiSnapshot:
         "2026-08-30T10:14:18+00:00",
         (worker,),
         (decision,),
-        None if connected else "supervisor control endpoint is unavailable",
+        None if connected else "harness control endpoint is unavailable",
     )
 
 
@@ -224,7 +224,7 @@ def test_tui_headless_driver_is_keyboard_bounded_at_wide_and_narrow_sizes() -> N
             terminal = CodexFlowTerminalApp(client, refresh_on_mount=False)  # type: ignore[arg-type]
             async with terminal.run_test(size=size) as pilot:
                 await pilot.pause()
-                assert "LIVE · authenticated supervisor" in str(terminal.query_one("#mode").render())
+                assert "LIVE · authenticated harness" in str(terminal.query_one("#mode").render())
                 assert "CONTROLLER" in str(terminal.query_one("#controller-summary").render())
                 assert "Implementer · Working" in str(terminal.query_one("#conversation-header").render())
                 conversation = terminal.query_one("#conversation")

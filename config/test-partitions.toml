@@ -15,7 +15,7 @@ controller = [
   "tests/test_multi_authority_review.py",
   "tests/test_program_controller.py",
   "tests/test_review_lifecycle.py",
-  "tests/test_supervisor_recovery.py",
+  "tests/test_harness_recovery.py",
   "tests/test_workflow_control.py",
 ]
 workers = [

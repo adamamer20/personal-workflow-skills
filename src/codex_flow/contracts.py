@@ -17,6 +17,8 @@ from enum import Enum
 from .domain import (
     MAX_LOCAL_IMAGE_COUNT,
     AcceptanceMode,
+    BlockerKind,
+    BlockerScope,
     ControllerActionKind,
     ControllerDecisionId,
     DispatchId,
@@ -33,6 +35,7 @@ from .domain import (
     ReviewResult,
     RoleId,
     Severity,
+    TypedBlocker,
     strict_json_loads,
     thaw_json,
 )
@@ -48,6 +51,11 @@ _CANONICAL_ACCEPTANCE_ROLES = {
 }
 _PLUGIN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}(?:@[a-z0-9][a-z0-9._-]{0,127})?$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+# Immutable predecessor digest retained solely so a v18 queue can be opened
+# and its already-submitted result can be validated during the v18 -> v19
+# migration.  New dispatches are always bound to the current schema digest.
+_LEGACY_MODEL_FACING_RESULT_SCHEMA_SHA256 = "ccc6993ea8e8fe0ddd0a84896e6d0993f33e7f173c43df11dd7dc4201a476bde"
 
 
 def _text(value: str, *, label: str, limit: int = _MAX_TEXT) -> str:
@@ -534,6 +542,7 @@ class ModelFacingResult:
     validations: tuple[ModelValidation, ...]
     durable_status: str
     next_action: str | None = None
+    blocker: TypedBlocker | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -548,6 +557,8 @@ class ModelFacingResult:
         _text(self.durable_status, label="result durable status", limit=128)
         if self.next_action is not None:
             _text(self.next_action, label="result next action")
+        if self.blocker is not None and not isinstance(self.blocker, TypedBlocker):
+            raise ValueError("result blocker must use TypedBlocker")
         object.__setattr__(self, "changed_surfaces", _items(self.changed_surfaces, label="result changed surfaces"))
         validations = tuple(self.validations)
         if len(validations) > _MAX_ITEMS or any(not isinstance(item, ModelValidation) for item in validations):
@@ -565,6 +576,7 @@ class ModelFacingResult:
             ],
             "durable_status": self.durable_status,
             "next_action": self.next_action,
+            "blocker": self.blocker.to_json() if self.blocker is not None else None,
         }
 
     @classmethod
@@ -578,7 +590,7 @@ class ModelFacingResult:
             "durable_status",
             "next_action",
         }
-        if set(value) != expected:
+        if set(value) not in (expected, expected | {"blocker"}):
             raise ValueError(f"model-facing result keys must be exactly {sorted(expected)!r}")
         raw_validations = value["validations"]
         if not isinstance(raw_validations, list):
@@ -605,6 +617,9 @@ class ModelFacingResult:
         next_action = value["next_action"]
         if next_action is not None and not isinstance(next_action, str):
             raise ValueError("result next_action must be a string or null")
+        raw_blocker = value.get("blocker")
+        if raw_blocker is not None and not isinstance(raw_blocker, Mapping):
+            raise ValueError("result blocker must be an object or null")
         return cls(
             version,
             ModelResultStatus(status),
@@ -613,6 +628,7 @@ class ModelFacingResult:
             tuple(validations),
             durable_status,
             next_action,
+            TypedBlocker.from_json(raw_blocker) if isinstance(raw_blocker, Mapping) else None,
         )
 
     @classmethod
@@ -1789,6 +1805,23 @@ def model_facing_result_schema() -> JsonObject:
                 "maxLength": _MAX_TEXT,
                 "pattern": _TEXT_PATTERN,
             },
+            "blocker": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["gate_id", "kind", "scope", "promotion_blocking", "required_action"],
+                        "properties": {
+                            "gate_id": {**text, "maxLength": 256},
+                            "kind": {"type": "string", "enum": [item.value for item in BlockerKind]},
+                            "scope": {"type": "string", "enum": [item.value for item in BlockerScope]},
+                            "promotion_blocking": {"type": "boolean"},
+                            "required_action": {**text, "maxLength": 512},
+                        },
+                    },
+                    {"type": "null"},
+                ]
+            },
         },
     }
 
@@ -1804,6 +1837,12 @@ def model_facing_result_schema_sha256() -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def legacy_model_facing_result_schema_sha256() -> str:
+    """Return the immutable predecessor result-contract digest for migration."""
+
+    return _LEGACY_MODEL_FACING_RESULT_SCHEMA_SHA256
 
 
 def format_model_facing_result_prompt(prompt: str) -> str:
@@ -1824,6 +1863,7 @@ def format_model_facing_result_prompt(prompt: str) -> str:
         "validations": [],
         "durable_status": "<durable status>",
         "next_action": None,
+        "blocker": None,
     }
     encoded = json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return (
@@ -1835,6 +1875,8 @@ def format_model_facing_result_prompt(prompt: str) -> str:
 
 
 __all__ = [
+    "BlockerKind",
+    "BlockerScope",
     "ModelAuthority",
     "ModelFacingCapsule",
     "ModelFacingControllerAction",
@@ -1846,6 +1888,7 @@ __all__ = [
     "PluginReadiness",
     "PluginRequirement",
     "format_model_facing_result_prompt",
+    "legacy_model_facing_result_schema_sha256",
     "model_facing_capsule_schema",
     "model_facing_controller_action_schema",
     "model_facing_result_schema",

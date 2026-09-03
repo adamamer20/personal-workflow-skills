@@ -337,11 +337,11 @@ def test_controller_prompt_receives_actionable_human_attention_context(tmp_path:
 def test_terminal_controller_prompt_forbids_retry_and_requires_acknowledgement(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path / "workflow.db")
     dispatch = _queue(ledger, tmp_path)
-    authority = ledger.acquire_supervisor(
+    authority = ledger.acquire_harness(
         repository_root=tmp_path,
         state_root=tmp_path,
         pid=1,
-        process_birth_identity="terminal-prompt-supervisor",
+        process_birth_identity="terminal-prompt-harness",
         executable_digest="a" * 64,
         version="test",
         owner_nonce_sha256="b" * 64,

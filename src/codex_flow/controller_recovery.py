@@ -285,7 +285,7 @@ class ControllerGenerationRunner:
         except Exception as error:
             # Preserve a durable terminal generation fact after identity.  A
             # pre-identity transport failure leaves the prepared generation
-            # reusable; the supervisor may retry it within its delivery cap.
+            # reusable; the harness may retry it within its delivery cap.
             if identity_bound:
                 outcome = ControllerGenerationState.FAILED.value
                 if isinstance(error, TransientFailureAfterIdentity):
@@ -364,7 +364,7 @@ class ControllerGenerationRecovery:
                 detail="replayed durable controller acknowledgement",
             )
         generation = self.client.generation(str(identity), int(status.current_generation))
-        # Recovery is one-shot per persisted generation.  A supervisor
+        # Recovery is one-shot per persisted generation.  A harness
         # restart may observe the already-recorded inspection outcome; return
         # its deterministic status instead of attempting another read.
         if generation.inspection_outcome is not None:

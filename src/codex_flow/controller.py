@@ -89,11 +89,11 @@ from .domain import (
     validate_local_image_inputs,
 )
 from .ledger import (
+    HarnessRefreshBlocked,
     Ledger,
     NativeCompatibilityConflict,
     NativePermissionConflict,
     RecordNotFound,
-    SupervisorRefreshBlocked,
 )
 from .native_profile import NativeDiscoveryCompatibilityError, NativeProfileProjection
 from .plugin_capabilities import (
@@ -704,7 +704,7 @@ class Controller:
         return self.ledger.program_status(program_id)
 
     def start_program(self, program_id: ProgramId | str, *, event_key: str = "start") -> object:
-        """Emit one coalesced program start event for the detached supervisor."""
+        """Emit one coalesced program start event for the detached harness."""
 
         with self._mutation_lock():
             return self.ledger.start_program(program_id, event_key=event_key)
@@ -808,7 +808,7 @@ class Controller:
         projection_sha256: str | None = None,
         checkpoint_seconds: float = 1800.0,
     ) -> dict[str, object]:
-        """Durably claim and queue a dispatch for the detached supervisor."""
+        """Durably claim and queue a dispatch for the detached harness."""
 
         role_value = role if isinstance(role, RoleId) else RoleId(str(role))
         if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
@@ -820,8 +820,8 @@ class Controller:
             except ValueError as exc:
                 raise ControllerError("CODEX_THREAD_ID is not a valid source controller identity") from exc
         with self._mutation_lock():
-            if self.ledger.supervisor_refresh_fenced():
-                raise SupervisorRefreshBlocked("supervisor refresh fence is active")
+            if self.ledger.harness_refresh_fenced():
+                raise HarnessRefreshBlocked("harness refresh fence is active")
             planned = self._plan(capsule)
             existing_dispatch = None
             try:

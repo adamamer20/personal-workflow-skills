@@ -158,9 +158,7 @@ def test_remaining_program_graph_is_serial_and_visual_review_stays_cancelled() -
     assert graph.node("terminal-candidate-retention-and-harness-cutover").dependencies == (
         "live-coding-agent-terminal-ui",
     )
-    assert graph.node("live-plan-dag-revision").dependencies == (
-        "terminal-candidate-retention-and-harness-cutover",
-    )
+    assert graph.node("live-plan-dag-revision").dependencies == ("terminal-candidate-retention-and-harness-cutover",)
     assert graph.node("module-responsibility-decomposition").dependencies == ("live-plan-dag-revision",)
     assert graph.node("live-coding-agent-terminal-ui").capsule.source_block_sha256 == (
         "9f3d55ee8c1bcaacb8203103cf30617a2d80abd6feb3c45ca0cc79396211b3b2"
@@ -266,7 +264,7 @@ def test_terminal_commit_releases_only_pre_authorized_successors_and_wakes_once(
     source = _queue(ledger, tmp_path, "run", "source")
     successor = _queue(ledger, tmp_path, "run", "successor", role="code-reviewer")
     ledger.authorize_successor(source, successor)
-    authority = ledger.acquire_supervisor(
+    authority = ledger.acquire_harness(
         repository_root=tmp_path,
         state_root=tmp_path,
         pid=os.getpid(),
@@ -311,7 +309,7 @@ def test_terminal_commit_releases_only_pre_authorized_successors_and_wakes_once(
 def test_checkpoint_is_one_shot_until_explicit_rearm_and_carries_liveness(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path / "workflow.db")
     dispatch = _queue(ledger, tmp_path, "checkpoint-run", "source")
-    authority = ledger.acquire_supervisor(
+    authority = ledger.acquire_harness(
         repository_root=tmp_path,
         state_root=tmp_path,
         pid=os.getpid(),
@@ -364,7 +362,7 @@ def test_checkpoint_rearm_rejects_an_active_wake(tmp_path: Path) -> None:
         "UPDATE queue_bindings SET checkpoint_deadline = '2000-01-01T00:00:00Z' WHERE dispatch_id = ?", (dispatch,)
     )
     ledger._db().commit()
-    authority = ledger.acquire_supervisor(
+    authority = ledger.acquire_harness(
         repository_root=tmp_path,
         state_root=tmp_path,
         pid=os.getpid(),
@@ -387,7 +385,7 @@ def test_wake_ambiguity_is_restart_reconciled_once(tmp_path: Path) -> None:
         "UPDATE queue_bindings SET source_thread_id = 'source-thread' WHERE dispatch_id = ?", (dispatch,)
     )
     ledger._db().commit()
-    authority = ledger.acquire_supervisor(
+    authority = ledger.acquire_harness(
         repository_root=tmp_path,
         state_root=tmp_path,
         pid=os.getpid(),
@@ -428,7 +426,7 @@ def test_wake_delivery_failure_keeps_one_bounded_retry_pending(tmp_path: Path) -
         "UPDATE queue_bindings SET source_thread_id = 'source-thread' WHERE dispatch_id = ?", (dispatch,)
     )
     ledger._db().commit()
-    authority = ledger.acquire_supervisor(
+    authority = ledger.acquire_harness(
         repository_root=tmp_path,
         state_root=tmp_path,
         pid=os.getpid(),

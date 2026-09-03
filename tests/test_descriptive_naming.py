@@ -47,7 +47,7 @@ def test_coupled_identifiers_are_rejected(value: str) -> None:
 
 
 def test_capability_names_are_accepted() -> None:
-    validate_path_name("tests/test_supervisor_recovery.py")
+    validate_path_name("tests/test_harness_recovery.py")
     validate_path_name("src/codex_flow/model_facing_projection.py")
     validate_identifier_name("has_dispatch_queue")
 

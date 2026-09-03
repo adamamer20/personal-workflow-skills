@@ -1,4 +1,4 @@
-"""Small authenticated local IPC protocol for the detached supervisor."""
+"""Small authenticated local IPC protocol for the detached harness."""
 
 from __future__ import annotations
 
@@ -80,10 +80,10 @@ def open_ipc_subscription(socket_path: Path, request: Mapping[str, object], *, t
     socket_path = Path(socket_path)
     ensure_runtime_dir(socket_path.parent)
     if socket_path.is_symlink() or not socket_path.exists():
-        raise IpcTransportError("supervisor IPC socket is unavailable")
+        raise IpcTransportError("harness IPC socket is unavailable")
     metadata = os.lstat(socket_path)
     if not stat.S_ISSOCK(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise IpcError("supervisor IPC socket has unsafe permissions")
+        raise IpcError("harness IPC socket has unsafe permissions")
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(timeout)
     try:
@@ -165,7 +165,7 @@ def ensure_runtime_dir(path: Path) -> Path:
     if not path.is_absolute():
         path = Path.cwd() / path
     # Walk the lexical ancestor chain without resolving links.  A symlink in
-    # any component would let an attacker redirect the supervisor endpoint.
+    # any component would let an attacker redirect the harness endpoint.
     current = Path(path.anchor)
     for component in path.parts[1:]:
         current /= component
@@ -175,12 +175,12 @@ def ensure_runtime_dir(path: Path) -> Path:
             current.mkdir(mode=0o700)
             metadata = os.lstat(current)
         if stat.S_ISLNK(metadata.st_mode):
-            raise IpcError("supervisor runtime directory cannot contain symlinks")
+            raise IpcError("harness runtime directory cannot contain symlinks")
         if not stat.S_ISDIR(metadata.st_mode):
-            raise IpcError("supervisor runtime path contains a non-directory")
+            raise IpcError("harness runtime path contains a non-directory")
     metadata = os.lstat(path)
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700:
-        raise IpcError("supervisor runtime directory is not a private real directory")
+        raise IpcError("harness runtime directory is not a private real directory")
     return path
 
 
@@ -188,10 +188,10 @@ def send_request(socket_path: Path, request: Mapping[str, object], *, timeout: f
     socket_path = Path(socket_path)
     ensure_runtime_dir(socket_path.parent)
     if socket_path.is_symlink() or not socket_path.exists():
-        raise IpcError("supervisor IPC socket is unavailable")
+        raise IpcError("harness IPC socket is unavailable")
     metadata = os.lstat(socket_path)
     if not stat.S_ISSOCK(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise IpcError("supervisor IPC socket has unsafe permissions")
+        raise IpcError("harness IPC socket has unsafe permissions")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(timeout)
         try:

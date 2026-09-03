@@ -8,6 +8,7 @@ deletes worktrees automatically.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import stat
 import subprocess
@@ -16,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .domain import ExecutionCapsule, WorkspaceMode
+from .domain import CandidateDisposition, CandidateRecord, ExecutionCapsule, WorkspaceMode
 
 
 class WorktreeError(RuntimeError):
@@ -269,6 +270,112 @@ class WorktreeManager:
         self._validate_checkout(capsule, workspace)
         return self._git(workspace, "rev-parse", "--verify", "HEAD^{commit}")
 
+    def inspect_terminal_workspace(
+        self,
+        capsule: ExecutionCapsule,
+        *,
+        candidate_sha: str | None = None,
+        require_direct_candidate: bool = False,
+    ) -> CandidateRecord:
+        """Inspect an executor checkout without mutating it.
+
+        A clean checkout yields one verified commit only when it is ahead of
+        the capsule base.  An explicit candidate may be verified from a dirty
+        checkout when its commit ancestry is exact; the dirty bytes remain an
+        explicit fact and never become part of the candidate commit.
+        """
+
+        workspace = _absolute_lexical(capsule.workspace_path)
+        self._validate_checkout(capsule, workspace)
+        try:
+            head = self._git(workspace, "rev-parse", "--verify", "HEAD^{commit}")
+            status = self._runner(("git", "status", "--porcelain", "--untracked-files=all"), workspace)
+        except WorktreeError:
+            raise
+        if status.returncode != 0:
+            raise WorktreeError("unable to inspect terminal workspace status")
+        status_digest = hashlib.sha256(status.stdout.encode("utf-8")).hexdigest() if status.stdout else None
+        if status.stdout and candidate_sha is None:
+            return CandidateRecord(
+                CandidateDisposition.PRESERVED_DIRTY_WORKSPACE,
+                workspace,
+                workspace_head=head,
+                workspace_digest=status_digest,
+                dirty=True,
+                reason="workspace contains tracked or untracked bytes",
+            )
+        selected = candidate_sha or (head if head != capsule.base_sha else None)
+        if selected is None:
+            return CandidateRecord(CandidateDisposition.NO_CANDIDATE, workspace, workspace_head=head)
+        if len(selected) != 40 or any(character not in "0123456789abcdef" for character in selected):
+            raise WorktreeError("candidate commit is not a lowercase Git SHA")
+        ancestry = self._runner(("git", "merge-base", "--is-ancestor", selected, "HEAD"), workspace)
+        if ancestry.returncode != 0:
+            raise WorkspaceConflict("candidate commit is not present in the dispatch workspace")
+        if require_direct_candidate:
+            parents = self._commit_parents(workspace, selected)
+            if parents != [capsule.base_sha]:
+                raise WorkspaceConflict("candidate commit contains an unrelated or non-direct history")
+        return CandidateRecord(
+            CandidateDisposition.VERIFIED_COMMIT,
+            workspace,
+            commit_sha=selected,
+            workspace_head=head,
+            workspace_digest=status_digest,
+            dirty=bool(status.stdout),
+            reason="workspace contains tracked or untracked bytes alongside the explicit candidate"
+            if status.stdout
+            else None,
+        )
+
+    def adopt_candidate(self, capsule: ExecutionCapsule, candidate_sha: str) -> CandidateRecord:
+        """Validate one pre-existing serial candidate for later review."""
+
+        return self.inspect_terminal_workspace(capsule, candidate_sha=candidate_sha, require_direct_candidate=True)
+
+    def verify_serial_candidate(
+        self,
+        *,
+        repository_root: Path,
+        candidate_sha: str,
+        expected_trunk_head: str,
+        strategy: str,
+    ) -> dict[str, object]:
+        """Return a logical promotion receipt for an already-committed checkout.
+
+        Serial milestones commit directly in the program checkout. Promotion
+        therefore records the exact commit without running a same-checkout Git
+        merge, fast-forward, cherry-pick, or reset.
+        """
+
+        root = _absolute_lexical(Path(repository_root))
+        _validate_raw_integration_chain(root)
+        if any(
+            len(value) != 40 or any(character not in "0123456789abcdef" for character in value)
+            for value in (candidate_sha, expected_trunk_head)
+        ):
+            raise WorktreeError("serial promotion commit identity is invalid")
+        head = self._git(root, "rev-parse", "--verify", "HEAD^{commit}")
+        status = self._git(root, "status", "--porcelain", "--untracked-files=all")
+        if status:
+            raise WorktreeError("serial promotion checkout is dirty")
+        if head != candidate_sha:
+            raise WorkspaceConflict("serial candidate is not the current program checkout HEAD")
+        parents = self._commit_parents(root, candidate_sha)
+        if parents != [expected_trunk_head]:
+            raise WorkspaceConflict("serial candidate is not a direct descendant of the durable trunk")
+        tree = self._git(root, "show", "-s", "--format=%T", candidate_sha)
+        if strategy not in {"merge", "fast_forward", "cherry_pick"}:
+            raise WorktreeError("serial promotion strategy is unsupported")
+        return {
+            "before_trunk_head": expected_trunk_head,
+            "after_trunk_head": candidate_sha,
+            "parents": parents,
+            "tree": tree,
+            "logical_promotion": True,
+            "strategy": strategy,
+        }
+
     def integrate_candidate(
         self,
         *,
@@ -454,7 +561,7 @@ class WorktreeManager:
     ) -> dict[str, object] | None:
         """Recognize only the exact authorized Git effect after a crash.
 
-        The durable outbox is written before Git changes.  If the supervisor
+        The durable outbox is written before Git changes.  If the harness
         exits after the strategy succeeds but before its receipt commits,
         replay reaches this read-only discriminator.  Unknown advancement is
         never treated as success.

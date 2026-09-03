@@ -89,6 +89,58 @@
       "minLength": 1,
       "maxLength": 16384,
       "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+    },
+    "blocker": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "gate_id",
+            "kind",
+            "scope",
+            "promotion_blocking",
+            "required_action"
+          ],
+          "properties": {
+            "gate_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "external",
+                "decision",
+                "execution"
+              ]
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "current_promotion",
+                "current_repair",
+                "future_milestone",
+                "whole_program"
+              ]
+            },
+            "promotion_blocking": {
+              "type": "boolean"
+            },
+            "required_action": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   }
 }

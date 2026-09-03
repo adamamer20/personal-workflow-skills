@@ -35,6 +35,7 @@ from .contracts import (
     ModelFacingProgramControllerActionBundle,
     ModelFacingResult,
     ModelResultStatus,
+    legacy_model_facing_result_schema_sha256,
     model_facing_result_schema_sha256,
     model_facing_review_result_schema_sha256,
     review_result_from_agent_message,
@@ -46,8 +47,12 @@ from .domain import (
     DIAGNOSTIC_TEXT_MAX_BYTES,
     TERMINAL_STATES,
     AcceptanceMode,
+    BlockerKind,
+    BlockerScope,
     Budget,
     BudgetExhaustion,
+    CandidateDisposition,
+    CandidateRecord,
     CompatibilityRebind,
     ControlCommand,
     ControlCommandKind,
@@ -117,6 +122,7 @@ from .domain import (
     ThreadIdentity,
     TransportFailureBeforeIdentity,
     TurnObservation,
+    TypedBlocker,
     ValidationFailureCode,
     ValidationObservation,
     WorkflowReason,
@@ -130,7 +136,7 @@ from .domain import (
     strict_json_loads,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(18)
+CURRENT_SCHEMA_VERSION = SchemaVersion(19)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -150,6 +156,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(15),
         SchemaVersion(16),
         SchemaVersion(17),
+        SchemaVersion(18),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -476,7 +483,7 @@ _APP_NATIVE_DISPATCHES_DRAFT_V9_DDL = _APP_NATIVE_DISPATCHES_DDL.replace(", 'can
 )
 _V9_TABLE_DDL = {**_V8_TABLE_DDL, "app_native_dispatches": _APP_NATIVE_DISPATCHES_DDL}
 
-# H6-E durable queue/supervisor authority.  These tables deliberately keep
+# H6-E durable queue/harness authority.  These tables deliberately keep
 # immutable dispatch facts and process/attempt leases separate from the legacy
 # H2-H6 execution projection.  The controller remains the sole writer and all
 # token plaintext is kept outside SQLite in a descriptor-anchored capability
@@ -1096,6 +1103,17 @@ _V18_TABLE_DDL = {
     "integration_outbox": _INTEGRATION_OUTBOX_DDL,
 }
 
+# H6-E-R4 forward-only terminology cutover.  Historical v10-v18 DDL remains
+# immutable provenance; the live authority is recreated under its semantic
+# harness name by one atomic migration.
+_HARNESS_AUTHORITY_DDL = _SUPERVISOR_AUTHORITY_DDL.replace(
+    "CREATE TABLE supervisor_authority", "CREATE TABLE harness_authority", 1
+)
+_V19_TABLE_DDL = {
+    **{name: statement for name, statement in _V18_TABLE_DDL.items() if name != "supervisor_authority"},
+    "harness_authority": _HARNESS_AUTHORITY_DDL,
+}
+
 
 def _canonical_ddl(sql: str) -> str:
     """Return exact SQLite DDL modulo whitespace outside quoted values."""
@@ -1129,7 +1147,7 @@ def _canonical_ddl(sql: str) -> str:
 
 
 def _process_birth_identity(pid: int) -> str:
-    """Return the Linux process-birth identity used by supervisor leases."""
+    """Return the Linux process-birth identity used by harness leases."""
 
     try:
         fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()
@@ -1197,6 +1215,7 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(16): "codex_flow_compatibility_rebind_recovery_v16",
     SchemaVersion(17): "codex_flow_provider_transient_recovery_v17",
     SchemaVersion(18): "codex_flow_event_driven_program_controller_v18",
+    SchemaVersion(19): "codex_flow_harness_candidate_retention_v19",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -1287,7 +1306,7 @@ class StaleWriter(LedgerError):
     """The caller's expected predecessor is no longer current."""
 
 
-class SupervisorRefreshBlocked(LedgerError):
+class HarnessRefreshBlocked(LedgerError):
     """A refresh fence or active child prevents a new lifecycle action."""
 
 
@@ -1731,7 +1750,7 @@ class Ledger:
             "sdk_lifecycle_events",
             "execution_integrity",
             "app_native_dispatches",
-            "supervisor_authority",
+            "harness_authority",
             "dispatch_queue",
             "attempt_capabilities",
             "successor_outbox",
@@ -1753,7 +1772,7 @@ class Ledger:
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V18_TABLE_DDL:
+        if table not in _V19_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -1850,7 +1869,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V18_TABLE_DDL.values():
+                for statement in _V19_TABLE_DDL.values():
                     self._db().execute(statement)
                 for _name, (_table, statement) in _V15_INDEX_DDL.items():
                     self._db().execute(statement)
@@ -1934,6 +1953,7 @@ class Ledger:
             SchemaVersion(16): _V16_TABLE_DDL,
             SchemaVersion(17): _V17_TABLE_DDL,
             SchemaVersion(18): _V18_TABLE_DDL,
+            SchemaVersion(19): _V19_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -1983,6 +2003,23 @@ class Ledger:
                         program_dispatch_table if item[0] == "table" and item[1] == "dispatches" else item
                         for item in expected_inventory
                     )
+        # A v19 ledger can be deliberately opened under an older marker by a
+        # recovery fixture.  Its live authority already has the replacement
+        # harness name; accept that exact table in place of the historical
+        # supervisor spelling while the forward migration chain catches up.
+        if version < SchemaVersion(19):
+            harness_actual = next(
+                (item for item in actual_inventory if item[0] == "table" and item[1] == "harness_authority"),
+                None,
+            )
+            supervisor_expected = next(
+                (item for item in expected_inventory if item[0] == "table" and item[1] == "supervisor_authority"),
+                None,
+            )
+            if harness_actual is not None and supervisor_expected is not None:
+                expected_inventory = tuple(
+                    sorted(harness_actual if item == supervisor_expected else item for item in expected_inventory)
+                )
         if _inventory_fingerprint(actual_inventory) != _inventory_fingerprint(expected_inventory):
             raise CorruptSchemaError("ledger sqlite_master inventory does not match the canonical owned schema")
 
@@ -2146,8 +2183,10 @@ class Ledger:
             expected["execution_integrity"].pop("workspace_terminal_sha256")
         if version < SchemaVersion(9):
             expected.pop("app_native_dispatches")
+        authority_name = "harness_authority" if version >= SchemaVersion(19) else "supervisor_authority"
         if version < SchemaVersion(10):
             expected.pop("supervisor_authority", None)
+            expected.pop("harness_authority", None)
             expected.pop("dispatch_queue", None)
             expected.pop("attempt_capabilities", None)
             expected.pop("successor_outbox", None)
@@ -2155,7 +2194,7 @@ class Ledger:
         if version >= SchemaVersion(10):
             expected.update(
                 {
-                    "supervisor_authority": {
+                    authority_name: {
                         "singleton": ("INTEGER", 1, 1),
                         "repository_root": ("TEXT", 1, 0),
                         "state_root": ("TEXT", 1, 0),
@@ -2491,7 +2530,21 @@ class Ledger:
                 "completed_at": ("TEXT", 0, 0),
             }
         for table, expected_columns in expected.items():
-            rows = self._db().execute(f"PRAGMA table_info({table})").fetchall()
+            actual_table = table
+            if table == "supervisor_authority":
+                harness_present = (
+                    self._db()
+                    .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'harness_authority'")
+                    .fetchone()
+                )
+                supervisor_present = (
+                    self._db()
+                    .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supervisor_authority'")
+                    .fetchone()
+                )
+                if harness_present is not None and supervisor_present is None:
+                    actual_table = "harness_authority"
+            rows = self._db().execute(f"PRAGMA table_info({actual_table})").fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5])) for row in rows}
             if (allow_program_residue or self._has_program_schema_residue()) and version < SchemaVersion(18):
                 actual = {name: value for name, value in actual.items() if name not in program_columns}
@@ -2813,8 +2866,15 @@ class Ledger:
             # Queue facts are intentionally closed and immutable.  Foreign-key
             # checks above cover ownership; these lightweight invariants keep
             # malformed rows from becoming a recovery authority.
-            if int(self._db().execute("SELECT COUNT(*) FROM supervisor_authority").fetchone()[0]) > 1:
-                raise CorruptSchemaError("multiple supervisor authority rows")
+            authority_table = (
+                "harness_authority"
+                if self._db()
+                .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'harness_authority'")
+                .fetchone()
+                else "supervisor_authority"
+            )
+            if int(self._db().execute(f"SELECT COUNT(*) FROM {authority_table}").fetchone()[0]) > 1:
+                raise CorruptSchemaError("multiple harness authority rows")
             duplicate = (
                 self._db()
                 .execute(
@@ -4513,6 +4573,9 @@ class Ledger:
                 raise CorruptSchemaError("program controller action receipt is inconsistent")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(18):
+            self._migrate_v18_to_v19()
+            return
         if version == SchemaVersion(17):
             self._migrate_v17_to_v18()
             return
@@ -4600,6 +4663,58 @@ class Ledger:
         if self._db().execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise CorruptSchemaError("migrated ledger violates the canonical foreign-key contract")
         self._migrate_v2_to_v3()
+
+    def _migrate_v18_to_v19(self) -> None:
+        """Rename the live supervisor authority in one forward migration.
+
+        The predecessor table and schema identity remain available only to
+        migration/provenance readers.  No compatibility view or dual-read
+        path is created for the replacement harness.
+        """
+
+        self._validate_schema_metadata(SchemaVersion(18))
+        self._validate_shape(SchemaVersion(18))
+        self._validate_rows()
+        harness_exists = (
+            self._db()
+            .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'harness_authority'")
+            .fetchone()
+        )
+        supervisor_exists = (
+            self._db()
+            .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supervisor_authority'")
+            .fetchone()
+        )
+        if harness_exists is not None and supervisor_exists is None:
+            # Recovery fixtures may have lowered a v19 marker without
+            # restoring the old table name.  The replacement identity is
+            # already present, so only advance metadata after validating it.
+            self._validate_schema_metadata(SchemaVersion(18))
+            self._validate_shape(SchemaVersion(18))
+            self._validate_rows()
+            with self._transaction(validate_authority=False):
+                self._db().execute("UPDATE schema_meta SET value = '19' WHERE key = 'schema_version'")
+                self._db().execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                    (_SCHEMA_IDENTITIES[SchemaVersion(19)],),
+                )
+                self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+                self._fault("after_migration")
+            return
+        authority = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+        if authority is not None and int(authority["requested_shutdown"]) not in {0, 1}:
+            raise CorruptSchemaError("supervisor authority shutdown fence is malformed")
+        with self._transaction(validate_authority=False):
+            self._fault("before_rename_supervisor_authority")
+            self._db().execute("ALTER TABLE supervisor_authority RENAME TO harness_authority")
+            self._fault("after_rename_supervisor_authority")
+            self._db().execute("UPDATE schema_meta SET value = '19' WHERE key = 'schema_version'")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(19)],),
+            )
+            self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+            self._fault("after_migration")
 
     def _migrate_v12_to_v13(self) -> None:
         """Add live diagnostics, retry policy and control-command authority."""
@@ -5389,6 +5504,7 @@ class Ledger:
                     self._fault("after_migration")
             finally:
                 self._db().execute("PRAGMA foreign_keys = ON")
+            self._migrate_v18_to_v19()
             return
         self._validate_shape(SchemaVersion(17), allow_program_residue=self._has_program_schema_residue())
         self._validate_rows()
@@ -5451,6 +5567,7 @@ class Ledger:
                 self._fault("after_migration")
         finally:
             self._db().execute("PRAGMA foreign_keys = ON")
+        self._migrate_v18_to_v19()
 
     def _migrate_v17_dispatches_to_v18(self) -> None:
         """Replace legacy role-only uniqueness with generation identity."""
@@ -5542,7 +5659,7 @@ class Ledger:
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
         for table in (
-            "supervisor_authority",
+            "harness_authority",
             "dispatch_queue",
             "attempt_capabilities",
             "worker_liveness",
@@ -5553,7 +5670,7 @@ class Ledger:
                 .execute("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?", (table,))
                 .fetchone()
             )
-            expected = _V17_TABLE_DDL[table]
+            expected = _V19_TABLE_DDL[table]
             if actual is None or actual[0] is None or _canonical_ddl(str(actual[0])) != _canonical_ddl(expected):
                 raise CorruptSchemaError(f"diagnostic transaction table identity changed: {table}")
 
@@ -5895,6 +6012,8 @@ class Ledger:
                 WorkflowState.COMPLETED,
                 WorkflowState.REVIEWING,
                 WorkflowState.REPAIR_REQUIRED,
+                WorkflowState.BLOCKED,
+                WorkflowState.NEEDS_DECISION,
                 WorkflowState.ACCEPTED,
             }:
                 raise InvalidTransition(f"program review claim requires a completed milestone, found {current.value}")
@@ -5964,7 +6083,7 @@ class Ledger:
                 DispatchClaim(dispatch_id, run, milestone, RoleId("executor"), generation_value, now)
             )
 
-    # H6-E detached supervisor queue authority.
+    # H6-E detached harness queue authority.
     @staticmethod
     def _queue_row(row: sqlite3.Row) -> JsonObject:
         return {key: row[key] for key in row.keys()}
@@ -6006,6 +6125,8 @@ class Ledger:
             raise ValueError("queue capsule and route facts must be non-empty")
         if not re.fullmatch(r"[0-9a-f]{64}", result_contract_sha256):
             raise ValueError("queue result contract digest is invalid")
+        if result_contract_sha256 == legacy_model_facing_result_schema_sha256():
+            raise ValueError("queue result contract digest is retired")
         if not isinstance(permission_mode, NativePermissionMode):
             permission_mode = NativePermissionMode(permission_mode)
         if checkpoint_seconds <= 0:
@@ -6126,10 +6247,10 @@ class Ledger:
                     raise DispatchConflict("queue dispatch already exists with different v12 recovery facts")
                 return row
             authority = (
-                self._db().execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()
+                self._db().execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()
             )
             if authority is not None and int(authority["requested_shutdown"]) == 1:
-                raise SupervisorRefreshBlocked("supervisor refresh fence is active")
+                raise HarnessRefreshBlocked("harness refresh fence is active")
             sequence = int(
                 self._db().execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM dispatch_queue").fetchone()[0]
             )
@@ -6308,7 +6429,7 @@ class Ledger:
         now = utc_now()
         identity = str(dispatch_id)
         with self._diagnostic_transaction():
-            self._require_live_supervisor_in_transaction(epoch)
+            self._require_live_harness_in_transaction(epoch)
             self._validate_diagnostic_ring_in_transaction(identity)
             live = self._db().execute("SELECT * FROM worker_liveness WHERE dispatch_id = ?", (identity,)).fetchone()
             queue = self._db().execute("SELECT state FROM dispatch_queue WHERE dispatch_id = ?", (identity,)).fetchone()
@@ -7069,7 +7190,7 @@ class Ledger:
                 return self._queue_row(row)
             if row["state"] != ControlCommandState.SENT.value:
                 # A worker can only acknowledge a command after the
-                # supervisor atomically moved it from pending to sent.  This
+                # harness atomically moved it from pending to sent.  This
                 # closes forged pre-poll acknowledgements and keeps replay
                 # semantics explicit.
                 raise StaleWriter("control acknowledgement requires a sent command")
@@ -7109,13 +7230,13 @@ class Ledger:
         with self._transaction():
             authority = (
                 self._db()
-                .execute("SELECT epoch, expires_at, requested_shutdown FROM supervisor_authority WHERE singleton = 1")
+                .execute("SELECT epoch, expires_at, requested_shutdown FROM harness_authority WHERE singleton = 1")
                 .fetchone()
             )
             if authority is None or int(authority["epoch"]) != epoch or str(authority["expires_at"]) <= now:
-                raise StaleWriter("queue claim requires a live supervisor lease")
+                raise StaleWriter("queue claim requires a live harness lease")
             if int(authority["requested_shutdown"]) == 1:
-                raise SupervisorRefreshBlocked("supervisor refresh fence is active")
+                raise HarnessRefreshBlocked("harness refresh fence is active")
             row = (
                 self._db()
                 .execute(
@@ -7222,16 +7343,14 @@ class Ledger:
                 raise StaleWriter(f"queue state transition {row['state']} -> {state} is not allowed")
             if epoch is not None:
                 authority = (
-                    self._db()
-                    .execute("SELECT epoch, expires_at FROM supervisor_authority WHERE singleton = 1")
-                    .fetchone()
+                    self._db().execute("SELECT epoch, expires_at FROM harness_authority WHERE singleton = 1").fetchone()
                 )
                 if (
                     authority is None
                     or int(authority["epoch"]) != int(epoch)
                     or str(authority["expires_at"]) <= utc_now()
                 ):
-                    raise StaleWriter("queue state transition requires a live supervisor lease")
+                    raise StaleWriter("queue state transition requires a live harness lease")
             self._db().execute(
                 "UPDATE dispatch_queue SET state = ?, updated_at = ? WHERE dispatch_id = ?",
                 (state, utc_now(), str(dispatch_id)),
@@ -7270,10 +7389,10 @@ class Ledger:
             if row["claim_epoch"] != epoch:
                 raise StaleWriter("queue cancellation claim epoch is stale")
             authority = (
-                self._db().execute("SELECT epoch, expires_at FROM supervisor_authority WHERE singleton = 1").fetchone()
+                self._db().execute("SELECT epoch, expires_at FROM harness_authority WHERE singleton = 1").fetchone()
             )
             if authority is None or int(authority["epoch"]) != int(epoch) or str(authority["expires_at"]) <= utc_now():
-                raise StaleWriter("queue cancellation requires a live supervisor lease")
+                raise StaleWriter("queue cancellation requires a live harness lease")
         if (
             row["raw_result_json"] is not None
             or row["raw_result_sha256"] is not None
@@ -7407,7 +7526,7 @@ class Ledger:
                     (now, now, str(dispatch_id)),
                 )
                 self._db().execute(
-                    "UPDATE recovery_state SET worker_exit_classification = 'supervisor-cancelled', exit_code = ?, "
+                    "UPDATE recovery_state SET worker_exit_classification = 'harness-cancelled', exit_code = ?, "
                     "exited_at = ?, updated_at = ? WHERE dispatch_id = ?",
                     (exit_code, now, now, str(dispatch_id)),
                 )
@@ -7426,10 +7545,10 @@ class Ledger:
             raise ValueError("recovery epoch is invalid")
         with self._transaction():
             authority = (
-                self._db().execute("SELECT epoch, expires_at FROM supervisor_authority WHERE singleton = 1").fetchone()
+                self._db().execute("SELECT epoch, expires_at FROM harness_authority WHERE singleton = 1").fetchone()
             )
             if authority is None or int(authority["epoch"]) != new_epoch or str(authority["expires_at"]) <= utc_now():
-                raise StaleWriter("queue recovery requires a live supervisor lease")
+                raise StaleWriter("queue recovery requires a live harness lease")
             row = (
                 self._db().execute("SELECT * FROM dispatch_queue WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
             )
@@ -7562,7 +7681,7 @@ class Ledger:
                     raise StaleWriter("attempt capability facts conflict")
                 if row["consumed_at"] is None and str(row["expires_at"]) <= now:
                     # Re-issuing an unchanged active attempt after a
-                    # supervisor restart repairs a stale capability without
+                    # harness restart repairs a stale capability without
                     # changing its token or any binding fact.
                     self._db().execute(
                         "UPDATE attempt_capabilities SET expires_at = ? "
@@ -7758,6 +7877,11 @@ class Ledger:
             raise RecordNotFound(f"queue dispatch does not exist: {dispatch_id}")
         contract = str(row["result_contract_sha256"])
         if contract == model_facing_result_schema_sha256():
+            return ModelFacingResult.from_agent_message(raw_result)
+        if contract == legacy_model_facing_result_schema_sha256():
+            # v18 queue rows predate the additive typed blocker projection.
+            # They remain parseable for migration and terminal completion, but
+            # the retired digest is rejected by enqueue_dispatch above.
             return ModelFacingResult.from_agent_message(raw_result)
         if contract == model_facing_review_result_schema_sha256():
             return review_result_from_agent_message(raw_result)
@@ -8552,7 +8676,7 @@ class Ledger:
         now = utc_now()
         expires = self._expires_after(now, lease_seconds)
         with self._transaction():
-            self._require_live_supervisor_in_transaction(epoch)
+            self._require_live_harness_in_transaction(epoch)
             queue = (
                 self._db().execute("SELECT * FROM dispatch_queue WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
             )
@@ -8645,7 +8769,7 @@ class Ledger:
         except (AttributeError, UnicodeEncodeError) as exc:
             raise StaleWriter("worker capability token is invalid") from exc
         with self._transaction():
-            self._require_live_supervisor_in_transaction(epoch)
+            self._require_live_harness_in_transaction(epoch)
             queue = (
                 self._db().execute("SELECT * FROM dispatch_queue WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
             )
@@ -8729,7 +8853,7 @@ class Ledger:
         now = utc_now()
         with self._transaction():
             if epoch is not None:
-                self._require_live_supervisor_in_transaction(epoch)
+                self._require_live_harness_in_transaction(epoch)
             row = (
                 self._db()
                 .execute("SELECT * FROM worker_liveness WHERE dispatch_id = ?", (str(dispatch_id),))
@@ -8791,14 +8915,14 @@ class Ledger:
         process_birth_identity: str,
         claim_nonce_sha256: str,
     ) -> JsonObject:
-        """Move a still-live worker claim to a replacement supervisor epoch."""
+        """Move a still-live worker claim to a replacement harness epoch."""
 
         if new_epoch <= 0 or pid <= 0 or not process_birth_identity:
             raise ValueError("live worker adoption facts are invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", claim_nonce_sha256):
             raise ValueError("worker adoption claim nonce is invalid")
         with self._transaction():
-            self._require_live_supervisor_in_transaction(new_epoch)
+            self._require_live_harness_in_transaction(new_epoch)
             queue = (
                 self._db().execute("SELECT * FROM dispatch_queue WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
             )
@@ -9391,7 +9515,7 @@ class Ledger:
             raise ValueError("recovery continuation claim nonce is invalid")
         current = now or utc_now()
         with self._transaction():
-            self._require_live_supervisor_in_transaction(epoch)
+            self._require_live_harness_in_transaction(epoch)
             recovery = (
                 self._db().execute("SELECT * FROM recovery_state WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
             )
@@ -9809,7 +9933,7 @@ class Ledger:
                 if live is not None and live["exited_at"] is None:
                     # The reasoned action is now durable and wins the policy
                     # CAS, but terminal authority must wait for the exact
-                    # supervisor-owned child exit acknowledgement.
+                    # harness-owned child exit acknowledgement.
                     self._db().execute(
                         "UPDATE retry_policies SET revision = ?, updated_at = ? WHERE dispatch_id = ?",
                         (applied_revision, now, str(dispatch_id)),
@@ -9852,7 +9976,7 @@ class Ledger:
 
         current = now or utc_now()
         with self._transaction():
-            self._require_live_supervisor_in_transaction(epoch)
+            self._require_live_harness_in_transaction(epoch)
             recovery = (
                 self._db().execute("SELECT * FROM recovery_state WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
             )
@@ -9894,15 +10018,15 @@ class Ledger:
                 self._db().execute("SELECT * FROM dispatch_queue WHERE dispatch_id = ?", (str(dispatch_id),)).fetchone()
             )
 
-    def _require_live_supervisor_in_transaction(self, epoch: int) -> None:
-        row = self._db().execute("SELECT epoch, expires_at FROM supervisor_authority WHERE singleton = 1").fetchone()
+    def _require_live_harness_in_transaction(self, epoch: int) -> None:
+        row = self._db().execute("SELECT epoch, expires_at FROM harness_authority WHERE singleton = 1").fetchone()
         if row is None or int(row["epoch"]) != epoch or str(row["expires_at"]) <= utc_now():
-            raise StaleWriter("operation requires a live supervisor lease")
+            raise StaleWriter("operation requires a live harness lease")
 
     def claim_due_checkpoint(self, *, epoch: int, now: str | None = None) -> JsonObject | None:
         current = now or utc_now()
         with self._transaction():
-            self._require_live_supervisor_in_transaction(epoch)
+            self._require_live_harness_in_transaction(epoch)
             row = (
                 self._db()
                 .execute(
@@ -10205,10 +10329,27 @@ class Ledger:
             reviews: list[str] = []
             findings: list[str] = []
             candidate: str | None = None
+            candidate_disposition: CandidateDisposition | None = None
+            blocker: TypedBlocker | None = None
             for fact in self.review_lifecycle(row["run_id"], milestone_id):
                 value = fact.data
                 if isinstance(value.get("candidate_sha"), str):
                     candidate = str(value["candidate_sha"])
+                    candidate_disposition = CandidateDisposition.VERIFIED_COMMIT
+                raw_disposition = value.get("candidate_disposition")
+                if isinstance(raw_disposition, str):
+                    try:
+                        candidate_disposition = CandidateDisposition(raw_disposition)
+                    except ValueError as exc:
+                        raise CorruptSchemaError("program candidate disposition is invalid") from exc
+                raw_blocker = value.get("blocker")
+                if raw_blocker is not None:
+                    if not isinstance(raw_blocker, Mapping):
+                        raise CorruptSchemaError("program blocker projection is invalid")
+                    try:
+                        blocker = TypedBlocker.from_json(raw_blocker)
+                    except (TypeError, ValueError) as exc:
+                        raise CorruptSchemaError("program blocker projection is invalid") from exc
                 review_id = value.get("review_id")
                 if isinstance(review_id, str):
                     reviews.append(review_id)
@@ -10236,6 +10377,8 @@ class Ledger:
                     tuple(reviews),
                     tuple(findings),
                     integrated,
+                    candidate_disposition,
+                    blocker,
                 )
             )
         try:
@@ -10368,6 +10511,8 @@ class Ledger:
                     status_by_id[node.milestone_id].finding_ids,
                     status_by_id[node.milestone_id].integrated,
                     node.milestone_id in ready,
+                    status_by_id[node.milestone_id].candidate_disposition,
+                    status_by_id[node.milestone_id].blocker,
                 )
                 for node in graph.nodes
             )
@@ -10770,6 +10915,82 @@ class Ledger:
             )
             return fact
 
+    def adopt_program_candidate(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId | str,
+        candidate: CandidateRecord,
+        *,
+        dispatch_id: DispatchId | str | None = None,
+    ) -> ProgramStatus:
+        """Register one independently verified existing candidate for review."""
+
+        if (
+            not isinstance(candidate, CandidateRecord)
+            or candidate.disposition is not CandidateDisposition.VERIFIED_COMMIT
+        ):
+            raise ValueError("program adoption requires a verified commit candidate")
+        assert candidate.commit_sha is not None
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        dispatch_value = str(dispatch_id) if dispatch_id is not None else None
+        with self._transaction():
+            row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            milestone_row = (
+                self._db()
+                .execute(
+                    "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                    (str(program), str(milestone)),
+                )
+                .fetchone()
+            )
+            if row is None or row["program_digest"] is None or milestone_row is None:
+                raise RecordNotFound(f"program candidate does not exist: {program}/{milestone}")
+            facts = self.review_lifecycle(program, milestone)
+            existing = self._program_candidate_sha(program, milestone)
+            if existing is not None and existing != candidate.commit_sha:
+                raise StaleWriter("program candidate commit changed before adoption")
+            if any(
+                item.kind in {"promotion_accepted", "integration_completed"}
+                and item.data.get("candidate_sha") == candidate.commit_sha
+                for item in facts
+            ):
+                raise StaleWriter("program candidate is already promoted or integrated")
+            current = WorkflowState(str(milestone_row["current_state"]))
+            if current in {WorkflowState.FAILED, WorkflowState.BLOCKED, WorkflowState.NEEDS_DECISION}:
+                self._transition_program_state_in_transaction(
+                    program,
+                    milestone,
+                    WorkflowState.REPAIR_REQUIRED,
+                    expected_state=current,
+                    reason=ReasonCode.TERMINAL_OUTCOME,
+                )
+            self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.RECOVERY,
+                kind="candidate_adopted",
+                data={
+                    "candidate_sha": candidate.commit_sha,
+                    "candidate_disposition": candidate.disposition.value,
+                    "candidate_workspace_path": str(candidate.workspace_path),
+                    "candidate_workspace_head": candidate.workspace_head,
+                    "candidate_workspace_digest": candidate.workspace_digest,
+                    "candidate_dirty": candidate.dirty,
+                    "candidate_reason": candidate.reason,
+                    "dispatch_id": dispatch_value,
+                },
+            )
+            self._ensure_program_decision_in_transaction(
+                program,
+                event_kind=ProgramEventKind.IMPLEMENTATION_COMPLETED,
+                event_key=f"milestone/{milestone}/candidate/{candidate.commit_sha}",
+                payload={"milestone_id": str(milestone), "candidate_sha": candidate.commit_sha, "adopted": True},
+            )
+            refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            assert refreshed is not None
+            return self._program_status_from_row(refreshed)
+
     def record_program_review(
         self, program_id: ProgramId | str, milestone_id: MilestoneId | str, result: object
     ) -> LifecycleRecord:
@@ -10917,8 +11138,10 @@ class Ledger:
         terminal_status: str,
         dispatch_id: DispatchId | str | None = None,
         result_sha256: str | None = None,
+        candidate_record: CandidateRecord | None = None,
+        blocker: TypedBlocker | None = None,
     ) -> ProgramStatus:
-        """Close one executor queue result and emit its program event once."""
+        """Close one executor result while retaining any verified workspace fact."""
 
         program = ProgramId(str(program_id))
         milestone = MilestoneId(str(milestone_id))
@@ -10928,12 +11151,40 @@ class Ledger:
             raise ValueError("program executor terminal status is unsupported")
         if result_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", result_sha256) is None:
             raise ValueError("program executor result digest is invalid")
+        if candidate_record is not None and not isinstance(candidate_record, CandidateRecord):
+            raise TypeError("program candidate record must be typed")
+        if blocker is not None and not isinstance(blocker, TypedBlocker):
+            raise TypeError("program blocker must be typed")
+        if candidate_record is not None:
+            record_sha = candidate_record.commit_sha
+            if record_sha != candidate_sha:
+                raise StaleWriter("program candidate record does not match candidate commit")
+            candidate_disposition = candidate_record.disposition
+        elif candidate_sha is not None:
+            candidate_disposition = CandidateDisposition.VERIFIED_COMMIT
+        else:
+            candidate_disposition = CandidateDisposition.NO_CANDIDATE
+        if terminal_status != "completed" and blocker is None:
+            blocker = TypedBlocker(
+                gate_id="executor-terminal-facts",
+                kind=BlockerKind.EXECUTION,
+                scope=BlockerScope.CURRENT_REPAIR,
+                promotion_blocking=True,
+                required_action="Inspect the retained terminal workspace and choose repair or abandonment.",
+            )
         dispatch_value = str(dispatch_id) if dispatch_id is not None else None
         terminal_fact = {
             "dispatch_id": dispatch_value,
             "terminal_status": terminal_status,
             "candidate_sha": candidate_sha,
+            "candidate_disposition": candidate_disposition.value,
+            "candidate_workspace_path": str(candidate_record.workspace_path) if candidate_record is not None else None,
+            "candidate_workspace_head": candidate_record.workspace_head if candidate_record is not None else None,
+            "candidate_workspace_digest": candidate_record.workspace_digest if candidate_record is not None else None,
+            "candidate_dirty": candidate_record.dirty if candidate_record is not None else False,
+            "candidate_reason": candidate_record.reason if candidate_record is not None else None,
             "result_sha256": result_sha256,
+            "blocker": blocker.to_json() if blocker is not None else None,
         }
         with self._transaction():
             row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
@@ -10954,58 +11205,75 @@ class Ledger:
                     raise StaleWriter("program executor terminal replay conflicts with its durable result")
                 return self._program_status_from_row(row)
             current = WorkflowState(str(milestone_row["current_state"]))
-            if terminal_status == "completed":
-                if candidate_sha is None:
-                    raise ValueError("completed program executor result requires a candidate commit")
-                if current is WorkflowState.STARTING:
-                    now = utc_now()
-                    self._db().execute(
-                        "UPDATE milestones SET current_state = 'RUNNING', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
-                        (now, str(program), str(milestone)),
-                    )
-                    self._append_event_in_transaction(
-                        RunId(str(program)),
-                        milestone,
-                        from_state=WorkflowState.STARTING,
-                        to_state=WorkflowState.RUNNING,
-                        event_type="state_transition",
-                        reason=WorkflowReason(ReasonCode.EXECUTION_FAILURE),
-                        dispatch_id=None,
-                        data=None,
-                    )
-                    current = WorkflowState.RUNNING
-                if current is WorkflowState.RUNNING:
-                    now = utc_now()
-                    self._db().execute(
-                        "UPDATE milestones SET current_state = 'COMPLETED', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
-                        (now, str(program), str(milestone)),
-                    )
-                    self._append_event_in_transaction(
-                        RunId(str(program)),
-                        milestone,
-                        from_state=WorkflowState.RUNNING,
-                        to_state=WorkflowState.COMPLETED,
-                        event_type="state_transition",
-                        reason=WorkflowReason(ReasonCode.TERMINAL_OUTCOME),
-                        dispatch_id=None,
-                        data=None,
-                    )
-                    current = WorkflowState.COMPLETED
-                if current is not WorkflowState.COMPLETED:
-                    raise StaleWriter(f"program executor result requires a running milestone, found {current.value}")
-                existing = self._program_candidate_sha(program, milestone)
-                if existing not in {None, candidate_sha}:
-                    raise StaleWriter("program candidate commit changed after executor completion")
-                self._record_program_fact_in_transaction(
-                    program,
-                    milestone,
-                    phase=LifecyclePhase.EXECUTION,
-                    kind="candidate_recorded",
-                    data={
-                        "candidate_sha": candidate_sha,
-                        "dispatch_id": dispatch_value,
-                    },
+            candidate_bearing = candidate_sha is not None
+            if terminal_status == "completed" and candidate_bearing:
+                target_state = WorkflowState.COMPLETED
+            elif candidate_bearing and terminal_status == "external_blocked":
+                target_state = WorkflowState.BLOCKED
+            elif candidate_bearing and terminal_status == "needs_decision":
+                target_state = WorkflowState.NEEDS_DECISION
+            elif candidate_bearing and terminal_status == "failed":
+                target_state = WorkflowState.REPAIR_REQUIRED
+            else:
+                target_state = WorkflowState.FAILED
+            if current is WorkflowState.STARTING and target_state in {
+                WorkflowState.COMPLETED,
+                WorkflowState.NEEDS_DECISION,
+                WorkflowState.REPAIR_REQUIRED,
+            }:
+                now = utc_now()
+                self._db().execute(
+                    "UPDATE milestones SET current_state = 'RUNNING', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                    (now, str(program), str(milestone)),
                 )
+                self._append_event_in_transaction(
+                    RunId(str(program)),
+                    milestone,
+                    from_state=WorkflowState.STARTING,
+                    to_state=WorkflowState.RUNNING,
+                    event_type="state_transition",
+                    reason=WorkflowReason(ReasonCode.EXECUTION_FAILURE),
+                    dispatch_id=None,
+                    data=None,
+                )
+                current = WorkflowState.RUNNING
+            if current in {WorkflowState.STARTING, WorkflowState.RUNNING}:
+                now = utc_now()
+                self._db().execute(
+                    "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                    (target_state.value, now, str(program), str(milestone)),
+                )
+                self._append_event_in_transaction(
+                    RunId(str(program)),
+                    milestone,
+                    from_state=current,
+                    to_state=target_state,
+                    event_type="state_transition",
+                    reason=WorkflowReason(
+                        ReasonCode.TERMINAL_OUTCOME
+                        if target_state is WorkflowState.COMPLETED
+                        else ReasonCode.EXECUTION_FAILURE
+                    ),
+                    dispatch_id=None,
+                    data=None,
+                )
+            elif current is WorkflowState.PLANNED and target_state is WorkflowState.FAILED:
+                # Low-level callers may close an unclaimed synthetic failure;
+                # retain its terminal fact without inventing a dispatch state.
+                pass
+            elif current is not target_state and target_state is not WorkflowState.COMPLETED:
+                raise StaleWriter(f"program executor result requires a launchable milestone, found {current.value}")
+            existing = self._program_candidate_sha(program, milestone)
+            if existing not in {None, candidate_sha}:
+                raise StaleWriter("program candidate commit changed after executor completion")
+            self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.EXECUTION,
+                kind="candidate_recorded",
+                data=terminal_fact,
+            )
+            if target_state is WorkflowState.COMPLETED and candidate_sha is not None:
                 self._ensure_program_decision_in_transaction(
                     program,
                     event_kind=ProgramEventKind.IMPLEMENTATION_COMPLETED,
@@ -11013,32 +11281,19 @@ class Ledger:
                     payload={"milestone_id": str(milestone), "candidate_sha": candidate_sha},
                 )
             else:
-                if current in {WorkflowState.STARTING, WorkflowState.RUNNING}:
-                    now = utc_now()
-                    self._db().execute(
-                        "UPDATE milestones SET current_state = 'FAILED', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
-                        (now, str(program), str(milestone)),
-                    )
-                    self._append_event_in_transaction(
-                        RunId(str(program)),
-                        milestone,
-                        from_state=current,
-                        to_state=WorkflowState.FAILED,
-                        event_type="state_transition",
-                        reason=WorkflowReason(ReasonCode.EXECUTION_FAILURE),
-                        dispatch_id=None,
-                        data=None,
-                    )
-                self._db().execute(
-                    "UPDATE runs SET program_state = ?, program_revision = program_revision + 1 WHERE run_id = ?",
-                    (
+                if candidate_bearing:
+                    program_state = ProgramState.RUNNING.value
+                else:
+                    program_state = (
                         ProgramState.NEEDS_DECISION.value
                         if terminal_status == "needs_decision"
                         else ProgramState.EXTERNAL_BLOCKED.value
                         if terminal_status == "external_blocked"
-                        else ProgramState.FAILED.value,
-                        str(program),
-                    ),
+                        else ProgramState.FAILED.value
+                    )
+                self._db().execute(
+                    "UPDATE runs SET program_state = ?, program_revision = program_revision + 1 WHERE run_id = ?",
+                    (program_state, str(program)),
                 )
                 reason = f"executor/{milestone}/{dispatch_value or 'unbound'}/{terminal_status}"
                 self._ensure_program_decision_in_transaction(
@@ -11050,6 +11305,9 @@ class Ledger:
                         "terminal_status": terminal_status,
                         "dispatch_id": dispatch_value,
                         "result_sha256": result_sha256,
+                        "candidate_sha": candidate_sha,
+                        "candidate_disposition": candidate_disposition.value,
+                        "blocker": blocker.to_json() if blocker is not None else None,
                     },
                 )
             self._record_program_fact_in_transaction(
@@ -11155,12 +11413,17 @@ class Ledger:
                     if existing is not None:
                         raise StaleWriter("program review action would duplicate a reviewer START")
                 state = self.current_state(bundle.program_id, action.milestone_id)
-                if state is WorkflowState.COMPLETED:
+                if state in {
+                    WorkflowState.COMPLETED,
+                    WorkflowState.BLOCKED,
+                    WorkflowState.NEEDS_DECISION,
+                    WorkflowState.REPAIR_REQUIRED,
+                }:
                     self._transition_program_state_in_transaction(
                         bundle.program_id,
                         MilestoneId(action.milestone_id),
                         WorkflowState.REVIEWING,
-                        expected_state=WorkflowState.COMPLETED,
+                        expected_state=state,
                         reason=ReasonCode.TERMINAL_OUTCOME,
                     )
                 elif state is not WorkflowState.REVIEWING:
@@ -11567,11 +11830,20 @@ class Ledger:
                 if not isinstance(tree, str) or re.fullmatch(r"[0-9a-f]{40}", tree) is None:
                     raise ValueError("applied program integration requires an exact commit tree")
                 strategy = expected["strategy"]
-                if strategy == "fast_forward" and after != candidate_sha:
+                logical_promotion = receipt_value.get("logical_promotion") is True
+                if logical_promotion and parents != [expected["expected_trunk_head"]]:
+                    raise StaleWriter("logical promotion receipt has unexpected commit parents")
+                if logical_promotion and after != candidate_sha:
+                    raise StaleWriter("logical promotion receipt has an unexpected resulting HEAD")
+                if not logical_promotion and strategy == "fast_forward" and after != candidate_sha:
                     raise StaleWriter("fast-forward integration receipt has an unexpected resulting HEAD")
-                if strategy == "merge" and parents != [expected["expected_trunk_head"], candidate_sha]:
+                if (
+                    not logical_promotion
+                    and strategy == "merge"
+                    and parents != [expected["expected_trunk_head"], candidate_sha]
+                ):
                     raise StaleWriter("merge integration receipt has unexpected commit parents")
-                if strategy == "cherry_pick" and parents != [expected["expected_trunk_head"]]:
+                if not logical_promotion and strategy == "cherry_pick" and parents != [expected["expected_trunk_head"]]:
                     raise StaleWriter("cherry-pick integration receipt has unexpected commit parents")
             if (
                 state == "applied"
@@ -11933,10 +12205,10 @@ class Ledger:
             }:
                 raise StaleWriter("controller decision is not launchable")
             authority = (
-                self._db().execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()
+                self._db().execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()
             )
             if authority is not None and int(authority["requested_shutdown"]) == 1:
-                raise SupervisorRefreshBlocked("supervisor refresh fence is active")
+                raise HarnessRefreshBlocked("harness refresh fence is active")
             row = (
                 self._db()
                 .execute(
@@ -12065,10 +12337,10 @@ class Ledger:
             if decision is None or row is None:
                 raise RecordNotFound(f"controller launch authority does not exist: {identity}/{generation_value}")
             authority = (
-                self._db().execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()
+                self._db().execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()
             )
             if authority is not None and int(authority["requested_shutdown"]) == 1:
-                raise SupervisorRefreshBlocked("supervisor refresh fence is active")
+                raise HarnessRefreshBlocked("harness refresh fence is active")
             if int(decision["current_generation"]) != int(generation_value):
                 raise StaleWriter("controller launch generation is stale")
             self._require_controller_generation_launch_owner(decision, now=current)
@@ -12106,10 +12378,10 @@ class Ledger:
             if decision is None or row is None:
                 raise RecordNotFound(f"controller launch authority does not exist: {identity}/{generation_value}")
             authority = (
-                self._db().execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()
+                self._db().execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()
             )
             if authority is not None and int(authority["requested_shutdown"]) == 1:
-                raise SupervisorRefreshBlocked("supervisor refresh fence is active")
+                raise HarnessRefreshBlocked("harness refresh fence is active")
             if int(decision["current_generation"]) != int(generation_value):
                 raise StaleWriter("controller launch generation is stale")
             self._require_controller_generation_launch_owner(decision, now=current)
@@ -12843,7 +13115,7 @@ class Ledger:
         way to know whether a writer crossed the process boundary.  This
         method records the ambiguous inspection and attention decision in one
         transaction, guarded by the exact decision revision and claimant
-        identity observed by the supervisor.  A newer human claim therefore
+        identity observed by the harness.  A newer human claim therefore
         causes the CAS to fail without changing either row.
         """
 
@@ -14469,7 +14741,7 @@ class Ledger:
     def reconcile_inflight_wakes(self) -> int:
         """Conservatively close source wakes left in the SDK call window.
 
-        A supervisor crash cannot prove whether the SDK created a source turn.
+        A harness crash cannot prove whether the SDK created a source turn.
         Marking the row ambiguous is therefore the only safe restart action;
         callers with authoritative shared-session evidence may then reconcile
         it to one recorded source turn through ``reconcile_wake_delivery``.
@@ -14623,31 +14895,31 @@ class Ledger:
             updated = self._db().execute("SELECT * FROM wake_outbox WHERE delivery_id = ?", (delivery_id,)).fetchone()
             return self._queue_row(updated)
 
-    def supervisor_authority(self) -> JsonObject | None:
-        row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+    def harness_authority(self) -> JsonObject | None:
+        row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
         return self._queue_row(row) if row is not None else None
 
-    def supervisor_refresh_fenced(self) -> bool:
-        """Return whether the durable supervisor row rejects new work."""
+    def harness_refresh_fenced(self) -> bool:
+        """Return whether the durable harness row rejects new work."""
 
-        row = self._db().execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()
+        row = self._db().execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()
         return row is not None and int(row["requested_shutdown"]) == 1
 
-    def _raise_if_active_supervisor_children_in_transaction(self) -> None:
+    def _raise_if_active_harness_children_in_transaction(self) -> None:
         # ``Popen`` cannot share the SQLite transaction that claims a queue
         # item.  Treat a durable pre-launch claim as active handoff work so a
         # refresh cannot win the gap between queue claim and worker-liveness
-        # binding.  The supervisor will reconcile stale claims on restart.
+        # binding.  The harness will reconcile stale claims on restart.
         queue = (
             self._db()
             .execute("SELECT 1 FROM dispatch_queue WHERE state IN ('claimed', 'starting', 'running') LIMIT 1")
             .fetchone()
         )
         if queue is not None:
-            raise SupervisorRefreshBlocked("supervisor refresh deferred while a worker launch is active")
+            raise HarnessRefreshBlocked("harness refresh deferred while a worker launch is active")
         worker = self._db().execute("SELECT 1 FROM worker_liveness WHERE exited_at IS NULL LIMIT 1").fetchone()
         if worker is not None:
-            raise SupervisorRefreshBlocked("supervisor refresh deferred while a worker child is active")
+            raise HarnessRefreshBlocked("harness refresh deferred while a worker child is active")
         controller = (
             self._db()
             .execute(
@@ -14656,27 +14928,27 @@ class Ledger:
             .fetchone()
         )
         if controller is not None:
-            raise SupervisorRefreshBlocked("supervisor refresh deferred while a controller child is active")
+            raise HarnessRefreshBlocked("harness refresh deferred while a controller child is active")
 
-    def assert_supervisor_refresh_allowed(self) -> None:
+    def assert_harness_refresh_allowed(self) -> None:
         """Fail closed if a child is active before a refresh fence is armed."""
 
         with self._transaction():
-            self._raise_if_active_supervisor_children_in_transaction()
+            self._raise_if_active_harness_children_in_transaction()
 
-    def arm_supervisor_refresh_fence(self) -> JsonObject | None:
+    def arm_harness_refresh_fence(self) -> JsonObject | None:
         """Atomically reject active children and arm the existing shutdown fact."""
 
         with self._transaction():
-            self._raise_if_active_supervisor_children_in_transaction()
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            self._raise_if_active_harness_children_in_transaction()
+            row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
             if row is None:
                 return None
-            self._db().execute("UPDATE supervisor_authority SET requested_shutdown = 1 WHERE singleton = 1")
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            self._db().execute("UPDATE harness_authority SET requested_shutdown = 1 WHERE singleton = 1")
+            row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
             return self._queue_row(row)
 
-    def acquire_supervisor(
+    def acquire_harness(
         self,
         *,
         repository_root: Path | str,
@@ -14689,10 +14961,10 @@ class Ledger:
         lease_seconds: float = 30.0,
     ) -> JsonObject:
         if pid <= 0 or lease_seconds <= 0 or not process_birth_identity or not version:
-            raise ValueError("supervisor lease facts are invalid")
+            raise ValueError("harness lease facts are invalid")
         digests = (executable_digest, owner_nonce_sha256)
         if any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in digests):
-            raise ValueError("supervisor digest is invalid")
+            raise ValueError("harness digest is invalid")
         now = utc_now()
         # ISO timestamps are only compared lexically in this module; callers
         # provide a bounded lease and stale ownership is conservatively denied.
@@ -14701,7 +14973,7 @@ class Ledger:
             datetime.fromtimestamp(expires, timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
         )
         with self._transaction():
-            existing = self.supervisor_authority()
+            existing = self.harness_authority()
             if existing is not None:
                 handoff_fenced = int(existing["requested_shutdown"]) == 1
                 if (
@@ -14709,13 +14981,13 @@ class Ledger:
                     and str(existing["expires_at"]) > now
                     and str(existing["owner_nonce_sha256"]) != owner_nonce_sha256
                 ):
-                    raise StaleWriter("another live supervisor owns the repository")
+                    raise StaleWriter("another live harness owns the repository")
                 epoch = int(existing["epoch"]) + 1
-                self._db().execute("DELETE FROM supervisor_authority WHERE singleton = 1")
+                self._db().execute("DELETE FROM harness_authority WHERE singleton = 1")
             else:
                 epoch = 1
             self._db().execute(
-                "INSERT INTO supervisor_authority(singleton, repository_root, state_root, epoch, owner_nonce_sha256, pid, process_birth_identity, acquired_at, renewed_at, expires_at, executable_digest, version, requested_shutdown) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                "INSERT INTO harness_authority(singleton, repository_root, state_root, epoch, owner_nonce_sha256, pid, process_birth_identity, acquired_at, renewed_at, expires_at, executable_digest, version, requested_shutdown) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
                 (
                     os.fspath(Path(repository_root).resolve()),
                     os.fspath(Path(state_root).resolve()),
@@ -14730,42 +15002,42 @@ class Ledger:
                     version,
                 ),
             )
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
             return self._queue_row(row)
 
-    def renew_supervisor(self, *, epoch: int, owner_nonce_sha256: str, lease_seconds: float = 30.0) -> JsonObject:
+    def renew_harness(self, *, epoch: int, owner_nonce_sha256: str, lease_seconds: float = 30.0) -> JsonObject:
         if epoch <= 0 or not re.fullmatch(r"[0-9a-f]{64}", owner_nonce_sha256):
-            raise ValueError("supervisor renewal facts are invalid")
+            raise ValueError("harness renewal facts are invalid")
         now = utc_now()
         expires = datetime.fromisoformat(now.removesuffix("Z")).replace(tzinfo=timezone.utc).timestamp() + lease_seconds
         expires_at = (
             datetime.fromtimestamp(expires, timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
         )
         with self._transaction():
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
             if (
                 row is None
                 or int(row["epoch"]) != epoch
                 or not secrets.compare_digest(str(row["owner_nonce_sha256"]), owner_nonce_sha256)
             ):
-                raise StaleWriter("supervisor lease is stale")
+                raise StaleWriter("harness lease is stale")
             self._db().execute(
-                "UPDATE supervisor_authority SET renewed_at = ?, expires_at = ? WHERE singleton = 1", (now, expires_at)
+                "UPDATE harness_authority SET renewed_at = ?, expires_at = ? WHERE singleton = 1", (now, expires_at)
             )
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
             return self._queue_row(row)
 
-    def request_supervisor_shutdown(self, *, epoch: int, owner_nonce_sha256: str) -> JsonObject:
+    def request_harness_shutdown(self, *, epoch: int, owner_nonce_sha256: str) -> JsonObject:
         with self._transaction():
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
             if (
                 row is None
                 or int(row["epoch"]) != epoch
                 or not secrets.compare_digest(str(row["owner_nonce_sha256"]), owner_nonce_sha256)
             ):
-                raise StaleWriter("supervisor lease is stale")
-            self._db().execute("UPDATE supervisor_authority SET requested_shutdown = 1 WHERE singleton = 1")
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+                raise StaleWriter("harness lease is stale")
+            self._db().execute("UPDATE harness_authority SET requested_shutdown = 1 WHERE singleton = 1")
+            row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
             return self._queue_row(row)
 
     def transition(

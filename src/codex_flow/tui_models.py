@@ -167,7 +167,7 @@ class WorkerView:
             turn_id=status.active_turn_id,
             model="not exposed by control API",
             effort="not exposed by control API",
-            route="control: authenticated local supervisor; execution: not exposed",
+            route="control: authenticated local harness; execution: not exposed",
             elapsed="not exposed by control API",
             activity_age=_age(last_seen, now=observed),
             lease="not exposed by control API",
@@ -238,7 +238,7 @@ class TerminalUiSnapshot:
 
     @property
     def mode_label(self) -> str:
-        return "LIVE · authenticated supervisor" if self.connected else "OFFLINE · read-only last snapshot"
+        return "LIVE · authenticated harness" if self.connected else "OFFLINE · read-only last snapshot"
 
 
 __all__ = ["ActivityView", "DecisionView", "TerminalUiSnapshot", "WorkerView"]

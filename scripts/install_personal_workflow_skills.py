@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from codex_flow.ledger import Ledger, LedgerError, SupervisorRefreshBlocked
+from codex_flow.ledger import HarnessRefreshBlocked, Ledger, LedgerError
 
 PLUGIN_NAME = "personal-workflow-skills"
 MARKETPLACE_NAME = "adam-workflows"
@@ -150,60 +150,60 @@ class Bootstrap:
         self.standard_home = Path.home().resolve()
         self.plugin_root = self.root / "plugins" / PLUGIN_NAME
 
-    def _matching_supervisor_unit(self) -> Path:
+    def _matching_harness_unit(self) -> Path:
         """Return the exact repository-scoped user unit path."""
 
         digest = hashlib.sha256(os.fspath(self.root.resolve()).encode("utf-8")).hexdigest()[:16]
         config_home = Path(os.environ.get("XDG_CONFIG_HOME", self.standard_home / ".config"))
         return config_home / "systemd" / "user" / f"codex-flow-{digest}.service"
 
-    def refresh_existing_supervisor(self) -> None:
-        """Refresh only a safe, pre-existing matching supervisor unit."""
+    def refresh_existing_harness(self) -> None:
+        """Refresh only a safe, pre-existing matching harness unit."""
 
-        path = self._matching_supervisor_unit()
+        path = self._matching_harness_unit()
         try:
             metadata = path.lstat()
         except FileNotFoundError:
             return
         except OSError as exc:
-            raise BootstrapError("matching supervisor unit is unavailable") from exc
+            raise BootstrapError("matching harness unit is unavailable") from exc
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise BootstrapError("matching supervisor unit is unsafe")
+            raise BootstrapError("matching harness unit is unsafe")
         launcher = self.standard_home / ".local" / "bin" / "codex-flow"
-        self.runner.run((os.fspath(launcher), "supervisor", "refresh", "--state-root", os.fspath(self.root)))
-        self.completed.append("supervisor-refreshed")
+        self.runner.run((os.fspath(launcher), "harness", "refresh", "--state-root", os.fspath(self.root)))
+        self.completed.append("harness-refreshed")
 
-    def fence_existing_supervisor(self) -> None:
+    def fence_existing_harness(self) -> None:
         """Arm the durable refresh fence before replacing the shared tool."""
 
-        path = self._matching_supervisor_unit()
+        path = self._matching_harness_unit()
         try:
             metadata = path.lstat()
         except FileNotFoundError:
             return
         except OSError as exc:
-            raise BootstrapError("matching supervisor unit is unavailable") from exc
+            raise BootstrapError("matching harness unit is unavailable") from exc
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise BootstrapError("matching supervisor unit is unsafe")
+            raise BootstrapError("matching harness unit is unsafe")
         ledger_path = self.root / ".codex-flow" / "workflow.db"
         if not ledger_path.is_file():
-            raise BootstrapError("matching supervisor ledger is unavailable")
+            raise BootstrapError("matching harness ledger is unavailable")
         try:
             ledger = Ledger(ledger_path)
         except LedgerError as exc:
-            raise BootstrapError("matching supervisor ledger cannot be opened") from exc
+            raise BootstrapError("matching harness ledger cannot be opened") from exc
         try:
             try:
-                authority = ledger.arm_supervisor_refresh_fence()
-            except SupervisorRefreshBlocked as exc:
-                raise BootstrapError(f"supervisor refresh deferred: {exc}") from exc
+                authority = ledger.arm_harness_refresh_fence()
+            except HarnessRefreshBlocked as exc:
+                raise BootstrapError(f"harness refresh deferred: {exc}") from exc
             except LedgerError as exc:
-                raise BootstrapError("supervisor refresh fence could not be armed") from exc
+                raise BootstrapError("harness refresh fence could not be armed") from exc
             if authority is None:
-                raise BootstrapError("matching supervisor authority is unavailable")
+                raise BootstrapError("matching harness authority is unavailable")
         finally:
             ledger.close()
-        self.completed.append("supervisor-refresh-fenced")
+        self.completed.append("harness-refresh-fenced")
 
     @staticmethod
     def _executable(name: str) -> str:
@@ -351,9 +351,9 @@ class Bootstrap:
 
     def execute(self) -> dict[str, str]:
         self.preflight()
-        self.fence_existing_supervisor()
+        self.fence_existing_harness()
         self.install_controller()
-        self.refresh_existing_supervisor()
+        self.refresh_existing_harness()
         self.install_marketplace()
         self.install_plugin()
         return self.verify()

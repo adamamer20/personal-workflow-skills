@@ -273,7 +273,7 @@ def test_external_failure_preserves_truthful_completed_phases(standard_home: Pat
     assert bootstrap.completed == ["preflight", "controller-installed"]
 
 
-def test_bootstrap_fences_active_supervisor_before_shared_tool_install(
+def test_bootstrap_fences_active_harness_before_shared_tool_install(
     standard_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = Path(__file__).parents[1].resolve()
@@ -281,16 +281,16 @@ def test_bootstrap_fences_active_supervisor_before_shared_tool_install(
     monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(config_home))
     runner = FakeRunner(root)
     bootstrap = installer.Bootstrap(root, runner=runner)
-    unit_path = bootstrap._matching_supervisor_unit()
+    unit_path = bootstrap._matching_harness_unit()
     unit_path.parent.mkdir(parents=True)
-    unit_path.write_text("existing supervisor unit\n", encoding="utf-8")
+    unit_path.write_text("existing harness unit\n", encoding="utf-8")
 
     class ActiveChildLedger:
         def __init__(self, _path: Path) -> None:
             pass
 
-        def arm_supervisor_refresh_fence(self) -> None:
-            raise installer.SupervisorRefreshBlocked("worker child is active")
+        def arm_harness_refresh_fence(self) -> None:
+            raise installer.HarnessRefreshBlocked("worker child is active")
 
         def close(self) -> None:
             pass
@@ -304,13 +304,13 @@ def test_bootstrap_fences_active_supervisor_before_shared_tool_install(
     )
     monkeypatch.setattr(installer, "Ledger", ActiveChildLedger)
 
-    with pytest.raises(installer.BootstrapError, match="supervisor refresh deferred"):
+    with pytest.raises(installer.BootstrapError, match="harness refresh deferred"):
         bootstrap.execute()
     assert bootstrap.completed == ["preflight"]
     assert not any(call[1:3] == ("tool", "install") for call in runner.calls)
 
 
-def test_bootstrap_rejects_unsafe_supervisor_unit_before_shared_tool_install(
+def test_bootstrap_rejects_unsafe_harness_unit_before_shared_tool_install(
     standard_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = Path(__file__).parents[1].resolve()
@@ -318,13 +318,13 @@ def test_bootstrap_rejects_unsafe_supervisor_unit_before_shared_tool_install(
     monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(config_home))
     runner = FakeRunner(root)
     bootstrap = installer.Bootstrap(root, runner=runner)
-    unit_path = bootstrap._matching_supervisor_unit()
+    unit_path = bootstrap._matching_harness_unit()
     unit_path.parent.mkdir(parents=True)
     target = tmp_path / "unit-target"
-    target.write_text("existing supervisor unit\n", encoding="utf-8")
+    target.write_text("existing harness unit\n", encoding="utf-8")
     unit_path.symlink_to(target)
 
-    with pytest.raises(installer.BootstrapError, match="matching supervisor unit is unsafe"):
+    with pytest.raises(installer.BootstrapError, match="matching harness unit is unsafe"):
         bootstrap.execute()
     assert bootstrap.completed == ["preflight"]
     assert not any(call[1:3] == ("tool", "install") for call in runner.calls)

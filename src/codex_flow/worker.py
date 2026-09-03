@@ -116,7 +116,7 @@ RECOVERY_CONTINUATION_PREAMBLE = (
     "RECOVERY INSPECT-BEFORE-MUTATE: this is a bounded recovery execution. "
     "The assigned worktree retains changes made by the prior worker. Inspect the current workspace and retained "
     "evidence before any mutation. The controller already established this capability as the sole mutable worker; "
-    "the supervisor, this worker process, and this dispatch's active row are expected parts of your own attempt, not "
+    "the harness, this worker process, and this dispatch's active row are expected parts of your own attempt, not "
     "conflicting owners. Do not inspect codex-flow runtime ownership or declare blocked merely because your own "
     "attempt is active. Do not repeat repository work already present, do not delegate, and return exactly one "
     "schema-v1 ModelFacingResult terminal envelope."
@@ -518,7 +518,7 @@ def run_sdk_worker(
     socket_path: Path,
     resume_thread_id: str | None = None,
 ) -> dict[str, object]:
-    """Run one SDK-headless turn outside the supervisor process."""
+    """Run one SDK-headless turn outside the harness process."""
 
     capability_binding = _read_private_capability(capability_file)
     capability = capability_binding.payload
@@ -587,7 +587,7 @@ def run_sdk_worker(
         )
     else:
         # The low-level donor/test seam may omit native facts.  Keep that seam
-        # explicit and bounded; production supervisor capabilities always
+        # explicit and bounded; production harness capabilities always
         # carry the shared-profile binding above.
         config = CodexSdkConfig(
             str(capsule["model"]),
@@ -608,7 +608,7 @@ def run_sdk_worker(
     skill_binding_entered = False
     sdk_input: str | SkillInput = str(capsule["prompt"])
     # Command application is idempotent within one worker process.  A lost
-    # acknowledgement causes the supervisor to return the same ``sent``
+    # acknowledgement causes the harness to return the same ``sent``
     # command on the next poll; never call the SDK handle twice.
     applied_commands: dict[str, tuple[str, str | None]] = {}
     bound_turn_id: str | None = None
@@ -660,7 +660,7 @@ def run_sdk_worker(
                         timeout=2.0,
                     )
                 except (IpcError, OSError):
-                    # The supervisor owns recovery.  A heartbeat failure is
+                    # The harness owns recovery.  A heartbeat failure is
                     # not a model result and must never be turned into one.
                     return
 
@@ -857,7 +857,7 @@ def run_sdk_worker(
             if outbound_turn_id is None:
                 return
             # LifecycleEvent is a closed typed value; keep the wire payload
-            # equally bounded and secretless.  The supervisor redacts again
+            # equally bounded and secretless.  The harness redacts again
             # before durable persistence.
             current_sequence = (
                 int(pending_event["sequence"]) + 1 if pending_event is not None else next_event_sequence + 1
@@ -1140,7 +1140,7 @@ def main() -> int:
         return WORKER_EXIT_TRANSPORT_BEFORE_IDENTITY
     except (WorkerError, OSError, ValueError) as exc:
         # Detached workers have no interactive caller. Emit one bounded,
-        # sanitized terminal diagnostic so the supervisor service journal can
+        # sanitized terminal diagnostic so the harness service journal can
         # explain a recoverable exit instead of silently cycling attempts.
         detail = redact_diagnostic_text(" ".join(str(exc).split())[:384], limit=384) or "no detail"
         cause = exc.__cause__

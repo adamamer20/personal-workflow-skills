@@ -174,7 +174,7 @@ class CodexFlowTerminalApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        yield Static("Connecting to local supervisor…", id="mode", markup=False)
+        yield Static("Connecting to local harness…", id="mode", markup=False)
         with Horizontal(id="main"):
             with Vertical(id="navigation"):
                 yield Static("CONTROLLER\n└ Workers and their conversations", id="controller-summary", markup=False)
@@ -211,7 +211,9 @@ class CodexFlowTerminalApp(App[None]):
             except (ControlClientError, TerminalUiOfflineError, ValueError, OSError):
                 pass
         self._render_snapshot(snapshot)
-        self._feedback("Snapshot refreshed" if snapshot.connected else "Supervisor unavailable · offline read-only")
+        self._feedback(
+            "Snapshot refreshed" if snapshot.connected else "WorkflowHarness unavailable · offline read-only"
+        )
 
     def _render_snapshot(self, snapshot: TerminalUiSnapshot) -> None:
         self.set_class(not snapshot.connected, "offline")
@@ -376,13 +378,13 @@ class CodexFlowTerminalApp(App[None]):
                 conversation = f"HISTORY · {pages[0].status.value.replace('_', ' ')}\n\n{pages[0].reason}"
         elif worker.activity:
             visible = worker.activity[-3:] if self.has_class("narrow") else worker.activity
-            conversation = "CONVERSATION EXCERPT · recent activity available to the supervisor\n\n" + "\n\n".join(
+            conversation = "CONVERSATION EXCERPT · recent activity available to the harness\n\n" + "\n\n".join(
                 f"{item.speaker_label.upper()} · {item.event_label}\n{item.text or 'No message text was exposed.'}"
                 for item in visible
             )
         else:
             conversation = (
-                "CONVERSATION EXCERPT\n\nNo message text is available in the supervisor's bounded activity window."
+                "CONVERSATION EXCERPT\n\nNo message text is available in the harness's bounded activity window."
             )
         technical = (
             f"TECHNICAL DETAILS\n"

@@ -255,7 +255,7 @@ class ProgramControllerGenerationRunner:
             # identity or turn binding, the generation is preserved for the
             # one-shot recovery inspection path.
             if claim is None or status is None:
-                # The supervisor owns the durable pre-identity closure when
+                # The harness owns the durable pre-identity closure when
                 # status/claim IPC itself fails.  There is no safe revision
                 # or claimant capability available to reset from this child.
                 raise

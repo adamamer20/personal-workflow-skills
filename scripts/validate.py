@@ -1861,6 +1861,7 @@ def _validate_model_projection_closure() -> None:
         "validations",
         "durable_status",
         "next_action",
+        "blocker",
     }
     branches = capsule_schema.get("oneOf")
     if not isinstance(branches, list) or len(branches) != 3 or any(not isinstance(item, dict) for item in branches):

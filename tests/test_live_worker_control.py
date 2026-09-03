@@ -67,9 +67,9 @@ from codex_flow.domain import (
     TerminalFailureAfterIdentity,
     ThreadIdentity,
 )
+from codex_flow.harness import WorkflowHarness
 from codex_flow.ipc import IpcError, encode_frame
 from codex_flow.ledger import Ledger, StaleWriter
-from codex_flow.supervisor import Supervisor
 from codex_flow.tui import CodexFlowTerminalApp, ConfirmActionScreen, SteerActionScreen
 from codex_flow.tui_client import TerminalUiClient, TerminalUiOfflineError
 from codex_flow.tui_models import WorkerView
@@ -168,7 +168,7 @@ def _ledger(root: Path) -> Ledger:
 
 def _active_command_ledger(root: Path) -> Ledger:
     ledger = _ledger(root)
-    authority = ledger.acquire_supervisor(
+    authority = ledger.acquire_harness(
         repository_root=root,
         state_root=root,
         pid=1,
@@ -289,7 +289,7 @@ def test_retry_budgets_and_backoff_gate_are_durable() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _ledger(root)
-        authority = ledger.acquire_supervisor(
+        authority = ledger.acquire_harness(
             repository_root=root,
             state_root=root,
             pid=1,
@@ -412,7 +412,7 @@ def test_public_control_envelopes_require_exact_response_digest_and_acknowledgem
 def test_live_control_client_distinguishes_rejection_from_post_send_transport(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    client = LiveWorkerControlClient(tmp_path / "supervisor.sock")
+    client = LiveWorkerControlClient(tmp_path / "harness.sock")
     facts = {
         "generation": 1,
         "attempt": 1,
@@ -467,7 +467,7 @@ def test_live_control_client_emits_and_decodes_closed_compatibility_rebind(
         }
 
     monkeypatch.setattr("codex_flow.control_client.send_request", exact_response)
-    action = LiveWorkerControlClient(tmp_path / "supervisor.sock").rebind_compatibility(
+    action = LiveWorkerControlClient(tmp_path / "harness.sock").rebind_compatibility(
         DISPATCH,
         action_id="authorized-runtime-rebind",
         expected_revision=7,
@@ -697,7 +697,7 @@ class _TerminalUiLiveClient:
 
     def status(self) -> tuple[LiveWorkerStatus, ...]:
         if not self.online:
-            raise ControlClientError("supervisor control endpoint is unavailable")
+            raise ControlClientError("harness control endpoint is unavailable")
         return (_tui_worker(),)
 
     @staticmethod
@@ -777,7 +777,7 @@ class _TerminalUiDecisionClient:
 
     def pending(self) -> tuple[ControllerDecisionStatus, ...]:
         if not self.online:
-            raise ControlClientError("supervisor control endpoint is unavailable")
+            raise ControlClientError("harness control endpoint is unavailable")
         return (_tui_decision(),)
 
     def claim(self, decision_id: str, **facts: object) -> ControllerDecisionClaim:
@@ -924,7 +924,7 @@ def test_decision_resume_requires_one_current_connected_inactive_source_thread()
 
         def status(self) -> tuple[LiveWorkerStatus, ...]:
             if not self.online:
-                raise ControlClientError("supervisor control endpoint is unavailable")
+                raise ControlClientError("harness control endpoint is unavailable")
             return self.statuses
 
     async def scenario() -> None:
@@ -1162,7 +1162,7 @@ def test_terminal_ui_discards_history_on_disconnect_and_identity_replacement() -
 
         def status(self) -> tuple[LiveWorkerStatus, ...]:
             if not self.online:
-                raise ControlClientError("supervisor control endpoint is unavailable")
+                raise ControlClientError("harness control endpoint is unavailable")
             status = _tui_worker()
             return (
                 LiveWorkerStatus(
@@ -1426,9 +1426,9 @@ def test_terminal_ui_renders_rejected_and_post_send_uncertain_distinctly(behavio
     asyncio.run(scenario())
 
 
-def test_terminal_ui_reaches_real_local_supervisor_socket_without_provider_or_app_calls(tmp_path: Path) -> None:
-    supervisor = Supervisor(tmp_path, worker_command=("provider-must-not-run",))
-    ledger = supervisor.ledger
+def test_terminal_ui_reaches_real_local_harness_socket_without_provider_or_app_calls(tmp_path: Path) -> None:
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+    ledger = harness.ledger
     ledger.create_run("run")
     ledger.create_milestone("run", "milestone")
     ledger.claim_dispatch("run", "milestone", "executor", 1)
@@ -1440,7 +1440,7 @@ def test_terminal_ui_reaches_real_local_supervisor_socket_without_provider_or_ap
         workspace_path=tmp_path,
         result_contract_sha256=model_facing_result_schema_sha256(),
     )
-    authority = supervisor.acquire()
+    authority = harness.acquire()
     epoch = int(authority["epoch"])
     ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="c" * 64)
     ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -1448,17 +1448,17 @@ def test_terminal_ui_reaches_real_local_supervisor_socket_without_provider_or_ap
     ledger._db().commit()
     ledger.set_queue_state(DISPATCH, "running", epoch=epoch)
     ledger.append_diagnostic(DISPATCH, kind="provider_free", text="synthetic turn bound through real IPC")
-    supervisor._active_turns[DISPATCH] = (1, 1, "thread-1", "turn-1")
-    endpoint = supervisor._socket
+    harness._active_turns[DISPATCH] = (1, 1, "thread-1", "turn-1")
+    endpoint = harness._socket
     assert endpoint is not None
     endpoint.setblocking(True)
 
     def serve_exact_requests() -> None:
         for _ in range(3):
             connection, _ = endpoint.accept()
-            supervisor._accept_connection(connection)
+            harness._accept_connection(connection)
 
-    service = threading.Thread(target=serve_exact_requests, name="provider-free-tui-supervisor")
+    service = threading.Thread(target=serve_exact_requests, name="provider-free-tui-harness")
     service.start()
     client = TerminalUiClient.for_state_root(tmp_path)
 
@@ -1473,15 +1473,15 @@ def test_terminal_ui_reaches_real_local_supervisor_socket_without_provider_or_ap
     assert not service.is_alive()
     commands = ledger.control_commands(DISPATCH)
     assert len(commands) == 1 and commands[0]["payload"] == "provider-free steer"
-    assert supervisor._children == {}
-    supervisor.close()
+    assert harness._children == {}
+    harness.close()
 
 
 def test_inactive_history_read_is_read_only_ephemeral_and_identity_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    supervisor = Supervisor(tmp_path, worker_command=("provider-must-not-run",))
-    ledger = supervisor.ledger
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+    ledger = harness.ledger
     ledger.create_run("run")
     ledger.create_milestone("run", "milestone")
     ledger.claim_dispatch("run", "milestone", "executor", 1)
@@ -1524,22 +1524,22 @@ def test_inactive_history_read_is_read_only_ephemeral_and_identity_bound(
     }
     before = "\n".join(ledger._db().iterdump())
 
-    response = supervisor._conversation_history(request)
+    response = harness._conversation_history(request)
 
     assert response["page"]["status"] == "available"  # type: ignore[index]
     assert observed == [(Sandbox.READ_ONLY, "test")]
     assert "\n".join(ledger._db().iterdump()) == before
     request["generation"] = int(row["generation"]) + 1
     with pytest.raises(IpcError, match="process identity is stale"):
-        supervisor._conversation_history(request)
-    supervisor.close()
+        harness._conversation_history(request)
+    harness.close()
 
 
 def test_history_broker_limits_slow_reads_and_returns_at_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    supervisor = Supervisor(tmp_path, worker_command=("provider-must-not-run",))
-    monkeypatch.setattr("codex_flow.supervisor.CONVERSATION_READ_DEADLINE_SECONDS", 0.01)
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+    monkeypatch.setattr("codex_flow.harness.CONVERSATION_READ_DEADLINE_SECONDS", 0.01)
     release = threading.Event()
     all_finished = threading.Event()
     lock = threading.Lock()
@@ -1564,7 +1564,7 @@ def test_history_broker_limits_slow_reads_and_returns_at_deadline(
             "stable-snapshot",
         )
 
-    monkeypatch.setattr(supervisor, "_inactive_conversation_page", slow_read)
+    monkeypatch.setattr(harness, "_inactive_conversation_page", slow_read)
     request = {
         "version": 1,
         "operation": "conversation_history",
@@ -1577,24 +1577,24 @@ def test_history_broker_limits_slow_reads_and_returns_at_deadline(
         "page_token": None,
         "page_fragments": 32,
     }
-    before = "\n".join(supervisor.ledger._db().iterdump())
+    before = "\n".join(harness.ledger._db().iterdump())
 
-    responses = [supervisor._conversation_history(request) for _ in range(5)]
+    responses = [harness._conversation_history(request) for _ in range(5)]
 
     assert [response["page"]["reason"] for response in responses[:4]] == [  # type: ignore[index]
         "conversation read exceeded its deadline"
     ] * 4
     assert responses[4]["page"]["reason"] == "conversation read capacity is busy"  # type: ignore[index]
     assert maximum == 4
-    assert "\n".join(supervisor.ledger._db().iterdump()) == before
+    assert "\n".join(harness.ledger._db().iterdump()) == before
     release.set()
     assert all_finished.wait(2)
-    supervisor.close()
+    harness.close()
 
 
-def test_real_supervisor_socket_reconciles_commit_after_lost_reply_with_zero_duplicates(tmp_path: Path) -> None:
-    supervisor = Supervisor(tmp_path, worker_command=("provider-must-not-run",))
-    ledger = supervisor.ledger
+def test_real_harness_socket_reconciles_commit_after_lost_reply_with_zero_duplicates(tmp_path: Path) -> None:
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+    ledger = harness.ledger
     ledger.create_run("run")
     ledger.create_milestone("run", "milestone")
     ledger.claim_dispatch("run", "milestone", "executor", 1)
@@ -1606,23 +1606,23 @@ def test_real_supervisor_socket_reconciles_commit_after_lost_reply_with_zero_dup
         workspace_path=tmp_path,
         result_contract_sha256=model_facing_result_schema_sha256(),
     )
-    epoch = int(supervisor.acquire()["epoch"])
+    epoch = int(harness.acquire()["epoch"])
     ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="c" * 64)
     ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
     ledger._db().execute("UPDATE dispatch_queue SET thread_id = ? WHERE dispatch_id = ?", ("thread-1", DISPATCH))
     ledger._db().commit()
     ledger.set_queue_state(DISPATCH, "running", epoch=epoch)
-    supervisor._active_turns[DISPATCH] = (1, 1, "thread-1", "turn-1")
-    endpoint = supervisor._socket
+    harness._active_turns[DISPATCH] = (1, 1, "thread-1", "turn-1")
+    endpoint = harness._socket
     assert endpoint is not None
     endpoint.setblocking(True)
 
     def serve_exact_requests() -> None:
         for _ in range(4):
             connection, _ = endpoint.accept()
-            supervisor._accept_connection(connection)
+            harness._accept_connection(connection)
 
-    service = threading.Thread(target=serve_exact_requests, name="lost-reply-control-supervisor")
+    service = threading.Thread(target=serve_exact_requests, name="lost-reply-control-harness")
     service.start()
     command_id = "caller-retained-command"
     request = {
@@ -1637,9 +1637,9 @@ def test_real_supervisor_socket_reconciles_commit_after_lost_reply_with_zero_dup
         "payload": "provider-free retained command",
     }
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.connect(str(supervisor.socket_path))
+        connection.connect(str(harness.socket_path))
         connection.sendall(encode_frame(request))
-        # Close without reading: the supervisor has no reply consumer, while
+        # Close without reading: the harness has no reply consumer, while
         # its commit remains the canonical fact reconciled below.
 
     client = LiveWorkerControlClient.for_state_root(tmp_path)
@@ -1671,7 +1671,7 @@ def test_real_supervisor_socket_reconciles_commit_after_lost_reply_with_zero_dup
     terminal = client.command_status(command_id)
     assert terminal is not None and terminal.state is ControlCommandState.ACKNOWLEDGED
     assert len(ledger.control_commands(DISPATCH)) == 1
-    assert supervisor._children == {}
+    assert harness._children == {}
     service.join(timeout=2)
     assert not service.is_alive()
-    supervisor.close()
+    harness.close()

@@ -1,4 +1,4 @@
-"""Detached, event-driven repository supervisor for H6-E."""
+"""Detached, event-driven repository harness for H6-E."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from .contracts import (
     ModelFacingControllerActionBundle,
     ModelFacingProgramControllerAction,
     ModelFacingProgramControllerActionBundle,
+    ModelFacingResult,
     PluginCapabilitySnapshot,
     PluginRequirement,
     review_result_from_agent_message,
@@ -42,6 +43,7 @@ from .domain import (
     CONVERSATION_READ_DEADLINE_SECONDS,
     LIVE_MAX_SUBSCRIBERS,
     LIVE_SUBSCRIBER_QUEUE_MAX_ENTRIES,
+    CandidateRecord,
     CompatibilityRebind,
     ControlCommandKind,
     ControlCommandState,
@@ -65,6 +67,7 @@ from .domain import (
     RetryBudgetChange,
     Sandbox,
     ThreadIdentity,
+    TypedBlocker,
     WorkerResultRejectionCode,
     conversation_history_page_from_json,
     is_lossy_worker_diagnostic_method,
@@ -73,7 +76,7 @@ from .domain import (
     thaw_json,
 )
 from .ipc import IpcError, IpcReasonCode, decode_frame, encode_frame, ensure_runtime_dir, peer_uid
-from .ledger import Ledger, LedgerError, RecordNotFound, StaleWriter, SupervisorRefreshBlocked
+from .ledger import HarnessRefreshBlocked, Ledger, LedgerError, RecordNotFound, StaleWriter
 from .native_profile import NativeProfileProjection
 from .plugin_capabilities import PluginCapabilityError, _verified_skill_input
 from .worker import (
@@ -102,15 +105,15 @@ from .worker import (
 from .worktrees import WorktreeError, WorktreeManager
 
 
-class SupervisorError(RuntimeError):
-    """Supervisor startup, lease, or lifecycle failure."""
+class HarnessError(RuntimeError):
+    """WorkflowHarness startup, lease, or lifecycle failure."""
 
 
-class FailedSpawnTerminalizationError(SupervisorError):
+class FailedSpawnTerminalizationError(HarnessError):
     """A failed worker launch still requires durable terminalization."""
 
 
-class WorkerCompatibilityDrift(SupervisorError):
+class WorkerCompatibilityDrift(HarnessError):
     """The verified installed runtime identity tuple differs from authority."""
 
     def __init__(
@@ -316,7 +319,7 @@ def process_birth_identity(pid: int | None = None) -> str:
         return f"pid:{target}"
 
 
-class Supervisor:
+class WorkflowHarness:
     """One repository-bound queue owner and local IPC endpoint."""
 
     def __init__(
@@ -334,7 +337,7 @@ class Supervisor:
         self.state_root = Path(state_root).resolve(strict=True)
         self.state_dir = self.state_root / ".codex-flow"
         self.runtime_root = ensure_runtime_dir(runtime_root or self.state_dir / "runtime")
-        self.socket_path = self.runtime_root / "supervisor.sock"
+        self.socket_path = self.runtime_root / "harness.sock"
         self.lease_seconds = lease_seconds
         self.worker_command = tuple(worker_command or (sys.executable, "-m", "codex_flow.worker"))
         self.controller_command = tuple(
@@ -375,7 +378,7 @@ class Supervisor:
                 tzinfo=timezone.utc
             )
         except ValueError as exc:
-            raise SupervisorError("checkpoint deadline is not a valid UTC timestamp") from exc
+            raise HarnessError("checkpoint deadline is not a valid UTC timestamp") from exc
 
     def _select_timeout(self, fallback: float) -> float:
         deadlines = [fallback]
@@ -457,11 +460,9 @@ class Supervisor:
                     except (LedgerError, ValueError) as exc:
                         # Do not silently discard a generation whose durable
                         # closure lost a CAS race or failed validation.  The
-                        # supervisor must remain fail-closed until an owner
+                        # harness must remain fail-closed until an owner
                         # can reconcile the exact persisted facts.
-                        raise SupervisorError(
-                            "program controller pre-identity failure could not be terminalized"
-                        ) from exc
+                        raise HarnessError("program controller pre-identity failure could not be terminalized") from exc
                 self._controller_children.pop(decision_id, None)
                 changed = True
                 continue
@@ -481,7 +482,7 @@ class Supervisor:
                             },
                         )
                     except LedgerError as exc:
-                        raise SupervisorError("program controller profile-drift terminalization failed") from exc
+                        raise HarnessError("program controller profile-drift terminalization failed") from exc
                 else:
                     try:
                         self.ledger.record_controller_profile_drift(
@@ -493,7 +494,7 @@ class Supervisor:
                         # corresponding durable closure did not.  Keep lifecycle
                         # authority fail-closed instead of silently allowing the
                         # scheduler to retry the same incompatible profile.
-                        raise SupervisorError("controller profile-drift terminalization failed") from exc
+                        raise HarnessError("controller profile-drift terminalization failed") from exc
             self._controller_children.pop(decision_id, None)
             changed = True
         return changed
@@ -780,12 +781,12 @@ class Supervisor:
     def _schedule_controller_generations(self) -> bool:
         """Drive due decisions and at most one process per generation."""
 
-        if self.ledger.supervisor_refresh_fenced():
+        if self.ledger.harness_refresh_fenced():
             return False
         changed = self._reap_controller_generations()
         changed = self._schedule_program_controller_generations() or changed
         for status in self.ledger.controller_decisions():
-            if self.ledger.supervisor_refresh_fenced():
+            if self.ledger.harness_refresh_fenced():
                 break
             # Lease expiry is a durable CAS boundary.  Human claims can be
             # released directly; model claims are released only after the
@@ -833,7 +834,7 @@ class Supervisor:
                 ):
                     # A controller that persisted an explicit temporary
                     # provider reset keeps its model claim until that bound.
-                    # A supervisor restart must not consume the one-read
+                    # A harness restart must not consume the one-read
                     # recovery path before the deferred owner is eligible.
                     continue
                 if (
@@ -939,7 +940,7 @@ class Supervisor:
                     error_code=type(exc).__name__,
                 )
             except LedgerError as record_error:
-                raise SupervisorError("program effect failure could not be recorded") from record_error
+                raise HarnessError("program effect failure could not be recorded") from record_error
             raise
         self.ledger.record_program_action_effect(bundle.action_id, effect_id, state="applied")
         return True
@@ -951,16 +952,16 @@ class Supervisor:
         graph: object,
     ) -> None:
         if not isinstance(action, ModelFacingProgramControllerAction):
-            raise SupervisorError("program integration effect is not typed")
+            raise HarnessError("program integration effect is not typed")
         if not isinstance(graph, ProgramGraph):
-            raise SupervisorError("program integration graph is not typed")
+            raise HarnessError("program integration graph is not typed")
         if (
             action.milestone_id is None
             or action.candidate_sha is None
             or action.expected_trunk_head is None
             or action.integration_strategy is None
         ):
-            raise SupervisorError("program integration effect is incomplete")
+            raise HarnessError("program integration effect is incomplete")
         pending = next(
             (
                 item
@@ -979,14 +980,22 @@ class Supervisor:
             raise WorktreeError("program integration is already terminal without a successful receipt")
         node = graph.node(action.milestone_id)
         try:
-            receipt = self._worktrees.integrate_candidate(
-                repository_root=self.state_root,
-                candidate_workspace=node.workspace_path,
-                candidate_branch=node.capsule.branch,
-                candidate_sha=action.candidate_sha,
-                expected_trunk_head=action.expected_trunk_head,
-                strategy=action.integration_strategy,
-            )
+            if node.capsule.workspace_mode.value == "current_checkout" and (self.state_root / ".git").exists():
+                receipt = self._worktrees.verify_serial_candidate(
+                    repository_root=self.state_root,
+                    candidate_sha=action.candidate_sha,
+                    expected_trunk_head=action.expected_trunk_head,
+                    strategy=action.integration_strategy,
+                )
+            else:
+                receipt = self._worktrees.integrate_candidate(
+                    repository_root=self.state_root,
+                    candidate_workspace=node.workspace_path,
+                    candidate_branch=node.capsule.branch,
+                    candidate_sha=action.candidate_sha,
+                    expected_trunk_head=action.expected_trunk_head,
+                    strategy=action.integration_strategy,
+                )
         except WorktreeError as exc:
             self.ledger.complete_program_integration(
                 bundle.program_id,
@@ -1045,7 +1054,7 @@ class Supervisor:
                     )
             elif action.kind is ProgramControllerActionKind.START_REVIEWS:
                 if action.milestone_id is None or action.candidate_sha is None:
-                    raise SupervisorError("program review effect is incomplete")
+                    raise HarnessError("program review effect is incomplete")
                 milestone_id = action.milestone_id
                 candidate_sha = action.candidate_sha
                 for role in action.review_roles:
@@ -1072,7 +1081,7 @@ class Supervisor:
                     )
             elif action.kind is ProgramControllerActionKind.REQUEST_REPAIR:
                 if action.milestone_id is None or action.candidate_sha is None:
-                    raise SupervisorError("program repair effect is incomplete")
+                    raise HarnessError("program repair effect is incomplete")
                 milestone_id = action.milestone_id
                 candidate_sha = action.candidate_sha
                 finding_ids = action.finding_ids
@@ -1117,7 +1126,7 @@ class Supervisor:
             raise RecordNotFound(f"program action outbox does not exist: {action_id}")
         raw = row.get("bundle_json")
         if not isinstance(raw, str):
-            raise SupervisorError("program action outbox bundle is missing")
+            raise HarnessError("program action outbox bundle is missing")
         return self._apply_program_action_bundle(ModelFacingProgramControllerActionBundle.from_json_bytes(raw))
 
     def _reconcile_program_action_outboxes(self) -> bool:
@@ -1127,7 +1136,7 @@ class Supervisor:
                 continue
             try:
                 applied = self._apply_program_action_outbox(str(row["action_id"]))
-            except (LedgerError, SupervisorError, WorktreeError, TypeError, ValueError):
+            except (LedgerError, HarnessError, WorktreeError, TypeError, ValueError):
                 continue
             changed = applied or changed
             if row.get("state") == "committed":
@@ -1159,7 +1168,7 @@ class Supervisor:
             if decision_id in status_by_decision
         }
         for status in statuses:
-            if self.ledger.supervisor_refresh_fenced():
+            if self.ledger.harness_refresh_fenced():
                 break
             program_id = str(status.program_id)
             if program_id in active_programs:
@@ -1218,7 +1227,7 @@ class Supervisor:
             if return_code is None:
                 continue
             # Keep the child and its liveness identity owned by this
-            # supervisor until the durable exit/classification transaction
+            # harness until the durable exit/classification transaction
             # commits.  A transient LedgerError must leave the event
             # retryable in the same epoch rather than stranding starting or
             # running work after the in-memory child entry is discarded.
@@ -1399,7 +1408,7 @@ class Supervisor:
         return changed
 
     def acquire(self) -> dict[str, object]:
-        existing = self.ledger.supervisor_authority()
+        existing = self.ledger.harness_authority()
         if existing is not None and int(existing["pid"]) != os.getpid():
             try:
                 os.kill(int(existing["pid"]), 0)
@@ -1407,10 +1416,10 @@ class Supervisor:
             except OSError:
                 live = False
             if live:
-                raise SupervisorError("another live supervisor owns the repository")
+                raise HarnessError("another live harness owns the repository")
         executable = Path(sys.executable).resolve()
         digest = hashlib.sha256(executable.read_bytes()).hexdigest()
-        fact = self.ledger.acquire_supervisor(
+        fact = self.ledger.acquire_harness(
             repository_root=self.state_root,
             state_root=self.state_root,
             pid=os.getpid(),
@@ -1423,7 +1432,7 @@ class Supervisor:
         self.epoch = int(fact["epoch"])
         if self.socket_path.exists():
             if self.socket_path.is_symlink() or not self.socket_path.is_socket():
-                raise SupervisorError("supervisor socket path is unsafe")
+                raise HarnessError("harness socket path is unsafe")
             self.socket_path.unlink()
         endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         endpoint.bind(os.fspath(self.socket_path))
@@ -1446,21 +1455,21 @@ class Supervisor:
         try:
             capsule = strict_json_loads(str(queue["capsule_json"]), max_bytes=2_000_000)
         except ValueError as exc:
-            raise SupervisorError("legacy queue capsule is not valid bounded JSON") from exc
+            raise HarnessError("legacy queue capsule is not valid bounded JSON") from exc
         if not isinstance(capsule, dict):
-            raise SupervisorError("legacy queue capsule root must be an object")
+            raise HarnessError("legacy queue capsule root must be an object")
         try:
             permission_mode = NativePermissionMode(str(capsule["permission_mode"]))
             source = ThreadIdentity(source_thread_id)
         except (KeyError, ValueError) as exc:
-            raise SupervisorError("legacy queue lacks original permission or source authority") from exc
+            raise HarnessError("legacy queue lacks original permission or source authority") from exc
         home = (native_home or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))).resolve(strict=True)
         try:
             profile = NativeProfileProjection.load(home)
             profile.verify_worker_sources()
             effective = profile.effective_authority(permission_mode)
         except (OSError, ValueError, RuntimeError) as exc:
-            raise SupervisorError("shared native Codex profile cannot authorize legacy recovery") from exc
+            raise HarnessError("shared native Codex profile cannot authorize legacy recovery") from exc
         return self.ledger.rebind_legacy_active_queue(
             dispatch_id,
             source_thread_id=source.id,
@@ -1468,6 +1477,28 @@ class Supervisor:
             native_profile_sha256=profile.profile_sha256,
             native_compatibility_sha256=profile.worker_compatibility_sha256,
             effective_permission=effective,
+        )
+
+    def adopt_program_candidate(
+        self,
+        program_id: str,
+        milestone_id: str,
+        candidate_sha: str,
+        *,
+        dispatch_id: str | None = None,
+    ) -> object:
+        """Adopt one exact existing workspace commit without replaying a worker."""
+
+        graph = self.ledger.program_graph(program_id)
+        node = graph.node(milestone_id)
+        candidate = self._worktrees.adopt_candidate(node.capsule, candidate_sha)
+        if candidate.workspace_path != node.capsule.workspace_path:
+            raise WorktreeError("adopted candidate workspace does not match the dispatch capsule")
+        return self.ledger.adopt_program_candidate(
+            program_id,
+            milestone_id,
+            candidate,
+            dispatch_id=dispatch_id,
         )
 
     @staticmethod
@@ -2014,8 +2045,8 @@ class Supervisor:
                 if set(payload) != {"version", "operation"}:
                     raise IpcError("shutdown request has an unsupported shape")
                 if self.epoch is None:
-                    raise IpcError("supervisor lease is not acquired")
-                self.ledger.request_supervisor_shutdown(epoch=self.epoch, owner_nonce_sha256=self.owner_nonce_sha256)
+                    raise IpcError("harness lease is not acquired")
+                self.ledger.request_harness_shutdown(epoch=self.epoch, owner_nonce_sha256=self.owner_nonce_sha256)
                 self._stop = True
                 return {"version": 1, "ok": True, "operation": "shutdown"}
             if operation.startswith(("controller_", "program_")):
@@ -2233,7 +2264,7 @@ class Supervisor:
         return subscriber
 
     def _live_state(self) -> tuple[threading.Lock, dict[str, _LiveSubscriber]]:
-        """Lazily initialize the in-memory broker for hermetic supervisor fixtures."""
+        """Lazily initialize the in-memory broker for hermetic harness fixtures."""
 
         lock = getattr(self, "_live_subscribers_lock", None)
         subscribers = getattr(self, "_live_subscribers", None)
@@ -2345,7 +2376,7 @@ class Supervisor:
         return {"version": 1, "ok": True, "operation": "live_keyframe", "delivered": delivered}
 
     def _serve_live_connection(self, connection: socket.socket, subscriber: _LiveSubscriber) -> None:
-        """Push bounded cumulative frames without blocking supervisor lifecycle work."""
+        """Push bounded cumulative frames without blocking harness lifecycle work."""
 
         try:
             connection.settimeout(0.25)
@@ -2818,7 +2849,7 @@ class Supervisor:
         row, generation, attempt, token = self._worker_capability(payload)
         generation, attempt, thread_id, turn_id = self._strict_worker_turn_identity(payload, row)
         self._renew_worker_liveness(row, generation=generation, attempt=attempt, token=token)
-        # A supervisor restart clears only in-memory active-turn state.  The
+        # A harness restart clears only in-memory active-turn state.  The
         # worker's first poll rebinds the exact live turn under the same
         # durable attempt capability; no replacement turn can be addressed.
         active_turns = getattr(self, "_active_turns", None)
@@ -3052,7 +3083,7 @@ class Supervisor:
         if not isinstance(dispatch_id, str):
             raise IpcError("dispatch id is required")
         if self.epoch is None:
-            raise IpcError("supervisor lease is not acquired")
+            raise IpcError("harness lease is not acquired")
         row = self.ledger.queue_dispatch(dispatch_id)
         if row.get("claim_epoch") != self.epoch:
             raise IpcError("queue claim epoch is stale")
@@ -3276,10 +3307,22 @@ class Supervisor:
                     result_sha256=result_sha256,
                 ):
                     return
-                candidate_sha: str | None = None
-                if terminal_status == "completed":
-                    graph = self.ledger.program_graph(program_id)
-                    candidate_sha = self._worktrees.candidate_head(graph.node(milestone_id).capsule)
+                graph = self.ledger.program_graph(program_id)
+                candidate_record: CandidateRecord | None = None
+                blocker: TypedBlocker | None = None
+                try:
+                    candidate_record = self._worktrees.inspect_terminal_workspace(graph.node(milestone_id).capsule)
+                except (WorktreeError, ValueError):
+                    # The result remains durable, but an uninspectable
+                    # workspace is never promoted or converted into a guess.
+                    candidate_record = None
+                try:
+                    result = ModelFacingResult.from_agent_message(raw)
+                except (TypeError, ValueError):
+                    result = None
+                if result is not None:
+                    blocker = result.blocker
+                candidate_sha = candidate_record.commit_sha if candidate_record is not None else None
                 self.ledger.record_program_executor_result(
                     program_id,
                     milestone_id,
@@ -3287,6 +3330,8 @@ class Supervisor:
                     terminal_status=terminal_status,
                     dispatch_id=dispatch_id,
                     result_sha256=result_sha256,
+                    candidate_record=candidate_record,
+                    blocker=blocker,
                 )
             else:
                 result = review_result_from_agent_message(raw)
@@ -3329,7 +3374,7 @@ class Supervisor:
             request = decode_frame(connection)
             raw_operation = request.get("operation")
             operation = raw_operation if isinstance(raw_operation, str) else None
-            self._renew_supervisor_lease_if_due()
+            self._renew_harness_lease_if_due()
             if request.get("operation") == "conversation_history":
                 threading.Thread(
                     target=self._serve_conversation_connection,
@@ -3381,7 +3426,7 @@ class Supervisor:
         except OSError:
             # A rejected or disconnected peer owns only its socket.  Failure
             # to deliver the bounded response must never escape the
-            # foreground supervisor loop.
+            # foreground harness loop.
             pass
 
     def _serve_conversation_connection(self, connection: socket.socket, request: dict[str, object]) -> None:
@@ -3443,11 +3488,11 @@ class Supervisor:
             # The visible App-native creation API has no proven per-task
             # collaboration/agent override.  Never silently run it as a leaf
             # SDK worker or synthesize completion while the App is absent.
-            raise SupervisorError("App-native queue dispatch lacks a proven leaf-worker runtime boundary")
+            raise HarnessError("App-native queue dispatch lacks a proven leaf-worker runtime boundary")
         try:
             route = json.loads(str(row["route_json"]))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise SupervisorError("queue route facts are not valid JSON") from exc
+            raise HarnessError("queue route facts are not valid JSON") from exc
         policy = route.get("leaf_worker_policy") if isinstance(route, dict) else None
         expected_policy = {
             "agents.enabled": False,
@@ -3455,7 +3500,7 @@ class Supervisor:
             "config_overrides": list(LEAF_WORKER_CONFIG_OVERRIDES),
         }
         if policy != expected_policy:
-            raise SupervisorError("SDK-headless queue lacks the controller-bound leaf-worker policy")
+            raise HarnessError("SDK-headless queue lacks the controller-bound leaf-worker policy")
         try:
             capsule_value = strict_json_loads(str(row["capsule_json"]).encode("utf-8"), max_bytes=2_000_000)
             if not isinstance(capsule_value, dict):
@@ -3481,16 +3526,16 @@ class Supervisor:
             if len(plugin_snapshots) != len(plugin_requirements):
                 raise ValueError("queued plugin capability cardinality changed")
         except (PluginCapabilityError, TypeError, ValueError) as exc:
-            raise SupervisorError("queued plugin capability authority is invalid") from exc
+            raise HarnessError("queued plugin capability authority is invalid") from exc
         effective_permission = route.get("effective_permission") if isinstance(route, dict) else None
         if not isinstance(effective_permission, dict):
-            raise SupervisorError("SDK-headless queue lacks effective native permission facts")
+            raise HarnessError("SDK-headless queue lacks effective native permission facts")
         native_profile_sha256 = route.get("native_profile_sha256")
         native_compatibility_sha256 = route.get("native_compatibility_sha256")
         if native_profile_sha256 is not None and not isinstance(native_profile_sha256, str):
-            raise SupervisorError("queue native profile identity is malformed")
+            raise HarnessError("queue native profile identity is malformed")
         if native_compatibility_sha256 is not None and not isinstance(native_compatibility_sha256, str):
-            raise SupervisorError("queue native compatibility identity is malformed")
+            raise HarnessError("queue native compatibility identity is malformed")
         profile_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
         try:
             with _verified_skill_input(plugin_requirements, plugin_snapshots, profile_home):
@@ -3508,7 +3553,7 @@ class Supervisor:
                     created_paths=created_paths,
                 )
         except PluginCapabilityError as exc:
-            raise SupervisorError("queued plugin capability changed before worker launch") from exc
+            raise HarnessError("queued plugin capability changed before worker launch") from exc
 
     def _issue_and_spawn_verified_worker(
         self,
@@ -3554,14 +3599,14 @@ class Supervisor:
                 provider_env_key=profile.provider_env_key,
                 profile_sha256=profile.profile_sha256,
             )
-        except SupervisorError:
+        except HarnessError:
             raise
         except (OSError, ValueError, RuntimeError) as exc:
             # Hermetic low-level tests intentionally omit a native profile;
             # production service startup remains fail-closed at its explicit
             # credential handoff boundary.
             if native_compatibility_sha256 is not None:
-                raise SupervisorError("shared native Codex profile cannot authorize worker launch") from exc
+                raise HarnessError("shared native Codex profile cannot authorize worker launch") from exc
         attempt_suffix = f"g{int(row['generation'])}-a{int(row['attempt'])}"
         token = os.urandom(32).hex()
         token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
@@ -3589,7 +3634,7 @@ class Supervisor:
         result_path = self.runtime_root / f"result-{dispatch_digest}-{attempt_suffix}.json"
         artifact_paths = (cap_path, capsule_path, result_path)
         if any(os.path.lexists(path) for path in artifact_paths):
-            raise SupervisorError("worker attempt artifacts already exist")
+            raise HarnessError("worker attempt artifacts already exist")
         capability_payload = {
             "version": 1,
             "operation": "submit_result",
@@ -3628,7 +3673,7 @@ class Supervisor:
         if recovery_continuation:
             original_prompt = capsule_value.get("prompt")
             if not isinstance(original_prompt, str):
-                raise SupervisorError("worker recovery capsule lacks its original prompt")
+                raise HarnessError("worker recovery capsule lacks its original prompt")
             capsule_value["prompt"] = recovery_continuation_prompt(
                 workspace=Path(str(row["workspace_path"])),
                 resume_same_thread=row.get("thread_id") is not None,
@@ -3672,7 +3717,7 @@ class Supervisor:
         try:
             child = subprocess.Popen(command, start_new_session=True, close_fds=True)
         except OSError as exc:
-            raise SupervisorError("worker launch failed") from exc
+            raise HarnessError("worker launch failed") from exc
         try:
             self.ledger.bind_worker_liveness(
                 dispatch_id,
@@ -3752,13 +3797,13 @@ class Supervisor:
     def process_once(self) -> bool:
         if self.epoch is None:
             self.acquire()
-        self._renew_supervisor_lease_if_due(force=True)
-        if self.ledger.supervisor_refresh_fenced():
+        self._renew_harness_lease_if_due(force=True)
+        if self.ledger.harness_refresh_fenced():
             return False
         claim_nonce_hash = hashlib.sha256(os.urandom(32)).hexdigest()
         try:
             row = self.ledger.claim_queue_dispatch(epoch=int(self.epoch), claim_nonce_sha256=claim_nonce_hash)
-        except SupervisorRefreshBlocked:
+        except HarnessRefreshBlocked:
             return False
         if row is None:
             return False
@@ -3772,7 +3817,7 @@ class Supervisor:
         ``_spawn_one`` moves an ordinary preparation/launch failure to
         ``human_attention_required`` before re-raising.  The foreground
         service must preserve that fail-closed dispatch fact without turning
-        it into a repository-wide supervisor outage.  Failure to commit that
+        it into a repository-wide harness outage.  Failure to commit that
         terminalization is different: it still escapes so systemd and an
         operator can see that lifecycle authority is uncertain.
         """
@@ -3781,7 +3826,7 @@ class Supervisor:
             return self.process_once()
         except FailedSpawnTerminalizationError:
             raise
-        except SupervisorError:
+        except HarnessError:
             return False
 
     def _recover_exited_dispatch(self, row: dict[str, object]) -> bool:
@@ -3993,7 +4038,7 @@ class Supervisor:
     def recover_once(self) -> None:
         """Reconcile one restart snapshot without duplicating live work."""
 
-        if self.ledger.supervisor_refresh_fenced():
+        if self.ledger.harness_refresh_fenced():
             return
         self.ledger.reconcile_inflight_wakes()
         self.ledger.reconcile_exhausted_wake_notifications()
@@ -4132,7 +4177,7 @@ class Supervisor:
                     self._spawn_one(claimed, recovery_continuation=True)
             except FailedSpawnTerminalizationError:
                 raise
-            except (LedgerError, SupervisorError):
+            except (LedgerError, HarnessError):
                 continue
 
     def _recover_retained_worker_result(self, row: dict[str, object]) -> bool:
@@ -4206,7 +4251,7 @@ class Supervisor:
                     break
         return changed
 
-    def _renew_supervisor_lease_if_due(self, *, force: bool = False) -> None:
+    def _renew_harness_lease_if_due(self, *, force: bool = False) -> None:
         """Renew before post-IPC lifecycle work while preserving exact epoch ownership."""
 
         epoch = getattr(self, "epoch", None)
@@ -4218,7 +4263,7 @@ class Supervisor:
         next_renewal = getattr(self, "_next_renewal_monotonic", None)
         if not force and next_renewal is not None and now_monotonic < next_renewal:
             return
-        self.ledger.renew_supervisor(
+        self.ledger.renew_harness(
             epoch=epoch,
             owner_nonce_sha256=owner_nonce_sha256,
             lease_seconds=lease_seconds,
@@ -4244,7 +4289,7 @@ class Supervisor:
                 if ready:
                     connection, _ = endpoint.accept()
                     operation = self._accept_connection(connection)
-                    self._renew_supervisor_lease_if_due()
+                    self._renew_harness_lease_if_due()
                     # Queue and controller action ingress are the only normal
                     # steady-state lifecycle triggers.  In particular,
                     # worker_event, heartbeat, status, and control polling
@@ -4257,7 +4302,7 @@ class Supervisor:
                         self._refresh_checkpoint_deadline()
                 now_monotonic = time.monotonic()
                 if self._next_renewal_monotonic is not None and now_monotonic >= self._next_renewal_monotonic:
-                    self._renew_supervisor_lease_if_due()
+                    self._renew_harness_lease_if_due()
                     children_reaped = self._reap_children()
                     controller_reaped = self._reap_controller_generations()
                     if children_reaped:
@@ -4281,4 +4326,4 @@ class Supervisor:
             self.close()
 
 
-__all__ = ["Supervisor", "SupervisorError", "WorkerResultRejected", "process_birth_identity"]
+__all__ = ["HarnessError", "WorkerResultRejected", "WorkflowHarness", "process_birth_identity"]

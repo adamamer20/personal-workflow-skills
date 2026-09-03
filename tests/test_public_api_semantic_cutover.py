@@ -20,8 +20,9 @@ def test_cli_groups_diagnostics_and_hides_compatibility_aliases() -> None:
     root_result = runner.invoke(app, ["--help"])
     assert root_result.exit_code == 0
     help_text = root_result.stdout
-    for command in ("tui", "control", "status", "cancel", "supervisor", "live", "schema", "diagnostics"):
+    for command in ("tui", "control", "status", "cancel", "harness", "live", "schema", "diagnostics"):
         assert command in help_text
+    assert "supervisor" not in help_text
     for command in (
         "plan",
         "start",

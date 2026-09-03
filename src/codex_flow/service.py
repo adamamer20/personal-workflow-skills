@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
 from .ipc import IpcError, send_request
-from .ledger import Ledger, LedgerError, SupervisorRefreshBlocked
+from .ledger import HarnessRefreshBlocked, Ledger, LedgerError
 
 
 class ServiceError(RuntimeError):
@@ -34,7 +34,7 @@ class ServiceRefreshDeferred(ServiceError):
 
 
 class ServiceRefreshFailed(ServiceError):
-    """A bounded supervisor handoff did not reach a verified replacement."""
+    """A bounded harness handoff did not reach a verified replacement."""
 
 
 @runtime_checkable
@@ -109,9 +109,9 @@ def _send_authenticated_shutdown(socket_path: Path, timeout: float) -> dict[str,
             timeout=timeout,
         )
     except (IpcError, OSError) as exc:
-        raise ServiceRefreshFailed("authenticated supervisor shutdown failed") from exc
+        raise ServiceRefreshFailed("authenticated harness shutdown failed") from exc
     if response != {"version": 1, "ok": True, "operation": "shutdown"}:
-        raise ServiceRefreshFailed("authenticated supervisor shutdown returned an invalid acknowledgement")
+        raise ServiceRefreshFailed("authenticated harness shutdown returned an invalid acknowledgement")
     return response
 
 
@@ -121,7 +121,7 @@ def _authority_identity(authority: Mapping[str, object]) -> tuple[int, str, int]
         birth_identity = authority["process_birth_identity"]
         epoch = authority["epoch"]
     except KeyError as exc:
-        raise ServiceRefreshFailed("supervisor authority is incomplete") from exc
+        raise ServiceRefreshFailed("harness authority is incomplete") from exc
     if (
         isinstance(pid, bool)
         or not isinstance(pid, int)
@@ -132,7 +132,7 @@ def _authority_identity(authority: Mapping[str, object]) -> tuple[int, str, int]
         or not isinstance(epoch, int)
         or epoch <= 0
     ):
-        raise ServiceRefreshFailed("supervisor authority has invalid process identity")
+        raise ServiceRefreshFailed("harness authority has invalid process identity")
     return pid, birth_identity, epoch
 
 
@@ -143,7 +143,7 @@ def _authority_matches_unit(authority: Mapping[str, object], unit: ServiceUnit) 
         ("version", unit.version),
     ):
         if authority.get(field) != expected:
-            raise ServiceRefreshFailed(f"supervisor authority {field} does not match the repository unit")
+            raise ServiceRefreshFailed(f"harness authority {field} does not match the repository unit")
 
 
 def _replacement_is_healthy(
@@ -164,7 +164,7 @@ def _replacement_is_healthy(
         epoch = authority["epoch"]
         requested_shutdown = authority["requested_shutdown"]
     except KeyError as exc:
-        raise ServiceRefreshFailed("replacement supervisor authority is incomplete") from exc
+        raise ServiceRefreshFailed("replacement harness authority is incomplete") from exc
     if (
         isinstance(pid, bool)
         or not isinstance(pid, int)
@@ -264,12 +264,12 @@ def generate_unit(
     text = "".join(
         (
             "[Unit]\n",
-            f"Description=Codex Flow supervisor ({repository_root})\n",
+            f"Description=Codex Flow harness ({repository_root})\n",
             "After=default.target\n\n",
             "[Service]\n",
             profile_identity,
             "Type=simple\n",
-            f"ExecStart={_unit_arg(executable)} supervisor run --foreground --state-root {_unit_arg(state_root)}\n",
+            f"ExecStart={_unit_arg(executable)} harness run --foreground --state-root {_unit_arg(state_root)}\n",
             pass_environment,
             "Restart=on-failure\n",
             "RuntimeDirectory=codex-flow\n",
@@ -333,11 +333,11 @@ def _assert_existing_unit(unit: ServiceUnit, *, config_home: Path | None = None)
     try:
         metadata = path.lstat()
     except FileNotFoundError as exc:
-        raise ServiceError("matching repository supervisor unit is not installed") from exc
+        raise ServiceError("matching repository harness unit is not installed") from exc
     except OSError as exc:
-        raise ServiceError("matching repository supervisor unit is unavailable") from exc
+        raise ServiceError("matching repository harness unit is unavailable") from exc
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise ServiceError("matching repository supervisor unit is unsafe")
+        raise ServiceError("matching repository harness unit is unsafe")
     return path
 
 
@@ -401,7 +401,7 @@ def _validate_installed_unit(
     lines = text.splitlines()
     expected_lines = unit.text.splitlines()
     expected_exec = (
-        f"ExecStart={_unit_arg(unit.executable)} supervisor run --foreground --state-root {_unit_arg(unit.state_root)}"
+        f"ExecStart={_unit_arg(unit.executable)} harness run --foreground --state-root {_unit_arg(unit.state_root)}"
     )
     exec_lines = [line for line in lines if line.startswith("ExecStart=")]
     if exec_lines != [expected_exec]:
@@ -507,15 +507,15 @@ def refresh_with_credential(
     sleeper: Callable[[float], None] = time.sleep,
     shutdown_sender: RefreshShutdown = _send_authenticated_shutdown,
 ) -> dict[str, object]:
-    """Refresh one unit through a fenced, authenticated supervisor handoff.
+    """Refresh one unit through a fenced, authenticated harness handoff.
 
-    The existing supervisor_authority.requested_shutdown bit is the durable
-    fence. It stays set on every failure; the replacement supervisor clears it
+    The existing harness_authority.requested_shutdown bit is the durable
+    fence. It stays set on every failure; the replacement harness clears it
     only as part of its normal atomic lease acquisition.
     """
 
     if deadline_seconds <= 0:
-        raise ValueError("supervisor refresh deadline must be positive")
+        raise ValueError("harness refresh deadline must be positive")
     if native_compatibility_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", native_compatibility_sha256) is None:
         raise ValueError("native compatibility identity is invalid")
     unit_path_value = _assert_existing_unit(unit, config_home=config_home)
@@ -536,11 +536,11 @@ def refresh_with_credential(
     if owned_ledger is None:
         ledger_path = unit.state_root / ".codex-flow" / "workflow.db"
         if not ledger_path.is_file():
-            raise ServiceRefreshFailed("supervisor ledger is unavailable")
+            raise ServiceRefreshFailed("harness ledger is unavailable")
         try:
             owned_ledger = Ledger(ledger_path)
         except LedgerError as exc:
-            raise ServiceRefreshFailed("supervisor ledger cannot be opened") from exc
+            raise ServiceRefreshFailed("harness ledger cannot be opened") from exc
 
     assert owned_ledger is not None
     close_ledger = ledger is None
@@ -552,24 +552,24 @@ def refresh_with_credential(
     def remaining() -> float:
         value = deadline - clock()
         if value <= 0:
-            raise ServiceRefreshFailed("supervisor refresh timed out")
+            raise ServiceRefreshFailed("harness refresh timed out")
         return value
 
     imported = False
     try:
         try:
-            fence = owned_ledger.arm_supervisor_refresh_fence()
-        except SupervisorRefreshBlocked as exc:
+            fence = owned_ledger.arm_harness_refresh_fence()
+        except HarnessRefreshBlocked as exc:
             raise ServiceRefreshDeferred(str(exc)) from exc
         except LedgerError as exc:
-            raise ServiceRefreshFailed("supervisor refresh fence could not be armed") from exc
+            raise ServiceRefreshFailed("harness refresh fence could not be armed") from exc
         if fence is None:
-            raise ServiceRefreshFailed("supervisor authority is unavailable")
+            raise ServiceRefreshFailed("harness authority is unavailable")
 
         authority = cast(Mapping[str, object], fence)
         _authority_matches_unit(authority, unit)
         old_pid, old_birth_identity, old_epoch = _authority_identity(authority)
-        socket_path = unit.state_root / ".codex-flow" / "runtime" / "supervisor.sock"
+        socket_path = unit.state_root / ".codex-flow" / "runtime" / "harness.sock"
         old_process_live = live_checker(old_pid, old_birth_identity)
         if old_process_live:
             shutdown_sender(socket_path, remaining())
@@ -578,8 +578,8 @@ def refresh_with_credential(
             # wait loop so an already completed handoff does not incur an
             # artificial sleep or deadline edge.
             old_process_live = live_checker(old_pid, old_birth_identity)
-        elif not owned_ledger.supervisor_refresh_fenced():
-            raise ServiceRefreshFailed("supervisor fence disappeared before shutdown")
+        elif not owned_ledger.harness_refresh_fenced():
+            raise ServiceRefreshFailed("harness fence disappeared before shutdown")
 
         while old_process_live or _unit_is_active(unit, runner=runner):
             remaining()
@@ -609,7 +609,7 @@ def refresh_with_credential(
 
         while True:
             remaining()
-            replacement = owned_ledger.supervisor_authority()
+            replacement = owned_ledger.harness_authority()
             if _unit_is_active(unit, runner=runner) and _replacement_is_healthy(
                 replacement,
                 unit=unit,
@@ -639,9 +639,9 @@ def refresh_with_credential(
         if isinstance(exc, ServiceRefreshDeferred | ServiceRefreshFailed | ServiceError):
             raise
         if isinstance(exc, LedgerError):
-            raise ServiceRefreshFailed("supervisor refresh ledger operation failed") from exc
+            raise ServiceRefreshFailed("harness refresh ledger operation failed") from exc
         if isinstance(exc, Exception):
-            raise ServiceRefreshFailed("supervisor refresh failed") from exc
+            raise ServiceRefreshFailed("harness refresh failed") from exc
         raise
     finally:
         if close_ledger:

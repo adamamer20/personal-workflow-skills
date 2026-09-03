@@ -43,11 +43,11 @@ from .ipc import IpcError, IpcSubscription, open_ipc_subscription, send_request
 
 
 class ControlClientError(RuntimeError):
-    """The supervisor rejected a typed control-plane request."""
+    """The harness rejected a typed control-plane request."""
 
 
 class ControlCommandRejected(ControlClientError):
-    """The supervisor explicitly rejected a live-control command."""
+    """The harness explicitly rejected a live-control command."""
 
 
 class ControlCommandPostSendUncertain(ControlClientError):
@@ -121,7 +121,7 @@ def _response(response: object, *, operation: str) -> dict[str, object]:
 
 def _shape(value: object, required: set[str]) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != required:
-        raise ControlClientError("supervisor returned an unsupported typed shape")
+        raise ControlClientError("harness returned an unsupported typed shape")
     return value
 
 
@@ -136,14 +136,14 @@ def _decode_event(value: object) -> DiagnosticEvent:
             payload_sha256=raw["payload_sha256"],  # type: ignore[arg-type]
         )
     except (TypeError, ValueError) as exc:
-        raise ControlClientError("supervisor returned malformed activity") from exc
+        raise ControlClientError("harness returned malformed activity") from exc
 
 
 def _decode_conversation_page(value: object) -> ConversationHistoryPage:
     try:
         return conversation_history_page_from_json(value)
     except (TypeError, ValueError) as exc:
-        raise ControlClientError("supervisor returned malformed conversation page") from exc
+        raise ControlClientError("harness returned malformed conversation page") from exc
 
 
 def _decode_retry_policy(value: object) -> RetryPolicyFacts:
@@ -172,7 +172,7 @@ def _decode_retry_policy(value: object) -> RetryPolicyFacts:
     try:
         return RetryPolicyFacts(**raw)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
-        raise ControlClientError("supervisor returned malformed retry policy") from exc
+        raise ControlClientError("harness returned malformed retry policy") from exc
 
 
 def _decode_status(value: object) -> LiveWorkerStatus:
@@ -227,17 +227,17 @@ def _decode_status(value: object) -> LiveWorkerStatus:
         if current is None and name in nullable_string_fields:
             continue
         if not isinstance(current, str):
-            raise ControlClientError(f"supervisor returned malformed status field: {name}")
+            raise ControlClientError(f"harness returned malformed status field: {name}")
     integer_fields = ("generation", "sequence", "attempt", "claim_epoch")
     for name in integer_fields:
         current = raw[name]
         if current is None and name == "claim_epoch":
             continue
         if isinstance(current, bool) or not isinstance(current, int):
-            raise ControlClientError(f"supervisor returned malformed status field: {name}")
+            raise ControlClientError(f"harness returned malformed status field: {name}")
     activity_raw = raw["recent_activity"]
     if not isinstance(activity_raw, list):
-        raise ControlClientError("supervisor returned malformed activity")
+        raise ControlClientError("harness returned malformed activity")
     try:
         return LiveWorkerStatus(
             dispatch_id=DispatchId(raw["dispatch_id"]),  # type: ignore[arg-type]
@@ -250,7 +250,7 @@ def _decode_status(value: object) -> LiveWorkerStatus:
             recent_activity=tuple(_decode_event(item) for item in activity_raw),
         )
     except (TypeError, ValueError, ControlClientError) as exc:
-        raise ControlClientError("supervisor returned malformed status") from exc
+        raise ControlClientError("harness returned malformed status") from exc
 
 
 def _decode_command(value: object) -> ControlCommand:
@@ -276,40 +276,40 @@ def _decode_command(value: object) -> ControlCommand:
     acknowledgement_terminal_status: str | None = None
     if raw["acknowledgement_json"] is not None:
         if not isinstance(raw["acknowledgement_json"], str):
-            raise ControlClientError("supervisor returned malformed command acknowledgement")
+            raise ControlClientError("harness returned malformed command acknowledgement")
         try:
             decoded = strict_json_loads(raw["acknowledgement_json"], max_bytes=4096)
         except (TypeError, ValueError) as exc:
-            raise ControlClientError("supervisor returned malformed command acknowledgement") from exc
+            raise ControlClientError("harness returned malformed command acknowledgement") from exc
         if not isinstance(decoded, dict):
-            raise ControlClientError("supervisor returned malformed command acknowledgement")
+            raise ControlClientError("harness returned malformed command acknowledgement")
         allowed_shapes = ({"detail"}, {"detail", "terminal_status"})
         if set(decoded) not in allowed_shapes:
-            raise ControlClientError("supervisor returned malformed command acknowledgement")
+            raise ControlClientError("harness returned malformed command acknowledgement")
         detail = decoded["detail"]
         if detail is not None and not isinstance(detail, str):
-            raise ControlClientError("supervisor returned malformed command acknowledgement")
+            raise ControlClientError("harness returned malformed command acknowledgement")
         terminal_status = decoded.get("terminal_status")
         if terminal_status is not None and terminal_status not in CONTROL_ACKNOWLEDGEMENT_TERMINAL_STATUSES:
-            raise ControlClientError("supervisor returned malformed command acknowledgement")
+            raise ControlClientError("harness returned malformed command acknowledgement")
         acknowledgement = detail
         acknowledgement_terminal_status = terminal_status
     payload = raw["payload"]
     payload_sha256 = raw["payload_sha256"]
     state = raw["state"]
     if not isinstance(state, str):
-        raise ControlClientError("supervisor returned malformed command state")
+        raise ControlClientError("harness returned malformed command state")
     if raw["acknowledgement_json"] is not None and state not in {"acknowledged", "rejected", "unresolved"}:
-        raise ControlClientError("supervisor returned command acknowledgement before a terminal command state")
+        raise ControlClientError("harness returned command acknowledgement before a terminal command state")
     if state == "acknowledged" and raw["acknowledgement_json"] is None:
-        raise ControlClientError("supervisor returned acknowledged command without acknowledgement facts")
+        raise ControlClientError("harness returned acknowledged command without acknowledgement facts")
     if (
         not isinstance(payload_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", payload_sha256) is None
         or not isinstance(payload, str | type(None))
         or hashlib.sha256((payload or "").encode("utf-8")).hexdigest() != payload_sha256
     ):
-        raise ControlClientError("supervisor returned malformed command payload digest")
+        raise ControlClientError("harness returned malformed command payload digest")
     try:
         return ControlCommand(
             command_id=raw["command_id"],  # type: ignore[arg-type]
@@ -330,7 +330,7 @@ def _decode_command(value: object) -> ControlCommand:
             acknowledgement_terminal_status=acknowledgement_terminal_status,
         )
     except (TypeError, ValueError) as exc:
-        raise ControlClientError("supervisor returned malformed control command") from exc
+        raise ControlClientError("harness returned malformed control command") from exc
 
 
 def _decode_action(value: object) -> RecoveryAction:
@@ -349,7 +349,7 @@ def _decode_action(value: object) -> RecoveryAction:
     requested: RetryBudgetChange | None = None
     if raw["requested_budget_json"] is not None:
         if not isinstance(raw["requested_budget_json"], str):
-            raise ControlClientError("supervisor returned malformed recovery budget")
+            raise ControlClientError("harness returned malformed recovery budget")
         try:
             requested_raw = strict_json_loads(raw["requested_budget_json"], max_bytes=1024)
             budget_fields = {
@@ -366,11 +366,11 @@ def _decode_action(value: object) -> RecoveryAction:
             budget_values = requested_raw
             requested = RetryBudgetChange(**budget_values)  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
-            raise ControlClientError("supervisor returned malformed recovery budget") from exc
+            raise ControlClientError("harness returned malformed recovery budget") from exc
     rebind: CompatibilityRebind | None = None
     if raw["compatibility_rebind_json"] is not None:
         if not isinstance(raw["compatibility_rebind_json"], str):
-            raise ControlClientError("supervisor returned malformed compatibility rebind")
+            raise ControlClientError("harness returned malformed compatibility rebind")
         try:
             rebind_raw = strict_json_loads(raw["compatibility_rebind_json"], max_bytes=1024)
             legacy_fields = {
@@ -386,7 +386,7 @@ def _decode_action(value: object) -> RecoveryAction:
                 raise ValueError("compatibility rebind shape is invalid")
             rebind = CompatibilityRebind(**rebind_raw)  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
-            raise ControlClientError("supervisor returned malformed compatibility rebind") from exc
+            raise ControlClientError("harness returned malformed compatibility rebind") from exc
     try:
         return RecoveryAction(
             action_id=raw["action_id"],  # type: ignore[arg-type]
@@ -400,7 +400,7 @@ def _decode_action(value: object) -> RecoveryAction:
             created_at=raw["created_at"],  # type: ignore[arg-type]
         )
     except (TypeError, ValueError) as exc:
-        raise ControlClientError("supervisor returned malformed recovery action") from exc
+        raise ControlClientError("harness returned malformed recovery action") from exc
 
 
 def _decode_controller_status(value: object) -> ControllerDecisionStatus:
@@ -424,7 +424,7 @@ def _decode_controller_status(value: object) -> ControllerDecisionStatus:
     raw = _shape(value, fields)
     summary_raw = raw["summary"]
     if not isinstance(summary_raw, dict):
-        raise ControlClientError("supervisor returned malformed controller summary")
+        raise ControlClientError("harness returned malformed controller summary")
     try:
         from .domain import ControllerDecisionSummary
 
@@ -477,7 +477,7 @@ def _decode_controller_status(value: object) -> ControllerDecisionStatus:
             summary,
         )
     except (TypeError, ValueError, KeyError) as exc:
-        raise ControlClientError("supervisor returned malformed controller decision") from exc
+        raise ControlClientError("harness returned malformed controller decision") from exc
 
 
 def _decode_controller_claim(value: object) -> ControllerDecisionClaim:
@@ -495,7 +495,7 @@ def _decode_controller_claim(value: object) -> ControllerDecisionClaim:
             raw["token"],  # type: ignore[arg-type]
         )
     except (TypeError, ValueError) as exc:
-        raise ControlClientError("supervisor returned malformed controller claim") from exc
+        raise ControlClientError("harness returned malformed controller claim") from exc
 
 
 def _decode_program_status(value: object) -> ProgramControllerDecisionStatus:
@@ -521,7 +521,7 @@ def _decode_program_status(value: object) -> ProgramControllerDecisionStatus:
         },
     )
     if not isinstance(raw["payload"], dict):
-        raise ControlClientError("supervisor returned malformed program payload")
+        raise ControlClientError("harness returned malformed program payload")
     try:
         return ProgramControllerDecisionStatus(
             ControllerDecisionId(raw["decision_id"]),  # type: ignore[arg-type]
@@ -542,16 +542,16 @@ def _decode_program_status(value: object) -> ProgramControllerDecisionStatus:
             raw["payload"],  # type: ignore[arg-type]
         )
     except (TypeError, ValueError, KeyError) as exc:
-        raise ControlClientError("supervisor returned malformed program decision") from exc
+        raise ControlClientError("harness returned malformed program decision") from exc
 
 
 def _decode_program_context(value: object) -> ProgramControllerContext:
     if not isinstance(value, dict):
-        raise ControlClientError("supervisor returned malformed program context")
+        raise ControlClientError("harness returned malformed program context")
     try:
         return ProgramControllerContext.from_json(value)
     except (TypeError, ValueError, KeyError) as exc:
-        raise ControlClientError("supervisor returned malformed program context") from exc
+        raise ControlClientError("harness returned malformed program context") from exc
 
 
 def _decode_controller_receipt(value: object) -> ControllerActionReceipt:
@@ -570,7 +570,7 @@ def _decode_controller_receipt(value: object) -> ControllerActionReceipt:
         },
     )
     if not isinstance(raw["effect_receipt"], dict):
-        raise ControlClientError("supervisor returned malformed controller receipt")
+        raise ControlClientError("harness returned malformed controller receipt")
     try:
         return ControllerActionReceipt(
             raw["action_id"],  # type: ignore[arg-type]
@@ -584,7 +584,7 @@ def _decode_controller_receipt(value: object) -> ControllerActionReceipt:
             raw["acknowledged_at"],  # type: ignore[arg-type]
         )
     except (TypeError, ValueError) as exc:
-        raise ControlClientError("supervisor returned malformed controller receipt") from exc
+        raise ControlClientError("harness returned malformed controller receipt") from exc
 
 
 class LiveWorkerControlClient:
@@ -598,7 +598,7 @@ class LiveWorkerControlClient:
 
     @classmethod
     def for_state_root(cls, state_root: Path, *, timeout: float = 5.0) -> LiveWorkerControlClient:
-        return cls(Path(state_root).resolve() / ".codex-flow" / "runtime" / "supervisor.sock", timeout=timeout)
+        return cls(Path(state_root).resolve() / ".codex-flow" / "runtime" / "harness.sock", timeout=timeout)
 
     def _request(self, operation: str, **facts: object) -> dict[str, object]:
         if not isinstance(operation, str) or not operation or any(c.isspace() for c in operation):
@@ -611,10 +611,10 @@ class LiveWorkerControlClient:
         except IpcError as exc:
             reason = _sanitized_reason(getattr(exc, "reason_code", None))
             if reason is not None:
-                raise ControlClientError(f"supervisor control response rejected: {reason}") from exc
-            raise ControlClientError("supervisor control endpoint is unavailable") from exc
+                raise ControlClientError(f"harness control response rejected: {reason}") from exc
+            raise ControlClientError("harness control endpoint is unavailable") from exc
         except OSError as exc:
-            raise ControlClientError("supervisor control endpoint is unavailable") from exc
+            raise ControlClientError("harness control endpoint is unavailable") from exc
 
     def _send_control(self, operation: str, **facts: object) -> dict[str, object]:
         """Send one mutation while preserving rejection versus reply ambiguity."""
@@ -642,7 +642,7 @@ class LiveWorkerControlClient:
             reason = _sanitized_reason(response.get("reason_code")) or _sanitized_reason(response.get("error"))
             if response.get("error") == "request_rejected":
                 detail = f": {reason}" if reason is not None else ""
-                raise ControlCommandRejected(f"supervisor explicitly rejected the live-control command{detail}")
+                raise ControlCommandRejected(f"harness explicitly rejected the live-control command{detail}")
             if reason == "response_too_large":
                 raise ControlCommandPostSendUncertain(
                     "live-control response exceeded the bounded frame; durable command state is uncertain"
@@ -666,7 +666,7 @@ class LiveWorkerControlClient:
         response = self._request("status", **facts)
         queue = response.get("queue")
         if not isinstance(queue, list):
-            raise ControlClientError("supervisor returned malformed status list")
+            raise ControlClientError("harness returned malformed status list")
         return tuple(_decode_status(item) for item in queue)
 
     def conversation_history(
@@ -709,7 +709,7 @@ class LiveWorkerControlClient:
             "page_fragments": request.page_fragments,
         }
         # Null optional values remain in this closed request shape so the
-        # supervisor can distinguish an omitted page token from a malformed
+        # harness can distinguish an omitted page token from a malformed
         # one without inferring identity.
         return _decode_conversation_page(self._request("conversation_history", **facts)["page"])
 
@@ -754,7 +754,7 @@ class LiveWorkerControlClient:
 
         raw = subscription.receive()
         if not isinstance(raw, dict) or raw.get("version") != 1 or raw.get("ok") is not True:
-            raise ControlClientError("supervisor returned malformed live event")
+            raise ControlClientError("harness returned malformed live event")
         kind = raw.get("event")
         if kind == "keyframe" and set(raw) == {"version", "ok", "event", "keyframe"}:
             try:
@@ -769,10 +769,10 @@ class LiveWorkerControlClient:
                     keyframe,
                 )
             except (TypeError, ValueError) as exc:
-                raise ControlClientError("supervisor returned malformed live keyframe") from exc
+                raise ControlClientError("harness returned malformed live keyframe") from exc
         required = {"version", "ok", "event", "dispatch_id", "generation", "attempt", "thread_id", "turn_id"}
         if kind != "terminal" or set(raw) != required:
-            raise ControlClientError("supervisor returned malformed live event")
+            raise ControlClientError("harness returned malformed live event")
         try:
             return LiveSubscriptionEvent(
                 LiveSubscriptionEventKind.TERMINAL,
@@ -783,7 +783,7 @@ class LiveWorkerControlClient:
                 raw["turn_id"],  # type: ignore[arg-type]
             )
         except (TypeError, ValueError) as exc:
-            raise ControlClientError("supervisor returned malformed live terminal event") from exc
+            raise ControlClientError("harness returned malformed live terminal event") from exc
 
     def recent_activity(self, dispatch_id: str, *, limit: int = 128) -> LiveWorkerActivity:
         try:
@@ -795,11 +795,11 @@ class LiveWorkerControlClient:
         response = self._request("activity", dispatch_id=dispatch_id, limit=limit)
         activity = response.get("activity")
         if not isinstance(activity, list):
-            raise ControlClientError("supervisor returned malformed activity list")
+            raise ControlClientError("harness returned malformed activity list")
         try:
             return LiveWorkerActivity(DispatchId(dispatch_id), tuple(_decode_event(item) for item in activity))
         except (TypeError, ValueError, ControlClientError) as exc:
-            raise ControlClientError("supervisor returned malformed activity") from exc
+            raise ControlClientError("harness returned malformed activity") from exc
 
     @staticmethod
     def _validate_command_id(command_id: str | None) -> str:
@@ -1021,7 +1021,7 @@ class ControllerDecisionClient:
 
     @classmethod
     def for_state_root(cls, state_root: Path, *, timeout: float = 5.0) -> ControllerDecisionClient:
-        return cls(Path(state_root).resolve() / ".codex-flow" / "runtime" / "supervisor.sock", timeout=timeout)
+        return cls(Path(state_root).resolve() / ".codex-flow" / "runtime" / "harness.sock", timeout=timeout)
 
     def _request(self, operation: str, **facts: object) -> dict[str, object]:
         try:
@@ -1031,17 +1031,17 @@ class ControllerDecisionClient:
         except IpcError as exc:
             reason = _sanitized_reason(getattr(exc, "reason_code", None))
             if reason is not None:
-                raise ControlClientError(f"supervisor control response rejected: {reason}") from exc
-            raise ControlClientError("supervisor control endpoint is unavailable") from exc
+                raise ControlClientError(f"harness control response rejected: {reason}") from exc
+            raise ControlClientError("harness control endpoint is unavailable") from exc
         except OSError as exc:
-            raise ControlClientError("supervisor control endpoint is unavailable") from exc
+            raise ControlClientError("harness control endpoint is unavailable") from exc
         return _response(response, operation=operation)
 
     def pending(self) -> tuple[ControllerDecisionStatus, ...]:
         response = self._request("controller_pending")
         decisions = response["decisions"]
         if not isinstance(decisions, list):
-            raise ControlClientError("supervisor returned malformed controller decisions")
+            raise ControlClientError("harness returned malformed controller decisions")
         return tuple(_decode_controller_status(item) for item in decisions)
 
     def program_pending(self) -> tuple[ProgramControllerDecisionStatus, ...]:
@@ -1050,7 +1050,7 @@ class ControllerDecisionClient:
         response = self._request("program_pending")
         decisions = response["decisions"]
         if not isinstance(decisions, list):
-            raise ControlClientError("supervisor returned malformed program decisions")
+            raise ControlClientError("harness returned malformed program decisions")
         return tuple(_decode_program_status(item) for item in decisions)
 
     def status(self, decision_id: str) -> ControllerDecisionStatus:
@@ -1063,7 +1063,7 @@ class ControllerDecisionClient:
         return _decode_program_status(self._request("program_status", decision_id=str(identity))["decision"])
 
     def program_start(self, program_id: str, *, event_key: str = "start") -> ProgramControllerDecisionStatus:
-        """Emit one idempotent program-start event through the supervisor."""
+        """Emit one idempotent program-start event through the harness."""
 
         if not isinstance(program_id, str) or not program_id.strip():
             raise ValueError("program id is invalid")
@@ -1246,7 +1246,7 @@ class ControllerDecisionClient:
         """Commit the exact bundle returned by one reserved SDK inspection.
 
         Recovery has no access to the source generation's secret claim token;
-        the supervisor therefore exposes a separate typed operation whose
+        the harness therefore exposes a separate typed operation whose
         ledger boundary requires the persisted completed-inspection fact.
         """
 
@@ -1303,7 +1303,7 @@ class ControllerDecisionClient:
     @staticmethod
     def _decode_generation(value: object) -> ControllerGenerationStatus:
         if not isinstance(value, dict):
-            raise ControlClientError("supervisor returned malformed controller generation")
+            raise ControlClientError("harness returned malformed controller generation")
         try:
             return ControllerGenerationStatus(
                 ControllerDecisionId(value["decision_id"]),  # type: ignore[arg-type]
@@ -1320,14 +1320,14 @@ class ControllerDecisionClient:
                 value.get("inspection_outcome"),  # type: ignore[arg-type]
             )
         except (TypeError, ValueError, KeyError) as exc:
-            raise ControlClientError("supervisor returned malformed controller generation") from exc
+            raise ControlClientError("harness returned malformed controller generation") from exc
 
     def reserve_recovery_inspection(self, decision_id: str) -> ControllerRecoveryInspectionClaim:
         identity = ControllerDecisionId(decision_id)
         response = self._request("controller_reserve_recovery", decision_id=str(identity))
         raw = response["claim"]
         if not isinstance(raw, dict):
-            raise ControlClientError("supervisor returned malformed controller inspection claim")
+            raise ControlClientError("harness returned malformed controller inspection claim")
         try:
             return ControllerRecoveryInspectionClaim(
                 ControllerDecisionId(raw["decision_id"]),
@@ -1337,7 +1337,7 @@ class ControllerDecisionClient:
                 raw["token"],  # type: ignore[arg-type]
             )
         except (TypeError, ValueError, KeyError) as exc:
-            raise ControlClientError("supervisor returned malformed controller inspection claim") from exc
+            raise ControlClientError("harness returned malformed controller inspection claim") from exc
 
     def generation(self, decision_id: str, generation: int | None = None) -> ControllerGenerationStatus:
         """Read one typed persisted generation without exposing SQLite rows."""

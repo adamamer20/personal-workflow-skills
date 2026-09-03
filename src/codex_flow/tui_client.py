@@ -38,7 +38,7 @@ from .tui_models import DecisionView, TerminalUiSnapshot, WorkerView
 
 
 class TerminalUiOfflineError(RuntimeError):
-    """A mutation was requested without a live authenticated supervisor."""
+    """A mutation was requested without a live authenticated harness."""
 
 
 _RECONCILIATION_UNAVAILABLE = object()

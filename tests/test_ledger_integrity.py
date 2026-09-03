@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import os
 import sqlite3
 import unittest
@@ -14,7 +16,13 @@ import codex_flow.artifacts as artifacts_module
 import codex_flow.domain as domain_module
 import codex_flow.ledger as ledger_module
 from codex_flow.artifacts import ArtifactError, ArtifactProjector, UnsafeArtifactPath, rebuild_projections
-from codex_flow.contracts import ModelFacingControllerAction, ModelFacingControllerActionBundle
+from codex_flow.contracts import (
+    ModelFacingControllerAction,
+    ModelFacingControllerActionBundle,
+    ModelFacingResult,
+    ModelValidation,
+    legacy_model_facing_result_schema_sha256,
+)
 from codex_flow.domain import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATES,
@@ -252,7 +260,7 @@ class LedgerTests(unittest.TestCase):
             {WorkflowState.ACCEPTED, WorkflowState.BLOCKED, WorkflowState.FAILED, WorkflowState.CANCELLED},
         )
         for state, allowed in ALLOWED_TRANSITIONS.items():
-            if state in TERMINAL_STATES:
+            if state in {WorkflowState.ACCEPTED, WorkflowState.CANCELLED}:
                 self.assertEqual(allowed, frozenset())
         with TemporaryDirectory() as directory:
             ledger = self.make_ledger(directory)
@@ -261,8 +269,7 @@ class LedgerTests(unittest.TestCase):
             with self.assertRaises(InvalidTransition):
                 ledger.transition("run-1", "m-1", WorkflowState.REVIEWING, expected_state=WorkflowState.RUNNING)
             ledger.transition("run-1", "m-1", WorkflowState.FAILED, expected_state=WorkflowState.RUNNING)
-            with self.assertRaises(InvalidTransition):
-                ledger.transition("run-1", "m-1", WorkflowState.RUNNING, expected_state=WorkflowState.FAILED)
+            ledger.transition("run-1", "m-1", WorkflowState.REPAIR_REQUIRED, expected_state=WorkflowState.FAILED)
 
     def test_all_121_state_pairs_execute_through_ledger(self) -> None:
         def prepare(ledger: Ledger, run_id: str, state: WorkflowState) -> None:
@@ -924,6 +931,72 @@ class LedgerTests(unittest.TestCase):
                 bundle.action_id,
             )
             self.assertIn("program_id", migrated.schema_columns("controller_decisions"))
+            migrated.close()
+
+    def test_schema_v18_migration_accepts_retired_result_contract_for_history(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            ledger = Ledger(path)
+            ledger.create_run("run")
+            ledger.create_milestone("run", "milestone")
+            claim = ledger.claim_dispatch("run", "milestone", "executor", 1)
+            ledger.enqueue_dispatch(
+                claim.dispatch_id,
+                backend="sdk_headless",
+                capsule_json='{"model":"test","prompt":"bounded"}',
+                route_json="{}",
+                workspace_path=Path(directory),
+                result_contract_sha256=ledger_module.model_facing_result_schema_sha256(),
+            )
+            ledger.close()
+
+            legacy_result = ModelFacingResult(
+                1,
+                "completed",
+                "historical result",
+                (),
+                (ModelValidation("checks", True, "passed"),),
+                "completed",
+                None,
+            )
+            raw = json.dumps(
+                {key: value for key, value in legacy_result.to_json().items() if key != "blocker"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            connection = sqlite3.connect(path)
+            connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+            connection.execute(
+                "UPDATE dispatch_queue SET result_contract_sha256 = ?, state = 'result_submitted', terminal_status = ?, "
+                "raw_result_json = ?, raw_result_sha256 = ? WHERE dispatch_id = ?",
+                (
+                    legacy_model_facing_result_schema_sha256(),
+                    "completed",
+                    raw,
+                    hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+                    str(claim.dispatch_id),
+                ),
+            )
+            connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(18)],),
+            )
+            connection.commit()
+            connection.close()
+
+            migrated = Ledger(path)
+            self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
+            self.assertEqual(migrated._parse_queue_result(claim.dispatch_id, raw).status.value, "completed")
+            with self.assertRaisesRegex(ValueError, "retired"):
+                migrated.enqueue_dispatch(
+                    claim.dispatch_id,
+                    backend="sdk_headless",
+                    capsule_json='{"model":"test","prompt":"bounded"}',
+                    route_json="{}",
+                    workspace_path=Path(directory),
+                    result_contract_sha256=legacy_model_facing_result_schema_sha256(),
+                )
             migrated.close()
 
     def test_counterfeit_constraintless_v2_is_rejected(self) -> None:

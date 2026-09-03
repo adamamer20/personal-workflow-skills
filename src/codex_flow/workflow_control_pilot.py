@@ -23,12 +23,12 @@ from .domain import (
     ValidationSpec,
     WorkspaceMode,
 )
+from .harness import process_birth_identity
 from .ipc import IpcError, send_request
 from .ledger import Ledger, LedgerError, RecordNotFound
-from .supervisor import process_birth_identity
 
 _TERMINAL_QUEUE_STATES = frozenset({"completed", "failed", "cancelled", "human_attention_required"})
-_SUPERVISOR_READY_TIMEOUT_SECONDS = 10.0
+_HARNESS_READY_TIMEOUT_SECONDS = 10.0
 _PILOT_TIMEOUT_SECONDS = 300.0
 
 
@@ -49,18 +49,18 @@ def _safe_command_result(result: subprocess.CompletedProcess[str]) -> dict[str, 
     return decoded if isinstance(decoded, dict) else None
 
 
-def _supervisor_command(root: Path) -> tuple[str, ...]:
-    return ("codex-flow", "supervisor", "run", "--foreground", "--state-root", os.fspath(root))
+def _harness_command(root: Path) -> tuple[str, ...]:
+    return ("codex-flow", "harness", "run", "--foreground", "--state-root", os.fspath(root))
 
 
-def _supervisor_ready(root: Path, process: subprocess.Popen[str], *, timeout_seconds: float) -> None:
-    """Wait only for the local supervisor lease/socket, never for provider state."""
+def _harness_ready(root: Path, process: subprocess.Popen[str], *, timeout_seconds: float) -> None:
+    """Wait only for the local harness lease/socket, never for provider state."""
 
     deadline = time.monotonic() + timeout_seconds
-    socket_path = root / ".codex-flow" / "runtime" / "supervisor.sock"
+    socket_path = root / ".codex-flow" / "runtime" / "harness.sock"
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError("temporary supervisor exited before readiness")
+            raise RuntimeError("temporary harness exited before readiness")
         if socket_path.is_socket() and not socket_path.is_symlink():
             try:
                 response = send_request(socket_path, {"version": 1, "operation": "status"}, timeout=0.5)
@@ -70,7 +70,7 @@ def _supervisor_ready(root: Path, process: subprocess.Popen[str], *, timeout_sec
                 if response.get("version") == 1 and response.get("ok") is True:
                     return
         time.sleep(0.05)
-    raise TimeoutError("temporary supervisor did not become ready")
+    raise TimeoutError("temporary harness did not become ready")
 
 
 def _exact_process_is_live(pid: int, birth_identity: str) -> bool:
@@ -95,7 +95,7 @@ def _wait_for_worker_or_terminal(
     try:
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                raise RuntimeError("temporary supervisor exited while the pilot was active")
+                raise RuntimeError("temporary harness exited while the pilot was active")
             queue = ledger.queue_dispatch(dispatch_id)
             live = ledger.worker_liveness(dispatch_id)
             if str(queue["state"]) in _TERMINAL_QUEUE_STATES:
@@ -148,7 +148,7 @@ def _wait_for_terminal_result(
                 birth_identity = str(terminal_live["process_birth_identity"])
                 while time.monotonic() < deadline and _exact_process_is_live(pid, birth_identity):
                     if process.poll() is not None:
-                        raise RuntimeError("temporary supervisor exited before worker acknowledgement")
+                        raise RuntimeError("temporary harness exited before worker acknowledgement")
                     time.sleep(0.05)
                 if _exact_process_is_live(pid, birth_identity):
                     raise TimeoutError("terminal worker did not exit after result acknowledgement")
@@ -171,12 +171,12 @@ def _wait_for_terminal_result(
         observed_attempts += 1
         while time.monotonic() < deadline and _exact_process_is_live(identity[2], identity[3]):
             if process.poll() is not None:
-                raise RuntimeError("temporary supervisor exited while its worker was active")
+                raise RuntimeError("temporary harness exited while its worker was active")
             time.sleep(0.1)
     raise TimeoutError("worker did not reach a durable terminal state")
 
 
-def _shutdown_supervisor(
+def _shutdown_harness(
     root: Path,
     process: subprocess.Popen[str],
     *,
@@ -184,7 +184,7 @@ def _shutdown_supervisor(
 ) -> bool:
     """Stop one temporary owner through authenticated IPC, with bounded cleanup."""
 
-    socket_path = root / ".codex-flow" / "runtime" / "supervisor.sock"
+    socket_path = root / ".codex-flow" / "runtime" / "harness.sock"
     if process.poll() is None and socket_path.is_socket() and not socket_path.is_symlink():
         try:
             send_request(socket_path, {"version": 1, "operation": "shutdown"}, timeout=1.0)
@@ -271,10 +271,10 @@ def run_workflow_control_pilot(*, model: str, effort: ReasoningEffort) -> dict[s
             "--json",
         )
         clean_shutdown = False
-        supervisor: subprocess.Popen[str] | None = None
+        harness: subprocess.Popen[str] | None = None
         try:
-            supervisor = subprocess.Popen(
-                _supervisor_command(root),
+            harness = subprocess.Popen(
+                _harness_command(root),
                 cwd=root,
                 env=environment,
                 text=True,
@@ -282,7 +282,7 @@ def run_workflow_control_pilot(*, model: str, effort: ReasoningEffort) -> dict[s
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
-            _supervisor_ready(root, supervisor, timeout_seconds=_SUPERVISOR_READY_TIMEOUT_SECONDS)
+            _harness_ready(root, harness, timeout_seconds=_HARNESS_READY_TIMEOUT_SECONDS)
             completed = subprocess.run(
                 command,
                 cwd=root,
@@ -299,7 +299,7 @@ def run_workflow_control_pilot(*, model: str, effort: ReasoningEffort) -> dict[s
             queue, worker, observed_attempts = _wait_for_terminal_result(
                 root,
                 dispatch_id,
-                supervisor,
+                harness,
                 timeout_seconds=_PILOT_TIMEOUT_SECONDS,
             )
             raw_result = queue.get("raw_result_json")
@@ -366,11 +366,13 @@ def run_workflow_control_pilot(*, model: str, effort: ReasoningEffort) -> dict[s
                 "error_class": type(exc).__name__,
             }
         finally:
-            if supervisor is not None:
-                clean_shutdown = _shutdown_supervisor(root, supervisor)
-        evidence["supervisor_clean_shutdown"] = clean_shutdown
+            if harness is not None:
+                clean_shutdown = _shutdown_harness(root, harness)
+        # This H5 evidence field is an immutable published contract; retain
+        # its historical spelling while the runtime owner is now harness.
+        evidence["harness_clean_shutdown"] = clean_shutdown
     evidence["temporary_repository_removed"] = not root.exists()
-    if not evidence["supervisor_clean_shutdown"] or not evidence["temporary_repository_removed"]:
+    if not evidence["harness_clean_shutdown"] or not evidence["temporary_repository_removed"]:
         evidence["status"] = "failed"
     return evidence
 

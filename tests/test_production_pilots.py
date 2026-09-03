@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 import codex_flow.workflow_control_pilot as workflow_control_pilot_module
 from codex_flow.cli import app
+from codex_flow.harness import WorkflowHarness, process_birth_identity
 from codex_flow.ledger import (
     _APP_NATIVE_DISPATCHES_DRAFT_V9_DDL,
     _V8_TABLE_DDL,
@@ -33,10 +34,9 @@ from codex_flow.production_pilots import (
     production_pilot_specs,
     write_production_evidence,
 )
-from codex_flow.supervisor import Supervisor, process_birth_identity
 
 INTEGRATED_WHEEL = Path("dist/integrated-runtime/codex_flow-0.2.0-py3-none-any.whl")
-INTEGRATED_WHEEL_SHA256 = "4c19f79230f894795ed18440c79ebd92eabe00e59c202dd34f4802ef92100d4e"
+INTEGRATED_WHEEL_SHA256 = "0bb3a528cd7745babfdf1b305513c622b6938c28b311706f8e63b29f0a64c73f"
 INTEGRATED_DISPATCHES = (
     "integrated/worker-one/executor/1",
     "integrated/worker-two/executor/1",
@@ -150,7 +150,7 @@ Path(capability["workspace_path"], f"worker-observation-{worker_slug}.json").wri
 )
 
 # Consume the exact typed plugin authority issued by the production
-# supervisor.  The descriptor is held while the fake SDK turn runs, matching
+# harness.  The descriptor is held while the fake SDK turn runs, matching
 # the worker's provider boundary without constructing a provider client.
 from codex_flow.contracts import PluginCapabilitySnapshot, PluginRequirement
 from codex_flow.plugin_capabilities import _verified_skill_input
@@ -190,11 +190,11 @@ request(
     thread_id=thread_id,
     turn_id=turn_id,
     sequence=1,
-    kind="worker_started",
+    kind="turn/started",
     text="provider-free worker started",
 )
 # Exercise the diagnostic ring only through the live IPC boundary.  The
-# supervisor owns eviction and byte limits; no post-stop SQLite append is
+# harness owns eviction and byte limits; no post-stop SQLite append is
 # permitted by this pilot.
 event_sequences = range(2, 131) if dispatch_id == "integrated/worker-one/executor/1" else range(2, 3)
 for sequence in event_sequences:
@@ -207,7 +207,7 @@ for sequence in event_sequences:
         thread_id=thread_id,
         turn_id=turn_id,
         sequence=sequence,
-        kind="bounded_probe",
+        kind="item/completed",
         text=f"event-{sequence}",
     )
 steered = False
@@ -248,7 +248,7 @@ while not steered and not interrupted:
             interrupted = True
             # Interrupt acknowledgement is owned by terminal evidence.  The
             # result is intentionally failed because ModelFacingResult has no
-            # interrupted status; Supervisor records the rejected terminal
+            # interrupted status; WorkflowHarness records the rejected terminal
             # acknowledgement without replaying the command.
     time.sleep(0.02)
 summary = "INTEGRATED_STEER_MARKER applied" if steered else "interrupted terminal"
@@ -673,10 +673,10 @@ def _write_service_entrypoint(path: Path, fake_worker: Path, *, lease_seconds: f
 from __future__ import annotations
 import sys
 from codex_flow import cli
-from codex_flow.supervisor import Supervisor as ProductionSupervisor
+from codex_flow.harness import WorkflowHarness as ProductionWorkflowHarness
 
-class IntegratedSupervisor(ProductionSupervisor):
-    # This is the production Supervisor and CLI entrypoint; only the worker
+class IntegratedWorkflowHarness(ProductionWorkflowHarness):
+    # This is the production WorkflowHarness and CLI entrypoint; only the worker
     # and controller commands are injected so provider-free behavior can be
     # observed safely without accidentally starting a model turn.
     def __init__(self, state_root, *args, **kwargs):
@@ -686,7 +686,7 @@ class IntegratedSupervisor(ProductionSupervisor):
         kwargs["wake_delivery"] = lambda source_thread_id, payload: "fake-wake-turn-" + source_thread_id
         super().__init__(state_root, *args, **kwargs)
 
-cli.Supervisor = IntegratedSupervisor
+cli.WorkflowHarness = IntegratedWorkflowHarness
 raise SystemExit(cli.app())
 ''',
         encoding="utf-8",
@@ -736,7 +736,7 @@ def _run_case(
         environment["CODEX_HOME"] = os.fspath(plugin_home)
         service_command = (
             os.fspath(service_executable),
-            "supervisor",
+            "harness",
             "run",
             "--foreground",
             "--state-root",
@@ -775,7 +775,7 @@ def _run_case(
                 continue
             if not authority_pid_match:
                 probe_ledger = Ledger(root / ".codex-flow" / "workflow.db")
-                authority = probe_ledger.supervisor_authority()
+                authority = probe_ledger.harness_authority()
                 if authority is not None:
                     authority_pid_match = int(authority["pid"]) == service.pid
                 probe_ledger.close()
@@ -800,7 +800,7 @@ def _run_case(
                     service.wait(timeout=5)
                     expired_ledger = Ledger(root / ".codex-flow" / "workflow.db")
                     expired_ledger._db().execute(
-                        "UPDATE supervisor_authority SET expires_at = '2000-01-01T00:00:00Z' WHERE singleton = 1"
+                        "UPDATE harness_authority SET expires_at = '2000-01-01T00:00:00Z' WHERE singleton = 1"
                     )
                     expired_ledger._db().commit()
                     expired_ledger.close()
@@ -817,7 +817,7 @@ def _run_case(
                     continue
                 if service_crash_restart and not restart_authority_pid_match:
                     restart_ledger = Ledger(root / ".codex-flow" / "workflow.db")
-                    restart_authority = restart_ledger.supervisor_authority()
+                    restart_authority = restart_ledger.harness_authority()
                     if restart_authority is not None:
                         restart_authority_pid_match = int(restart_authority["pid"]) == service.pid
                     restart_ledger.close()
@@ -919,10 +919,10 @@ def _run_case(
         except Exception:
             tui_headless = False
 
-        # Stop through the production supervisor IPC shutdown operation so its
+        # Stop through the production harness IPC shutdown operation so its
         # own close path removes the socket and retains a requested-shutdown
         # audit rather than force-killing the lifecycle owner.
-        send_request(root / ".codex-flow" / "runtime" / "supervisor.sock", {"version": 1, "operation": "shutdown"})
+        send_request(root / ".codex-flow" / "runtime" / "harness.sock", {"version": 1, "operation": "shutdown"})
         service.wait(timeout=10)
         for process in (service,):
             if process.poll() is None:
@@ -957,7 +957,7 @@ def _run_case(
             pid_path = root / f"worker-pid-{dispatch.replace('/', '-')}.txt"
             if pid_path.exists():
                 worker_pids_gone = worker_pids_gone and _pid_is_gone(int(pid_path.read_text()))
-        authority = ledger.supervisor_authority()
+        authority = ledger.harness_authority()
         # The production close path intentionally leaves a bounded lease row
         # for stale-owner reconciliation.  Prove there is no live lease owner
         # after shutdown rather than waiting for the full lease duration.
@@ -1008,7 +1008,7 @@ def _run_case(
                 if count == 2
                 else all(item[1] is None for item in outbox)
             ),
-            "socket_removed": not (root / ".codex-flow" / "runtime" / "supervisor.sock").exists(),
+            "socket_removed": not (root / ".codex-flow" / "runtime" / "harness.sock").exists(),
             "worker_processes_stopped": worker_pids_gone,
             "service_crash_restart": service_crash_restart if count == 1 else False,
             "service_processes_stopped": all(_pid_is_gone(pid) for pid in service_pids),
@@ -1023,7 +1023,7 @@ def _run_case(
             ),
             "restart_clean": all(_pid_is_gone(pid) for pid in service_pids) and worker_pids_gone,
             "service_unit_installed": unit_installed,
-            "service_entrypoint": "codex_flow.cli.supervisor_run",
+            "service_entrypoint": "codex_flow.cli.harness_run",
             "ring_entries_bounded": bool(ring_snapshot)
             and int(ring_snapshot["entries"]) <= int(ring_snapshot["max_entries"])
             and int(ring_snapshot["payload_bytes"]) <= int(ring_snapshot["max_bytes"]),
@@ -1372,7 +1372,7 @@ def test_empty_source_draft_v9_is_detected_read_only_then_upgraded_by_candidate(
 
 
 def test_integrated_control_runs_exact_retained_wheel_service_provider_free(tmp_path: Path) -> None:
-    """Exercise one installed-wheel service through the real supervisor IPC seam.
+    """Exercise one installed-wheel service through the real harness IPC seam.
 
     The worker process is deliberately a typed fake: it consumes the exact
     capability/result files and sends bind, activity, control and submission
@@ -1478,7 +1478,7 @@ def test_integrated_control_runs_exact_retained_wheel_service_provider_free(tmp_
     assert matrix["2"]["service_crash_restart"] is False
     assert matrix["1"]["restart_authority_pid_match"] is True
     assert matrix["1"]["worker_adopted_across_crash"] is True
-    assert all(matrix[str(count)]["service_entrypoint"] == "codex_flow.cli.supervisor_run" for count in (0, 1, 2))
+    assert all(matrix[str(count)]["service_entrypoint"] == "codex_flow.cli.harness_run" for count in (0, 1, 2))
     assert matrix["2"]["interrupt_replay_rejected"] is True
     assert matrix["1"]["commands"][INTEGRATED_DISPATCHES[0]][0]["state"] == "acknowledged"
     assert matrix["2"]["commands"][INTEGRATED_DISPATCHES[0]][0]["state"] == "acknowledged"
@@ -1493,27 +1493,27 @@ def test_integrated_control_runs_exact_retained_wheel_service_provider_free(tmp_
     assert observed["sdk"]["structured_output_unchanged"] is True
 
 
-class _RunningSupervisorProcess:
+class _RunningWorkflowHarnessProcess:
     def poll(self) -> None:
         return None
 
 
-def test_workflow_control_pilot_waits_for_temporary_supervisor_readiness(tmp_path: Path) -> None:
-    supervisor = Supervisor(tmp_path, worker_command=("provider-must-not-run",))
+def test_workflow_control_pilot_waits_for_temporary_harness_readiness(tmp_path: Path) -> None:
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
     thread = threading.Thread(
-        target=supervisor.run_foreground,
+        target=harness.run_foreground,
         kwargs={"timeout": 0.05},
         daemon=True,
     )
     thread.start()
     try:
-        workflow_control_pilot_module._supervisor_ready(  # pyright: ignore[reportPrivateUsage]
+        workflow_control_pilot_module._harness_ready(  # pyright: ignore[reportPrivateUsage]
             tmp_path,
-            _RunningSupervisorProcess(),  # type: ignore[arg-type]
+            _RunningWorkflowHarnessProcess(),  # type: ignore[arg-type]
             timeout_seconds=2.0,
         )
     finally:
-        supervisor._stop = True  # pyright: ignore[reportPrivateUsage]
+        harness._stop = True  # pyright: ignore[reportPrivateUsage]
         thread.join(timeout=2.0)
     assert not thread.is_alive()
 
@@ -1554,7 +1554,7 @@ def test_workflow_control_pilot_waits_for_exact_worker_exit_before_terminal_read
     queue, live, attempts = workflow_control_pilot_module._wait_for_terminal_result(  # pyright: ignore[reportPrivateUsage]
         tmp_path,
         "pilot/worker/executor/1",
-        _RunningSupervisorProcess(),  # type: ignore[arg-type]
+        _RunningWorkflowHarnessProcess(),  # type: ignore[arg-type]
         timeout_seconds=2.0,
     )
     reaper.join(timeout=1.0)
@@ -1585,17 +1585,17 @@ def test_workflow_control_pilot_terminal_wait_is_bounded(
         workflow_control_pilot_module._wait_for_terminal_result(  # pyright: ignore[reportPrivateUsage]
             tmp_path,
             "pilot/worker/executor/1",
-            _RunningSupervisorProcess(),  # type: ignore[arg-type]
+            _RunningWorkflowHarnessProcess(),  # type: ignore[arg-type]
             timeout_seconds=0.02,
         )
 
 
-def test_workflow_control_pilot_cleanup_stops_temporary_supervisor_process(tmp_path: Path) -> None:
+def test_workflow_control_pilot_cleanup_stops_temporary_harness_process(tmp_path: Path) -> None:
     process = subprocess.Popen(
         (sys.executable, "-c", "import time; time.sleep(60)"),
         start_new_session=True,
     )
-    assert workflow_control_pilot_module._shutdown_supervisor(  # pyright: ignore[reportPrivateUsage]
+    assert workflow_control_pilot_module._shutdown_harness(  # pyright: ignore[reportPrivateUsage]
         tmp_path,
         process,
         grace_seconds=0.05,

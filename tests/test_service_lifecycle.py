@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import pytest
 
 import codex_flow.service as service_module
-from codex_flow.ledger import Ledger, SupervisorRefreshBlocked
+from codex_flow.ledger import HarnessRefreshBlocked, Ledger
 from codex_flow.service import (
     CredentialUnavailable,
     ServiceError,
@@ -39,7 +39,7 @@ def test_temporary_service_template_has_exact_executable_and_no_install_side_eff
         assert unit.unit_name == unit_name(repository)
         assert unit.version == "0.2.0"
         assert unit.executable == executable
-        assert f"ExecStart={executable} supervisor run --foreground --state-root {repository}" in unit.text
+        assert f"ExecStart={executable} harness run --foreground --state-root {repository}" in unit.text
         executable_digest = hashlib.sha256(executable.read_bytes()).hexdigest()
         assert executable_digest == hashlib.sha256(b"#!/bin/sh\n").hexdigest()
         installed = install_unit(unit, config_home=config_home)
@@ -273,7 +273,7 @@ def _refresh_fixture(tmp_path: Path) -> tuple[Path, object, Ledger, dict[tuple[i
     state_dir = repository / ".codex-flow"
     state_dir.mkdir()
     ledger = Ledger(state_dir / "workflow.db")
-    ledger.acquire_supervisor(
+    ledger.acquire_harness(
         repository_root=repository,
         state_root=repository,
         pid=500,
@@ -302,7 +302,7 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
         if operation == "start":
             processes[(500, "new-birth")] = True
             service_state["active"] = True
-            ledger.acquire_supervisor(
+            ledger.acquire_harness(
                 repository_root=unit.repository_root,
                 state_root=unit.state_root,
                 pid=500,
@@ -315,7 +315,7 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
 
     def shutdown(socket_path: Path, timeout: float) -> dict[str, object]:
         shutdowns.append((socket_path, timeout))
-        authority = ledger.supervisor_authority()
+        authority = ledger.harness_authority()
         assert authority is not None
         assert authority["requested_shutdown"] == 1
         processes[(500, "old-birth")] = False
@@ -338,7 +338,7 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
         assert result["old_epoch"] == 1
         assert result["new_epoch"] == 2
         assert len(shutdowns) == 1
-        assert shutdowns[0][0] == unit.state_root / ".codex-flow" / "runtime" / "supervisor.sock"
+        assert shutdowns[0][0] == unit.state_root / ".codex-flow" / "runtime" / "harness.sock"
         assert [call[2] for call in calls] == [
             "is-active",
             "daemon-reload",
@@ -347,7 +347,7 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
             "is-active",
         ]
         assert all("restart" not in call for call in calls)
-        authority = ledger.supervisor_authority()
+        authority = ledger.harness_authority()
         assert authority is not None
         assert authority["requested_shutdown"] == 0
         assert authority["process_birth_identity"] == "new-birth"
@@ -368,8 +368,8 @@ def test_refresh_defers_before_shutdown_or_manager_mutation_for_active_child(tmp
     shutdowns: list[Path] = []
 
     class ActiveChildLedger:
-        def arm_supervisor_refresh_fence(self) -> None:
-            raise SupervisorRefreshBlocked("worker child is active")
+        def arm_harness_refresh_fence(self) -> None:
+            raise HarnessRefreshBlocked("worker child is active")
 
     with pytest.raises(ServiceRefreshDeferred, match="worker child is active"):
         refresh_with_credential(
@@ -471,7 +471,7 @@ def test_refresh_timeout_is_explicit_and_leaves_fence_armed(tmp_path: Path) -> N
                 shutdown_sender=shutdown,
                 deadline_seconds=0.2,
             )
-        authority = ledger.supervisor_authority()
+        authority = ledger.harness_authority()
         assert authority is not None
         assert authority["requested_shutdown"] == 1
         assert [call[2] for call in calls][-1] == "unset-environment"

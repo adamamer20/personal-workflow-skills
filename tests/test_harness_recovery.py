@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-import codex_flow.supervisor as supervisor_module
+import codex_flow.harness as harness_module
 from codex_flow import worker as worker_module
 from codex_flow.backends.codex_sdk import ResponseChainInvalid, ThreadInspection, ThreadInspectionKind
 from codex_flow.contracts import (
@@ -43,18 +43,18 @@ from codex_flow.domain import (
     ThreadIdentity,
     WorkerResultRejectionCode,
 )
+from codex_flow.harness import (
+    QUEUE_TRIGGERING_OPERATIONS,
+    FailedSpawnTerminalizationError,
+    HarnessError,
+    WorkerCompatibilityDrift,
+    WorkerResultRejected,
+    WorkflowHarness,
+    process_birth_identity,
+)
 from codex_flow.ipc import IpcError, IpcTransportError, decode_frame, encode_frame
 from codex_flow.ledger import CorruptSchemaError, Ledger, LedgerError, StaleWriter, UnsupportedSchemaVersion, utc_now
 from codex_flow.plugin_capabilities import PluginCapabilityError, discover_plugin_capabilities
-from codex_flow.supervisor import (
-    QUEUE_TRIGGERING_OPERATIONS,
-    FailedSpawnTerminalizationError,
-    Supervisor,
-    SupervisorError,
-    WorkerCompatibilityDrift,
-    WorkerResultRejected,
-    process_birth_identity,
-)
 from codex_flow.worker import (
     WORKER_EXIT_RESPONSE_CHAIN_INVALID,
     WORKER_EXIT_RESULT_TRANSPORT_AFTER_IDENTITY,
@@ -90,7 +90,7 @@ class _LiveChild:
 
 
 class _StoppingChild:
-    """Exact owned child that exits when the supervisor requests a stop."""
+    """Exact owned child that exits when the harness requests a stop."""
 
     pid = os.getpid()
 
@@ -135,7 +135,7 @@ def test_controller_generation_ipc_exposes_the_raw_sdk_thread_id() -> None:
         controller_thread_id=ThreadIdentity("controller-thread-raw"),
     )
 
-    payload = Supervisor._controller_generation_payload(generation)
+    payload = WorkflowHarness._controller_generation_payload(generation)
 
     assert payload["controller_thread_id"] == "controller-thread-raw"
     assert "ThreadIdentity(" not in json.dumps(payload, sort_keys=True)
@@ -226,34 +226,34 @@ def _prepare_idle_continuation(ledger: Ledger, root: Path, epoch: int) -> None:
     )
 
 
-def _configured_supervisor(ledger: Ledger, root: Path, epoch: int) -> Supervisor:
-    """Attach a supervisor instance to the fixture's explicitly opened ledger."""
+def _configured_harness(ledger: Ledger, root: Path, epoch: int) -> WorkflowHarness:
+    """Attach a harness instance to the fixture's explicitly opened ledger."""
 
     runtime_root = root / "runtime"
     runtime_root.mkdir()
     runtime_root.chmod(0o700)
-    supervisor = object.__new__(Supervisor)
-    supervisor.state_root = root
-    supervisor.state_dir = root
-    supervisor.runtime_root = runtime_root
-    supervisor.socket_path = runtime_root / "supervisor.sock"
-    supervisor.lease_seconds = 30.0
-    supervisor.worker_command = ("codex-flow-worker",)
-    supervisor._wake_delivery = None
-    supervisor._thread_inspector = None
-    supervisor.ledger = ledger
-    supervisor.owner_nonce = "test-owner"
-    supervisor.owner_nonce_sha256 = hashlib.sha256(b"test-owner").hexdigest()
-    supervisor.epoch = epoch
-    supervisor._socket = None
-    supervisor._children = {}
-    supervisor._resumed_children = set()
-    supervisor._stop = False
-    supervisor._next_checkpoint_deadline = None
-    supervisor._next_renewal_monotonic = None
-    supervisor.controller_command = ("codex-flow-controller",)
-    supervisor._controller_children = {}
-    return supervisor
+    harness = object.__new__(WorkflowHarness)
+    harness.state_root = root
+    harness.state_dir = root
+    harness.runtime_root = runtime_root
+    harness.socket_path = runtime_root / "harness.sock"
+    harness.lease_seconds = 30.0
+    harness.worker_command = ("codex-flow-worker",)
+    harness._wake_delivery = None
+    harness._thread_inspector = None
+    harness.ledger = ledger
+    harness.owner_nonce = "test-owner"
+    harness.owner_nonce_sha256 = hashlib.sha256(b"test-owner").hexdigest()
+    harness.epoch = epoch
+    harness._socket = None
+    harness._children = {}
+    harness._resumed_children = set()
+    harness._stop = False
+    harness._next_checkpoint_deadline = None
+    harness._next_renewal_monotonic = None
+    harness.controller_command = ("codex-flow-controller",)
+    harness._controller_children = {}
+    return harness
 
 
 def _compatibility_attention_ledger(
@@ -354,17 +354,17 @@ def test_exact_compatibility_rebind_is_audited_without_launching_or_retrying(
         assert queued["state"] == "queued"
         assert queued["attempt"] == 2
         assert json.loads(str(queued["route_json"]))["native_compatibility_sha256"] == "b" * 64
-        authority = _supervisor(ledger, root)
-        supervisor = _configured_supervisor(ledger, root, int(authority["epoch"]))
+        authority = _harness(ledger, root)
+        harness = _configured_harness(ledger, root, int(authority["epoch"]))
         observed: dict[str, object] = {}
 
         def observe_rebound_identity(_row: dict[str, object], **facts: object) -> None:
             observed.update(facts)
 
-        monkeypatch.setattr(supervisor, "_issue_and_spawn_verified_worker", observe_rebound_identity)
-        assert supervisor.process_once() is True
+        monkeypatch.setattr(harness, "_issue_and_spawn_verified_worker", observe_rebound_identity)
+        assert harness.process_once() is True
         assert observed["native_compatibility_sha256"] == "b" * 64
-        assert supervisor._children == {}
+        assert harness._children == {}
         ledger.close()
 
 
@@ -582,8 +582,8 @@ def test_pre_worker_compatibility_drift_is_typed_profile_attention() -> None:
             action_kind=RecoveryActionKind.RETRY,
             reason="exercise typed drift classification",
         )
-        authority = _supervisor(ledger, root)
-        supervisor = _configured_supervisor(ledger, root, int(authority["epoch"]))
+        authority = _harness(ledger, root)
+        harness = _configured_harness(ledger, root, int(authority["epoch"]))
         row = ledger.claim_queue_dispatch(epoch=int(authority["epoch"]), claim_nonce_sha256="e" * 64)
         assert row is not None
         drift = WorkerCompatibilityDrift(
@@ -596,7 +596,7 @@ def test_pre_worker_compatibility_drift_is_typed_profile_attention() -> None:
             try:
                 raise drift
             except WorkerCompatibilityDrift as exc:
-                supervisor._close_failed_spawn(row, (), failure=exc)
+                harness._close_failed_spawn(row, (), failure=exc)
                 raise
         policy = ledger.retry_policy(DISPATCH)
         assert policy["last_failure"] == "profile"
@@ -622,12 +622,12 @@ def test_spawn_checks_complete_verified_runtime_tuple_before_capability(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        authority = _supervisor(ledger, root)
-        supervisor = _configured_supervisor(ledger, root, int(authority["epoch"]))
-        monkeypatch.setattr(supervisor_module.NativeProfileProjection, "load", lambda _home: _DriftedProfile())
+        authority = _harness(ledger, root)
+        harness = _configured_harness(ledger, root, int(authority["epoch"]))
+        monkeypatch.setattr(harness_module.NativeProfileProjection, "load", lambda _home: _DriftedProfile())
 
         with pytest.raises(WorkerCompatibilityDrift, match="profile/configuration identity drift"):
-            supervisor._issue_and_spawn_verified_worker(
+            harness._issue_and_spawn_verified_worker(
                 ledger.queue_dispatch(DISPATCH),
                 capsule_value={},
                 policy={},
@@ -642,7 +642,7 @@ def test_spawn_checks_complete_verified_runtime_tuple_before_capability(
             )
         assert verified is True
         assert ledger._db().execute("SELECT COUNT(*) FROM attempt_capabilities").fetchone()[0] == 0
-        assert supervisor._children == {}
+        assert harness._children == {}
         ledger.close()
 
 
@@ -698,7 +698,7 @@ def test_compatibility_rebind_rejects_partial_tuple_total_noop_and_legacy_mutati
         ledger.close()
 
 
-def test_supervisor_rebind_verifies_current_profile_before_ledger_cas(
+def test_harness_rebind_verifies_current_profile_before_ledger_cas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _VerifiedProfile:
@@ -711,18 +711,18 @@ def test_supervisor_rebind_verifies_current_profile_before_ledger_cas(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _compatibility_attention_ledger(root)
-        authority = _supervisor(ledger, root)
-        supervisor = _configured_supervisor(ledger, root, int(authority["epoch"]))
+        authority = _harness(ledger, root)
+        harness = _configured_harness(ledger, root, int(authority["epoch"]))
         monkeypatch.setenv("CODEX_HOME", str(root))
-        monkeypatch.setattr(supervisor_module.NativeProfileProjection, "load", lambda _home: _VerifiedProfile())
+        monkeypatch.setattr(harness_module.NativeProfileProjection, "load", lambda _home: _VerifiedProfile())
         revision = int(ledger.retry_policy(DISPATCH)["revision"])
 
-        response = supervisor._recovery_action(
+        response = harness._recovery_action(
             {
                 "version": 1,
                 "operation": "recovery_action",
                 "dispatch_id": DISPATCH,
-                "action_id": "verified-supervisor-runtime-rebind",
+                "action_id": "verified-harness-runtime-rebind",
                 "expected_revision": revision,
                 "action_kind": "compatibility_rebind",
                 "reason": "human authorized exact installed runtime",
@@ -737,7 +737,7 @@ def test_supervisor_rebind_verifies_current_profile_before_ledger_cas(
         ledger.close()
 
 
-def test_supervisor_rebind_preserves_stale_cas_classification_after_verification(
+def test_harness_rebind_preserves_stale_cas_classification_after_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _VerifiedProfile:
@@ -750,13 +750,13 @@ def test_supervisor_rebind_preserves_stale_cas_classification_after_verification
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _compatibility_attention_ledger(root)
-        authority = _supervisor(ledger, root)
-        supervisor = _configured_supervisor(ledger, root, int(authority["epoch"]))
+        authority = _harness(ledger, root)
+        harness = _configured_harness(ledger, root, int(authority["epoch"]))
         monkeypatch.setenv("CODEX_HOME", str(root))
-        monkeypatch.setattr(supervisor_module.NativeProfileProjection, "load", lambda _home: _VerifiedProfile())
+        monkeypatch.setattr(harness_module.NativeProfileProjection, "load", lambda _home: _VerifiedProfile())
 
         with pytest.raises(StaleWriter, match="revision is stale"):
-            supervisor._recovery_action(
+            harness._recovery_action(
                 {
                     "version": 1,
                     "operation": "recovery_action",
@@ -773,25 +773,25 @@ def test_supervisor_rebind_preserves_stale_cas_classification_after_verification
 
 
 @pytest.mark.parametrize("failure_kind", ("profile", "plugin"))
-def test_supervisor_rebind_verification_failure_preserves_queue_authority(
+def test_harness_rebind_verification_failure_preserves_queue_authority(
     monkeypatch: pytest.MonkeyPatch,
     failure_kind: str,
 ) -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _compatibility_attention_ledger(root)
-        authority = _supervisor(ledger, root)
-        supervisor = _configured_supervisor(ledger, root, int(authority["epoch"]))
+        authority = _harness(ledger, root)
+        harness = _configured_harness(ledger, root, int(authority["epoch"]))
         monkeypatch.setenv("CODEX_HOME", str(root))
         if failure_kind == "profile":
             monkeypatch.setattr(
-                supervisor_module.NativeProfileProjection,
+                harness_module.NativeProfileProjection,
                 "load",
                 lambda _home: (_ for _ in ()).throw(ValueError("unverified profile")),
             )
         else:
             monkeypatch.setattr(
-                supervisor_module,
+                harness_module,
                 "_verified_skill_input",
                 lambda *_args, **_kwargs: (_ for _ in ()).throw(PluginCapabilityError("plugin changed")),
             )
@@ -800,7 +800,7 @@ def test_supervisor_rebind_verification_failure_preserves_queue_authority(
         before_binding = ledger.queue_binding(DISPATCH)
 
         with pytest.raises(IpcError, match="could not be verified"):
-            supervisor._recovery_action(
+            harness._recovery_action(
                 {
                     "version": 1,
                     "operation": "recovery_action",
@@ -824,19 +824,19 @@ def test_foreground_queue_event_contains_a_durably_closed_spawn_failure(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        epoch = int(_supervisor(ledger, root)["epoch"])
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        epoch = int(_harness(ledger, root)["epoch"])
+        harness = _configured_harness(ledger, root, epoch)
 
         def failed_spawn() -> bool:
             ledger.mark_human_attention_required(
                 DISPATCH,
                 reason="worker spawn failed before a durable live-worker binding",
             )
-            raise SupervisorError("worker attempt artifacts already exist")
+            raise HarnessError("worker attempt artifacts already exist")
 
-        monkeypatch.setattr(supervisor, "process_once", failed_spawn)
+        monkeypatch.setattr(harness, "process_once", failed_spawn)
 
-        assert supervisor._process_queue_event() is False
+        assert harness._process_queue_event() is False
         assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
         ledger.close()
 
@@ -847,16 +847,16 @@ def test_foreground_queue_event_does_not_hide_failed_spawn_terminalization(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        epoch = int(_supervisor(ledger, root)["epoch"])
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        epoch = int(_harness(ledger, root)["epoch"])
+        harness = _configured_harness(ledger, root, epoch)
 
         def uncertain_spawn() -> bool:
             raise FailedSpawnTerminalizationError("worker spawn failed before durable terminalization")
 
-        monkeypatch.setattr(supervisor, "process_once", uncertain_spawn)
+        monkeypatch.setattr(harness, "process_once", uncertain_spawn)
 
         with pytest.raises(FailedSpawnTerminalizationError, match="durable terminalization"):
-            supervisor._process_queue_event()
+            harness._process_queue_event()
         assert ledger.queue_dispatch(DISPATCH)["state"] == "queued"
         ledger.close()
 
@@ -877,7 +877,7 @@ def _private_capability_payload(
         "workspace_path": str(root),
         "schema_sha256": model_facing_result_schema_sha256(),
         "token": "a" * 64,
-        "socket_path": str(root / "supervisor.sock"),
+        "socket_path": str(root / "harness.sock"),
         "worker_role": "leaf",
         "allowed_operations": ["submit_result"],
         "leaf_worker_policy": {
@@ -894,11 +894,11 @@ def _private_capability_payload(
 
 
 @pytest.mark.parametrize("mutation", ("requirement", "snapshot", "capability_digest", "source"))
-def test_supervisor_rejects_plugin_authority_drift_before_popen(monkeypatch: pytest.MonkeyPatch, mutation: str) -> None:
+def test_harness_rejects_plugin_authority_drift_before_popen(monkeypatch: pytest.MonkeyPatch, mutation: str) -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         row = ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="b" * 64)
         assert row is not None
@@ -921,7 +921,7 @@ def test_supervisor_rejects_plugin_authority_drift_before_popen(monkeypatch: pyt
             route["plugin_capabilities"][0]["source"] = "marketplace"
         row["capsule_json"] = json.dumps(capsule, sort_keys=True)
         row["route_json"] = json.dumps(route, sort_keys=True)
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         popen_calls = 0
 
         def unexpected_popen(*args: object, **kwargs: object) -> _LiveChild:
@@ -929,14 +929,14 @@ def test_supervisor_rejects_plugin_authority_drift_before_popen(monkeypatch: pyt
             popen_calls += 1
             return _LiveChild()
 
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", unexpected_popen)
-        with pytest.raises(SupervisorError, match="plugin capability"):
-            supervisor._prepare_and_spawn_one(row, recovery_continuation=False, created_paths=[])
+        monkeypatch.setattr(harness_module.subprocess, "Popen", unexpected_popen)
+        with pytest.raises(HarnessError, match="plugin capability"):
+            harness._prepare_and_spawn_one(row, recovery_continuation=False, created_paths=[])
         assert popen_calls == 0
         ledger.close()
 
 
-def test_supervisor_fresh_plugin_drift_precedes_all_launch_mutation(
+def test_harness_fresh_plugin_drift_precedes_all_launch_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with TemporaryDirectory() as directory:
@@ -960,7 +960,7 @@ def test_supervisor_fresh_plugin_drift_precedes_all_launch_mutation(
             (),
         )
         ledger = _production_queued_ledger(root)
-        epoch = int(_supervisor(ledger, root)["epoch"])
+        epoch = int(_harness(ledger, root)["epoch"])
         row = ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="b" * 64)
         assert row is not None
         capsule = json.loads(str(row["capsule_json"]))
@@ -970,7 +970,7 @@ def test_supervisor_fresh_plugin_drift_precedes_all_launch_mutation(
         route["plugin_capabilities"] = [{**snapshot.to_json(), "capability_sha256": snapshot.capability_digest}]
         row["capsule_json"] = json.dumps(capsule, sort_keys=True)
         row["route_json"] = json.dumps(route, sort_keys=True)
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         queue_before = ledger.queue_dispatch(DISPATCH)
         recovery_before = ledger.recovery_state(DISPATCH)
         created_paths: list[Path] = []
@@ -982,16 +982,16 @@ def test_supervisor_fresh_plugin_drift_precedes_all_launch_mutation(
             return _LiveChild()
 
         monkeypatch.setenv("CODEX_HOME", str(home))
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", unexpected_popen)
+        monkeypatch.setattr(harness_module.subprocess, "Popen", unexpected_popen)
         (skill / "SKILL.md").write_text("drifted\n", encoding="utf-8")
 
-        with pytest.raises(SupervisorError, match="plugin capability changed"):
-            supervisor._prepare_and_spawn_one(row, recovery_continuation=False, created_paths=created_paths)
+        with pytest.raises(HarnessError, match="plugin capability changed"):
+            harness._prepare_and_spawn_one(row, recovery_continuation=False, created_paths=created_paths)
 
         assert ledger.queue_dispatch(DISPATCH) == queue_before
         assert ledger.recovery_state(DISPATCH) == recovery_before
         assert ledger._db().execute("SELECT COUNT(*) FROM attempt_capabilities").fetchone()[0] == 0
-        assert list(supervisor.runtime_root.iterdir()) == []
+        assert list(harness.runtime_root.iterdir()) == []
         assert created_paths == []
         assert popen_calls == 0
         ledger.close()
@@ -1035,7 +1035,7 @@ def test_worker_rejects_private_plugin_capability_drift_before_sdk_construction(
                 capability_file=capability_path,
                 capsule_file=capsule_path,
                 result_file=root / "result.json",
-                socket_path=root / "supervisor.sock",
+                socket_path=root / "harness.sock",
             )
         assert adapter_constructions == 0
 
@@ -1107,7 +1107,7 @@ def test_result_submission_rejects_private_capability_shape_or_substitution_befo
         assert sent == 0
 
 
-def test_supervisor_launched_detached_worker_submits_terminal_result_over_production_ipc(
+def test_harness_launched_detached_worker_submits_terminal_result_over_production_ipc(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with TemporaryDirectory() as directory:
@@ -1141,16 +1141,16 @@ def test_supervisor_launched_detached_worker_submits_terminal_result_over_produc
             (json.dumps(capsule, sort_keys=True), json.dumps(route, sort_keys=True), DISPATCH),
         )
         ledger._db().commit()
-        epoch = int(_supervisor(ledger, root)["epoch"])
+        epoch = int(_harness(ledger, root)["epoch"])
         row = ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="b" * 64)
         assert row is not None
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        endpoint.bind(str(supervisor.socket_path))
-        os.chmod(supervisor.socket_path, 0o600)
+        endpoint.bind(str(harness.socket_path))
+        os.chmod(harness.socket_path, 0o600)
         endpoint.listen(1)
         endpoint.settimeout(5.0)
-        supervisor._socket = endpoint
+        harness._socket = endpoint
         terminal_result = _completed_worker_result()
         worker_script = (
             "import argparse; from pathlib import Path; from codex_flow.worker import submit_result; "
@@ -1163,32 +1163,32 @@ def test_supervisor_launched_detached_worker_submits_terminal_result_over_produc
             "submit_result(capability_file=args.capability_file, result_file=args.result_file, "
             "socket_path=args.socket_path)"
         )
-        supervisor.worker_command = (sys.executable, "-c", worker_script)
+        harness.worker_command = (sys.executable, "-c", worker_script)
         monkeypatch.setenv("CODEX_HOME", str(home))
 
-        supervisor._prepare_and_spawn_one(row, recovery_continuation=False, created_paths=[])
+        harness._prepare_and_spawn_one(row, recovery_continuation=False, created_paths=[])
         connection, _ = endpoint.accept()
-        supervisor._accept_connection(connection)
-        child = supervisor._children[DISPATCH]
+        harness._accept_connection(connection)
+        child = harness._children[DISPATCH]
         assert child.wait(timeout=5.0) == 0
 
         queue = ledger.queue_dispatch(DISPATCH)
         assert queue["state"] == "completed"
         assert queue["raw_result_json"] == terminal_result
         digest = hashlib.sha256(DISPATCH.encode()).hexdigest()[:24]
-        capability_path = supervisor.runtime_root / f"capability-{digest}-g1-a1.json"
+        capability_path = harness.runtime_root / f"capability-{digest}-g1-a1.json"
         capability = json.loads(capability_path.read_text(encoding="utf-8"))
         assert capability["plugin_requirements"] == [requirement.to_json()]
         assert capability["plugin_capabilities"] == [
             {**snapshot.to_json(), "capability_sha256": snapshot.capability_digest}
         ]
-        supervisor.close()
+        harness.close()
 
 
-def _supervisor(ledger: Ledger, root: Path, *, lease_seconds: float = 30.0) -> dict[str, object]:
+def _harness(ledger: Ledger, root: Path, *, lease_seconds: float = 30.0) -> dict[str, object]:
     digest = hashlib.sha256(b"test-executable").hexdigest()
     nonce = hashlib.sha256(b"test-owner").hexdigest()
-    return ledger.acquire_supervisor(
+    return ledger.acquire_harness(
         repository_root=root,
         state_root=root,
         pid=os.getpid(),
@@ -1202,28 +1202,28 @@ def _supervisor(ledger: Ledger, root: Path, *, lease_seconds: float = 30.0) -> d
 
 def test_wake_delivery_exhausts_bounded_retry_in_one_triggering_event(tmp_path: Path) -> None:
     ledger = _queued_ledger(tmp_path)
-    authority = _supervisor(ledger, tmp_path)
+    authority = _harness(ledger, tmp_path)
     ledger._db().execute(
         "UPDATE queue_bindings SET source_thread_id = 'source-thread' WHERE dispatch_id = ?", (DISPATCH,)
     )
     ledger._db().commit()
     decision = ledger.create_controller_decision(DISPATCH, kind="checkpoint", source_thread_id="source-thread")
-    supervisor = _configured_supervisor(ledger, tmp_path, int(authority["epoch"]))
+    harness = _configured_harness(ledger, tmp_path, int(authority["epoch"]))
     calls: list[tuple[str, str]] = []
 
     def unavailable(source_thread_id: str, payload: str) -> str:
         calls.append((source_thread_id, payload))
         raise RuntimeError("source notification unavailable")
 
-    supervisor._wake_delivery = unavailable
+    harness._wake_delivery = unavailable
 
-    assert supervisor._deliver_wakes()
+    assert harness._deliver_wakes()
     assert len(calls) == 2
     wake = ledger.wake_outbox(state="failed")
     assert len(wake) == 1 and wake[0]["attempt_count"] == 2
     assert ledger.wake_outbox(state="pending") == ()
     assert ledger.controller_decision(decision.decision_id).state is ControllerDecisionState.AWAITING_CLAIM
-    supervisor.close()
+    harness.close()
 
 
 def _completed_worker_result() -> str:
@@ -1250,7 +1250,7 @@ def test_terminal_result_preserves_contiguous_checkpoint_audit_with_middle_actio
             (DISPATCH,),
         )
         ledger._db().commit()
-        epoch = int(_supervisor(ledger, root)["epoch"])
+        epoch = int(_harness(ledger, root)["epoch"])
         token = "worker-token"
         token_sha256 = hashlib.sha256(token.encode("ascii")).hexdigest()
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
@@ -1426,7 +1426,7 @@ def test_delayed_exact_result_is_accepted_after_result_transport_exit() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        epoch = int(_supervisor(ledger, root)["epoch"])
+        epoch = int(_harness(ledger, root)["epoch"])
         _prepare_result_transport_attention(ledger, root, epoch)
 
         terminal = ledger.commit_queue_result(
@@ -1451,7 +1451,7 @@ def test_retained_result_recovery_rejects_non_exact_owner(guard: str) -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        epoch = int(_supervisor(ledger, root)["epoch"])
+        epoch = int(_harness(ledger, root)["epoch"])
         _prepare_result_transport_attention(ledger, root, epoch)
         token = "a" * 64
         attempt = 1
@@ -1492,24 +1492,24 @@ def test_restart_recovers_expired_private_result_once() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        epoch = int(_supervisor(ledger, root)["epoch"])
+        epoch = int(_harness(ledger, root)["epoch"])
         _prepare_result_transport_attention(ledger, root, epoch)
         ledger._db().execute(
             "UPDATE attempt_capabilities SET expires_at = '2000-01-01T00:00:00Z' WHERE dispatch_id = ?",
             (DISPATCH,),
         )
         ledger._db().commit()
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         digest = hashlib.sha256(DISPATCH.encode()).hexdigest()[:24]
-        capability_path = supervisor.runtime_root / f"capability-{digest}-g1-a1.json"
-        result_path = supervisor.runtime_root / f"result-{digest}-g1-a1.json"
+        capability_path = harness.runtime_root / f"capability-{digest}-g1-a1.json"
+        result_path = harness.runtime_root / f"result-{digest}-g1-a1.json"
         worker_module.write_capability(capability_path, _private_capability_payload(root))
         result_path.write_text(_completed_worker_result(), encoding="utf-8")
         result_path.chmod(0o400)
 
-        supervisor.recover_once()
+        harness.recover_once()
         first = ledger.queue_dispatch(DISPATCH)
-        supervisor.recover_once()
+        harness.recover_once()
 
         assert first["state"] == "completed"
         assert ledger.queue_dispatch(DISPATCH) == first
@@ -1530,7 +1530,7 @@ def test_recovered_attempt_repairs_past_capability_and_ignores_queue_deadline() 
             "UPDATE dispatch_queue SET deadline = '2000-01-01T00:00:00Z' WHERE dispatch_id = ?", (DISPATCH,)
         )
         ledger._db().commit()
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
 
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
@@ -1583,7 +1583,7 @@ def test_worker_heartbeat_renews_the_exact_attempt_capability() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -1640,7 +1640,7 @@ def test_replaced_attempts_and_wrong_tokens_remain_rejected() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -1696,7 +1696,7 @@ def test_worker_result_boundary_distinguishes_malformed_output_and_acknowledges_
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -1712,7 +1712,7 @@ def test_worker_result_boundary_distinguishes_malformed_output_and_acknowledges_
             token_sha256=hashlib.sha256(token.encode("ascii")).hexdigest(),
             expires_at=None,
         )
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         malformed_payload = {
             "version": 1,
             "operation": "submit_result",
@@ -1726,7 +1726,7 @@ def test_worker_result_boundary_distinguishes_malformed_output_and_acknowledges_
             "raw_result": "not-json",
         }
         with pytest.raises(WorkerResultRejected) as rejected:
-            supervisor._submit_result(malformed_payload)
+            harness._submit_result(malformed_payload)
         assert rejected.value.code is WorkerResultRejectionCode.MALFORMED_OUTPUT
         assert ledger.recent_activity(DISPATCH)[-1]["text"] == "malformed_model_output"
         assert "not-json" not in json.dumps(ledger.recent_activity(DISPATCH))
@@ -1734,7 +1734,7 @@ def test_worker_result_boundary_distinguishes_malformed_output_and_acknowledges_
         left, right = socket.socketpair()
         try:
             left.sendall(encode_frame(malformed_payload))
-            supervisor._accept_connection(right)
+            harness._accept_connection(right)
             response = decode_frame(left)
         finally:
             left.close()
@@ -1750,7 +1750,7 @@ def test_worker_result_boundary_distinguishes_malformed_output_and_acknowledges_
         left, right = socket.socketpair()
         try:
             left.sendall(encode_frame(valid_payload))
-            supervisor._accept_connection(right)
+            harness._accept_connection(right)
             response = decode_frame(left)
         finally:
             left.close()
@@ -1759,7 +1759,7 @@ def test_worker_result_boundary_distinguishes_malformed_output_and_acknowledges_
 
         # Re-issuing unchanged active-attempt facts repairs the expired
         # capability before the valid terminal envelope is accepted.
-        supervisor.ledger.issue_attempt_capability(
+        harness.ledger.issue_attempt_capability(
             DISPATCH,
             generation=1,
             attempt=1,
@@ -1771,11 +1771,11 @@ def test_worker_result_boundary_distinguishes_malformed_output_and_acknowledges_
             expires_at=None,
         )
 
-        response = supervisor._submit_result(valid_payload)
+        response = harness._submit_result(valid_payload)
         assert response["ok"] is True
         assert response["terminal_status"] == "completed"
         assert ledger.queue_dispatch(DISPATCH)["state"] == "completed"
-        supervisor.close()
+        harness.close()
         ledger.close()
 
 
@@ -1814,7 +1814,7 @@ def test_worker_result_submit_replays_after_lost_ack_without_duplicate_terminal_
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -1830,7 +1830,7 @@ def test_worker_result_submit_replays_after_lost_ack_without_duplicate_terminal_
             token_sha256=hashlib.sha256(token.encode("ascii")).hexdigest(),
             expires_at=None,
         )
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         capability_path = root / "capability.json"
         result_path = root / "result.json"
         result_path.write_text(_completed_worker_result(), encoding="utf-8")
@@ -1840,7 +1840,7 @@ def test_worker_result_submit_replays_after_lost_ack_without_duplicate_terminal_
         def commit_then_lose_ack(_endpoint: Path, request: dict[str, object], **_: object) -> dict[str, object]:
             nonlocal calls
             calls += 1
-            response = supervisor._submit_result(request)
+            response = harness._submit_result(request)
             if calls == 1:
                 raise IpcTransportError("ack lost after durable commit")
             return response
@@ -1858,7 +1858,7 @@ def test_worker_result_submit_replays_after_lost_ack_without_duplicate_terminal_
             ledger.queue_dispatch(DISPATCH)["raw_result_sha256"]
             == hashlib.sha256(_completed_worker_result().encode("utf-8")).hexdigest()
         )
-        supervisor.close()
+        harness.close()
         ledger.close()
 
 
@@ -1915,11 +1915,11 @@ def test_worker_result_submit_does_not_retry_rejection_or_invalid_ack(
         assert calls == 1
 
 
-def test_supervisor_classifies_exhausted_result_transport_without_malformed_retry() -> None:
+def test_harness_classifies_exhausted_result_transport_without_malformed_retry() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -1945,10 +1945,10 @@ def test_supervisor_classifies_exhausted_result_transport_without_malformed_retr
             process_birth_identity="result-transport-worker",
             lease_token_sha256=token_hash,
         )
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._children = {DISPATCH: _ExitedChild(WORKER_EXIT_RESULT_TRANSPORT_AFTER_IDENTITY)}
+        harness = _configured_harness(ledger, root, epoch)
+        harness._children = {DISPATCH: _ExitedChild(WORKER_EXIT_RESULT_TRANSPORT_AFTER_IDENTITY)}
 
-        assert supervisor._reap_children() is True
+        assert harness._reap_children() is True
 
         queue = ledger.queue_dispatch(DISPATCH)
         retry = ledger.retry_policy(DISPATCH)
@@ -1960,7 +1960,7 @@ def test_supervisor_classifies_exhausted_result_transport_without_malformed_retr
         assert retry["pre_identity_used"] == 0
         assert recovery["human_attention_reason"] == retry["human_attention_reason"]
         assert queue["raw_result_json"] is None
-        supervisor.close()
+        harness.close()
         ledger.close()
 
 
@@ -2000,7 +2000,7 @@ def test_terminal_result_preserves_historical_human_attention_action_and_wake() 
         assert historical.state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED
         assert historical.action_id == "historical-human-attention"
 
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2042,7 +2042,7 @@ def test_resultless_cancellation_is_terminal_and_cannot_restart() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         cancelled = ledger.cancel_queue_dispatch(DISPATCH)
 
         assert cancelled["state"] == "cancelled"
@@ -2082,7 +2082,7 @@ def test_resultless_cancellation_supersedes_failed_checkpoint_wake() -> None:
             (DISPATCH,),
         )
         ledger._db().commit()
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         token_sha256 = hashlib.sha256(b"worker-token").hexdigest()
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
@@ -2138,7 +2138,7 @@ def test_running_reasoned_cancellation_waits_for_exact_child_exit_acknowledgemen
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2187,15 +2187,15 @@ def test_running_reasoned_cancellation_waits_for_exact_child_exit_acknowledgemen
             )
 
         child = _StoppingChild()
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._children = {DISPATCH: child}  # type: ignore[assignment]
-        assert supervisor._advance_worker_cancellation(action) is True
+        harness = _configured_harness(ledger, root, epoch)
+        harness._children = {DISPATCH: child}  # type: ignore[assignment]
+        assert harness._advance_worker_cancellation(action) is True
 
         assert child.terminated is True
         assert ledger.queue_dispatch(DISPATCH)["state"] == "cancelled"
         assert ledger.worker_liveness(DISPATCH)["exited_at"] is not None  # type: ignore[index]
         assert ledger._db().execute("SELECT COUNT(*) FROM attempt_capabilities").fetchone()[0] == 0
-        assert supervisor._children == {}
+        assert harness._children == {}
         ledger.close()
 
 
@@ -2203,7 +2203,7 @@ def test_human_attention_reasoned_cancellation_uses_the_same_stop_protocol() -> 
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2242,9 +2242,9 @@ def test_human_attention_reasoned_cancellation_uses_the_same_stop_protocol() -> 
         assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
 
         child = _StoppingChild()
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._children = {DISPATCH: child}  # type: ignore[assignment]
-        assert supervisor._advance_worker_cancellation(action) is True
+        harness = _configured_harness(ledger, root, epoch)
+        harness._children = {DISPATCH: child}  # type: ignore[assignment]
+        assert harness._advance_worker_cancellation(action) is True
         assert ledger.queue_dispatch(DISPATCH)["state"] == "cancelled"
         ledger.close()
 
@@ -2253,7 +2253,7 @@ def test_recovery_inspection_human_attention_disarms_checkpoint_deadline() -> No
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         _prepare_idle_continuation(ledger, root, epoch)
 
@@ -2300,7 +2300,7 @@ def test_cancellation_acknowledgement_failure_retains_child_ownership_for_reap_r
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2333,8 +2333,8 @@ def test_cancellation_acknowledgement_failure_retains_child_ownership_for_reap_r
             reason="stop and retain ownership",
         )
         child = _StoppingChild()
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._children = {DISPATCH: child}  # type: ignore[assignment]
+        harness = _configured_harness(ledger, root, epoch)
+        harness._children = {DISPATCH: child}  # type: ignore[assignment]
         original = ledger.acknowledge_worker_cancellation_exit
         calls = 0
 
@@ -2347,14 +2347,14 @@ def test_cancellation_acknowledgement_failure_retains_child_ownership_for_reap_r
 
         monkeypatch.setattr(ledger, "acknowledge_worker_cancellation_exit", fail_once)
         with pytest.raises(LedgerError, match="acknowledgement failure"):
-            supervisor._advance_worker_cancellation(action)
-        assert supervisor._children == {DISPATCH: child}
+            harness._advance_worker_cancellation(action)
+        assert harness._children == {DISPATCH: child}
         assert ledger.queue_dispatch(DISPATCH)["state"] == "starting"
         assert ledger.worker_liveness(DISPATCH)["exited_at"] is None  # type: ignore[index]
 
-        assert supervisor._reap_children() is True
+        assert harness._reap_children() is True
         assert calls == 2
-        assert supervisor._children == {}
+        assert harness._children == {}
         assert ledger.queue_dispatch(DISPATCH)["state"] == "cancelled"
         ledger.close()
 
@@ -2364,7 +2364,7 @@ def test_cancel_before_result_rejects_result_and_resolves_one_terminal_owner(res
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2411,14 +2411,14 @@ def test_cancel_before_result_rejects_result_and_resolves_one_terminal_owner(res
         capability = ledger.worker_attempt_capability(DISPATCH, generation=1, attempt=1, token=token)
         assert capability["consumed_at"] is None
 
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         if resolution == "reap":
-            supervisor._children = {DISPATCH: _ExitedChild(-15)}  # type: ignore[assignment]
-            assert supervisor._reap_children() is True
-            assert supervisor._reap_children() is False
+            harness._children = {DISPATCH: _ExitedChild(-15)}  # type: ignore[assignment]
+            assert harness._reap_children() is True
+            assert harness._reap_children() is False
         else:
-            assert supervisor._advance_pending_cancellations() is True
-            assert supervisor._advance_pending_cancellations() is False
+            assert harness._advance_pending_cancellations() is True
+            assert harness._advance_pending_cancellations() is False
 
         queue = ledger.queue_dispatch(DISPATCH)
         live = ledger.worker_liveness(DISPATCH)
@@ -2426,7 +2426,7 @@ def test_cancel_before_result_rejects_result_and_resolves_one_terminal_owner(res
         assert queue["raw_result_json"] is None
         assert live is not None and live["exited_at"] is not None
         assert ledger.pending_cancellation_actions() == ()
-        assert supervisor._children == {}
+        assert harness._children == {}
         assert ledger._db().execute("SELECT COUNT(*) FROM attempt_capabilities").fetchone()[0] == 0
         ledger.close()
 
@@ -2435,7 +2435,7 @@ def test_result_before_cancel_remains_the_only_terminal_owner_after_reap() -> No
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2478,15 +2478,15 @@ def test_result_before_cancel_remains_the_only_terminal_owner_after_reap() -> No
                 reason="late cancellation cannot replace a result",
             )
 
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._children = {DISPATCH: _ExitedChild(0)}  # type: ignore[assignment]
-        assert supervisor._reap_children() is True
-        assert supervisor._reap_children() is False
+        harness = _configured_harness(ledger, root, epoch)
+        harness._children = {DISPATCH: _ExitedChild(0)}  # type: ignore[assignment]
+        assert harness._reap_children() is True
+        assert harness._reap_children() is False
         assert terminal["state"] == "completed"
         assert ledger.queue_dispatch(DISPATCH)["state"] == "completed"
         assert ledger.worker_liveness(DISPATCH)["exited_at"] is not None  # type: ignore[index]
         assert ledger.pending_cancellation_actions() == ()
-        assert supervisor._children == {}
+        assert harness._children == {}
         ledger.close()
 
 
@@ -2504,19 +2504,19 @@ def test_cancelled_shape_rejects_partial_terminal_facts() -> None:
             Ledger(root / "workflow.db")
 
 
-def test_cancelled_queue_is_not_claimable_by_supervisor_process() -> None:
+def test_cancelled_queue_is_not_claimable_by_harness_process() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         ledger.cancel_queue_dispatch(DISPATCH)
-        supervisor = object.__new__(Supervisor)
-        supervisor.ledger = ledger
-        supervisor.epoch = int(authority["epoch"])
-        supervisor._children = {}
+        harness = object.__new__(WorkflowHarness)
+        harness.ledger = ledger
+        harness.epoch = int(authority["epoch"])
+        harness._children = {}
 
-        assert supervisor.process_once() is False
-        assert supervisor._children == {}
+        assert harness.process_once() is False
+        assert harness._children == {}
         assert ledger.queue_dispatch(DISPATCH)["state"] == "cancelled"
         ledger.close()
 
@@ -2585,7 +2585,7 @@ def test_invalid_resumed_response_chain_enters_inspect_before_mutate_recovery() 
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2613,13 +2613,13 @@ def test_invalid_resumed_response_chain_enters_inspect_before_mutate_recovery() 
         )
         ledger._db().execute("UPDATE dispatch_queue SET thread_id = 'old-thread' WHERE dispatch_id = ?", (DISPATCH,))
         ledger._db().commit()
-        supervisor = object.__new__(Supervisor)
-        supervisor.ledger = ledger
-        supervisor.epoch = epoch
-        supervisor._children = {DISPATCH: _ExitedChild(WORKER_EXIT_RESPONSE_CHAIN_INVALID)}
-        supervisor._resumed_children = {DISPATCH}
+        harness = object.__new__(WorkflowHarness)
+        harness.ledger = ledger
+        harness.epoch = epoch
+        harness._children = {DISPATCH: _ExitedChild(WORKER_EXIT_RESPONSE_CHAIN_INVALID)}
+        harness._resumed_children = {DISPATCH}
 
-        assert supervisor._reap_children() is True
+        assert harness._reap_children() is True
         recovered = ledger.queue_dispatch(DISPATCH)
         assert recovered["state"] == "recovery_inspection_pending"
         assert recovered["attempt"] == 1
@@ -2643,7 +2643,7 @@ def test_typed_invalid_chain_history_uses_the_single_fresh_thread_budget(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2676,10 +2676,10 @@ def test_typed_invalid_chain_history_uses_the_single_fresh_thread_budget(
             process_birth_identity="invalid-chain-worker",
             classification="response-chain-invalid",
         )
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._thread_inspector = lambda thread_id: ThreadInspection(thread_id, inspection_kind, turn_id=turn_id)
+        harness = _configured_harness(ledger, root, epoch)
+        harness._thread_inspector = lambda thread_id: ThreadInspection(thread_id, inspection_kind, turn_id=turn_id)
 
-        assert supervisor._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
+        assert harness._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
         recovery = ledger.recovery_state(DISPATCH)
         assert recovery["recovery_state"] == "recovery_continuation_pending"
         assert recovery["inspected_kind"] == durable_kind
@@ -2699,20 +2699,20 @@ def test_non_chain_worker_exit_never_requeues_automatically() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
-        supervisor = object.__new__(Supervisor)
-        supervisor.ledger = ledger
-        supervisor.epoch = epoch
-        supervisor._children = {DISPATCH: _ExitedChild(2)}
-        supervisor._resumed_children = set()
+        harness = object.__new__(WorkflowHarness)
+        harness.ledger = ledger
+        harness.epoch = epoch
+        harness._children = {DISPATCH: _ExitedChild(2)}
+        harness._resumed_children = set()
 
-        assert supervisor._reap_children() is True
+        assert harness._reap_children() is True
         assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
         assert ledger.queue_dispatch(DISPATCH)["attempt"] == 1
-        supervisor.recover_once()
+        harness.recover_once()
         assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
         ledger.close()
 
@@ -2721,7 +2721,7 @@ def test_transient_failed_turn_resumes_the_same_persisted_thread_once() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -2750,18 +2750,18 @@ def test_transient_failed_turn_resumes_the_same_persisted_thread_once() -> None:
             "UPDATE dispatch_queue SET thread_id = 'thread-with-502' WHERE dispatch_id = ?", (DISPATCH,)
         )
         ledger._db().commit()
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
-        supervisor._thread_inspector = lambda thread_id: ThreadInspection(
+        harness = _configured_harness(ledger, root, epoch)
+        harness._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
+        harness._thread_inspector = lambda thread_id: ThreadInspection(
             thread_id,
             ThreadInspectionKind.FAILED_TURN,
             turn_id="failed-turn",
             retry_at="9999-01-01T00:00:00Z",
         )
 
-        assert supervisor._reap_children() is True
+        assert harness._reap_children() is True
         assert ledger.retry_policy(DISPATCH)["strategy"] == "same_thread_continuation"
-        assert supervisor._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
+        assert harness._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
         recovery = ledger.recovery_state(DISPATCH)
         assert recovery["recovery_state"] == "recovery_continuation_pending"
         assert recovery["inspected_kind"] == "transient_failed_turn"
@@ -2782,10 +2782,10 @@ def test_provider_transient_recovery_has_three_increasing_same_thread_continuati
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._thread_inspector = lambda thread_id: ThreadInspection(
+        harness = _configured_harness(ledger, root, epoch)
+        harness._thread_inspector = lambda thread_id: ThreadInspection(
             thread_id,
             ThreadInspectionKind.FAILED_TURN,
             turn_id=f"failed-{thread_id}",
@@ -2829,17 +2829,17 @@ def test_provider_transient_recovery_has_three_increasing_same_thread_continuati
                 process_birth_identity=f"provider-worker-{attempt}",
                 lease_token_sha256=token_sha256,
             )
-            supervisor._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
-            supervisor._resumed_children = {DISPATCH}
+            harness._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
+            harness._resumed_children = {DISPATCH}
 
-            assert supervisor._reap_children() is True
+            assert harness._reap_children() is True
             policy = ledger.retry_policy(DISPATCH)
             assert policy["provider_transient_used"] == attempt
             assert policy["strategy"] == "same_thread_continuation"
             assert isinstance(policy["next_eligible_at"], str)
             deadlines.append(str(policy["next_eligible_at"]))
 
-            assert supervisor._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
+            assert harness._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
             recovery = ledger.recovery_state(DISPATCH)
             assert recovery["recovery_state"] == "recovery_continuation_pending"
             assert recovery["next_eligible_at"] == policy["next_eligible_at"]
@@ -2878,9 +2878,9 @@ def test_provider_transient_recovery_has_three_increasing_same_thread_continuati
             process_birth_identity="provider-worker-4",
             lease_token_sha256=fourth_token_sha256,
         )
-        supervisor._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
-        supervisor._resumed_children = {DISPATCH}
-        assert supervisor._reap_children() is True
+        harness._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
+        harness._resumed_children = {DISPATCH}
+        assert harness._reap_children() is True
         exhausted_policy = ledger.retry_policy(DISPATCH)
         assert exhausted_policy["provider_transient_used"] == 3
         assert exhausted_policy["last_failure"] == "provider_transient"
@@ -2899,7 +2899,7 @@ def test_provider_transient_recovery_has_three_increasing_same_thread_continuati
         granted_policy = ledger.retry_policy(DISPATCH)
         assert granted_policy["provider_transient_budget"] == 4
         assert granted_policy["provider_transient_used"] == 4
-        assert supervisor._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
+        assert harness._recover_exited_dispatch(ledger.queue_dispatch(DISPATCH)) is True
         granted_claim = ledger.begin_recovery_continuation(
             DISPATCH,
             epoch=epoch,
@@ -2932,9 +2932,9 @@ def test_provider_transient_recovery_has_three_increasing_same_thread_continuati
             process_birth_identity="provider-worker-5",
             lease_token_sha256=fifth_token_sha256,
         )
-        supervisor._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
-        supervisor._resumed_children = {DISPATCH}
-        assert supervisor._reap_children() is True
+        harness._children = {DISPATCH: _ExitedChild(WORKER_EXIT_TRANSIENT_AFTER_IDENTITY)}  # type: ignore[assignment]
+        harness._resumed_children = {DISPATCH}
+        assert harness._reap_children() is True
         assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
         assert ledger.retry_policy(DISPATCH)["provider_transient_used"] == 4
         assert ledger.recovery_state(DISPATCH)["continuation_used"] == 4
@@ -2945,7 +2945,7 @@ def test_provider_transient_grant_is_exact_idempotent_and_preserves_usage() -> N
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         ledger._db().execute(
             "UPDATE dispatch_queue SET state = 'claimed', thread_id = 'provider-thread' WHERE dispatch_id = ?",
             (DISPATCH,),
@@ -3102,7 +3102,7 @@ def test_human_attention_exit_arms_exactly_one_controller_checkpoint() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3111,10 +3111,10 @@ def test_human_attention_exit_arms_exactly_one_controller_checkpoint() -> None:
             (DISPATCH,),
         )
         ledger._db().commit()
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._children = {DISPATCH: _ExitedChild(2)}  # type: ignore[assignment]
+        harness = _configured_harness(ledger, root, epoch)
+        harness._children = {DISPATCH: _ExitedChild(2)}  # type: ignore[assignment]
 
-        assert supervisor._reap_children() is True
+        assert harness._reap_children() is True
         assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
         assert ledger.queue_binding(DISPATCH)["checkpoint_armed"] == 1
         first = ledger.claim_due_checkpoint(epoch=epoch, now="9999-01-01T00:00:00Z")
@@ -3128,7 +3128,7 @@ def test_explicit_retry_uses_fresh_thread_recovery_prompt(monkeypatch: pytest.Mo
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.mark_human_attention_required(DISPATCH, reason="same-thread recovery exhausted")
         ledger.apply_recovery_action(
@@ -3138,14 +3138,14 @@ def test_explicit_retry_uses_fresh_thread_recovery_prompt(monkeypatch: pytest.Mo
             action_kind=RecoveryActionKind.RETRY,
             reason="continue from retained worktree changes in a fresh thread",
         )
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         captured: list[tuple[int, bool]] = []
 
         def capture(row: dict[str, object], *, recovery_continuation: bool = False) -> None:
             captured.append((int(row["attempt"]), recovery_continuation))
 
-        monkeypatch.setattr(supervisor, "_spawn_one", capture)
-        assert supervisor.process_once() is True
+        monkeypatch.setattr(harness, "_spawn_one", capture)
+        assert harness.process_once() is True
         assert captured == [(2, True)]
 
         original_prompt = "Implement the original durable milestone objective."
@@ -3181,7 +3181,7 @@ def test_worker_exit_recovery_inspects_once_after_event_reap() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3212,21 +3212,21 @@ def test_worker_exit_recovery_inspects_once_after_event_reap() -> None:
         )
         ledger._db().commit()
         calls: list[str] = []
-        supervisor = object.__new__(Supervisor)
-        supervisor.ledger = ledger
-        supervisor.epoch = epoch
-        supervisor._children = {DISPATCH: _ExitedChild(2)}
-        supervisor._resumed_children = set()
-        supervisor._thread_inspector = lambda thread_id: (
+        harness = object.__new__(WorkflowHarness)
+        harness.ledger = ledger
+        harness.epoch = epoch
+        harness._children = {DISPATCH: _ExitedChild(2)}
+        harness._resumed_children = set()
+        harness._thread_inspector = lambda thread_id: (
             calls.append(thread_id) or ThreadInspection(thread_id, ThreadInspectionKind.IDLE_NO_RESULT)
         )
 
-        assert supervisor._reap_children() is True
-        supervisor.recover_once()
+        assert harness._reap_children() is True
+        harness.recover_once()
 
         assert calls == ["persisted-thread"]
         # The low-level fixture intentionally omits production permission
-        # facts, so continuation preparation fails closed.  The supervisor
+        # facts, so continuation preparation fails closed.  The harness
         # must not leave a claimed/none row behind after that failure.
         assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
         assert ledger.queue_dispatch(DISPATCH)["attempt"] == 2
@@ -3238,7 +3238,7 @@ def test_worker_exit_decision_is_crash_atomic_and_terminal_inspection_requires_p
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3292,7 +3292,7 @@ def test_transport_before_identity_exit_returns_the_atomic_requeued_row() -> Non
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3337,7 +3337,7 @@ def test_reap_retries_failed_exit_transition_without_stranding_same_epoch_worker
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3363,11 +3363,11 @@ def test_reap_retries_failed_exit_transition_without_stranding_same_epoch_worker
             lease_token_sha256=token_sha256,
         )
         child = _ExitedChild(2)
-        supervisor = object.__new__(Supervisor)
-        supervisor.ledger = ledger
-        supervisor.epoch = epoch
-        supervisor._children = {DISPATCH: child}
-        supervisor._resumed_children = set()
+        harness = object.__new__(WorkflowHarness)
+        harness.ledger = ledger
+        harness.epoch = epoch
+        harness._children = {DISPATCH: child}
+        harness._resumed_children = set()
         original = ledger.mark_worker_exit
         calls = 0
 
@@ -3380,13 +3380,13 @@ def test_reap_retries_failed_exit_transition_without_stranding_same_epoch_worker
 
         monkeypatch.setattr(ledger, "mark_worker_exit", fail_once)
 
-        assert supervisor._reap_children() is False
-        assert supervisor._children == {DISPATCH: child}
+        assert harness._reap_children() is False
+        assert harness._children == {DISPATCH: child}
         assert ledger.queue_dispatch(DISPATCH)["state"] == "starting"
         assert ledger.worker_liveness(DISPATCH)["exited_at"] is None  # type: ignore[index]
 
-        assert supervisor._reap_children() is True
-        assert supervisor._children == {}
+        assert harness._reap_children() is True
+        assert harness._children == {}
         assert calls == 2
         assert ledger.queue_dispatch(DISPATCH)["state"] == "recovery_inspection_pending"
         assert ledger.worker_liveness(DISPATCH)["exited_at"] is not None  # type: ignore[index]
@@ -3401,7 +3401,7 @@ def test_worker_turn_identity_is_rejected_before_active_turn_mutation(field: str
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3420,8 +3420,8 @@ def test_worker_turn_identity_is_rejected_before_active_turn_mutation(field: str
         )
         ledger._db().execute("UPDATE dispatch_queue SET thread_id = 'thread-1' WHERE dispatch_id = ?", (DISPATCH,))
         ledger._db().commit()
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._active_turns = {}
+        harness = _configured_harness(ledger, root, epoch)
+        harness._active_turns = {}
         payload: dict[str, object] = {
             "version": 1,
             "operation": "bind_turn",
@@ -3435,8 +3435,8 @@ def test_worker_turn_identity_is_rejected_before_active_turn_mutation(field: str
         payload[field] = value
 
         with pytest.raises(IpcError, match="worker"):
-            supervisor._bind_turn(payload)
-        assert supervisor._active_turns == {}
+            harness._bind_turn(payload)
+        assert harness._active_turns == {}
         ledger.close()
 
 
@@ -3463,7 +3463,7 @@ def test_malformed_worker_operation_identity_leaves_liveness_activity_and_active
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3491,8 +3491,8 @@ def test_malformed_worker_operation_identity_leaves_liveness_activity_and_active
         )
         ledger._db().execute("UPDATE dispatch_queue SET thread_id = 'thread-1' WHERE dispatch_id = ?", (DISPATCH,))
         ledger._db().commit()
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._active_turns = {DISPATCH: (1, 1, "thread-1", "turn-1")}
+        harness = _configured_harness(ledger, root, epoch)
+        harness._active_turns = {DISPATCH: (1, 1, "thread-1", "turn-1")}
         payload: dict[str, object] = {
             "version": 1,
             "operation": operation,
@@ -3520,15 +3520,15 @@ def test_malformed_worker_operation_identity_leaves_liveness_activity_and_active
             return (
                 json.dumps(ledger.worker_liveness(DISPATCH), sort_keys=True).encode("utf-8"),
                 json.dumps(ledger.recent_activity(DISPATCH), sort_keys=True).encode("utf-8"),
-                json.dumps(supervisor._active_turns, sort_keys=True).encode("utf-8"),
+                json.dumps(harness._active_turns, sort_keys=True).encode("utf-8"),
             )
 
         before = snapshot()
         handler = {
-            "bind_turn": supervisor._bind_turn,
-            "worker_event": supervisor._worker_event,
-            "poll_commands": supervisor._poll_commands,
-            "ack_control": supervisor._ack_control,
+            "bind_turn": harness._bind_turn,
+            "worker_event": harness._worker_event,
+            "poll_commands": harness._poll_commands,
+            "ack_control": harness._ack_control,
         }[operation]
         with pytest.raises(IpcError):
             handler(payload)
@@ -3551,7 +3551,7 @@ def test_malformed_worker_binding_leaves_queue_and_worker_ownership_unchanged(fi
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3577,8 +3577,8 @@ def test_malformed_worker_binding_leaves_queue_and_worker_ownership_unchanged(fi
             process_birth_identity="strict-binding-worker",
             lease_token_sha256=token_sha256,
         )
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._active_turns = {}
+        harness = _configured_harness(ledger, root, epoch)
+        harness._active_turns = {}
         payload: dict[str, object] = {
             "version": 1,
             "operation": "bind_worker",
@@ -3596,19 +3596,19 @@ def test_malformed_worker_binding_leaves_queue_and_worker_ownership_unchanged(fi
                     "queue": ledger.queue_dispatch(DISPATCH),
                     "liveness": ledger.worker_liveness(DISPATCH),
                     "activity": ledger.recent_activity(DISPATCH),
-                    "active_turns": supervisor._active_turns,
+                    "active_turns": harness._active_turns,
                 },
                 sort_keys=True,
             ).encode("utf-8")
 
         before = snapshot()
         with pytest.raises(IpcError):
-            supervisor._bind_worker(payload)
+            harness._bind_worker(payload)
         assert snapshot() == before
         ledger.close()
 
 
-def test_broken_rejection_peer_cannot_escape_the_supervisor_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_broken_rejection_peer_cannot_escape_the_harness_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     class _BrokenPeer:
         closed = False
 
@@ -3621,39 +3621,39 @@ def test_broken_rejection_peer_cannot_escape_the_supervisor_loop(monkeypatch: py
         def close(self) -> None:
             self.closed = True
 
-    supervisor = object.__new__(Supervisor)
-    supervisor.lease_seconds = 30.0
+    harness = object.__new__(WorkflowHarness)
+    harness.lease_seconds = 30.0
     peer = _BrokenPeer()
-    monkeypatch.setattr(supervisor_module, "peer_uid", lambda _connection: os.getuid())
+    monkeypatch.setattr(harness_module, "peer_uid", lambda _connection: os.getuid())
     monkeypatch.setattr(
-        supervisor_module,
+        harness_module,
         "decode_frame",
         lambda _connection: {"version": 1, "operation": "unsupported"},
     )
 
-    supervisor._accept_connection(peer)  # type: ignore[arg-type]
+    harness._accept_connection(peer)  # type: ignore[arg-type]
     assert peer.closed is True
 
 
 def test_oversized_response_is_bounded_and_next_request_remains_usable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    supervisor = object.__new__(Supervisor)
-    supervisor.lease_seconds = 30.0
-    supervisor._next_renewal_monotonic = None
+    harness = object.__new__(WorkflowHarness)
+    harness.lease_seconds = 30.0
+    harness._next_renewal_monotonic = None
 
     def response(request: dict[str, object]) -> dict[str, object]:
         if request["operation"] == "status":
             return {"version": 1, "ok": True, "payload": "x" * 70_000}
         return {"version": 1, "ok": True, "operation": request["operation"]}
 
-    monkeypatch.setattr(supervisor, "_request_ack", response)
-    monkeypatch.setattr(supervisor, "_renew_supervisor_lease_if_due", lambda: None)
+    monkeypatch.setattr(harness, "_request_ack", response)
+    monkeypatch.setattr(harness, "_renew_harness_lease_if_due", lambda: None)
 
     first_client, first_server = socket.socketpair()
     try:
         first_client.sendall(encode_frame({"version": 1, "operation": "status"}))
-        assert supervisor._accept_connection(first_server) == "status"
+        assert harness._accept_connection(first_server) == "status"
         assert decode_frame(first_client) == {"version": 1, "ok": False, "error": "response_too_large"}
     finally:
         first_client.close()
@@ -3661,7 +3661,7 @@ def test_oversized_response_is_bounded_and_next_request_remains_usable(
     second_client, second_server = socket.socketpair()
     try:
         second_client.sendall(encode_frame({"version": 1, "operation": "wake"}))
-        assert supervisor._accept_connection(second_server) == "wake"
+        assert harness._accept_connection(second_server) == "wake"
         assert decode_frame(second_client) == {"version": 1, "ok": True, "operation": "wake"}
     finally:
         second_client.close()
@@ -3671,8 +3671,8 @@ def test_status_compacts_large_diagnostic_history_before_ipc() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
-        supervisor = _configured_supervisor(ledger, root, int(authority["epoch"]))
+        authority = _harness(ledger, root)
+        harness = _configured_harness(ledger, root, int(authority["epoch"]))
         for sequence in range(1, 17):
             ledger.append_diagnostic(
                 DISPATCH,
@@ -3684,7 +3684,7 @@ def test_status_compacts_large_diagnostic_history_before_ipc() -> None:
         client, server = socket.socketpair()
         try:
             client.sendall(encode_frame({"version": 1, "operation": "status"}))
-            assert supervisor._accept_connection(server) == "status"
+            assert harness._accept_connection(server) == "status"
             response = decode_frame(client)
         finally:
             client.close()
@@ -3695,21 +3695,21 @@ def test_status_compacts_large_diagnostic_history_before_ipc() -> None:
         activity = queue[0]["recent_activity"]
         assert [item["sequence"] for item in activity] == [13, 14, 15, 16]
         assert all(len(item["text"].encode("utf-8")) <= 512 for item in activity)
-        supervisor.close()
+        harness.close()
 
 
 def test_conversation_response_overflow_returns_bounded_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    supervisor = object.__new__(Supervisor)
+    harness = object.__new__(WorkflowHarness)
     monkeypatch.setattr(
-        supervisor,
+        harness,
         "_request_ack",
         lambda _request: {"version": 1, "ok": True, "page": {"fragments": ["x" * 70_000]}},
     )
     client, server = socket.socketpair()
     try:
-        supervisor._serve_conversation_connection(
+        harness._serve_conversation_connection(
             server,
             {"version": 1, "operation": "conversation_history"},
         )
@@ -3718,13 +3718,13 @@ def test_conversation_response_overflow_returns_bounded_error(
         client.close()
 
 
-def test_worker_event_storm_keeps_short_supervisor_lease_and_terminal_result_live(
+def test_worker_event_storm_keeps_short_harness_lease_and_terminal_result_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root, lease_seconds=1.0)
+        authority = _harness(ledger, root, lease_seconds=1.0)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3759,9 +3759,9 @@ def test_worker_event_storm_keeps_short_supervisor_lease_and_terminal_result_liv
             token=token,
             thread_id="thread-storm",
         )
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor.lease_seconds = 1.0
-        supervisor._active_turns = {DISPATCH: (1, 1, "thread-storm", "turn-storm")}
+        harness = _configured_harness(ledger, root, epoch)
+        harness.lease_seconds = 1.0
+        harness._active_turns = {DISPATCH: (1, 1, "thread-storm", "turn-storm")}
         whole_ledger_validations = 0
         original = ledger._validate_rows
 
@@ -3772,9 +3772,9 @@ def test_worker_event_storm_keeps_short_supervisor_lease_and_terminal_result_liv
 
         monkeypatch.setattr(ledger, "_validate_rows", counted_validation)
         for sequence in range(1, 2_001):
-            supervisor._renew_supervisor_lease_if_due()
+            harness._renew_harness_lease_if_due()
             text = "x" * 64
-            response = supervisor._worker_event(
+            response = harness._worker_event(
                 {
                     "version": 1,
                     "operation": "worker_event",
@@ -3794,7 +3794,7 @@ def test_worker_event_storm_keeps_short_supervisor_lease_and_terminal_result_liv
         assert response["event"] is None
         assert response["evicted"] is True
         assert whole_ledger_validations < 32
-        live_authority = ledger.supervisor_authority()
+        live_authority = ledger.harness_authority()
         assert live_authority is not None
         assert int(live_authority["epoch"]) == epoch
         assert int(live_authority["pid"]) == os.getpid()
@@ -3858,7 +3858,7 @@ def test_live_keyframe_broker_is_ephemeral_bounded_identity_bound_and_terminal_p
     tmp_path: Path,
 ) -> None:
     ledger = _queued_ledger(tmp_path)
-    authority = _supervisor(ledger, tmp_path)
+    authority = _harness(ledger, tmp_path)
     epoch = int(authority["epoch"])
     ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
     ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -3892,8 +3892,8 @@ def test_live_keyframe_broker_is_ephemeral_bounded_identity_bound_and_terminal_p
         token=token,
         thread_id="live-thread",
     )
-    supervisor = _configured_supervisor(ledger, tmp_path, epoch)
-    supervisor._active_turns = {DISPATCH: (1, 1, "live-thread", "live-turn")}
+    harness = _configured_harness(ledger, tmp_path, epoch)
+    harness._active_turns = {DISPATCH: (1, 1, "live-thread", "live-turn")}
     request = {
         "version": 1,
         "operation": "live_subscribe",
@@ -3903,7 +3903,7 @@ def test_live_keyframe_broker_is_ephemeral_bounded_identity_bound_and_terminal_p
         "thread_id": "live-thread",
         "turn_id": "live-turn",
     }
-    subscriber = supervisor._live_subscription(request)
+    subscriber = harness._live_subscription(request)
     before = "\n".join(ledger._db().iterdump())
 
     for revision in range(1, 65):
@@ -3916,7 +3916,7 @@ def test_live_keyframe_broker_is_ephemeral_bounded_identity_bound_and_terminal_p
             revision,
             f"assistant revision {revision} token=[REDACTED]",
         )
-        response = supervisor._publish_live_keyframe(
+        response = harness._publish_live_keyframe(
             {
                 "version": 1,
                 "operation": "live_keyframe",
@@ -3935,7 +3935,7 @@ def test_live_keyframe_broker_is_ephemeral_bounded_identity_bound_and_terminal_p
     newest = subscriber.frames.queue[-1]
     assert newest.live_revision == 64
     assert "token=[REDACTED]" in newest.assistant_text
-    replay = supervisor._publish_live_keyframe(
+    replay = harness._publish_live_keyframe(
         {
             "version": 1,
             "operation": "live_keyframe",
@@ -3962,10 +3962,10 @@ def test_live_keyframe_broker_is_ephemeral_bounded_identity_bound_and_terminal_p
     assert "\n".join(ledger._db().iterdump()) == before
 
     client, server = socket.socketpair()
-    stream = threading.Thread(target=supervisor._serve_live_connection, args=(server, subscriber), daemon=True)
+    stream = threading.Thread(target=harness._serve_live_connection, args=(server, subscriber), daemon=True)
     stream.start()
     assert decode_frame(client) == {"version": 1, "ok": True, "operation": "live_subscribe"}
-    supervisor._close_live_subject(DISPATCH, (1, 1, "live-thread", "live-turn"))
+    harness._close_live_subject(DISPATCH, (1, 1, "live-thread", "live-turn"))
     terminal = decode_frame(client)
     assert terminal["event"] == "terminal"
     stream.join(timeout=2)
@@ -3979,10 +3979,10 @@ def test_foreground_worker_event_volume_does_not_rescan_and_result_ingress_stays
     tmp_path: Path,
 ) -> None:
     ledger = _queued_ledger(tmp_path)
-    authority = _supervisor(ledger, tmp_path)
+    authority = _harness(ledger, tmp_path)
     epoch = int(authority["epoch"])
-    supervisor = _configured_supervisor(ledger, tmp_path, epoch)
-    supervisor.lease_seconds = 30.0
+    harness = _configured_harness(ledger, tmp_path, epoch)
+    harness.lease_seconds = 30.0
     token = "foreground-event-token"
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="b" * 64)
@@ -4015,7 +4015,7 @@ def test_foreground_worker_event_volume_does_not_rescan_and_result_ingress_stays
         token=token,
         thread_id="foreground-event-thread",
     )
-    supervisor._active_turns = {DISPATCH: (1, 1, "foreground-event-thread", "foreground-event-turn")}
+    harness._active_turns = {DISPATCH: (1, 1, "foreground-event-thread", "foreground-event-turn")}
 
     class ReadyEndpoint:
         def accept(self) -> tuple[object, None]:
@@ -4028,15 +4028,15 @@ def test_foreground_worker_event_volume_does_not_rescan_and_result_ingress_stays
     terminal_ingress = 0
 
     def fake_acquire() -> None:
-        supervisor.epoch = epoch
-        supervisor._socket = endpoint  # type: ignore[assignment]
+        harness.epoch = epoch
+        harness._socket = endpoint  # type: ignore[assignment]
 
     def fake_accept(_connection: object) -> str:
         nonlocal accepted, terminal_ingress
         accepted += 1
         if accepted <= 200:
             text = "progress"
-            response = supervisor._worker_event(
+            response = harness._worker_event(
                 {
                     "version": 1,
                     "operation": "worker_event",
@@ -4055,7 +4055,7 @@ def test_foreground_worker_event_volume_does_not_rescan_and_result_ingress_stays
             assert response == {"version": 1, "ok": True, "event": None, "evicted": True}
             return "worker_event"
         terminal_ingress += 1
-        response = supervisor._submit_result(
+        response = harness._submit_result(
             {
                 "version": 1,
                 "operation": "submit_result",
@@ -4082,23 +4082,21 @@ def test_foreground_worker_event_volume_does_not_rescan_and_result_ingress_stays
         scheduling_calls += 1
         return False
 
-    monkeypatch.setattr(supervisor, "acquire", fake_acquire)
-    monkeypatch.setattr(supervisor, "close", lambda: None)
-    monkeypatch.setattr(supervisor, "recover_once", lambda: None)
-    monkeypatch.setattr(supervisor, "_accept_connection", fake_accept)
-    monkeypatch.setattr(supervisor, "_process_queue_event", fake_process_queue_event)
-    monkeypatch.setattr(supervisor, "_schedule_controller_generations", count_schedule)
-    monkeypatch.setattr(supervisor, "_deliver_wakes", lambda: False)
-    monkeypatch.setattr(supervisor, "_refresh_checkpoint_deadline", lambda: None)
-    monkeypatch.setattr(supervisor, "_renew_supervisor_lease_if_due", lambda: None)
-    monkeypatch.setattr(supervisor, "_reap_children", lambda: False)
-    monkeypatch.setattr(supervisor, "_reap_controller_generations", lambda: False)
-    monkeypatch.setattr(supervisor, "_select_timeout", lambda _timeout: 0.0)
-    monkeypatch.setattr(
-        supervisor_module.select, "select", lambda readable, _write, _error, _timeout: (readable, [], [])
-    )
+    monkeypatch.setattr(harness, "acquire", fake_acquire)
+    monkeypatch.setattr(harness, "close", lambda: None)
+    monkeypatch.setattr(harness, "recover_once", lambda: None)
+    monkeypatch.setattr(harness, "_accept_connection", fake_accept)
+    monkeypatch.setattr(harness, "_process_queue_event", fake_process_queue_event)
+    monkeypatch.setattr(harness, "_schedule_controller_generations", count_schedule)
+    monkeypatch.setattr(harness, "_deliver_wakes", lambda: False)
+    monkeypatch.setattr(harness, "_refresh_checkpoint_deadline", lambda: None)
+    monkeypatch.setattr(harness, "_renew_harness_lease_if_due", lambda: None)
+    monkeypatch.setattr(harness, "_reap_children", lambda: False)
+    monkeypatch.setattr(harness, "_reap_controller_generations", lambda: False)
+    monkeypatch.setattr(harness, "_select_timeout", lambda _timeout: 0.0)
+    monkeypatch.setattr(harness_module.select, "select", lambda readable, _write, _error, _timeout: (readable, [], []))
 
-    supervisor.run_foreground(timeout=0.0, max_cycles=201)
+    harness.run_foreground(timeout=0.0, max_cycles=201)
 
     assert accepted == 201
     assert terminal_ingress == 1
@@ -4110,11 +4108,11 @@ def test_foreground_worker_event_volume_does_not_rescan_and_result_ingress_stays
     ledger.close()
 
 
-def test_worker_diagnostic_fails_closed_after_explicit_supervisor_authority_loss() -> None:
+def test_worker_diagnostic_fails_closed_after_explicit_harness_authority_loss() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -4139,9 +4137,9 @@ def test_worker_diagnostic_fails_closed_after_explicit_supervisor_authority_loss
             process_birth_identity="lost-authority-worker",
             lease_token_sha256=token_hash,
         )
-        ledger._db().execute("UPDATE supervisor_authority SET expires_at = '2000-01-01T00:00:00Z' WHERE singleton = 1")
+        ledger._db().execute("UPDATE harness_authority SET expires_at = '2000-01-01T00:00:00Z' WHERE singleton = 1")
         ledger._db().commit()
-        with pytest.raises(StaleWriter, match="live supervisor lease"):
+        with pytest.raises(StaleWriter, match="live harness lease"):
             ledger.append_worker_diagnostic(
                 DISPATCH,
                 generation=1,
@@ -4162,7 +4160,7 @@ def test_dead_idle_recovery_consumes_one_bounded_continuation_without_resetting_
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -4218,7 +4216,7 @@ def test_restart_observed_dead_worker_inspects_and_resumes_the_same_thread(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        first = _supervisor(ledger, root)
+        first = _harness(ledger, root)
         first_epoch = int(first["epoch"])
         ledger.claim_queue_dispatch(epoch=first_epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=first_epoch)
@@ -4244,29 +4242,29 @@ def test_restart_observed_dead_worker_inspects_and_resumes_the_same_thread(
             lease_token_sha256=token_hash,
         )
         ledger._db().execute("UPDATE dispatch_queue SET thread_id = 'old-thread' WHERE dispatch_id = ?", (DISPATCH,))
-        ledger._db().execute("UPDATE supervisor_authority SET expires_at = '2000-01-01T00:00:00Z'")
+        ledger._db().execute("UPDATE harness_authority SET expires_at = '2000-01-01T00:00:00Z'")
         ledger._db().commit()
-        replacement = ledger.acquire_supervisor(
+        replacement = ledger.acquire_harness(
             repository_root=root,
             state_root=root,
             pid=os.getpid(),
-            process_birth_identity="replacement-supervisor",
+            process_birth_identity="replacement-harness",
             executable_digest="c" * 64,
             version="test",
             owner_nonce_sha256="d" * 64,
         )
-        supervisor = _configured_supervisor(ledger, root, int(replacement["epoch"]))
+        harness = _configured_harness(ledger, root, int(replacement["epoch"]))
         inspected: list[str] = []
 
         def inspect(thread_id: str) -> ThreadInspection:
             inspected.append(thread_id)
             return ThreadInspection(thread_id, ThreadInspectionKind.IDLE_NO_RESULT)
 
-        supervisor._thread_inspector = inspect
+        harness._thread_inspector = inspect
         child = _LiveChild()
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", lambda *args, **kwargs: child)
+        monkeypatch.setattr(harness_module.subprocess, "Popen", lambda *args, **kwargs: child)
 
-        supervisor.recover_once()
+        harness.recover_once()
 
         queue = ledger.queue_dispatch(DISPATCH)
         recovery = ledger.recovery_state(DISPATCH)
@@ -4278,7 +4276,7 @@ def test_restart_observed_dead_worker_inspects_and_resumes_the_same_thread(
         assert recovery["worker_exit_classification"] == "restart-observed-worker-dead"
         assert recovery["recovery_state"] == "none"
         assert recovery["continuation_used"] == 1
-        assert supervisor._children[DISPATCH] is child
+        assert harness._children[DISPATCH] is child
         ledger.close()
 
 
@@ -4290,20 +4288,18 @@ def test_real_spawn_continuation_uses_new_monotonic_attempt_artifacts(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         _prepare_idle_continuation(ledger, root, epoch)
-        supervisor = _configured_supervisor(ledger, root, epoch)
-        supervisor._thread_inspector = lambda thread_id: ThreadInspection(
-            thread_id, ThreadInspectionKind.IDLE_NO_RESULT
-        )
+        harness = _configured_harness(ledger, root, epoch)
+        harness._thread_inspector = lambda thread_id: ThreadInspection(thread_id, ThreadInspectionKind.IDLE_NO_RESULT)
         old_digest = hashlib.sha256(DISPATCH.encode()).hexdigest()[:24]
         for prefix in ("capability", "capsule", "result"):
-            (supervisor.runtime_root / f"{prefix}-{old_digest}-g1-a1.json").write_text("retained", encoding="utf-8")
+            (harness.runtime_root / f"{prefix}-{old_digest}-g1-a1.json").write_text("retained", encoding="utf-8")
         child = _LiveChild()
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", lambda *args, **kwargs: child)
+        monkeypatch.setattr(harness_module.subprocess, "Popen", lambda *args, **kwargs: child)
 
-        supervisor.recover_once()
+        harness.recover_once()
 
         queue = ledger.queue_dispatch(DISPATCH)
         assert queue["state"] == "starting"
@@ -4313,16 +4309,16 @@ def test_real_spawn_continuation_uses_new_monotonic_attempt_artifacts(
         liveness = ledger.worker_liveness(DISPATCH)
         assert liveness is not None
         assert liveness["attempt"] == 2
-        assert supervisor.runtime_root.joinpath(f"capability-{old_digest}-g1-a2.json").exists()
-        assert supervisor.runtime_root.joinpath(f"capsule-{old_digest}-g1-a2.json").exists()
-        assert not supervisor.runtime_root.joinpath(f"result-{old_digest}-g1-a2.json").exists()
+        assert harness.runtime_root.joinpath(f"capability-{old_digest}-g1-a2.json").exists()
+        assert harness.runtime_root.joinpath(f"capsule-{old_digest}-g1-a2.json").exists()
+        assert not harness.runtime_root.joinpath(f"result-{old_digest}-g1-a2.json").exists()
         capability_attempts = (
             ledger._db()
             .execute("SELECT generation, attempt FROM attempt_capabilities WHERE dispatch_id = ?", (DISPATCH,))
             .fetchall()
         )
         assert [(int(item[0]), int(item[1])) for item in capability_attempts] == [(1, 2)]
-        assert supervisor._children[DISPATCH] is child
+        assert harness._children[DISPATCH] is child
         ledger.close()
 
 
@@ -4334,12 +4330,12 @@ def test_spawn_failure_closes_continuation_without_claimed_none(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         _prepare_idle_continuation(ledger, root, epoch)
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         monkeypatch.setattr(
-            supervisor_module.subprocess,
+            harness_module.subprocess,
             "Popen",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected launch failure")),
         )
@@ -4350,8 +4346,8 @@ def test_spawn_failure_closes_continuation_without_claimed_none(
             claim_nonce_sha256="b" * 64,
             now="2000-01-02T00:00:00Z",
         )
-        with pytest.raises(SupervisorError, match="worker launch failed"):
-            supervisor._spawn_one(claimed, recovery_continuation=True)
+        with pytest.raises(HarnessError, match="worker launch failed"):
+            harness._spawn_one(claimed, recovery_continuation=True)
 
         queue = ledger.queue_dispatch(DISPATCH)
         recovery = ledger.recovery_state(DISPATCH)
@@ -4360,8 +4356,8 @@ def test_spawn_failure_closes_continuation_without_claimed_none(
         assert queue["attempt"] == 2
         assert ledger.worker_liveness(DISPATCH) is None
         digest = hashlib.sha256(DISPATCH.encode()).hexdigest()[:24]
-        assert not supervisor.runtime_root.joinpath(f"capability-{digest}-g1-a2.json").exists()
-        assert not supervisor.runtime_root.joinpath(f"capsule-{digest}-g1-a2.json").exists()
+        assert not harness.runtime_root.joinpath(f"capability-{digest}-g1-a2.json").exists()
+        assert not harness.runtime_root.joinpath(f"capsule-{digest}-g1-a2.json").exists()
         ledger.close()
 
 
@@ -4384,14 +4380,14 @@ def test_controller_recovery_launch_failure_closes_unclaimed_orphan(
         generation = ledger.controller_generation(decision.decision_id)
         assert status.state.value == "awaiting_claim"
         assert generation.state.value == generation_state
-        supervisor = _configured_supervisor(ledger, root, int(_supervisor(ledger, root)["epoch"]))
+        harness = _configured_harness(ledger, root, int(_harness(ledger, root)["epoch"]))
         monkeypatch.setattr(
-            supervisor_module.subprocess,
+            harness_module.subprocess,
             "Popen",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected controller launch failure")),
         )
 
-        assert supervisor._spawn_controller_generation(status, recovery=True) is False
+        assert harness._spawn_controller_generation(status, recovery=True) is False
 
         closed = ledger.controller_decision(decision.decision_id)
         orphan = ledger.controller_generation(decision.decision_id)
@@ -4413,7 +4409,7 @@ def test_controller_recovery_launch_failure_does_not_clear_newer_human_claim(
         decision = ledger.create_controller_decision(DISPATCH, kind="checkpoint")
         ledger.prepare_controller_generation(decision.decision_id, generation=1)
         status = ledger.controller_decision(decision.decision_id)
-        supervisor = _configured_supervisor(ledger, root, int(_supervisor(ledger, root)["epoch"]))
+        harness = _configured_harness(ledger, root, int(_harness(ledger, root)["epoch"]))
 
         def claim_then_fail(*args: object, **kwargs: object) -> object:
             ledger.claim_controller_decision(
@@ -4425,8 +4421,8 @@ def test_controller_recovery_launch_failure_does_not_clear_newer_human_claim(
             )
             raise OSError("injected controller launch failure")
 
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", claim_then_fail)
-        assert supervisor._spawn_controller_generation(status, recovery=True) is False
+        monkeypatch.setattr(harness_module.subprocess, "Popen", claim_then_fail)
+        assert harness._spawn_controller_generation(status, recovery=True) is False
 
         claimed = ledger.controller_decision(decision.decision_id)
         orphan = ledger.controller_generation(decision.decision_id)
@@ -4453,7 +4449,7 @@ def test_controller_launch_reaps_child_when_human_claim_wins_during_popen(
         if recovery:
             ledger.prepare_controller_generation(decision.decision_id, generation=1)
         status = ledger.controller_decision(decision.decision_id)
-        supervisor = _configured_supervisor(ledger, root, int(_supervisor(ledger, root)["epoch"]))
+        harness = _configured_harness(ledger, root, int(_harness(ledger, root)["epoch"]))
         child = _StoppingChild()
 
         def claim_then_start(*args: object, **kwargs: object) -> _StoppingChild:
@@ -4465,9 +4461,9 @@ def test_controller_launch_reaps_child_when_human_claim_wins_during_popen(
             )
             return child
 
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", claim_then_start)
+        monkeypatch.setattr(harness_module.subprocess, "Popen", claim_then_start)
 
-        assert supervisor._spawn_controller_generation(status, recovery=recovery) is False
+        assert harness._spawn_controller_generation(status, recovery=recovery) is False
 
         claimed = ledger.controller_decision(decision.decision_id)
         assert claimed.state is ControllerDecisionState.CLAIMED
@@ -4475,7 +4471,7 @@ def test_controller_launch_reaps_child_when_human_claim_wins_during_popen(
         assert claimed.claimant_id == "operator"
         assert child.terminated is True
         assert child.return_code == -15
-        assert str(decision.decision_id) not in supervisor._controller_children
+        assert str(decision.decision_id) not in harness._controller_children
         assert ledger.controller_generation(decision.decision_id).state is ControllerGenerationState.DELIVERY_STARTING
         ledger.close()
 
@@ -4494,13 +4490,13 @@ def test_controller_launch_registers_child_only_after_unchanged_authority_bind(
         if recovery:
             ledger.prepare_controller_generation(decision.decision_id, generation=1)
         status = ledger.controller_decision(decision.decision_id)
-        supervisor = _configured_supervisor(ledger, root, int(_supervisor(ledger, root)["epoch"]))
+        harness = _configured_harness(ledger, root, int(_harness(ledger, root)["epoch"]))
         child = _LiveChild()
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", lambda *args, **kwargs: child)
+        monkeypatch.setattr(harness_module.subprocess, "Popen", lambda *args, **kwargs: child)
 
-        assert supervisor._spawn_controller_generation(status, recovery=recovery) is True
+        assert harness._spawn_controller_generation(status, recovery=recovery) is True
 
-        assert supervisor._controller_children[str(decision.decision_id)] is child
+        assert harness._controller_children[str(decision.decision_id)] is child
         assert ledger.controller_decision(decision.decision_id) == status
         assert ledger.controller_generation(decision.decision_id).state is ControllerGenerationState.DELIVERY_STARTING
         ledger.close()
@@ -4523,7 +4519,7 @@ def test_controller_recovery_launch_reaps_child_when_model_claim_revision_drifts
             expected_revision=decision.revision,
         )
         status = ledger.controller_decision(decision.decision_id)
-        supervisor = _configured_supervisor(ledger, root, int(_supervisor(ledger, root)["epoch"]))
+        harness = _configured_harness(ledger, root, int(_harness(ledger, root)["epoch"]))
         child = _StoppingChild()
 
         def renew_then_start(*args: object, **kwargs: object) -> _StoppingChild:
@@ -4535,9 +4531,9 @@ def test_controller_recovery_launch_reaps_child_when_model_claim_revision_drifts
             )
             return child
 
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", renew_then_start)
+        monkeypatch.setattr(harness_module.subprocess, "Popen", renew_then_start)
 
-        assert supervisor._spawn_controller_generation(status, recovery=True) is False
+        assert harness._spawn_controller_generation(status, recovery=True) is False
 
         renewed = ledger.controller_decision(decision.decision_id)
         assert renewed.state is ControllerDecisionState.CLAIMED
@@ -4545,7 +4541,7 @@ def test_controller_recovery_launch_reaps_child_when_model_claim_revision_drifts
         assert renewed.claimant_id == claim.claimant_id
         assert renewed.revision == claim.revision + 1
         assert child.terminated is True
-        assert str(decision.decision_id) not in supervisor._controller_children
+        assert str(decision.decision_id) not in harness._controller_children
         ledger.close()
 
 
@@ -4563,7 +4559,7 @@ def test_controller_launch_reaps_child_when_generation_state_drifts(
         if recovery:
             ledger.prepare_controller_generation(decision.decision_id, generation=1)
         status = ledger.controller_decision(decision.decision_id)
-        supervisor = _configured_supervisor(ledger, root, int(_supervisor(ledger, root)["epoch"]))
+        harness = _configured_harness(ledger, root, int(_harness(ledger, root)["epoch"]))
         child = _StoppingChild()
 
         def finish_then_start(*args: object, **kwargs: object) -> _StoppingChild:
@@ -4574,15 +4570,15 @@ def test_controller_launch_reaps_child_when_generation_state_drifts(
             )
             return child
 
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", finish_then_start)
+        monkeypatch.setattr(harness_module.subprocess, "Popen", finish_then_start)
 
-        assert supervisor._spawn_controller_generation(status, recovery=recovery) is False
+        assert harness._spawn_controller_generation(status, recovery=recovery) is False
 
         assert ledger.controller_decision(decision.decision_id).state is ControllerDecisionState.AWAITING_CLAIM
         assert ledger.controller_generation(decision.decision_id).state is ControllerGenerationState.FAILED
         assert child.terminated is True
         assert child.return_code == -15
-        assert str(decision.decision_id) not in supervisor._controller_children
+        assert str(decision.decision_id) not in harness._controller_children
         ledger.close()
 
 
@@ -4610,15 +4606,15 @@ def test_human_claim_never_launches_or_recovers_a_model_generation(
             expected_revision=decision.revision,
         )
         assert claim.claimant_kind is ControllerClaimantKind.HUMAN
-        supervisor = _configured_supervisor(ledger, root, int(_supervisor(ledger, root)["epoch"]))
+        harness = _configured_harness(ledger, root, int(_harness(ledger, root)["epoch"]))
         launches: list[tuple[object, bool]] = []
         monkeypatch.setattr(
-            supervisor,
+            harness,
             "_spawn_controller_generation",
             lambda status, *, recovery=False: launches.append((status, recovery)) or True,
         )
 
-        supervisor._schedule_controller_generations()
+        harness._schedule_controller_generations()
 
         assert launches == []
         claimed = ledger.controller_decision(decision.decision_id)
@@ -4654,15 +4650,15 @@ def test_committed_human_attention_is_scheduled_only_until_acknowledged(
             "restart ack",
         )
         receipt = ledger.submit_controller_actions(bundle, claimant_id="operator", token=str(claim.token))
-        supervisor = _configured_supervisor(ledger, root, int(_supervisor(ledger, root)["epoch"]))
+        harness = _configured_harness(ledger, root, int(_harness(ledger, root)["epoch"]))
         launches: list[tuple[object, bool]] = []
         monkeypatch.setattr(
-            supervisor,
+            harness,
             "_spawn_controller_generation",
             lambda status, *, recovery=False: launches.append((status, recovery)) or True,
         )
 
-        supervisor._schedule_controller_generations()
+        harness._schedule_controller_generations()
         assert len(launches) == 1 and launches[0][1] is True
 
         ledger.acknowledge_recovered_controller_action(
@@ -4672,7 +4668,7 @@ def test_committed_human_attention_is_scheduled_only_until_acknowledged(
             committed_revision=receipt.expected_revision + 1,
         )
         launches.clear()
-        supervisor._schedule_controller_generations()
+        harness._schedule_controller_generations()
         assert launches == []
         ledger.close()
 
@@ -4687,10 +4683,10 @@ def test_failed_spawn_commit_fault_is_detectable_and_reconciled_once(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         _prepare_idle_continuation(ledger, root, epoch)
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         commit_fault_armed = False
 
         def fail_launch(*args: object, **kwargs: object) -> _LiveChild:
@@ -4702,7 +4698,7 @@ def test_failed_spawn_commit_fault_is_detectable_and_reconciled_once(
             if commit_fault_armed and stage == "at_commit_boundary":
                 raise LedgerError("injected failed-spawn terminalization commit failure")
 
-        monkeypatch.setattr(supervisor_module.subprocess, "Popen", fail_launch)
+        monkeypatch.setattr(harness_module.subprocess, "Popen", fail_launch)
         ledger._fault_injector = fail_terminalization_commit
         claimed = ledger.begin_recovery_continuation(
             DISPATCH,
@@ -4712,7 +4708,7 @@ def test_failed_spawn_commit_fault_is_detectable_and_reconciled_once(
         )
 
         with pytest.raises(FailedSpawnTerminalizationError, match="before durable terminalization"):
-            supervisor._spawn_one(claimed, recovery_continuation=True)
+            harness._spawn_one(claimed, recovery_continuation=True)
 
         queue = ledger.queue_dispatch(DISPATCH)
         assert queue["state"] == "starting"
@@ -4720,18 +4716,16 @@ def test_failed_spawn_commit_fault_is_detectable_and_reconciled_once(
         assert ledger.recovery_state(DISPATCH)["recovery_state"] == "none"
         assert ledger.worker_liveness(DISPATCH) is None
         digest = hashlib.sha256(DISPATCH.encode()).hexdigest()[:24]
-        capability_path = supervisor.runtime_root / f"capability-{digest}-g1-a2.json"
-        capsule_path = supervisor.runtime_root / f"capsule-{digest}-g1-a2.json"
+        capability_path = harness.runtime_root / f"capability-{digest}-g1-a2.json"
+        capsule_path = harness.runtime_root / f"capsule-{digest}-g1-a2.json"
         assert capability_path.exists()
         assert capsule_path.exists()
 
         ledger._fault_injector = None
         if restart_before_recovery:
-            ledger._db().execute(
-                "UPDATE supervisor_authority SET expires_at = '2000-01-01T00:00:00Z' WHERE singleton = 1"
-            )
+            ledger._db().execute("UPDATE harness_authority SET expires_at = '2000-01-01T00:00:00Z' WHERE singleton = 1")
             ledger._db().commit()
-            replacement = ledger.acquire_supervisor(
+            replacement = ledger.acquire_harness(
                 repository_root=root,
                 state_root=root,
                 pid=os.getpid(),
@@ -4740,9 +4734,9 @@ def test_failed_spawn_commit_fault_is_detectable_and_reconciled_once(
                 version="test-v12",
                 owner_nonce_sha256="d" * 64,
             )
-            supervisor.epoch = int(replacement["epoch"])
+            harness.epoch = int(replacement["epoch"])
 
-        supervisor.recover_once()
+        harness.recover_once()
         first_terminal_queue = ledger.queue_dispatch(DISPATCH)
         first_terminal_recovery = ledger.recovery_state(DISPATCH)
         assert first_terminal_queue["state"] == "human_attention_required"
@@ -4756,7 +4750,7 @@ def test_failed_spawn_commit_fault_is_detectable_and_reconciled_once(
         assert ledger._db().execute("SELECT COUNT(*) FROM successor_outbox").fetchone()[0] == 0
         assert ledger._db().execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0] == 0
 
-        supervisor.recover_once()
+        harness.recover_once()
         assert ledger.queue_dispatch(DISPATCH) == first_terminal_queue
         assert ledger.recovery_state(DISPATCH) == first_terminal_recovery
         assert ledger._db().execute("SELECT COUNT(*) FROM attempt_capabilities").fetchone()[0] == 1
@@ -4776,12 +4770,12 @@ def test_failed_spawn_artifact_cleanup_fault_preserves_durable_terminalization(
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _production_queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         _prepare_idle_continuation(ledger, root, epoch)
-        supervisor = _configured_supervisor(ledger, root, epoch)
+        harness = _configured_harness(ledger, root, epoch)
         monkeypatch.setattr(
-            supervisor_module.subprocess,
+            harness_module.subprocess,
             "Popen",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected launch failure")),
         )
@@ -4800,14 +4794,14 @@ def test_failed_spawn_artifact_cleanup_fault_preserves_durable_terminalization(
             now="2000-01-02T00:00:00Z",
         )
 
-        with pytest.raises(SupervisorError, match="worker launch failed"):
-            supervisor._spawn_one(claimed, recovery_continuation=True)
+        with pytest.raises(HarnessError, match="worker launch failed"):
+            harness._spawn_one(claimed, recovery_continuation=True)
 
         assert ledger.queue_dispatch(DISPATCH)["state"] == "human_attention_required"
         assert ledger.recovery_state(DISPATCH)["recovery_state"] == "human_attention_required"
         digest = hashlib.sha256(DISPATCH.encode()).hexdigest()[:24]
-        assert not supervisor.runtime_root.joinpath(f"capability-{digest}-g1-a2.json").exists()
-        assert supervisor.runtime_root.joinpath(f"capsule-{digest}-g1-a2.json").exists()
+        assert not harness.runtime_root.joinpath(f"capability-{digest}-g1-a2.json").exists()
+        assert harness.runtime_root.joinpath(f"capsule-{digest}-g1-a2.json").exists()
         assert ledger.queue_dispatch(DISPATCH)["raw_result_json"] is None
         assert ledger._db().execute("SELECT COUNT(*) FROM successor_outbox").fetchone()[0] == 0
         assert ledger._db().execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0] == 0
@@ -4818,7 +4812,7 @@ def test_generic_recovery_cannot_requeue_pending_or_human_attention_states() -> 
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         token = "worker-token"
         token_sha256 = hashlib.sha256(token.encode("ascii")).hexdigest()
@@ -4878,7 +4872,7 @@ def test_generic_recovery_cannot_requeue_retry_or_continuation_states() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -4972,7 +4966,7 @@ def test_worker_main_classifies_terminal_sdk_failures_without_traceback(
             "--result-file",
             "result.json",
             "--socket-path",
-            "supervisor.sock",
+            "harness.sock",
         ],
     )
 
@@ -4986,7 +4980,7 @@ def test_profile_failure_is_human_attention_configuration_drift_without_malforme
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        authority = _supervisor(ledger, root)
+        authority = _harness(ledger, root)
         epoch = int(authority["epoch"])
         ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
@@ -5035,13 +5029,13 @@ def test_restart_recovers_running_queue_without_migrated_liveness() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         ledger = _queued_ledger(root)
-        first = _supervisor(ledger, root)
+        first = _harness(ledger, root)
         ledger.claim_queue_dispatch(epoch=int(first["epoch"]), claim_nonce_sha256="a" * 64)
         ledger.set_queue_state(DISPATCH, "starting", epoch=int(first["epoch"]))
         ledger.set_queue_state(DISPATCH, "running", epoch=int(first["epoch"]))
-        ledger._db().execute("UPDATE supervisor_authority SET expires_at = '2000-01-01T00:00:00Z' WHERE singleton = 1")
+        ledger._db().execute("UPDATE harness_authority SET expires_at = '2000-01-01T00:00:00Z' WHERE singleton = 1")
         ledger._db().commit()
-        second = ledger.acquire_supervisor(
+        second = ledger.acquire_harness(
             repository_root=root,
             state_root=root,
             pid=os.getpid(),
@@ -5050,11 +5044,11 @@ def test_restart_recovers_running_queue_without_migrated_liveness() -> None:
             version="test-v11",
             owner_nonce_sha256="d" * 64,
         )
-        supervisor = object.__new__(Supervisor)
-        supervisor.ledger = ledger
-        supervisor.epoch = int(second["epoch"])
+        harness = object.__new__(WorkflowHarness)
+        harness.ledger = ledger
+        harness.epoch = int(second["epoch"])
 
-        supervisor.recover_once()
+        harness.recover_once()
 
         recovered = ledger.queue_dispatch(DISPATCH)
         assert recovered["state"] == "human_attention_required"
@@ -5063,17 +5057,18 @@ def test_restart_recovers_running_queue_without_migrated_liveness() -> None:
         ledger.close()
 
 
-def test_v11_opener_refuses_to_migrate_under_live_v10_supervisor() -> None:
+def test_v11_opener_refuses_to_migrate_under_live_v10_harness() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)
         path = root / "workflow.db"
         ledger = _queued_ledger(root)
-        _supervisor(ledger, root)
+        _harness(ledger, root)
         ledger.close()
         connection = sqlite3.connect(path)
         connection.execute("PRAGMA foreign_keys = OFF")
         for table in ("wake_outbox", "authorized_successors", "worker_liveness", "queue_bindings"):
             connection.execute(f"DROP TABLE {table}")
+        connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
         connection.execute(
             "UPDATE supervisor_authority SET process_birth_identity = ?, expires_at = ? WHERE singleton = 1",
             (process_birth_identity(), "9999-12-31T23:59:59.999999Z"),

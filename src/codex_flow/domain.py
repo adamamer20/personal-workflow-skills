@@ -1204,7 +1204,7 @@ class RetryPolicyFacts:
 
 @dataclass(frozen=True, slots=True)
 class ControlCommand:
-    """Capability-bound steer/interrupt command persisted by the supervisor."""
+    """Capability-bound steer/interrupt command persisted by the harness."""
 
     command_id: str
     dispatch_id: DispatchId
@@ -1521,7 +1521,7 @@ class RecoveryAction:
 
 @dataclass(frozen=True, slots=True)
 class LiveWorkerActivity:
-    """Typed recent activity response from the supervisor control plane."""
+    """Typed recent activity response from the harness control plane."""
 
     dispatch_id: DispatchId
     events: tuple[DiagnosticEvent, ...]
@@ -1945,6 +1945,130 @@ class LifecyclePhase(str, Enum):
     ROUTING = "routing"
 
 
+class CandidateDisposition(str, Enum):
+    """Durable outcome of inspecting an executor workspace after termination."""
+
+    VERIFIED_COMMIT = "verified_commit"
+    PRESERVED_DIRTY_WORKSPACE = "preserved_dirty_workspace"
+    NO_CANDIDATE = "no_candidate"
+
+
+class BlockerKind(str, Enum):
+    """Closed owner of a typed terminal blocker."""
+
+    EXTERNAL = "external"
+    DECISION = "decision"
+    EXECUTION = "execution"
+
+
+class BlockerScope(str, Enum):
+    """The smallest lifecycle scope a blocker is allowed to affect."""
+
+    CURRENT_PROMOTION = "current_promotion"
+    CURRENT_REPAIR = "current_repair"
+    FUTURE_MILESTONE = "future_milestone"
+    WHOLE_PROGRAM = "whole_program"
+
+
+@dataclass(frozen=True, slots=True)
+class TypedBlocker:
+    """Sanitized, bounded blocker facts projected from a terminal result."""
+
+    gate_id: str
+    kind: BlockerKind
+    scope: BlockerScope
+    promotion_blocking: bool
+    required_action: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.gate_id, label="blocker gate id", limit=256)
+        if not isinstance(self.kind, BlockerKind):
+            object.__setattr__(self, "kind", BlockerKind(self.kind))
+        if not isinstance(self.scope, BlockerScope):
+            object.__setattr__(self, "scope", BlockerScope(self.scope))
+        if not isinstance(self.promotion_blocking, bool):
+            raise ValueError("blocker promotion_blocking must be boolean")
+        _required_text(self.required_action, label="blocker required action", limit=512)
+
+    def to_json(self) -> JsonObject:
+        return {
+            "gate_id": self.gate_id,
+            "kind": self.kind.value,
+            "scope": self.scope.value,
+            "promotion_blocking": self.promotion_blocking,
+            "required_action": self.required_action,
+        }
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> TypedBlocker:
+        if not isinstance(value, Mapping) or set(value) != {
+            "gate_id",
+            "kind",
+            "scope",
+            "promotion_blocking",
+            "required_action",
+        }:
+            raise ValueError("typed blocker shape is unsupported")
+        return cls(
+            value["gate_id"],  # type: ignore[arg-type]
+            BlockerKind(value["kind"]),  # type: ignore[arg-type]
+            BlockerScope(value["scope"]),  # type: ignore[arg-type]
+            value["promotion_blocking"],  # type: ignore[arg-type]
+            value["required_action"],  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRecord:
+    """Workspace inspection fact retained independently of executor status."""
+
+    disposition: CandidateDisposition
+    workspace_path: Path
+    commit_sha: str | None = None
+    workspace_head: str | None = None
+    workspace_digest: str | None = None
+    dirty: bool = False
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.disposition, CandidateDisposition):
+            object.__setattr__(self, "disposition", CandidateDisposition(self.disposition))
+        path = Path(self.workspace_path)
+        if not path.is_absolute() or ".." in path.parts:
+            raise ValueError("candidate workspace path must be absolute and canonical")
+        object.__setattr__(self, "workspace_path", path)
+        for label, value, length in (
+            ("candidate commit", self.commit_sha, 40),
+            ("candidate workspace head", self.workspace_head, 40),
+            ("candidate workspace digest", self.workspace_digest, 64),
+        ):
+            if value is not None and (not isinstance(value, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", value)):
+                raise ValueError(f"{label} is invalid")
+        if not isinstance(self.dirty, bool):
+            raise ValueError("candidate dirty flag must be boolean")
+        if self.reason is not None:
+            _required_text(self.reason, label="candidate inspection reason", limit=512)
+        if self.disposition is CandidateDisposition.VERIFIED_COMMIT:
+            if self.commit_sha is None or self.workspace_head is None:
+                raise ValueError("verified candidate requires a commit and workspace head")
+        elif self.disposition is CandidateDisposition.PRESERVED_DIRTY_WORKSPACE:
+            if not self.dirty or self.commit_sha is not None:
+                raise ValueError("dirty candidate must remain commitless and explicitly dirty")
+        elif self.commit_sha is not None:
+            raise ValueError("empty candidate cannot carry a commit")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "disposition": self.disposition.value,
+            "workspace_path": str(self.workspace_path),
+            "commit_sha": self.commit_sha,
+            "workspace_head": self.workspace_head,
+            "workspace_digest": self.workspace_digest,
+            "dirty": self.dirty,
+            "reason": self.reason,
+        }
+
+
 class BudgetExhaustion(str, Enum):
     """Which bounded resource stopped another external turn."""
 
@@ -2001,9 +2125,25 @@ def is_transition_allowed(from_state: WorkflowState | str, to_state: WorkflowSta
                 WorkflowState.FAILED,
                 WorkflowState.CANCELLED,
             }
-        case WorkflowState.STARTING | WorkflowState.NEEDS_DECISION | WorkflowState.REPAIR_REQUIRED:
+        case WorkflowState.STARTING:
             return target in {
                 WorkflowState.RUNNING,
+                WorkflowState.BLOCKED,
+                WorkflowState.FAILED,
+                WorkflowState.CANCELLED,
+            }
+        case WorkflowState.REPAIR_REQUIRED:
+            return target in {
+                WorkflowState.RUNNING,
+                WorkflowState.REVIEWING,
+                WorkflowState.BLOCKED,
+                WorkflowState.FAILED,
+                WorkflowState.CANCELLED,
+            }
+        case WorkflowState.NEEDS_DECISION:
+            return target in {
+                WorkflowState.RUNNING,
+                WorkflowState.REVIEWING,
                 WorkflowState.BLOCKED,
                 WorkflowState.FAILED,
                 WorkflowState.CANCELLED,
@@ -2012,6 +2152,7 @@ def is_transition_allowed(from_state: WorkflowState | str, to_state: WorkflowSta
             return target in {
                 WorkflowState.NEEDS_DECISION,
                 WorkflowState.COMPLETED,
+                WorkflowState.REPAIR_REQUIRED,
                 WorkflowState.BLOCKED,
                 WorkflowState.FAILED,
                 WorkflowState.CANCELLED,
@@ -2031,7 +2172,16 @@ def is_transition_allowed(from_state: WorkflowState | str, to_state: WorkflowSta
                 WorkflowState.FAILED,
                 WorkflowState.CANCELLED,
             }
-        case WorkflowState.ACCEPTED | WorkflowState.BLOCKED | WorkflowState.FAILED | WorkflowState.CANCELLED:
+        case WorkflowState.BLOCKED:
+            return target in {
+                WorkflowState.REVIEWING,
+                WorkflowState.REPAIR_REQUIRED,
+                WorkflowState.FAILED,
+                WorkflowState.CANCELLED,
+            }
+        case WorkflowState.FAILED:
+            return target in {WorkflowState.REPAIR_REQUIRED, WorkflowState.REVIEWING, WorkflowState.CANCELLED}
+        case WorkflowState.ACCEPTED | WorkflowState.CANCELLED:
             return False
     raise AssertionError(f"unhandled workflow state: {source!r}")
 
@@ -3082,7 +3232,8 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
                         and version_property.get("const") == 3
                         and "local_image_paths" in properties
                     )
-                    if optional and not is_optional_plugin_capsule:
+                    is_optional_typed_blocker = optional == {"blocker"}
+                    if optional and not (is_optional_plugin_capsule or is_optional_typed_blocker):
                         raise ValueError("record schemas must require every declared property")
                     if len(required) != len(set(required)):
                         raise ValueError("record schema required names must be unique")
@@ -3313,8 +3464,11 @@ def validate_structured_output(value: object, schema: Mapping[str, object]) -> N
             if _is_closed_constant_map(node, properties):
                 if not set(mapping) <= expected:
                     raise ValueError(f"structured output field {path!r} contains an unsupported map key")
-            elif set(mapping) != expected:
-                raise ValueError(f"structured output field {path!r} does not match the closed record")
+            else:
+                required = node.get("required")
+                required_names = set(required) if isinstance(required, list | tuple) else expected
+                if not required_names <= set(mapping) or not set(mapping) <= expected:
+                    raise ValueError(f"structured output field {path!r} does not match the closed record")
             for key in mapping:
                 validate(
                     mapping[key],
@@ -3702,6 +3856,8 @@ class ProgramNodeStatus:
     review_ids: tuple[str, ...] = ()
     finding_ids: tuple[str, ...] = ()
     integrated: bool = False
+    candidate_disposition: CandidateDisposition | None = None
+    blocker: TypedBlocker | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.milestone_id, MilestoneId):
@@ -3721,6 +3877,10 @@ class ProgramNodeStatus:
             raise ValueError("program candidate commit is invalid")
         if not isinstance(self.integrated, bool):
             raise ValueError("program integration state is invalid")
+        if self.candidate_disposition is not None and not isinstance(self.candidate_disposition, CandidateDisposition):
+            object.__setattr__(self, "candidate_disposition", CandidateDisposition(self.candidate_disposition))
+        if self.blocker is not None and not isinstance(self.blocker, TypedBlocker):
+            raise ValueError("program node blocker is not typed")
 
     @property
     def ready(self) -> bool:
@@ -3779,6 +3939,8 @@ class ProgramControllerNodeContext:
     finding_ids: tuple[str, ...]
     integrated: bool
     ready: bool
+    candidate_disposition: CandidateDisposition | None = None
+    blocker: TypedBlocker | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.milestone_id, MilestoneId):
@@ -3817,6 +3979,10 @@ class ProgramControllerNodeContext:
             raise ValueError("program node context candidate is invalid")
         if not isinstance(self.integrated, bool) or not isinstance(self.ready, bool):
             raise ValueError("program node context flags are invalid")
+        if self.candidate_disposition is not None and not isinstance(self.candidate_disposition, CandidateDisposition):
+            object.__setattr__(self, "candidate_disposition", CandidateDisposition(self.candidate_disposition))
+        if self.blocker is not None and not isinstance(self.blocker, TypedBlocker):
+            raise ValueError("program node context blocker is not typed")
 
     def to_json(self) -> JsonObject:
         return {
@@ -3831,6 +3997,8 @@ class ProgramControllerNodeContext:
             "finding_ids": list(self.finding_ids),
             "integrated": self.integrated,
             "ready": self.ready,
+            "candidate_disposition": self.candidate_disposition.value if self.candidate_disposition else None,
+            "blocker": self.blocker.to_json() if self.blocker else None,
         }
 
     @classmethod
@@ -3847,8 +4015,10 @@ class ProgramControllerNodeContext:
             "finding_ids",
             "integrated",
             "ready",
+            "candidate_disposition",
+            "blocker",
         }
-        if set(value) != expected:
+        if set(value) not in (expected - {"candidate_disposition", "blocker"}, expected):
             raise ValueError("program node context shape is unsupported")
         arrays = {
             name: value[name]
@@ -3877,6 +4047,10 @@ class ProgramControllerNodeContext:
             tuple(arrays["finding_ids"]),  # type: ignore[arg-type]
             value["integrated"],  # type: ignore[arg-type]
             value["ready"],  # type: ignore[arg-type]
+            CandidateDisposition(value.get("candidate_disposition"))
+            if value.get("candidate_disposition") is not None
+            else None,
+            TypedBlocker.from_json(value["blocker"]) if isinstance(value.get("blocker"), Mapping) else None,
         )
 
 

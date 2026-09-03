@@ -12,7 +12,7 @@ import pytest
 import codex_flow.cli as cli_module
 import codex_flow.control_client as control_client_module
 import codex_flow.controller as controller_module
-import codex_flow.supervisor as supervisor_module
+import codex_flow.harness as harness_module
 from codex_flow.backends.codex_sdk import _provider_output_schema
 from codex_flow.cli import app
 from codex_flow.contracts import (
@@ -54,10 +54,10 @@ from codex_flow.domain import (
     validate_output_schema,
     validate_structured_output,
 )
+from codex_flow.harness import WorkflowHarness
 from codex_flow.ipc import MAX_FRAME_BYTES, IpcError, IpcReasonCode, decode_frame, encode_frame
-from codex_flow.ledger import Ledger, StaleWriter, SupervisorRefreshBlocked
+from codex_flow.ledger import HarnessRefreshBlocked, Ledger, StaleWriter
 from codex_flow.program_controller import ProgramControllerGenerationRecovery, ProgramControllerGenerationRunner
-from codex_flow.supervisor import Supervisor
 from codex_flow.worktrees import CommandResult, WorkspaceConflict, WorktreeError, WorktreeManager
 
 TRUNK_HEAD = "b" * 40
@@ -494,10 +494,10 @@ def test_program_context_contains_exact_graph_and_rejects_stale_revision(tmp_pat
 
 
 def test_program_context_ipc_projection_is_typed_and_revision_bound(tmp_path: Path) -> None:
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        supervisor.ledger.register_program(_graph(tmp_path))
-        response = supervisor._controller_request(
+        harness.ledger.register_program(_graph(tmp_path))
+        response = harness._controller_request(
             {
                 "version": 1,
                 "operation": "program_context",
@@ -509,9 +509,9 @@ def test_program_context_ipc_projection_is_typed_and_revision_bound(tmp_path: Pa
         context = ProgramControllerContext.from_json(response["context"])  # type: ignore[arg-type]
         assert context.program_revision == 0
         assert context.nodes[1].dependencies == (MilestoneId("first"),)
-        supervisor.ledger.start_program("program")
+        harness.ledger.start_program("program")
         with pytest.raises(StaleWriter, match="context identity is stale"):
-            supervisor._controller_request(
+            harness._controller_request(
                 {
                     "version": 1,
                     "operation": "program_context",
@@ -521,14 +521,14 @@ def test_program_context_ipc_projection_is_typed_and_revision_bound(tmp_path: Pa
                 }
             )
     finally:
-        supervisor.close()
+        harness.close()
 
 
 def test_program_status_ipc_thaws_nested_payload_before_bounded_framing(tmp_path: Path) -> None:
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        supervisor.ledger.register_program(_graph(tmp_path))
-        decision = supervisor.ledger.start_program("program")
+        harness.ledger.register_program(_graph(tmp_path))
+        decision = harness.ledger.start_program("program")
         client, server = socket.socketpair()
         try:
             client.sendall(
@@ -540,7 +540,7 @@ def test_program_status_ipc_thaws_nested_payload_before_bounded_framing(tmp_path
                     }
                 )
             )
-            assert supervisor._accept_connection(server) == "program_status"
+            assert harness._accept_connection(server) == "program_status"
             response = decode_frame(client)
         finally:
             client.close()
@@ -552,25 +552,25 @@ def test_program_status_ipc_thaws_nested_payload_before_bounded_framing(tmp_path
         assert isinstance(payload["payload"], dict)
         assert isinstance(payload["payload"]["ready_milestones"], list)
     finally:
-        supervisor.close()
+        harness.close()
 
 
 def test_program_start_ipc_routes_through_controller_and_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        supervisor.ledger.register_program(_graph(tmp_path))
+        harness.ledger.register_program(_graph(tmp_path))
         calls: list[tuple[str, str]] = []
 
         class _Controller:
             def __init__(self, state_root: Path, *, worktrees: object) -> None:
                 assert state_root == tmp_path.resolve()
-                assert worktrees is supervisor._worktrees
+                assert worktrees is harness._worktrees
 
             def start_program(self, program_id: str, *, event_key: str) -> object:
                 calls.append((program_id, event_key))
-                return supervisor.ledger.start_program(program_id, event_key=event_key)
+                return harness.ledger.start_program(program_id, event_key=event_key)
 
             def close(self) -> None:
                 return None
@@ -582,42 +582,42 @@ def test_program_start_ipc_routes_through_controller_and_is_idempotent(
             "program_id": "program",
             "event_key": "start",
         }
-        first = supervisor._controller_request(request)
-        second = supervisor._controller_request(request)
+        first = harness._controller_request(request)
+        second = harness._controller_request(request)
         assert calls == [("program", "start"), ("program", "start")]
         assert first == second
-        assert "program_start" in supervisor_module.QUEUE_TRIGGERING_OPERATIONS
+        assert "program_start" in harness_module.QUEUE_TRIGGERING_OPERATIONS
     finally:
-        supervisor.close()
+        harness.close()
 
 
 def test_program_controller_child_preidentity_exit_with_expired_deadline_is_closed_once_and_not_respawned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        supervisor.ledger.register_program(_graph(tmp_path))
-        decision = supervisor.ledger.start_program("program")
-        supervisor.ledger.prepare_controller_generation(decision.decision_id, generation=1)
-        supervisor.ledger._db().execute(
+        harness.ledger.register_program(_graph(tmp_path))
+        decision = harness.ledger.start_program("program")
+        harness.ledger.prepare_controller_generation(decision.decision_id, generation=1)
+        harness.ledger._db().execute(
             "UPDATE controller_decisions SET deadline = '2000-01-01T00:00:00Z' WHERE decision_id = ?",
             (str(decision.decision_id),),
         )
-        supervisor.ledger._db().commit()
+        harness.ledger._db().commit()
 
         class _ExitedChild:
             def poll(self) -> int:
                 return 2
 
         decision_id = str(decision.decision_id)
-        supervisor._controller_children[decision_id] = _ExitedChild()  # type: ignore[assignment]
-        assert supervisor._reap_controller_generations() is True
-        status = supervisor.ledger.program_controller_decision(decision.decision_id)
-        generation = supervisor.ledger.controller_generation(decision.decision_id)
+        harness._controller_children[decision_id] = _ExitedChild()  # type: ignore[assignment]
+        assert harness._reap_controller_generations() is True
+        status = harness.ledger.program_controller_decision(decision.decision_id)
+        generation = harness.ledger.controller_generation(decision.decision_id)
         assert status.state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED
         assert generation.state is ControllerGenerationState.AMBIGUOUS
         assert generation.inspection_outcome == ControllerGenerationState.AMBIGUOUS.value
-        assert supervisor._reap_controller_generations() is False
+        assert harness._reap_controller_generations() is False
 
         spawned: list[bool] = []
 
@@ -625,12 +625,12 @@ def test_program_controller_child_preidentity_exit_with_expired_deadline_is_clos
             spawned.append(recovery)
             return True
 
-        monkeypatch.setattr(supervisor, "_spawn_program_controller_generation", unexpected_spawn)
-        supervisor.epoch = 1
-        assert supervisor._schedule_program_controller_generations() is False
+        monkeypatch.setattr(harness, "_spawn_program_controller_generation", unexpected_spawn)
+        harness.epoch = 1
+        assert harness._schedule_program_controller_generations() is False
         assert spawned == []
     finally:
-        supervisor.close()
+        harness.close()
 
 
 @pytest.mark.parametrize("fenced", [False, True], ids=["refresh-allowed", "refresh-fenced"])
@@ -667,7 +667,7 @@ def test_program_controller_start_ready_milestone_enqueues_worker_under_active_c
         ),
         base_sha,
     )
-    supervisor = Supervisor(repository)
+    harness = WorkflowHarness(repository)
     real_controller = controller_module.Controller
 
     class _TestController(real_controller):
@@ -680,16 +680,16 @@ def test_program_controller_start_ready_milestone_enqueues_worker_under_active_c
 
     monkeypatch.setattr(controller_module, "Controller", _TestController)
     try:
-        supervisor.ledger.register_program(graph)
-        decision = supervisor.ledger.start_program("program")
-        claim = supervisor.ledger.claim_program_controller_decision(
+        harness.ledger.register_program(graph)
+        decision = harness.ledger.start_program("program")
+        claim = harness.ledger.claim_program_controller_decision(
             decision.decision_id,
             claimant_id="program-controller/active-test",
             expected_revision=decision.revision,
             generation=1,
         )
-        supervisor.ledger.prepare_controller_generation(decision.decision_id, generation=1)
-        supervisor.ledger.bind_controller_generation_thread(
+        harness.ledger.prepare_controller_generation(decision.decision_id, generation=1)
+        harness.ledger.bind_controller_generation_thread(
             decision.decision_id,
             generation=1,
             controller_thread_id="active-program-controller",
@@ -703,12 +703,12 @@ def test_program_controller_start_ready_milestone_enqueues_worker_under_active_c
             ),
             trunk_head=base_sha,
         )
-        supervisor.ledger.submit_program_controller_actions(
+        harness.ledger.submit_program_controller_actions(
             bundle,
             claimant_id=claim.claimant_id,
             token=str(claim.token),
         )
-        authority = supervisor.ledger.acquire_supervisor(
+        authority = harness.ledger.acquire_harness(
             repository_root=repository,
             state_root=repository,
             pid=os.getpid(),
@@ -718,21 +718,21 @@ def test_program_controller_start_ready_milestone_enqueues_worker_under_active_c
             owner_nonce_sha256="b" * 64,
         )
         if fenced:
-            supervisor.ledger.request_supervisor_shutdown(epoch=int(authority["epoch"]), owner_nonce_sha256="b" * 64)
-            with pytest.raises(SupervisorRefreshBlocked, match="refresh fence"):
-                supervisor._apply_program_action_bundle(bundle)
-            assert supervisor.ledger._db().execute("SELECT COUNT(*) FROM dispatch_queue").fetchone()[0] == 0
+            harness.ledger.request_harness_shutdown(epoch=int(authority["epoch"]), owner_nonce_sha256="b" * 64)
+            with pytest.raises(HarnessRefreshBlocked, match="refresh fence"):
+                harness._apply_program_action_bundle(bundle)
+            assert harness.ledger._db().execute("SELECT COUNT(*) FROM dispatch_queue").fetchone()[0] == 0
         else:
-            assert supervisor._apply_program_action_bundle(bundle) is True
-            dispatch = supervisor.ledger.queue_dispatch("program/first/executor/1")
+            assert harness._apply_program_action_bundle(bundle) is True
+            dispatch = harness.ledger.queue_dispatch("program/first/executor/1")
             assert dispatch["state"] == "queued"
-            assert supervisor.ledger._db().execute("SELECT COUNT(*) FROM dispatch_queue").fetchone()[0] == 1
+            assert harness.ledger._db().execute("SELECT COUNT(*) FROM dispatch_queue").fetchone()[0] == 1
     finally:
-        supervisor.close()
+        harness.close()
 
 
 def test_program_start_client_preserves_ipc_reason_codes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    client = ControllerDecisionClient(tmp_path / "supervisor.sock")
+    client = ControllerDecisionClient(tmp_path / "harness.sock")
     monkeypatch.setattr(
         control_client_module,
         "send_request",
@@ -750,13 +750,13 @@ def test_program_start_client_preserves_ipc_reason_codes(monkeypatch: pytest.Mon
 
 
 def test_program_start_client_emits_one_typed_ipc_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    client = ControllerDecisionClient(tmp_path / "supervisor.sock")
+    client = ControllerDecisionClient(tmp_path / "harness.sock")
     captured: dict[str, object] = {}
     status = _runner_status()
 
     def response(_socket: Path, request: dict[str, object], **_kwargs: object) -> dict[str, object]:
         captured.update(request)
-        return {"version": 1, "ok": True, "decision": Supervisor._program_status_payload(status)}
+        return {"version": 1, "ok": True, "decision": WorkflowHarness._program_status_payload(status)}
 
     monkeypatch.setattr(control_client_module, "send_request", response)
     assert client.program_start("program", event_key="operator-start").decision_id == status.decision_id
@@ -776,7 +776,7 @@ def test_send_response_distinguishes_malformed_and_oversized_payloads() -> None:
     for response, expected_error in cases:
         sender, receiver = socket.socketpair()
         try:
-            Supervisor._send_response(sender, response)
+            WorkflowHarness._send_response(sender, response)
             assert decode_frame(receiver) == {"version": 1, "ok": False, "error": expected_error}
         finally:
             sender.close()
@@ -817,15 +817,15 @@ def test_program_revision_allows_only_one_claim_and_coalesces_stale_events(tmp_p
         ledger.close()
 
 
-def test_supervisor_schedules_only_one_program_controller_child_per_program_revision(
+def test_harness_schedules_only_one_program_controller_child_per_program_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        supervisor.ledger.register_program(_graph(tmp_path))
-        supervisor.ledger.record_program_event("program", ProgramEventKind.CHECKPOINT, "first-event")
-        supervisor.ledger.record_program_event("program", ProgramEventKind.CHECKPOINT, "second-event")
-        supervisor.epoch = 1
+        harness.ledger.register_program(_graph(tmp_path))
+        harness.ledger.record_program_event("program", ProgramEventKind.CHECKPOINT, "first-event")
+        harness.ledger.record_program_event("program", ProgramEventKind.CHECKPOINT, "second-event")
+        harness.epoch = 1
         spawned: list[str] = []
 
         def spawn(status: ProgramControllerDecisionStatus, *, recovery: bool = False) -> bool:
@@ -833,34 +833,34 @@ def test_supervisor_schedules_only_one_program_controller_child_per_program_revi
             spawned.append(str(status.decision_id))
             return True
 
-        monkeypatch.setattr(supervisor, "_spawn_program_controller_generation", spawn)
-        assert supervisor._schedule_program_controller_generations() is True
+        monkeypatch.setattr(harness, "_spawn_program_controller_generation", spawn)
+        assert harness._schedule_program_controller_generations() is True
         assert len(spawned) == 1
     finally:
-        supervisor.close()
+        harness.close()
 
 
 def test_active_recovery_inspection_defers_without_repeated_controller_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        supervisor.ledger.register_program(_graph(tmp_path))
-        decision = supervisor.ledger.start_program("program")
-        claim = supervisor.ledger.claim_program_controller_decision(
+        harness.ledger.register_program(_graph(tmp_path))
+        decision = harness.ledger.start_program("program")
+        claim = harness.ledger.claim_program_controller_decision(
             decision.decision_id,
             claimant_id="program-controller/test",
             expected_revision=decision.revision,
             generation=1,
         )
-        supervisor.ledger.prepare_controller_generation(decision.decision_id, generation=1)
-        supervisor.ledger.bind_controller_generation_thread(
+        harness.ledger.prepare_controller_generation(decision.decision_id, generation=1)
+        harness.ledger.bind_controller_generation_thread(
             decision.decision_id,
             generation=1,
             controller_thread_id="active-program-controller",
         )
-        inspection = supervisor.ledger.reserve_controller_recovery_inspection(decision.decision_id)
-        supervisor.ledger.complete_controller_recovery_inspection(
+        inspection = harness.ledger.reserve_controller_recovery_inspection(decision.decision_id)
+        harness.ledger.complete_controller_recovery_inspection(
             decision.decision_id,
             inspection_outcome=ControllerGenerationState.ACTIVE.value,
             claim=inspection,
@@ -871,36 +871,36 @@ def test_active_recovery_inspection_defers_without_repeated_controller_spawn(
             spawned.append(recovery)
             return True
 
-        monkeypatch.setattr(supervisor, "_spawn_program_controller_generation", spawn)
-        assert supervisor._schedule_program_controller_generations() is False
-        assert supervisor._schedule_program_controller_generations() is False
+        monkeypatch.setattr(harness, "_spawn_program_controller_generation", spawn)
+        assert harness._schedule_program_controller_generations() is False
+        assert harness._schedule_program_controller_generations() is False
         assert spawned == []
-        assert supervisor.ledger.controller_generation(decision.decision_id).inspection_outcome == (
+        assert harness.ledger.controller_generation(decision.decision_id).inspection_outcome == (
             ControllerGenerationState.ACTIVE.value
         )
         with pytest.raises(StaleWriter, match="already consumed"):
-            supervisor.ledger.reserve_controller_recovery_inspection(decision.decision_id)
+            harness.ledger.reserve_controller_recovery_inspection(decision.decision_id)
         assert claim.claimant_id == "program-controller/test"
 
-        checkpoint = supervisor.ledger.record_program_event(
+        checkpoint = harness.ledger.record_program_event(
             "program",
             ProgramEventKind.CHECKPOINT,
             "explicit-rearm",
             payload={"summary": "explicit controller checkpoint"},
         )
-        assert supervisor.ledger.program_controller_decision(decision.decision_id).state is (
+        assert harness.ledger.program_controller_decision(decision.decision_id).state is (
             ControllerDecisionState.SUPERSEDED
         )
-        assert supervisor._schedule_program_controller_generations() is True
+        assert harness._schedule_program_controller_generations() is True
         assert spawned == [False]
-        checkpoint_claim = supervisor.ledger.claim_program_controller_decision(
+        checkpoint_claim = harness.ledger.claim_program_controller_decision(
             checkpoint.decision_id,
             claimant_id="program-controller/rearmed",
             expected_revision=checkpoint.revision,
             generation=1,
         )
         with pytest.raises(StaleWriter, match="not claimable"):
-            supervisor.ledger.claim_program_controller_decision(
+            harness.ledger.claim_program_controller_decision(
                 checkpoint.decision_id,
                 claimant_id="program-controller/duplicate",
                 expected_revision=checkpoint.revision,
@@ -908,7 +908,7 @@ def test_active_recovery_inspection_defers_without_repeated_controller_spawn(
             )
         assert checkpoint_claim.claimant_id == "program-controller/rearmed"
     finally:
-        supervisor.close()
+        harness.close()
 
 
 def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
@@ -924,11 +924,11 @@ def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
         ),
         TRUNK_HEAD,
     )
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        supervisor.ledger.register_program(graph)
-        decision = supervisor.ledger.start_program("program")
-        claim = supervisor.ledger.claim_program_controller_decision(
+        harness.ledger.register_program(graph)
+        decision = harness.ledger.start_program("program")
+        claim = harness.ledger.claim_program_controller_decision(
             decision.decision_id,
             claimant_id="program-controller/test",
             expected_revision=decision.revision,
@@ -942,7 +942,7 @@ def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
                 milestone_ids=("first", "second"),
             ),
         )
-        receipt = supervisor.ledger.submit_program_controller_actions(
+        receipt = harness.ledger.submit_program_controller_actions(
             bundle,
             claimant_id=claim.claimant_id,
             token=str(claim.token),
@@ -954,16 +954,16 @@ def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
             if milestone_id == "second":
                 raise RuntimeError("bounded enqueue failure")
 
-        monkeypatch.setattr(supervisor, "_enqueue_program_worker", enqueue)
+        monkeypatch.setattr(harness, "_enqueue_program_worker", enqueue)
         with pytest.raises(RuntimeError, match="bounded enqueue failure"):
-            supervisor._apply_program_action_bundle(bundle)
+            harness._apply_program_action_bundle(bundle)
         assert calls == ["first", "second"]
-        assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:first") == "applied"
-        assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:second") == "failed"
-        status = supervisor.ledger.program_controller_decision(decision.decision_id)
+        assert harness.ledger.program_action_effect_state(bundle.action_id, "start:first") == "applied"
+        assert harness.ledger.program_action_effect_state(bundle.action_id, "start:second") == "failed"
+        status = harness.ledger.program_controller_decision(decision.decision_id)
         assert status.state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED
-        assert supervisor.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
-        acknowledged = supervisor.ledger.acknowledge_controller_action(
+        assert harness.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
+        acknowledged = harness.ledger.acknowledge_controller_action(
             decision.decision_id,
             action_id=receipt.action_id,
             bundle_sha256=bundle.sha256,
@@ -973,15 +973,15 @@ def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
         )
         assert acknowledged.state == "acknowledged"
         assert (
-            supervisor.ledger.record_program_action_effect(
+            harness.ledger.record_program_action_effect(
                 bundle.action_id, "start:second", state="failed", error_code="RuntimeError"
             )
             == "failed"
         )
     finally:
-        supervisor.close()
+        harness.close()
 
-    restarted = Supervisor(tmp_path)
+    restarted = WorkflowHarness(tmp_path)
     try:
         replayed: list[str] = []
         monkeypatch.setattr(
@@ -1005,9 +1005,9 @@ def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
 def test_program_integration_conflict_has_one_action_bound_attention_decision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        ledger = supervisor.ledger
+        ledger = harness.ledger
         ledger.register_program(_graph(tmp_path))
         start = ledger.start_program("program")
         _claim_and_apply(
@@ -1100,9 +1100,9 @@ def test_program_integration_conflict_has_one_action_bound_attention_decision(
             calls += 1
             raise WorkspaceConflict("concurrent trunk advancement")
 
-        monkeypatch.setattr(supervisor._worktrees, "integrate_candidate", conflict)
+        monkeypatch.setattr(harness._worktrees, "integrate_candidate", conflict)
         with pytest.raises(WorkspaceConflict, match="concurrent trunk advancement"):
-            supervisor._apply_program_action_bundle(bundle)
+            harness._apply_program_action_bundle(bundle)
         assert calls == 1
         assert ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
         attention = [
@@ -1113,9 +1113,9 @@ def test_program_integration_conflict_has_one_action_bound_attention_decision(
         assert len(attention) == 1
         assert attention[0].event_key == f"action-effect/{bundle.action_id}/failed"
     finally:
-        supervisor.close()
+        harness.close()
 
-    restarted = Supervisor(tmp_path)
+    restarted = WorkflowHarness(tmp_path)
     try:
         monkeypatch.setattr(
             restarted._worktrees,
@@ -1133,12 +1133,12 @@ def test_program_integration_conflict_has_one_action_bound_attention_decision(
         restarted.close()
 
 
-def test_program_effect_failure_is_redacted_at_live_ipc_and_keeps_supervisor_usable(
+def test_program_effect_failure_is_redacted_at_live_ipc_and_keeps_harness_usable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    supervisor = Supervisor(tmp_path)
+    harness = WorkflowHarness(tmp_path)
     try:
-        supervisor.ledger.register_program(
+        harness.ledger.register_program(
             ProgramGraph(
                 ProgramId("program"),
                 tmp_path / "canonical-plan.md",
@@ -1150,8 +1150,8 @@ def test_program_effect_failure_is_redacted_at_live_ipc_and_keeps_supervisor_usa
                 TRUNK_HEAD,
             )
         )
-        decision = supervisor.ledger.start_program("program")
-        claim = supervisor.ledger.claim_program_controller_decision(
+        decision = harness.ledger.start_program("program")
+        claim = harness.ledger.claim_program_controller_decision(
             decision.decision_id,
             claimant_id="program-controller/ipc-test",
             expected_revision=decision.revision,
@@ -1172,7 +1172,7 @@ def test_program_effect_failure_is_redacted_at_live_ipc_and_keeps_supervisor_usa
             if milestone_id == "second":
                 raise RuntimeError("secret enqueue detail")
 
-        monkeypatch.setattr(supervisor, "_enqueue_program_worker", enqueue)
+        monkeypatch.setattr(harness, "_enqueue_program_worker", enqueue)
         client, server = socket.socketpair()
         try:
             client.sendall(
@@ -1186,26 +1186,26 @@ def test_program_effect_failure_is_redacted_at_live_ipc_and_keeps_supervisor_usa
                     }
                 )
             )
-            assert supervisor._accept_connection(server) == "program_submit_actions"
+            assert harness._accept_connection(server) == "program_submit_actions"
             response = decode_frame(client)
         finally:
             client.close()
         assert response == {"version": 1, "ok": False, "error": "request_rejected"}
         assert "secret enqueue detail" not in json.dumps(response)
         assert calls == ["first", "second"]
-        assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:first") == "applied"
-        assert supervisor.ledger.program_action_effect_state(bundle.action_id, "start:second") == "failed"
-        assert supervisor.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
+        assert harness.ledger.program_action_effect_state(bundle.action_id, "start:first") == "applied"
+        assert harness.ledger.program_action_effect_state(bundle.action_id, "start:second") == "failed"
+        assert harness.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
 
         next_client, next_server = socket.socketpair()
         try:
             next_client.sendall(encode_frame({"version": 1, "operation": "wake"}))
-            assert supervisor._accept_connection(next_server) == "wake"
+            assert harness._accept_connection(next_server) == "wake"
             assert decode_frame(next_client) == {"version": 1, "ok": True, "operation": "wake"}
         finally:
             next_client.close()
     finally:
-        supervisor.close()
+        harness.close()
 
 
 class _ProgramAdapter:
@@ -1829,11 +1829,11 @@ def test_program_integration_records_applied_after_transient_checkout_failure(tm
     repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "merge")
     exclude = repository / ".git" / "info" / "exclude"
     exclude.write_text(f"{exclude.read_text(encoding='utf-8')}\n.codex-flow/\n", encoding="utf-8")
-    supervisor = Supervisor(repository)
+    harness = WorkflowHarness(repository)
     try:
-        supervisor.ledger.register_program(_integration_graph(repository, candidate, expected))
+        harness.ledger.register_program(_integration_graph(repository, candidate, expected))
         bundle = _prepare_program_integration(
-            supervisor.ledger,
+            harness.ledger,
             candidate_sha=candidate_sha,
             trunk_head=expected,
         )
@@ -1851,19 +1851,19 @@ def test_program_integration_records_applied_after_transient_checkout_failure(tm
             completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
             return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
-        supervisor._worktrees = WorktreeManager(
+        harness._worktrees = WorktreeManager(
             runner=transient_runner,
             mutation_lock_path=repository / ".codex-flow" / "controller.lock",
         )
-        assert supervisor._apply_program_action_bundle(bundle) is True
+        assert harness._apply_program_action_bundle(bundle) is True
         assert read_tree_failures == 1
-        assert supervisor.ledger.program_status("program").nodes[0].integrated is True
-        assert supervisor.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
+        assert harness.ledger.program_status("program").nodes[0].integrated is True
+        assert harness.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
         assert _git(repository, "status", "--porcelain", "--untracked-files=all") == ""
     finally:
-        supervisor.close()
+        harness.close()
 
-    restarted = Supervisor(repository)
+    restarted = WorkflowHarness(repository)
     try:
         assert restarted._reconcile_program_action_outboxes() is False
         assert restarted.ledger.program_status("program").nodes[0].integrated is True

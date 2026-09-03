@@ -24,8 +24,8 @@ from .domain import (
     ThreadIdentity,
     redact_diagnostic_text,
 )
+from .harness import WorkflowHarness
 from .ledger import Ledger
-from .supervisor import Supervisor
 
 _MARKER = "LIVE_CONTROL_STEER_SENTINEL"
 _DISPATCH = "sentinel/live-worker-control/executor/1"
@@ -76,8 +76,8 @@ def run_live_control_sentinel(*, model: str, effort: ReasoningEffort, timeout_se
     }
     if timeout_seconds <= 0:
         raise ValueError("sentinel timeout must be positive")
-    supervisor: Supervisor | None = None
-    supervisor_thread: threading.Thread | None = None
+    harness: WorkflowHarness | None = None
+    harness_thread: threading.Thread | None = None
     ledger: Ledger | None = None
     with tempfile.TemporaryDirectory(prefix="codex-flow-live-control-") as temporary:
         root = Path(temporary)
@@ -134,20 +134,20 @@ def run_live_control_sentinel(*, model: str, effort: ReasoningEffort, timeout_se
                 profile_sha256=profile.profile_sha256,
                 checkpoint_seconds=60.0,
             )
-            supervisor = Supervisor(
+            harness = WorkflowHarness(
                 root,
                 lease_seconds=10.0,
                 worker_command=(sys.executable, "-m", "codex_flow.worker"),
             )
             evidence["provider_attempts"] = 1
             evidence["sdk"]["version"] = "0.147.0"
-            supervisor_thread = threading.Thread(
-                target=supervisor.run_foreground,
+            harness_thread = threading.Thread(
+                target=harness.run_foreground,
                 kwargs={"timeout": 0.1},
                 name="codex-flow-live-control-sentinel",
                 daemon=True,
             )
-            supervisor_thread.start()
+            harness_thread.start()
             client = LiveWorkerControlClient.for_state_root(root, timeout=2.0)
             deadline = time.monotonic() + timeout_seconds
             steered = False
@@ -225,10 +225,10 @@ def run_live_control_sentinel(*, model: str, effort: ReasoningEffort, timeout_se
             evidence["error"] = _safe_error(exc)
             evidence["failure"]["detail"] = evidence["error"]["detail"]
         finally:
-            if supervisor is not None:
-                supervisor._stop = True
-            if supervisor_thread is not None:
-                supervisor_thread.join(timeout=5.0)
+            if harness is not None:
+                harness._stop = True
+            if harness_thread is not None:
+                harness_thread.join(timeout=5.0)
             after = _repository_snapshot(root)
             evidence["repository"]["after_sha256"] = hashlib.sha256(
                 json.dumps(after, sort_keys=True, separators=(",", ":")).encode()

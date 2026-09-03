@@ -26,11 +26,11 @@ CODEX_FLOW_REAL_SDK=1 codex-flow workflow-control-pilot --real --model gpt-5.6-l
 ```
 
 The root help keeps the day-to-day surface to `tui`, `control`, `status`,
-`cancel`, `supervisor`, `live`, `schema`, and `diagnostics`. Compatibility
+`cancel`, `harness`, `live`, `schema`, and `diagnostics`. Compatibility
 root spellings for low-level, sentinel, and pilot commands remain callable but
 are hidden from help; new diagnostics use the `codex-flow diagnostics` group.
 The native conversation command reads one bounded redacted page through the
-existing supervisor/SDK worker path and never persists raw provider output.
+existing harness/SDK worker path and never persists raw provider output.
 
 Diagnostic pilot and sentinel commands are `review-pilot`,
 `multi-authority-review-pilot`, `workflow-control-pilot`, `production-pilots`,

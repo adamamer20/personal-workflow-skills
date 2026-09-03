@@ -65,6 +65,7 @@ from .domain import (
     strict_json_loads,
     thaw_json,
 )
+from .harness import HarnessError, WorkflowHarness
 from .ipc import IpcError, send_request
 from .ledger import LedgerError, RecordNotFound, ledger_schema_compatibility
 from .live_control_sentinel import run_live_control_sentinel, write_live_control_evidence
@@ -94,17 +95,17 @@ from .service import (
     systemctl_user,
     unit_path,
 )
-from .supervisor import Supervisor, SupervisorError
 from .worker import WORKER_EXIT_PROFILE, WorkerError, run_nested_delegation_sentinel, submit_result
 from .workflow_control_pilot import run_workflow_control_pilot, write_workflow_control_evidence
+from .worktrees import WorktreeError
 
 app = typer.Typer(no_args_is_help=True, help="SDK-first Codex workflow tooling.")
-supervisor_app = typer.Typer(no_args_is_help=True, help="Detached repository supervisor lifecycle.")
+harness_app = typer.Typer(no_args_is_help=True, help="Detached repository workflow harness lifecycle.")
 live_app = typer.Typer(no_args_is_help=True, help="Bounded live-worker observation and control.")
 diagnostics_app = typer.Typer(no_args_is_help=True, help="Read-only compatibility, sentinel, and pilot diagnostics.")
 controller_decision_app = typer.Typer(no_args_is_help=True, help="Typed controller decision claims and recovery.")
 program_app = typer.Typer(no_args_is_help=True, help="Register and operate complete event-driven milestone programs.")
-app.add_typer(supervisor_app, name="supervisor")
+app.add_typer(harness_app, name="harness")
 app.add_typer(live_app, name="live")
 app.add_typer(diagnostics_app, name="diagnostics")
 app.add_typer(controller_decision_app, name="controller-decision", hidden=True)
@@ -126,7 +127,7 @@ def _resume_argv(thread_id: str) -> tuple[str, str, str]:
 
 @app.command("tui")
 def terminal_ui(
-    state_root: Annotated[Path, typer.Option(help="Checkout that owns the local supervisor.")] = _DEFAULT_STATE_ROOT,
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns the local harness.")] = _DEFAULT_STATE_ROOT,
     dark: Annotated[bool, typer.Option(help="Start with the deterministic dark theme.")] = False,
     no_color: Annotated[bool, typer.Option("--no-color", help="Use the monochrome fallback.")] = False,
     resume_mode: Annotated[
@@ -243,6 +244,8 @@ def _program_status_payload(status: object) -> dict[str, object]:
                 "review_ids": list(node.review_ids),
                 "finding_ids": list(node.finding_ids),
                 "integrated": node.integrated,
+                "candidate_disposition": node.candidate_disposition.value if node.candidate_disposition else None,
+                "blocker": node.blocker.to_json() if node.blocker else None,
             }
             for node in status.nodes
         ],
@@ -352,7 +355,7 @@ def program_start(
     state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
     as_json: Annotated[bool, typer.Option("--json", help="Emit stable machine-readable JSON.")] = False,
 ) -> None:
-    """Emit one coalesced start event to the detached supervisor."""
+    """Emit one coalesced start event to the detached harness."""
 
     try:
         decision = _controller_decision_client(state_root).program_start(program_id, event_key=event_key)
@@ -380,6 +383,33 @@ def program_status(
     finally:
         if controller is not None:
             controller.close()
+
+
+@program_app.command("adopt-candidate")
+def program_adopt_candidate(
+    program_id: Annotated[str, typer.Option(help="Registered program identity.")],
+    milestone_id: Annotated[str, typer.Option(help="Milestone whose existing candidate is being recovered.")],
+    candidate_sha: Annotated[str, typer.Option(help="Exact lowercase candidate commit SHA.")],
+    dispatch_id: Annotated[str | None, typer.Option(help="Original executor dispatch identity.")] = None,
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit stable machine-readable JSON.")] = False,
+) -> None:
+    """Adopt an exact existing candidate for controller review without rerunning the worker."""
+
+    harness = WorkflowHarness(state_root.resolve())
+    try:
+        status = harness.adopt_program_candidate(
+            program_id,
+            milestone_id,
+            candidate_sha,
+            dispatch_id=dispatch_id,
+        )
+        _emit_program_payload(_program_status_payload(status), as_json=as_json)
+    except (HarnessError, LedgerError, WorktreeError, OSError, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        harness.close()
 
 
 @program_app.command("decisions")
@@ -654,10 +684,10 @@ def control_execution(
         # tests with an injected adapter retain the historical synchronous
         # control path so the adapter contract remains covered.
         if controller._production_adapter:
-            socket_path = controller.state_dir / "runtime" / "supervisor.sock"
+            socket_path = controller.state_dir / "runtime" / "harness.sock"
             if not socket_path.exists() or socket_path.is_symlink():
                 raise ControllerError(
-                    "detached supervisor is unavailable; start the installed supervisor service before enqueue"
+                    "detached harness is unavailable; start the installed harness service before enqueue"
                 )
             queued = controller.enqueue(
                 parsed,
@@ -674,7 +704,7 @@ def control_execution(
                 )
             except (IpcError, OSError) as exc:
                 raise ControllerError(
-                    "detached supervisor is unavailable; start the installed supervisor service before enqueue"
+                    "detached harness is unavailable; start the installed harness service before enqueue"
                 ) from exc
             if as_json:
                 typer.echo(json.dumps(queue_json(queued), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -814,10 +844,10 @@ def live_conversation(
     revision: Annotated[int | None, typer.Option(help="Bound controller decision revision, when required.")] = None,
     page_token: Annotated[str | None, typer.Option(help="Opaque token returned for the next older page.")] = None,
     page_fragments: Annotated[int, typer.Option(help="Maximum fragments in one bounded page (1-32).")] = 32,
-    state_root: Annotated[Path, typer.Option(help="Checkout that owns the supervisor.")] = _DEFAULT_STATE_ROOT,
+    state_root: Annotated[Path, typer.Option(help="Checkout that owns the harness.")] = _DEFAULT_STATE_ROOT,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Read one bounded native SDK conversation page through the supervisor."""
+    """Read one bounded native SDK conversation page through the harness."""
 
     try:
         page = LiveWorkerControlClient.for_state_root(state_root).conversation_history(
@@ -1079,28 +1109,28 @@ def live_budget_change(
         raise typer.Exit(code=2) from exc
 
 
-@supervisor_app.command("run")
-def supervisor_run(
+@harness_app.command("run")
+def harness_run(
     state_root: Annotated[
         Path, typer.Option(help="Repository checkout owning .codex-flow state.")
     ] = _DEFAULT_STATE_ROOT,
-    foreground: Annotated[bool, typer.Option("--foreground", help="Run the supervisor in this process.")] = False,
+    foreground: Annotated[bool, typer.Option("--foreground", help="Run the harness in this process.")] = False,
 ) -> None:
     if not foreground:
-        typer.echo("error: supervisor run requires --foreground", err=True)
+        typer.echo("error: harness run requires --foreground", err=True)
         raise typer.Exit(code=2)
-    supervisor = Supervisor(state_root.resolve())
+    harness = WorkflowHarness(state_root.resolve())
     try:
-        supervisor.run_foreground()
-    except (SupervisorError, LedgerError, OSError, ValueError) as exc:
+        harness.run_foreground()
+    except (HarnessError, LedgerError, OSError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     finally:
-        supervisor.close()
+        harness.close()
 
 
-@supervisor_app.command("rebind-legacy")
-def supervisor_rebind_legacy(
+@harness_app.command("rebind-legacy")
+def harness_rebind_legacy(
     dispatch_id: Annotated[str, typer.Option(help="Exact migrated active v10 dispatch identity.")],
     source_thread_id: Annotated[str, typer.Option(help="Exact source controller task identity.")],
     state_root: Annotated[
@@ -1109,9 +1139,9 @@ def supervisor_rebind_legacy(
 ) -> None:
     """Atomically restore verified native authority for one migrated v10 queue."""
 
-    supervisor = Supervisor(state_root.resolve())
+    harness = WorkflowHarness(state_root.resolve())
     try:
-        binding = supervisor.rebind_legacy_active_queue(
+        binding = harness.rebind_legacy_active_queue(
             dispatch_id,
             source_thread_id=source_thread_id,
         )
@@ -1129,11 +1159,11 @@ def supervisor_rebind_legacy(
                 separators=(",", ":"),
             )
         )
-    except (SupervisorError, LedgerError, OSError, ValueError) as exc:
+    except (HarnessError, LedgerError, OSError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     finally:
-        supervisor.close()
+        harness.close()
 
 
 def _service_profile() -> NativeProfileProjection:
@@ -1170,8 +1200,8 @@ def _service_unit(
     )
 
 
-@supervisor_app.command("install")
-def supervisor_install(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
+@harness_app.command("install")
+def harness_install(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
     try:
         typer.echo(os.fspath(install_unit(_service_unit(state_root))))
     except (ServiceError, NativeProfileError, OSError, ValueError) as exc:
@@ -1179,8 +1209,8 @@ def supervisor_install(state_root: Annotated[Path, typer.Option()] = _DEFAULT_ST
         raise typer.Exit(code=2) from exc
 
 
-@supervisor_app.command("start")
-def supervisor_start(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
+@harness_app.command("start")
+def harness_start(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
     try:
         profile = _service_profile()
         unit = _service_unit(state_root, profile=profile)
@@ -1194,8 +1224,8 @@ def supervisor_start(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STAT
         raise typer.Exit(code=2) from exc
 
 
-@supervisor_app.command("status")
-def supervisor_status(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
+@harness_app.command("status")
+def harness_status(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
     try:
         unit = _service_unit(state_root, allow_missing_profile=True)
         systemctl_user("status", unit)
@@ -1210,8 +1240,8 @@ def supervisor_status(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STA
         raise typer.Exit(code=2) from exc
 
 
-@supervisor_app.command("stop")
-def supervisor_stop(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
+@harness_app.command("stop")
+def harness_stop(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
     try:
         systemctl_user("stop", _service_unit(state_root, allow_missing_profile=True))
     except (ServiceError, OSError, ValueError) as exc:
@@ -1219,8 +1249,8 @@ def supervisor_stop(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE
         raise typer.Exit(code=2) from exc
 
 
-@supervisor_app.command("uninstall")
-def supervisor_uninstall(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
+@harness_app.command("uninstall")
+def harness_uninstall(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
     path = unit_path(repository_root=state_root.resolve())
     try:
         if path.is_symlink():
@@ -1250,9 +1280,9 @@ def app_native_status(
         controller.close()
 
 
-@supervisor_app.command("refresh")
-def supervisor_refresh(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
-    """Install and restart one already-installed repository supervisor unit."""
+@harness_app.command("refresh")
+def harness_refresh(state_root: Annotated[Path, typer.Option()] = _DEFAULT_STATE_ROOT) -> None:
+    """Install and restart one already-installed repository harness unit."""
 
     try:
         profile = _service_profile()
@@ -1731,7 +1761,7 @@ def _controller_generation_config(
     effective_permission_json: str | None,
     native_compatibility_sha256: str | None,
 ) -> CodexSdkConfig:
-    """Build a shared-session config from supervisor-bound permission facts."""
+    """Build a shared-session config from harness-bound permission facts."""
 
     if effective_permission_json is None and native_compatibility_sha256 is None:
         # Low-level provider-free fixtures may intentionally omit native
@@ -1772,7 +1802,7 @@ def _controller_generation_config(
 def controller_generation_service(
     decision_id: Annotated[str, typer.Option(help="Exact durable controller decision identity.")],
     state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
-    cwd: Annotated[Path | None, typer.Option(help="Repository cwd selected by the supervisor.")] = None,
+    cwd: Annotated[Path | None, typer.Option(help="Repository cwd selected by the harness.")] = None,
     model: Annotated[str, typer.Option(help="Explicit controller model.")] = "gpt-5.6-luna",
     reasoning_effort: Annotated[str, typer.Option(help="Explicit controller reasoning effort.")] = "medium",
     recover: Annotated[bool, typer.Option("--recover", help="Inspect the persisted generation once.")] = False,
@@ -1781,7 +1811,7 @@ def controller_generation_service(
         str | None, typer.Option("--native-compatibility-sha256", hidden=True)
     ] = None,
 ) -> None:
-    """Private supervisor entrypoint for one bounded controller generation."""
+    """Private harness entrypoint for one bounded controller generation."""
 
     client = ControllerDecisionClient.for_state_root(state_root)
     selected_cwd = (cwd or state_root).resolve()
@@ -1836,7 +1866,7 @@ def controller_generation_service(
 def program_controller_generation_service(
     decision_id: Annotated[str, typer.Option(help="Exact durable program decision identity.")],
     state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
-    cwd: Annotated[Path | None, typer.Option(help="Repository cwd selected by the supervisor.")] = None,
+    cwd: Annotated[Path | None, typer.Option(help="Repository cwd selected by the harness.")] = None,
     model: Annotated[str, typer.Option(help="Explicit ephemeral controller model.")] = "gpt-5.6-sol",
     reasoning_effort: Annotated[str, typer.Option(help="Explicit controller reasoning effort.")] = "medium",
     recover: Annotated[bool, typer.Option("--recover", help="Inspect the persisted generation once.")] = False,
@@ -1845,7 +1875,7 @@ def program_controller_generation_service(
         str | None, typer.Option("--native-compatibility-sha256", hidden=True)
     ] = None,
 ) -> None:
-    """Private supervisor entrypoint for one ephemeral program decision generation."""
+    """Private harness entrypoint for one ephemeral program decision generation."""
 
     client = ControllerDecisionClient.for_state_root(state_root)
     selected_cwd = (cwd or state_root).resolve()
