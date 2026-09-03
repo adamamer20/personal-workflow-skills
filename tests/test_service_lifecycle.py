@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -477,3 +478,100 @@ def test_refresh_timeout_is_explicit_and_leaves_fence_armed(tmp_path: Path) -> N
         assert [call[2] for call in calls][-1] == "unset-environment"
     finally:
         ledger.close()
+
+
+def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    executable = tmp_path / "codex-flow"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    state_root = repository / ".codex-flow"
+    state_root.mkdir()
+    ledger_path = state_root / "workflow.db"
+    ledger = Ledger(ledger_path)
+    ledger.acquire_harness(
+        repository_root=repository,
+        state_root=repository,
+        pid=500,
+        process_birth_identity="old-birth",
+        executable_digest="a" * 64,
+        version="0.2.0",
+        owner_nonce_sha256="b" * 64,
+    )
+    ledger.close()
+    connection = sqlite3.connect(ledger_path)
+    connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = 'codex_flow_event_driven_program_controller_v18' WHERE key = 'schema_identity'"
+    )
+    connection.commit()
+    connection.close()
+
+    unit = generate_unit(repository, executable=executable, provider_env_key="OPENAI_API_KEY")
+    legacy = service_module._legacy_supervisor_unit(unit)
+    config_home = tmp_path / "config"
+    install_unit(legacy, config_home=config_home)
+    processes = {(500, "old-birth"): True}
+    service_state = {"active": True}
+    calls: list[tuple[str, ...]] = []
+    now = [0.0]
+
+    class Result:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def runner(argv: tuple[str, ...], **_: object) -> Result:
+        calls.append(argv)
+        operation = argv[2]
+        if operation == "is-active":
+            return Result(0 if service_state["active"] else 3)
+        if operation == "start":
+            processes[(501, "new-birth")] = True
+            service_state["active"] = True
+            replacement = Ledger(ledger_path)
+            replacement.acquire_harness(
+                repository_root=repository,
+                state_root=repository,
+                pid=501,
+                process_birth_identity="new-birth",
+                executable_digest="c" * 64,
+                version=unit.version,
+                owner_nonce_sha256="d" * 64,
+            )
+            replacement.close()
+        return Result(0)
+
+    def clock() -> float:
+        now[0] += 0.001
+        return now[0]
+
+    def shutdown(socket_path: Path, _timeout: float) -> dict[str, object]:
+        assert socket_path.name == "supervisor.sock"
+        processes[(500, "old-birth")] = False
+        service_state["active"] = False
+        return {"version": 1, "ok": True, "operation": "shutdown"}
+
+    result = refresh_with_credential(
+        unit,
+        config_home=config_home,
+        environment={"OPENAI_API_KEY": "secret"},
+        runner=runner,
+        process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+        clock=clock,
+        sleeper=lambda _delay: None,
+        shutdown_sender=shutdown,
+    )
+    assert result["refreshed"] is True
+    installed = (config_home / "systemd" / "user" / unit.unit_name).read_text(encoding="utf-8")
+    assert "harness run" in installed and "supervisor" not in installed
+    assert [call[2] for call in calls] == ["is-active", "daemon-reload", "import-environment", "start", "is-active"]
+    migrated = Ledger(ledger_path)
+    try:
+        assert migrated.schema_version.value == 19
+        assert (
+            migrated._db().execute("SELECT 1 FROM sqlite_master WHERE name = 'supervisor_authority'").fetchone() is None
+        )
+    finally:
+        migrated.close()

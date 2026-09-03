@@ -10423,6 +10423,12 @@ class Ledger:
                         blocker = TypedBlocker.from_json(raw_blocker)
                     except (TypeError, ValueError) as exc:
                         raise CorruptSchemaError("program blocker projection is invalid") from exc
+                if (
+                    fact.kind == "candidate_blocker_resolved"
+                    and value.get("candidate_sha") == candidate
+                    and isinstance(value.get("blocker_gate_id"), str)
+                ):
+                    blocker = None
                 review_id = value.get("review_id")
                 if isinstance(review_id, str):
                     reviews.append(review_id)
@@ -11292,6 +11298,28 @@ class Ledger:
                 return value
         return None
 
+    def _program_candidate_blocker(
+        self, program_id: ProgramId | str, milestone_id: MilestoneId | str, candidate_sha: str
+    ) -> TypedBlocker | None:
+        """Return the current unresolved terminal blocker for one candidate."""
+
+        blocker: TypedBlocker | None = None
+        for fact in self.review_lifecycle(program_id, milestone_id):
+            data = fact.data
+            if data.get("candidate_sha") != candidate_sha:
+                continue
+            raw = data.get("blocker")
+            if raw is not None:
+                if not isinstance(raw, Mapping):
+                    raise CorruptSchemaError("program blocker projection is invalid")
+                try:
+                    blocker = TypedBlocker.from_json(raw)
+                except (TypeError, ValueError) as exc:
+                    raise CorruptSchemaError("program blocker projection is invalid") from exc
+            if fact.kind == "candidate_blocker_resolved":
+                blocker = None
+        return blocker
+
     def _transition_program_state_in_transaction(
         self,
         program_id: ProgramId | str,
@@ -11684,6 +11712,31 @@ class Ledger:
                     },
                 )
                 effects.append(f"repair:{action.milestone_id}")
+            elif action.kind is ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER:
+                if (
+                    action.milestone_id not in nodes
+                    or action.candidate_sha != self._program_candidate_sha(bundle.program_id, action.milestone_id)
+                    or action.blocker_gate_id is None
+                    or action.blocker_resolution is None
+                ):
+                    raise StaleWriter("program blocker action does not target the exact candidate")
+                if action.blocker_resolution not in {"resolve", "supersede"}:
+                    raise StaleWriter("program blocker action has an unsupported resolution")
+                blocker = self._program_candidate_blocker(bundle.program_id, action.milestone_id, action.candidate_sha)
+                if blocker is None or blocker.gate_id != action.blocker_gate_id:
+                    raise StaleWriter("program blocker action does not target the current terminal blocker")
+                self._record_program_fact_in_transaction(
+                    bundle.program_id,
+                    action.milestone_id,
+                    phase=LifecyclePhase.ACCEPTANCE,
+                    kind="candidate_blocker_resolved",
+                    data={
+                        "candidate_sha": action.candidate_sha,
+                        "blocker_gate_id": action.blocker_gate_id,
+                        "blocker_resolution": action.blocker_resolution,
+                    },
+                )
+                effects.append(f"resolve-blocker:{action.milestone_id}:{action.blocker_gate_id}")
             elif action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE:
                 if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
                     bundle.program_id, action.milestone_id
@@ -11718,6 +11771,11 @@ class Ledger:
                     for item in facts
                 ):
                     raise StaleWriter("program promotion has a promotion-blocking finding")
+                terminal_blocker = self._program_candidate_blocker(
+                    bundle.program_id, action.milestone_id, action.candidate_sha
+                )
+                if terminal_blocker is not None and terminal_blocker.promotion_blocking:
+                    raise StaleWriter("program promotion has a promotion-blocking terminal blocker")
                 if not any(
                     item.kind == "promotion_accepted" and item.data.get("candidate_sha") == action.candidate_sha
                     for item in facts
@@ -11754,6 +11812,11 @@ class Ledger:
                     for item in facts
                 ):
                     raise StaleWriter("program integration requires an exact promotion receipt")
+                terminal_blocker = self._program_candidate_blocker(
+                    bundle.program_id, action.milestone_id, action.candidate_sha
+                )
+                if terminal_blocker is not None and terminal_blocker.promotion_blocking:
+                    raise StaleWriter("program integration has a promotion-blocking terminal blocker")
                 integration_id = f"integration/{bundle.program_id}/{action.milestone_id}/{action.candidate_sha}"
                 existing = (
                     self._db()
@@ -15172,6 +15235,14 @@ class Ledger:
             self._db().execute("UPDATE supervisor_authority SET requested_shutdown = 1 WHERE singleton = 1")
             row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
             return self._queue_row(row)
+
+    def predecessor_refresh_fenced(self) -> bool:
+        """Return the v18 predecessor fence without opening the v19 authority."""
+
+        if self._legacy_schema_version != SchemaVersion(18):
+            raise MigrationRequired("predecessor refresh fencing requires a legacy schema-v18 opener")
+        row = self._db().execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()
+        return row is not None and int(row["requested_shutdown"]) == 1
 
     def acquire_harness(
         self,

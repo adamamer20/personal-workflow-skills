@@ -28,6 +28,10 @@ class WorkspaceConflict(WorktreeError):
     """An existing path or branch conflicts with the requested semantic lane."""
 
 
+class CandidateIntegrityError(WorktreeError):
+    """A candidate commit range violates the capsule's path ownership."""
+
+
 @dataclass(frozen=True, slots=True)
 class CommandResult:
     returncode: int
@@ -312,6 +316,7 @@ class WorktreeManager:
         ancestry = self._runner(("git", "merge-base", "--is-ancestor", selected, "HEAD"), workspace)
         if ancestry.returncode != 0:
             raise WorkspaceConflict("candidate commit is not present in the dispatch workspace")
+        self._validate_candidate_history(capsule, workspace, selected)
         if require_direct_candidate:
             parents = self._commit_parents(workspace, selected)
             if parents != [capsule.base_sha]:
@@ -333,6 +338,14 @@ class WorktreeManager:
 
         return self.inspect_terminal_workspace(capsule, candidate_sha=candidate_sha, require_direct_candidate=True)
 
+    def validate_candidate(self, capsule: ExecutionCapsule, candidate_sha: str) -> None:
+        """Revalidate candidate ancestry and path ownership before an effect."""
+
+        workspace = _absolute_lexical(capsule.workspace_path)
+        self._validate_checkout(capsule, workspace)
+        self._validate_candidate_history(capsule, workspace, candidate_sha)
+        self._require_clean_checkout(workspace, label="candidate")
+
     def verify_serial_candidate(
         self,
         *,
@@ -340,6 +353,7 @@ class WorktreeManager:
         candidate_sha: str,
         expected_trunk_head: str,
         strategy: str,
+        capsule: ExecutionCapsule | None = None,
     ) -> dict[str, object]:
         """Return a logical promotion receipt for an already-committed checkout.
 
@@ -361,6 +375,8 @@ class WorktreeManager:
             raise WorktreeError("serial promotion checkout is dirty")
         if head != candidate_sha:
             raise WorkspaceConflict("serial candidate is not the current program checkout HEAD")
+        if capsule is not None:
+            self._validate_candidate_history(capsule, root, candidate_sha)
         parents = self._commit_parents(root, candidate_sha)
         if parents != [expected_trunk_head]:
             raise WorkspaceConflict("serial candidate is not a direct descendant of the durable trunk")
@@ -385,6 +401,7 @@ class WorktreeManager:
         candidate_sha: str,
         expected_trunk_head: str,
         strategy: str,
+        capsule: ExecutionCapsule | None = None,
     ) -> dict[str, object]:
         """Serialize and apply one controller-authorized Git integration."""
 
@@ -397,6 +414,7 @@ class WorktreeManager:
                 candidate_sha=candidate_sha,
                 expected_trunk_head=expected_trunk_head,
                 strategy=strategy,
+                capsule=capsule,
             )
 
     def _integrate_candidate(
@@ -408,6 +426,7 @@ class WorktreeManager:
         candidate_sha: str,
         expected_trunk_head: str,
         strategy: str,
+        capsule: ExecutionCapsule | None = None,
     ) -> dict[str, object]:
         """Verify and apply one controller-authorized Git integration.
 
@@ -440,6 +459,9 @@ class WorktreeManager:
         if self._physical_toplevel(candidate) != candidate:
             raise WorktreeError("candidate workspace must equal the physical Git toplevel")
         self._validate_repository_relationship(repository, candidate)
+
+        if capsule is not None:
+            self._validate_candidate_history(capsule, candidate, candidate_sha)
 
         branch = self._git(candidate, "symbolic-ref", "--quiet", "--short", "HEAD")
         if branch != candidate_branch:
@@ -680,6 +702,54 @@ class WorktreeManager:
         if not values or values[0] != commit:
             raise WorktreeError("Git commit parent receipt is invalid")
         return values[1:]
+
+    def _validate_candidate_history(self, capsule: ExecutionCapsule, workspace: Path, candidate_sha: str) -> None:
+        """Prove every commit and changed path is owned by one capsule.
+
+        Checking only the final tree is insufficient: a candidate can add and
+        remove an unauthorized path while leaving no net diff.  Walk the full
+        ancestry range and inspect each commit's tree diff, including every
+        parent of a merge commit.
+        """
+
+        if capsule.workspace_path != workspace.resolve():
+            raise CandidateIntegrityError("candidate workspace does not match the capsule")
+        base_check = self._runner(("git", "merge-base", "--is-ancestor", capsule.base_sha, candidate_sha), workspace)
+        if base_check.returncode != 0:
+            raise CandidateIntegrityError("candidate commit does not descend from the capsule base")
+        commits = self._git(workspace, "rev-list", "--reverse", f"{capsule.base_sha}..{candidate_sha}").splitlines()
+        if not commits:
+            raise CandidateIntegrityError("candidate commit is not ahead of the capsule base")
+        mutable = tuple(Path(value) for value in capsule.mutable_paths)
+        protected = tuple(Path(value) for value in capsule.protected_paths)
+
+        def owned(path: str) -> bool:
+            candidate = Path(path)
+            if candidate.is_absolute() or ".." in candidate.parts or candidate.as_posix() != path:
+                raise CandidateIntegrityError("candidate commit contains a non-relative path")
+            if any(candidate == item or item in candidate.parents for item in protected):
+                raise CandidateIntegrityError("candidate commit changes a protected path")
+            if not any(candidate == item or item in candidate.parents for item in mutable):
+                raise CandidateIntegrityError("candidate commit changes a path outside capsule ownership")
+            return True
+
+        for commit in commits:
+            if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
+                raise CandidateIntegrityError("candidate commit history contains an invalid identity")
+            raw_paths = self._git(
+                workspace,
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "-m",
+                "-z",
+                commit,
+            )
+            paths = tuple(item for item in raw_paths.split("\x00") if item)
+            for path in paths:
+                owned(path)
 
     def _merge_tree(
         self,

@@ -43,6 +43,8 @@ from .domain import (
     CONVERSATION_READ_DEADLINE_SECONDS,
     LIVE_MAX_SUBSCRIBERS,
     LIVE_SUBSCRIBER_QUEUE_MAX_ENTRIES,
+    BlockerKind,
+    BlockerScope,
     CandidateRecord,
     CompatibilityRebind,
     ControlCommandKind,
@@ -102,7 +104,7 @@ from .worker import (
     recovery_continuation_prompt,
     write_capability,
 )
-from .worktrees import WorktreeError, WorktreeManager
+from .worktrees import CandidateIntegrityError, WorktreeError, WorktreeManager
 
 
 class HarnessError(RuntimeError):
@@ -986,6 +988,7 @@ class WorkflowHarness:
                     candidate_sha=action.candidate_sha,
                     expected_trunk_head=action.expected_trunk_head,
                     strategy=action.integration_strategy,
+                    capsule=node.capsule,
                 )
             else:
                 receipt = self._worktrees.integrate_candidate(
@@ -995,6 +998,7 @@ class WorkflowHarness:
                     candidate_sha=action.candidate_sha,
                     expected_trunk_head=action.expected_trunk_head,
                     strategy=action.integration_strategy,
+                    capsule=node.capsule,
                 )
         except WorktreeError as exc:
             self.ledger.complete_program_integration(
@@ -1708,6 +1712,22 @@ class WorkflowHarness:
             if set(payload) != required or not isinstance(payload["bundle"], dict):
                 raise IpcError("program action submission has an unsupported shape")
             bundle = ModelFacingProgramControllerActionBundle.from_json(payload["bundle"])
+            graph = self.ledger.program_graph(bundle.program_id)
+            for action in bundle.actions:
+                if action.kind not in {
+                    ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                    ProgramControllerActionKind.INTEGRATE_CANDIDATE,
+                }:
+                    continue
+                if action.milestone_id is None or action.candidate_sha is None:
+                    raise IpcError("program candidate action is incomplete")
+                try:
+                    self._worktrees.validate_candidate(
+                        graph.node(action.milestone_id).capsule,
+                        action.candidate_sha,
+                    )
+                except (CandidateIntegrityError, WorktreeError, ValueError) as exc:
+                    raise IpcError("program candidate integrity validation failed") from exc
             receipt = self.ledger.submit_program_controller_actions(
                 bundle,
                 claimant_id=payload["claimant_id"],
@@ -3312,6 +3332,16 @@ class WorkflowHarness:
                 blocker: TypedBlocker | None = None
                 try:
                     candidate_record = self._worktrees.inspect_terminal_workspace(graph.node(milestone_id).capsule)
+                except CandidateIntegrityError:
+                    # A committed but out-of-scope/protected candidate is a
+                    # durable integrity blocker, never a verified candidate.
+                    blocker = TypedBlocker(
+                        gate_id="candidate-integrity",
+                        kind=BlockerKind.EXECUTION,
+                        scope=BlockerScope.CURRENT_PROMOTION,
+                        promotion_blocking=True,
+                        required_action="Inspect the retained commit range and repair or abandon unauthorized paths.",
+                    )
                 except (WorktreeError, ValueError):
                     # The result remains durable, but an uninspectable
                     # workspace is never promoted or converted into a guess.
@@ -3320,7 +3350,7 @@ class WorkflowHarness:
                     result = ModelFacingResult.from_agent_message(raw)
                 except (TypeError, ValueError):
                     result = None
-                if result is not None:
+                if result is not None and result.blocker is not None:
                     blocker = result.blocker
                 candidate_sha = candidate_record.commit_sha if candidate_record is not None else None
                 self.ledger.record_program_executor_result(

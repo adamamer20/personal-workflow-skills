@@ -214,6 +214,7 @@ class ServiceUnit:
     text: str
     provider_env_key: str | None = None
     profile_sha256: str | None = None
+    runtime: str = "harness"
 
 
 def unit_name(repository_root: Path) -> str:
@@ -278,6 +279,28 @@ def generate_unit(
         )
     )
     return ServiceUnit(repository_root, state_root, executable, version, name, text, provider_env_key, profile_sha256)
+
+
+def _legacy_supervisor_unit(unit: ServiceUnit) -> ServiceUnit:
+    """Describe the exact v18 predecessor without making it a runtime alias."""
+
+    if unit.runtime != "harness":
+        raise ServiceError("replacement service unit runtime is not harness")
+    old_text = unit.text.replace("Description=Codex Flow harness ", "Description=Codex Flow supervisor ", 1)
+    old_text = old_text.replace(" harness run --foreground", " supervisor run --foreground", 1)
+    if old_text == unit.text or "supervisor run --foreground" not in old_text:
+        raise ServiceError("legacy supervisor service template cannot be derived")
+    return ServiceUnit(
+        unit.repository_root,
+        unit.state_root,
+        unit.executable,
+        unit.version,
+        unit.unit_name,
+        old_text,
+        unit.provider_env_key,
+        unit.profile_sha256,
+        "supervisor",
+    )
 
 
 def unit_path(*, config_home: Path | None = None, repository_root: Path) -> Path:
@@ -400,9 +423,9 @@ def _validate_installed_unit(
         raise ServiceError("service unit contains credential material")
     lines = text.splitlines()
     expected_lines = unit.text.splitlines()
-    expected_exec = (
-        f"ExecStart={_unit_arg(unit.executable)} harness run --foreground --state-root {_unit_arg(unit.state_root)}"
-    )
+    if unit.runtime not in {"harness", "supervisor"}:
+        raise ServiceError("service unit runtime is unsupported")
+    expected_exec = f"ExecStart={_unit_arg(unit.executable)} {unit.runtime} run --foreground --state-root {_unit_arg(unit.state_root)}"
     exec_lines = [line for line in lines if line.startswith("ExecStart=")]
     if exec_lines != [expected_exec]:
         raise ServiceError("installed service unit ExecStart drifted")
@@ -525,22 +548,18 @@ def refresh_with_credential(
         profile_sha256=profile_sha256,
         environment=environment,
     )
-    _validate_installed_unit(
-        unit,
-        config_home=config_home,
-        expected_profile_sha256=profile_sha256,
-        credential_value=value,
-        allow_profile_identity_update=True,
-    )
     owned_ledger = ledger
     migration_required = False
+    ledger_path: Path | None = None
     if owned_ledger is None:
         ledger_path = unit.state_root / ".codex-flow" / "workflow.db"
         if not ledger_path.is_file():
             raise ServiceRefreshFailed("harness ledger is unavailable")
         try:
             compatibility = ledger_schema_compatibility(ledger_path)
-            migration_required = bool(compatibility.get("migration_required"))
+            migration_required = compatibility.get("ledger_schema_version") == 18
+            if compatibility.get("migration_required") and not migration_required:
+                raise ServiceRefreshFailed("service refresh only supports the installed schema-v18 predecessor handoff")
             if migration_required:
                 # Keep the predecessor schema intact while the old service is
                 # fenced and stopped.  The migrating opener is created only
@@ -550,11 +569,37 @@ def refresh_with_credential(
                 owned_ledger = Ledger(ledger_path)
         except LedgerError as exc:
             raise ServiceRefreshFailed("harness ledger cannot be opened") from exc
-    elif isinstance(ledger, Ledger) and ledger.schema_version < CURRENT_SCHEMA_VERSION:
-        raise ServiceRefreshFailed("explicit schema migration requires a service-owned ledger opener")
+    elif isinstance(ledger, Ledger):
+        try:
+            migration_required = int(ledger.schema_version) == 18
+            if ledger.schema_version < CURRENT_SCHEMA_VERSION and not migration_required:
+                raise ServiceRefreshFailed("service refresh only supports the installed schema-v18 predecessor handoff")
+            ledger_path = ledger.path
+        except LedgerError as exc:
+            raise ServiceRefreshFailed("harness ledger cannot be inspected") from exc
+
+    if migration_required:
+        # The replacement unit cannot validate an installed v18 predecessor:
+        # first prove the exact old command/description, then replace it only
+        # after the predecessor has been fenced and stopped.
+        _validate_installed_unit(
+            _legacy_supervisor_unit(unit),
+            config_home=config_home,
+            expected_profile_sha256=profile_sha256,
+            credential_value=value,
+            allow_profile_identity_update=True,
+        )
+    else:
+        _validate_installed_unit(
+            unit,
+            config_home=config_home,
+            expected_profile_sha256=profile_sha256,
+            credential_value=value,
+            allow_profile_identity_update=True,
+        )
 
     assert owned_ledger is not None
-    close_ledger = ledger is None
+    close_ledger = ledger is None or migration_required
     live_checker = process_is_live or (
         lambda pid, birth_identity: _exact_process_is_live(pid, birth_identity, identity_reader)
     )
@@ -584,7 +629,10 @@ def refresh_with_credential(
         authority = cast(Mapping[str, object], fence)
         _authority_matches_unit(authority, unit)
         old_pid, old_birth_identity, old_epoch = _authority_identity(authority)
-        socket_path = unit.state_root / ".codex-flow" / "runtime" / "harness.sock"
+        predecessor_unit = _legacy_supervisor_unit(unit) if migration_required else unit
+        socket_path = (
+            unit.state_root / ".codex-flow" / "runtime" / ("supervisor.sock" if migration_required else "harness.sock")
+        )
         old_process_live = live_checker(old_pid, old_birth_identity)
         if old_process_live:
             shutdown_sender(socket_path, remaining())
@@ -593,10 +641,12 @@ def refresh_with_credential(
             # wait loop so an already completed handoff does not incur an
             # artificial sleep or deadline edge.
             old_process_live = live_checker(old_pid, old_birth_identity)
-        elif not owned_ledger.harness_refresh_fenced():
+        elif not (
+            owned_ledger.predecessor_refresh_fenced() if migration_required else owned_ledger.harness_refresh_fenced()
+        ):
             raise ServiceRefreshFailed("harness fence disappeared before shutdown")
 
-        while old_process_live or _unit_is_active(unit, runner=runner):
+        while old_process_live or _unit_is_active(predecessor_unit, runner=runner):
             remaining()
             sleeper(min(0.05, remaining()))
             old_process_live = live_checker(old_pid, old_birth_identity)
@@ -604,6 +654,10 @@ def refresh_with_credential(
         if migration_required:
             # The old authority is now fenced and its process/unit are gone;
             # only this explicit handoff may mutate the schema identity.
+            if ledger_path is None:
+                raise ServiceRefreshFailed("legacy ledger path is unavailable")
+            if (unit.state_root / ".codex-flow" / "runtime" / "supervisor.sock").exists():
+                raise ServiceRefreshFailed("legacy supervisor socket remains after predecessor stop")
             owned_ledger.close()
             owned_ledger = Ledger(ledger_path, migrate=True)
 
@@ -614,6 +668,8 @@ def refresh_with_credential(
             )
 
         install_unit(unit, config_home=config_home)
+        if "supervisor" in unit.text.lower() or unit.runtime != "harness":
+            raise ServiceRefreshFailed("replacement service unit retains a supervisor runtime alias")
         _validate_installed_unit(
             unit,
             config_home=config_home,

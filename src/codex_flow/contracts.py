@@ -1116,6 +1116,8 @@ class ModelFacingProgramControllerAction:
     finding_ids: tuple[str, ...] = ()
     integration_strategy: str | None = None
     reason: str | None = None
+    blocker_gate_id: str | None = None
+    blocker_resolution: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ProgramControllerActionKind):
@@ -1130,6 +1132,10 @@ class ModelFacingProgramControllerAction:
             MilestoneId(self.milestone_id)
         if self.candidate_sha is not None and re.fullmatch(r"[0-9a-f]{40}", self.candidate_sha) is None:
             raise ValueError("program candidate commit is invalid")
+        if self.blocker_gate_id is not None:
+            _text(self.blocker_gate_id, label="program blocker gate id", limit=256)
+        if self.blocker_resolution is not None and self.blocker_resolution not in {"resolve", "supersede"}:
+            raise ValueError("program blocker resolution is unsupported")
         if self.expected_trunk_head is not None and re.fullmatch(r"[0-9a-f]{40}", self.expected_trunk_head) is None:
             raise ValueError("program expected trunk HEAD is invalid")
         for label, values in (
@@ -1171,6 +1177,14 @@ class ModelFacingProgramControllerAction:
         elif self.kind is ProgramControllerActionKind.REQUEST_REPAIR:
             if self.milestone_id is None or self.candidate_sha is None or not self.finding_ids:
                 raise ValueError("request_repair requires candidate and finding ids")
+        elif self.kind is ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER:
+            if (
+                self.milestone_id is None
+                or self.candidate_sha is None
+                or self.blocker_gate_id is None
+                or self.blocker_resolution is None
+            ):
+                raise ValueError("resolve_candidate_blocker requires candidate, gate id and resolution")
         elif self.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE:
             if self.milestone_id is None or self.candidate_sha is None or not self.review_ids:
                 raise ValueError("promote_candidate requires candidate and review ids")
@@ -1194,6 +1208,8 @@ class ModelFacingProgramControllerAction:
                 self.milestone_ids,
                 self.milestone_id,
                 self.candidate_sha,
+                self.blocker_gate_id,
+                self.blocker_resolution,
                 self.expected_trunk_head,
                 self.review_roles,
                 self.review_ids,
@@ -1212,6 +1228,10 @@ class ModelFacingProgramControllerAction:
             value["milestone_id"] = self.milestone_id
         if self.candidate_sha is not None:
             value["candidate_sha"] = self.candidate_sha
+        if self.blocker_gate_id is not None:
+            value["blocker_gate_id"] = self.blocker_gate_id
+        if self.blocker_resolution is not None:
+            value["blocker_resolution"] = self.blocker_resolution
         if self.expected_trunk_head is not None:
             value["expected_trunk_head"] = self.expected_trunk_head
         if self.review_roles:
@@ -1255,6 +1275,13 @@ class ModelFacingProgramControllerAction:
             ProgramControllerActionKind.START_READY_MILESTONES: {"kind", "milestone_ids"},
             ProgramControllerActionKind.START_REVIEWS: {"kind", "milestone_id", "candidate_sha", "review_roles"},
             ProgramControllerActionKind.REQUEST_REPAIR: {"kind", "milestone_id", "candidate_sha", "finding_ids"},
+            ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER: {
+                "kind",
+                "milestone_id",
+                "candidate_sha",
+                "blocker_gate_id",
+                "blocker_resolution",
+            },
             ProgramControllerActionKind.PROMOTE_CANDIDATE: {"kind", "milestone_id", "candidate_sha", "review_ids"},
             ProgramControllerActionKind.INTEGRATE_CANDIDATE: {
                 "kind",
@@ -1286,6 +1313,8 @@ class ModelFacingProgramControllerAction:
             arrays["finding_ids"],
             value.get("integration_strategy"),  # type: ignore[arg-type]
             value.get("reason"),  # type: ignore[arg-type]
+            value.get("blocker_gate_id"),  # type: ignore[arg-type]
+            value.get("blocker_resolution"),  # type: ignore[arg-type]
         )
 
 
@@ -1575,6 +1604,16 @@ def model_facing_program_controller_action_schema() -> JsonObject:
                     "milestone_id": {"type": "string"},
                     "candidate_sha": sha,
                     "finding_ids": ids,
+                },
+            ),
+            action_branch(
+                ["kind", "milestone_id", "candidate_sha", "blocker_gate_id", "blocker_resolution"],
+                {
+                    "kind": {"const": "resolve_candidate_blocker"},
+                    "milestone_id": {"type": "string"},
+                    "candidate_sha": sha,
+                    "blocker_gate_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "blocker_resolution": {"type": "string", "enum": ["resolve", "supersede"]},
                 },
             ),
             action_branch(

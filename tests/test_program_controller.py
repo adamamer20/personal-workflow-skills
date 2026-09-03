@@ -63,7 +63,13 @@ from codex_flow.harness import WorkflowHarness
 from codex_flow.ipc import MAX_FRAME_BYTES, IpcError, IpcReasonCode, decode_frame, encode_frame
 from codex_flow.ledger import HarnessRefreshBlocked, Ledger, StaleWriter
 from codex_flow.program_controller import ProgramControllerGenerationRecovery, ProgramControllerGenerationRunner
-from codex_flow.worktrees import CommandResult, WorkspaceConflict, WorktreeError, WorktreeManager
+from codex_flow.worktrees import (
+    CandidateIntegrityError,
+    CommandResult,
+    WorkspaceConflict,
+    WorktreeError,
+    WorktreeManager,
+)
 
 TRUNK_HEAD = "b" * 40
 PLAN_DIGEST = "c" * 64
@@ -546,6 +552,89 @@ def test_external_executor_candidate_projects_blocked_scope(tmp_path: Path) -> N
         assert node.blocker is not None
         assert node.blocker.kind is BlockerKind.EXTERNAL
         assert node.blocker.scope is BlockerScope.CURRENT_PROMOTION
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("terminal_status", ["external_blocked", "needs_decision", "failed"])
+def test_terminal_candidate_blocker_cannot_bypass_clean_review_promotion(tmp_path: Path, terminal_status: str) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        start = ledger.start_program("program")
+        _claim_and_apply(
+            ledger,
+            start,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+        )
+        ledger.claim_dispatch("program", "first", "executor", 1)
+        ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=CANDIDATE_SHA,
+            terminal_status=terminal_status,
+            dispatch_id="program/first/executor/1",
+            result_sha256="1" * 64,
+        )
+        implementation = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+        )
+        _claim_and_apply(
+            ledger,
+            implementation,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_REVIEWS,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                review_roles=("architecture-reviewer", "code-reviewer"),
+            ),
+        )
+        ledger.record_program_review(
+            "program",
+            "first",
+            ReviewResult(
+                "architecture-clean",
+                RoleId("architecture-reviewer"),
+                True,
+                (),
+                CANDIDATE_SHA,
+                acceptance_mode=AcceptanceMode.ARCHITECTURE,
+            ),
+        )
+        ledger.record_program_review(
+            "program",
+            "first",
+            ReviewResult(
+                "code-clean",
+                RoleId("code-reviewer"),
+                True,
+                (),
+                CANDIDATE_SHA,
+                acceptance_mode=AcceptanceMode.OBJECTIVE,
+            ),
+        )
+        review_completion = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+        )
+        with pytest.raises(StaleWriter, match="promotion-blocking terminal blocker"):
+            _claim_and_apply(
+                ledger,
+                review_completion,
+                ModelFacingProgramControllerAction(
+                    ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                    milestone_id="first",
+                    candidate_sha=CANDIDATE_SHA,
+                    review_ids=("architecture-clean", "code-clean"),
+                ),
+            )
+        assert ledger.program_status("program").nodes[0].blocker is not None
     finally:
         ledger.close()
 
@@ -1573,6 +1662,13 @@ def test_program_action_schema_is_locally_closed_and_provider_projectable() -> N
             finding_ids=("finding",),
         ),
         ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER,
+            milestone_id="first",
+            candidate_sha=CANDIDATE_SHA,
+            blocker_gate_id="executor-terminal-facts",
+            blocker_resolution="resolve",
+        ),
+        ModelFacingProgramControllerAction(
             ProgramControllerActionKind.PROMOTE_CANDIDATE,
             milestone_id="first",
             candidate_sha=CANDIDATE_SHA,
@@ -1769,6 +1865,20 @@ def _integration_graph(repository: Path, candidate: Path, expected: str) -> Prog
         (ProgramNodeSpec(MilestoneId("first"), capsule),),
         expected,
     )
+
+
+@pytest.mark.parametrize("path", ["unowned.txt", "base.txt"])
+def test_candidate_history_rejects_clean_out_of_scope_or_protected_commits(tmp_path: Path, path: str) -> None:
+    repository, candidate, expected, _ = _integration_repositories(tmp_path, "fast_forward")
+    content = "unauthorized\n"
+    (candidate / path).write_text(content, encoding="utf-8")
+    _git(candidate, "add", path)
+    _git(candidate, "commit", "-m", "unauthorized candidate path")
+    candidate_sha = _git(candidate, "rev-parse", "HEAD")
+    capsule = _integration_graph(repository, candidate, expected).node("first").capsule
+
+    with pytest.raises(CandidateIntegrityError):
+        WorktreeManager().validate_candidate(capsule, candidate_sha)
 
 
 @pytest.mark.parametrize("strategy", ["fast_forward", "merge", "cherry_pick"])

@@ -3118,7 +3118,10 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
             if (
                 set(node) - _SCHEMA_METADATA_KEYS != {"oneOf"}
                 or not isinstance(branches, list | tuple)
-                or not (2 <= len(branches) <= (3 if root else 8))
+                # Program controller actions currently have nine closed
+                # discriminated variants; keep the union bounded while
+                # allowing the additive action contract to remain explicit.
+                or not (2 <= len(branches) <= (3 if root else 16))
                 or any(not isinstance(branch, Mapping) for branch in branches)
             ):
                 raise ValueError("output schema oneOf must be a single bounded branch authority")
@@ -3711,6 +3714,7 @@ class ProgramControllerActionKind(str, Enum):
     START_READY_MILESTONES = "start_ready_milestones"
     START_REVIEWS = "start_reviews"
     REQUEST_REPAIR = "request_repair"
+    RESOLVE_CANDIDATE_BLOCKER = "resolve_candidate_blocker"
     PROMOTE_CANDIDATE = "promote_candidate"
     INTEGRATE_CANDIDATE = "integrate_candidate"
     REQUIRE_REPLAN = "require_replan"
