@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -53,7 +55,7 @@ from codex_flow.domain import (
     validate_structured_output,
 )
 from codex_flow.ipc import MAX_FRAME_BYTES, IpcError, IpcReasonCode, decode_frame, encode_frame
-from codex_flow.ledger import Ledger, StaleWriter
+from codex_flow.ledger import Ledger, StaleWriter, SupervisorRefreshBlocked
 from codex_flow.program_controller import ProgramControllerGenerationRecovery, ProgramControllerGenerationRunner
 from codex_flow.supervisor import Supervisor
 from codex_flow.worktrees import CommandResult, WorkspaceConflict, WorktreeError, WorktreeManager
@@ -627,6 +629,104 @@ def test_program_controller_child_preidentity_exit_with_expired_deadline_is_clos
         supervisor.epoch = 1
         assert supervisor._schedule_program_controller_generations() is False
         assert spawned == []
+    finally:
+        supervisor.close()
+
+
+@pytest.mark.parametrize("fenced", [False, True], ids=["refresh-allowed", "refresh-fenced"])
+def test_program_controller_start_ready_milestone_enqueues_worker_under_active_controller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fenced: bool
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for command in (
+        ("git", "init", "-q"),
+        ("git", "config", "user.email", "codex-flow@example.test"),
+        ("git", "config", "user.name", "Codex Flow Test"),
+    ):
+        subprocess.run(command, cwd=repository, check=True, capture_output=True)
+    (repository / "protected.txt").write_text("protected\n", encoding="utf-8")
+    (repository / "source.txt").write_text("source\n", encoding="utf-8")
+    subprocess.run(("git", "add", "protected.txt", "source.txt"), cwd=repository, check=True)
+    subprocess.run(("git", "commit", "-qm", "base"), cwd=repository, check=True)
+    branch = subprocess.run(
+        ("git", "branch", "--show-current"), cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    base_sha = subprocess.run(
+        ("git", "rev-parse", "HEAD"), cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    graph = ProgramGraph(
+        ProgramId("program"),
+        repository / "canonical-plan.md",
+        PLAN_DIGEST,
+        (
+            ProgramNodeSpec(
+                MilestoneId("first"),
+                replace(_capsule(repository, "first", "source.txt"), branch=branch, base_sha=base_sha),
+            ),
+        ),
+        base_sha,
+    )
+    supervisor = Supervisor(repository)
+    real_controller = controller_module.Controller
+
+    class _TestController(real_controller):
+        def __init__(self, state_root: Path, *, worktrees: object = None) -> None:
+            super().__init__(
+                state_root,
+                _trusted_test_adapter_factory=lambda _config: object(),
+                worktrees=worktrees,  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(controller_module, "Controller", _TestController)
+    try:
+        supervisor.ledger.register_program(graph)
+        decision = supervisor.ledger.start_program("program")
+        claim = supervisor.ledger.claim_program_controller_decision(
+            decision.decision_id,
+            claimant_id="program-controller/active-test",
+            expected_revision=decision.revision,
+            generation=1,
+        )
+        supervisor.ledger.prepare_controller_generation(decision.decision_id, generation=1)
+        supervisor.ledger.bind_controller_generation_thread(
+            decision.decision_id,
+            generation=1,
+            controller_thread_id="active-program-controller",
+        )
+        bundle = _bundle(
+            decision,
+            claim,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+            trunk_head=base_sha,
+        )
+        supervisor.ledger.submit_program_controller_actions(
+            bundle,
+            claimant_id=claim.claimant_id,
+            token=str(claim.token),
+        )
+        authority = supervisor.ledger.acquire_supervisor(
+            repository_root=repository,
+            state_root=repository,
+            pid=os.getpid(),
+            process_birth_identity="active-controller-test",
+            executable_digest="a" * 64,
+            version="test",
+            owner_nonce_sha256="b" * 64,
+        )
+        if fenced:
+            supervisor.ledger.request_supervisor_shutdown(epoch=int(authority["epoch"]), owner_nonce_sha256="b" * 64)
+            with pytest.raises(SupervisorRefreshBlocked, match="refresh fence"):
+                supervisor._apply_program_action_bundle(bundle)
+            assert supervisor.ledger._db().execute("SELECT COUNT(*) FROM dispatch_queue").fetchone()[0] == 0
+        else:
+            assert supervisor._apply_program_action_bundle(bundle) is True
+            dispatch = supervisor.ledger.queue_dispatch("program/first/executor/1")
+            assert dispatch["state"] == "queued"
+            assert supervisor.ledger._db().execute("SELECT COUNT(*) FROM dispatch_queue").fetchone()[0] == 1
     finally:
         supervisor.close()
 

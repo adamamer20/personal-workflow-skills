@@ -820,7 +820,6 @@ class Controller:
             except ValueError as exc:
                 raise ControllerError("CODEX_THREAD_ID is not a valid source controller identity") from exc
         with self._mutation_lock():
-            self.ledger.assert_supervisor_refresh_allowed()
             if self.ledger.supervisor_refresh_fenced():
                 raise SupervisorRefreshBlocked("supervisor refresh fence is active")
             planned = self._plan(capsule)
