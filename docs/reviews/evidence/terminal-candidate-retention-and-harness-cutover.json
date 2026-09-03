@@ -6,7 +6,7 @@
   "outcome": {
     "executor_status": "completed",
     "implementation_candidate_disposition": "verified_commit",
-    "implementation_candidate_sha": "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
+    "implementation_candidate_sha": "0c06e77ab639b8ff1c144e3194e7d00015cfca1e",
     "milestone_state": "COMPLETED",
     "promotion_state": "unpromoted",
     "adopted_candidate_milestone_state": "BLOCKED",
@@ -15,11 +15,29 @@
     "dirty_workspace_preserved": true
   },
   "implementation_candidate": {
-    "commit_sha": "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
-    "parent_commit": "65042b970828751686bbecf902c42f11f7f12879",
+    "commit_sha": "0c06e77ab639b8ff1c144e3194e7d00015cfca1e",
+    "parent_commit": "1570faeed508d9dc455bdce1faa95425e50bf8bc",
     "direct_parent_matches_repair_base": true,
     "candidate_role": "terminal-candidate-retention-and-harness-cutover-repair",
     "distinct_from_adopted_tui_candidate": true
+  },
+  "reviewed_range": {
+    "external_baseline": "6fa09a3701d97f39a5183701687b4b8bcf62dc17",
+    "final_successor_tip": "0c06e77ab639b8ff1c144e3194e7d00015cfca1e",
+    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..0c06e77ab639b8ff1c144e3194e7d00015cfca1e",
+    "superseded_predecessors": [
+      "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
+      "a2230ad79d2883d8bb2c5955b37709cce0e12315"
+    ]
+  },
+  "external_baseline": {
+    "commit_sha": "6fa09a3701d97f39a5183701687b4b8bcf62dc17",
+    "excluded_paths": [
+      "plugins/personal-workflow-skills/skills/collect-evidence/SKILL.md",
+      "plugins/personal-workflow-skills/skills/recover-milestone/SKILL.md",
+      "schemas/evidence.schema.json"
+    ],
+    "ownership_note": "These baseline bytes are external to this owner and are neither claimed nor reverted."
   },
   "adopted_candidate": {
     "commit_sha": "925d505d55e963c1d01dd541f67c939f1f716e5c",
@@ -111,7 +129,7 @@
     "global_installation_or_plugin_mutation": false
   },
   "validation": {
-    "full_pytest": "843 passed in 222.07s",
+    "full_pytest": "849 passed in 237.46s",
     "ruff_format": "passed",
     "ruff_check": "passed",
     "schema_validator": "passed",
@@ -119,10 +137,10 @@
     "pre_commit": "passed",
     "migration_regression": "passed",
     "targeted_retained_wheel": "passed",
-    "repair_focused": "96 passed in 20.27s",
+    "repair_focused": "102 passed across candidate, ledger and service partitions",
     "git_diff_check": "passed",
     "independent_reviews": "pending",
-    "full_make_check": "passed: Ruff format/check, 843 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
+    "full_make_check": "passed: Ruff format/check, 849 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
   },
   "changed_surfaces": [
     "config/test-partitions.toml",
