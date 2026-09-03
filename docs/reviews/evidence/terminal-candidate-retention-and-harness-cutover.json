@@ -6,7 +6,7 @@
   "outcome": {
     "executor_status": "completed",
     "implementation_candidate_disposition": "verified_commit",
-    "implementation_candidate_sha": "31d71cf7de1677eb8b813c2c0de824e396af74c5",
+    "implementation_candidate_sha": "19b5bf6f847581280079b67e41ba8788e0c303e1",
     "milestone_state": "COMPLETED",
     "promotion_state": "unpromoted",
     "adopted_candidate_milestone_state": "BLOCKED",
@@ -15,18 +15,18 @@
     "dirty_workspace_preserved": true
   },
   "implementation_candidate": {
-    "commit_sha": "31d71cf7de1677eb8b813c2c0de824e396af74c5",
-    "parent_commit": "0c06e77ab639b8ff1c144e3194e7d00015cfca1e",
+    "commit_sha": "19b5bf6f847581280079b67e41ba8788e0c303e1",
+    "parent_commit": "31d71cf7de1677eb8b813c2c0de824e396af74c5",
     "direct_parent_matches_repair_base": false,
     "repair_base_commit": "1570faeed508d9dc455bdce1faa95425e50bf8bc",
-    "successor_of": "0c06e77ab639b8ff1c144e3194e7d00015cfca1e",
+    "successor_of": "31d71cf7de1677eb8b813c2c0de824e396af74c5",
     "candidate_role": "terminal-candidate-retention-and-harness-cutover-repair",
     "distinct_from_adopted_tui_candidate": true
   },
   "reviewed_range": {
     "external_baseline": "6fa09a3701d97f39a5183701687b4b8bcf62dc17",
-    "final_successor_tip": "31d71cf7de1677eb8b813c2c0de824e396af74c5",
-    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..31d71cf7de1677eb8b813c2c0de824e396af74c5",
+    "final_successor_tip": "19b5bf6f847581280079b67e41ba8788e0c303e1",
+    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..19b5bf6f847581280079b67e41ba8788e0c303e1",
     "superseded_predecessors": [
       "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
       "a2230ad79d2883d8bb2c5955b37709cce0e12315"
@@ -131,7 +131,7 @@
     "global_installation_or_plugin_mutation": false
   },
   "validation": {
-    "full_pytest": "849 passed in 234.81s",
+    "full_pytest": "849 passed in 267.43s",
     "ruff_format": "passed",
     "ruff_check": "passed",
     "schema_validator": "passed",
