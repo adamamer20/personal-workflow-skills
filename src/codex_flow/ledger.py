@@ -10423,11 +10423,16 @@ class Ledger:
                         blocker = TypedBlocker.from_json(raw_blocker)
                     except (TypeError, ValueError) as exc:
                         raise CorruptSchemaError("program blocker projection is invalid") from exc
-                if (
-                    fact.kind == "candidate_blocker_resolved"
-                    and value.get("candidate_sha") == candidate
-                    and isinstance(value.get("blocker_gate_id"), str)
-                ):
+                if fact.kind == "candidate_blocker_resolved" and value.get("candidate_sha") == candidate:
+                    gate_id = value.get("blocker_gate_id")
+                    resolution = value.get("blocker_resolution")
+                    if (
+                        not isinstance(gate_id, str)
+                        or resolution not in {"resolve", "supersede"}
+                        or blocker is None
+                        or blocker.gate_id != gate_id
+                    ):
+                        raise CorruptSchemaError("program blocker resolution is stale or malformed")
                     blocker = None
                 review_id = value.get("review_id")
                 if isinstance(review_id, str):
@@ -11317,6 +11322,15 @@ class Ledger:
                 except (TypeError, ValueError) as exc:
                     raise CorruptSchemaError("program blocker projection is invalid") from exc
             if fact.kind == "candidate_blocker_resolved":
+                gate_id = data.get("blocker_gate_id")
+                resolution = data.get("blocker_resolution")
+                if (
+                    not isinstance(gate_id, str)
+                    or resolution not in {"resolve", "supersede"}
+                    or blocker is None
+                    or blocker.gate_id != gate_id
+                ):
+                    raise CorruptSchemaError("program blocker resolution is stale or malformed")
                 blocker = None
         return blocker
 
