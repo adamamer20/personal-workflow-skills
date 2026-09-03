@@ -286,9 +286,24 @@ def _legacy_supervisor_unit(unit: ServiceUnit) -> ServiceUnit:
 
     if unit.runtime != "harness":
         raise ServiceError("replacement service unit runtime is not harness")
-    old_text = unit.text.replace("Description=Codex Flow harness ", "Description=Codex Flow supervisor ", 1)
-    old_text = old_text.replace(" harness run --foreground", " supervisor run --foreground", 1)
-    if old_text == unit.text or "supervisor run --foreground" not in old_text:
+    expected_exec = (
+        f"ExecStart={_unit_arg(unit.executable)} harness run --foreground --state-root {_unit_arg(unit.state_root)}"
+    )
+    old_lines: list[str] = []
+    description_replaced = False
+    exec_replaced = False
+    for line in unit.text.splitlines(keepends=True):
+        if line.startswith("Description=Codex Flow harness ("):
+            line = line.replace("Description=Codex Flow harness ", "Description=Codex Flow supervisor ", 1)
+            description_replaced = True
+        elif line.startswith("ExecStart="):
+            if line.rstrip("\n") != expected_exec:
+                raise ServiceError("replacement service command is not the harness template")
+            line = line.replace(" harness run --foreground", " supervisor run --foreground", 1)
+            exec_replaced = True
+        old_lines.append(line)
+    old_text = "".join(old_lines)
+    if not description_replaced or not exec_replaced or old_text == unit.text:
         raise ServiceError("legacy supervisor service template cannot be derived")
     return ServiceUnit(
         unit.repository_root,
