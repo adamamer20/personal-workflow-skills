@@ -2,17 +2,26 @@
   "schema": "codex-flow/terminal-candidate-retention-and-harness-cutover/v1",
   "schema_version": 1,
   "milestone": "terminal-candidate-retention-and-harness-cutover",
-  "status": "repair_required_with_unpromoted_candidate",
+  "status": "completed_with_distinct_adopted_candidate",
   "outcome": {
-    "executor_status": "external_blocked",
-    "candidate_disposition": "verified_commit",
-    "milestone_state": "REPAIR_REQUIRED",
+    "executor_status": "completed",
+    "implementation_candidate_disposition": "verified_commit",
+    "implementation_candidate_sha": "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
+    "milestone_state": "COMPLETED",
     "promotion_state": "unpromoted",
+    "adopted_candidate_milestone_state": "BLOCKED",
     "provider_retry": false,
     "visual_review_restarted": false,
     "dirty_workspace_preserved": true
   },
-  "candidate": {
+  "implementation_candidate": {
+    "commit_sha": "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
+    "parent_commit": "65042b970828751686bbecf902c42f11f7f12879",
+    "direct_parent_matches_repair_base": true,
+    "candidate_role": "terminal-candidate-retention-and-harness-cutover-repair",
+    "distinct_from_adopted_tui_candidate": true
+  },
+  "adopted_candidate": {
     "commit_sha": "925d505d55e963c1d01dd541f67c939f1f716e5c",
     "base_commit": "05516e208225aadd1f87343c41bd8e345170baec",
     "parent_commit": "05516e208225aadd1f87343c41bd8e345170baec",
@@ -40,18 +49,36 @@
     "workspace_head_at_adoption": "6fa09a3701d97f39a5183701687b4b8bcf62dc17",
     "workspace_status_digest_at_adoption": "6bf26698eac3363b30760f1bb7f34cd4659b3028e40e68483a74754eafbfe9c3",
     "workspace_dirty_at_adoption": true,
-    "workspace_dirty_facts_retained": true
+    "workspace_dirty_facts_retained": true,
+    "terminal_status": "external_blocked",
+    "milestone_state": "BLOCKED",
+    "promotion_state": "unpromoted",
+    "blocker": {
+      "gate_id": "real-streaming-sentinel",
+      "kind": "external",
+      "scope": "current_promotion",
+      "promotion_blocking": true,
+      "required_action": "Authorize one fresh provider attempt before promotion."
+    },
+    "reconciliation": {
+      "method": "Ledger.reconcile_program_candidate",
+      "worker_replayed": false,
+      "provider_retry": false,
+      "real_ledger_mutated_by_repair": false
+    }
   },
   "adoption": {
     "program_id": "codex-flow-remaining-milestones",
     "milestone_id": "live-coding-agent-terminal-ui",
     "program_revision": 4,
     "durable_trunk_head": "05516e208225aadd1f87343c41bd8e345170baec",
-    "candidate_event": "candidate_adopted",
+    "candidate_event": "candidate_adopted_then_reconciled_by_explicit_path",
     "candidate_review_decision": "awaiting_claim",
     "candidate_recovery_is_unpromoted": true,
     "worker_replayed": false,
-    "source_thread_notified": false
+    "source_thread_notified": false,
+    "reconciliation_executed_in_repair_worker": false,
+    "reconciliation_method": "Ledger.reconcile_program_candidate"
   },
   "migration": {
     "from_schema_version": 18,
@@ -69,7 +96,11 @@
     "historical_result_digest": "ccc6993ea8e8fe0ddd0a84896e6d0993f33e7f173c43df11dd7dc4201a476bde",
     "historical_result_rows_readable": true,
     "new_dispatch_rejects_historical_digest": true,
-    "migration_failure_is_fail_closed": true
+    "migration_failure_is_fail_closed": true,
+    "default_ledger_open": "refuses legacy migration with MigrationRequired",
+    "legacy_fence_opener": "Ledger(..., allow_legacy=True).arm_predecessor_refresh_fence",
+    "explicit_migration_opener": "Ledger(..., migrate=True) after predecessor fence and process inactivity",
+    "real_ledger_mutated_by_repair": false
   },
   "retained_wheel": {
     "path": "dist/integrated-runtime/codex_flow-0.2.0-py3-none-any.whl",
@@ -80,7 +111,7 @@
     "global_installation_or_plugin_mutation": false
   },
   "validation": {
-    "full_pytest": "839 passed in 226.66s",
+    "full_pytest": "843 passed in 222.07s",
     "ruff_format": "passed",
     "ruff_check": "passed",
     "schema_validator": "passed",
@@ -88,8 +119,10 @@
     "pre_commit": "passed",
     "migration_regression": "passed",
     "targeted_retained_wheel": "passed",
+    "repair_focused": "96 passed in 20.27s",
     "git_diff_check": "passed",
-    "independent_reviews": "pending"
+    "independent_reviews": "pending",
+    "full_make_check": "passed: Ruff format/check, 843 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
   },
   "changed_surfaces": [
     "config/test-partitions.toml",
@@ -136,7 +169,7 @@
     "promotion_blockers": "not_assessed_until_independent_reviews",
     "self_review_p0": 0,
     "self_review_p1": 0,
-    "scope_note": "Candidate retention, typed blocker projection, migration, and terminology cutover are provider-free implementation evidence; no promotion is claimed."
+    "scope_note": "Implementation executor is completed with a distinct successor candidate; the adopted TUI candidate remains blocked and unpromoted pending its external gate and controller-owned reviews."
   },
   "privacy": {
     "raw_provider_text_retained": false,

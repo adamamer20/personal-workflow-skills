@@ -1366,7 +1366,7 @@ def test_empty_source_draft_v9_is_detected_read_only_then_upgraded_by_candidate(
 
     assert ledger_schema_compatibility(path)["migration_required"] is True
     assert path.read_bytes() == before
-    ledger = Ledger(path)
+    ledger = Ledger(path, migrate=True)
     assert ledger_schema_compatibility(path)["migration_required"] is False
     ledger.close()
 

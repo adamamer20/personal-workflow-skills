@@ -1859,18 +1859,28 @@ class Ledger:
             raise UnsupportedSchemaVersion(f"ledger schema {version} is unsupported")
         self._validate_schema_metadata(version)
         if version < CURRENT_SCHEMA_VERSION:
-            self._validate_shape(version)
-            try:
-                self._validate_rows()
-            except ValueError as exc:
-                raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
             if self._allow_legacy:
                 # Legacy access is deliberately read/transition scoped.  It
                 # lets the service arm the predecessor refresh fence without
                 # changing its schema underneath an older installed owner.
+                self._validate_shape(version)
+                try:
+                    self._validate_rows()
+                except ValueError as exc:
+                    raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
                 self._legacy_schema_version = version
                 return
             if not self._migrate_requested:
+                # A non-migrating opener still proves the predecessor is a
+                # canonical, readable ledger before refusing the implicit
+                # upgrade.  Migration-enabled openers defer validation to the
+                # version-specific migration routine, whose ordering includes
+                # legacy residue and recovery repairs before shape checks.
+                self._validate_shape(version)
+                try:
+                    self._validate_rows()
+                except ValueError as exc:
+                    raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
                 raise MigrationRequired(f"ledger schema {version} requires explicit fenced migration authority")
             self._assert_migration_fenced(version)
             self._migrate(version)
