@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://personal-workflow-skills.invalid/schemas/evidence.schema.json",
   "title": "Bounded evidence pack",
+  "description": "Optional machine projection of one canonical evidence.md for a named consumer; never an independent evidence authority.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "question", "conclusion", "claims"],

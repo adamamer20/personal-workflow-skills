@@ -186,6 +186,11 @@ unbounded retry budget.
 
 Default result is `CONTINUE`.
 
+The recovery result below is the canonical recovery evidence. Do not create a
+parallel `evidence.md` or `evidence.json` by default. A separate evidence pack
+is justified only by a controller-assigned bounded investigation; that pack
+uses one canonical `evidence.md`, with JSON only for a named machine consumer.
+
 ```text
 Diagnosis:
 Evidence:

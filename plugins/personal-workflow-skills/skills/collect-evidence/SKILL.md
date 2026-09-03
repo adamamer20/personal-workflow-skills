@@ -88,12 +88,16 @@ answer. Record residual uncertainty rather than broadening scope.
 
 A useful evidence pack is materially smaller than the material inspected.
 
-## 6. Write the artifacts
+## 6. Write one canonical artifact
 
-Write:
+Write `evidence.md` at the assigned output path. It is the canonical evidence
+artifact and contains readable conclusions with traceable support.
 
-- `evidence.md` — readable conclusions and traceable support;
-- `evidence.json` — conforming to `schemas/evidence.schema.json`.
+Do not create `evidence.json` by default. Produce it only when the assignment
+names a real machine consumer that requires the structured projection. In that
+case, name the consumer, derive the JSON from the same settled claims, validate
+it against `schemas/evidence.schema.json`, and treat it as a projection of
+`evidence.md`, never as a second independently maintained authority.
 
 Use this Markdown shape:
 
@@ -121,4 +125,5 @@ Confidence
 - request one material decision;
 - inspect a named missing source.
 
-Do not dispatch the follow-up. Return the artifact paths to the controller.
+Do not dispatch the follow-up. Return only the artifact paths actually written
+to the controller.
