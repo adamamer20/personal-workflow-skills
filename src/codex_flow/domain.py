@@ -47,6 +47,13 @@ WORKER_DIAGNOSTIC_RETAINED_METHODS = frozenset(
     }
 )
 STEER_TEXT_MAX_BYTES = 8 * 1024
+# Live frames are an explicitly ephemeral projection.  They are bounded more
+# tightly than persisted result/history values and never enter the ledger.
+LIVE_KEYFRAME_MAX_TEXT_BYTES = 16 * 1024
+LIVE_KEYFRAME_FRAGMENT_MAX_BYTES = 8 * 1024
+LIVE_KEYFRAME_MAX_TOOLS = 32
+LIVE_SUBSCRIBER_QUEUE_MAX_ENTRIES = 8
+LIVE_MAX_SUBSCRIBERS = 4
 CONTROL_ACKNOWLEDGEMENT_TERMINAL_STATUSES = frozenset(
     {"completed", "needs_decision", "external_blocked", "failed", "interrupted"}
 )
@@ -390,6 +397,259 @@ class TurnObservation:
     structured_output: JsonObject | None
     events: tuple[LifecycleEvent, ...]
     error: str | None = None
+
+
+class LiveToolState(str, Enum):
+    """Closed presentation states for one visible SDK tool item."""
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
+@dataclass(frozen=True, slots=True)
+class LiveToolKeyframe:
+    """Redacted, body-free state for one in-flight tool item."""
+
+    item_id: str
+    kind: str
+    label: str
+    state: LiveToolState
+    path_present: bool = False
+    url_present: bool = False
+    image_present: bool = False
+
+    def __post_init__(self) -> None:
+        for name, value in (("live tool item", self.item_id), ("live tool kind", self.kind)):
+            if (
+                not isinstance(value, str)
+                or not value
+                or any(character.isspace() or ord(character) < 0x20 for character in value)
+                or len(value.encode("utf-8")) > 512
+            ):
+                raise ValueError(f"{name} identity is invalid")
+        if not isinstance(self.label, str) or not self.label or "\x00" in self.label:
+            raise ValueError("live tool label is invalid")
+        if len(self.label.encode("utf-8")) > 256:
+            raise ValueError("live tool label exceeds its byte limit")
+        if redact_diagnostic_text(self.label, limit=256) != self.label:
+            raise ValueError("live tool label is not redacted")
+        if not isinstance(self.state, LiveToolState):
+            object.__setattr__(self, "state", LiveToolState(self.state))
+        for name, value in (
+            ("path presence", self.path_present),
+            ("URL presence", self.url_present),
+            ("image presence", self.image_present),
+        ):
+            if not isinstance(value, bool):
+                raise ValueError(f"live tool {name} must be boolean")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "item_id": self.item_id,
+            "kind": self.kind,
+            "label": self.label,
+            "state": self.state.value,
+            "path_present": self.path_present,
+            "url_present": self.url_present,
+            "image_present": self.image_present,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LiveTurnProjection:
+    """Cumulative SDK-side projection before dispatch identity is attached."""
+
+    thread_id: ThreadIdentity
+    turn_id: str
+    live_revision: int
+    assistant_text: str
+    tools: tuple[LiveToolKeyframe, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.thread_id, ThreadIdentity):
+            object.__setattr__(self, "thread_id", ThreadIdentity(self.thread_id))
+        if (
+            not isinstance(self.turn_id, str)
+            or not self.turn_id
+            or any(character.isspace() or ord(character) < 0x20 for character in self.turn_id)
+            or len(self.turn_id.encode("utf-8")) > 512
+        ):
+            raise ValueError("live turn identity is invalid")
+        if isinstance(self.live_revision, bool) or not isinstance(self.live_revision, int) or self.live_revision < 1:
+            raise ValueError("live revision must be positive")
+        if not isinstance(self.assistant_text, str) or "\x00" in self.assistant_text:
+            raise ValueError("live assistant text is invalid")
+        if len(self.assistant_text.encode("utf-8")) > LIVE_KEYFRAME_MAX_TEXT_BYTES:
+            raise ValueError("live assistant text exceeds its byte limit")
+        if redact_conversation_text(self.assistant_text)[0] != self.assistant_text:
+            raise ValueError("live assistant text is not redacted")
+        tools = tuple(self.tools)
+        if len(tools) > LIVE_KEYFRAME_MAX_TOOLS or not all(isinstance(tool, LiveToolKeyframe) for tool in tools):
+            raise ValueError("live tool keyframes exceed their bound or are untyped")
+        if len({tool.item_id for tool in tools}) != len(tools):
+            raise ValueError("live tool item identities must be unique")
+        object.__setattr__(self, "tools", tools)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveTurnKeyframe:
+    """Identity-bound cumulative frame delivered only to ephemeral subscribers."""
+
+    dispatch_id: DispatchId
+    generation: int
+    attempt: int
+    thread_id: ThreadIdentity
+    turn_id: str
+    live_revision: int
+    assistant_text: str
+    tools: tuple[LiveToolKeyframe, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        for name, value in (("generation", self.generation), ("attempt", self.attempt)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"live keyframe {name} is invalid")
+        projection = LiveTurnProjection(
+            self.thread_id,
+            self.turn_id,
+            self.live_revision,
+            self.assistant_text,
+            self.tools,
+        )
+        object.__setattr__(self, "thread_id", projection.thread_id)
+        object.__setattr__(self, "turn_id", projection.turn_id)
+        object.__setattr__(self, "live_revision", projection.live_revision)
+        object.__setattr__(self, "assistant_text", projection.assistant_text)
+        object.__setattr__(self, "tools", projection.tools)
+
+    @classmethod
+    def from_projection(
+        cls, dispatch_id: DispatchId | str, generation: int, attempt: int, projection: LiveTurnProjection
+    ) -> LiveTurnKeyframe:
+        return cls(
+            DispatchId(dispatch_id),
+            generation,
+            attempt,
+            projection.thread_id,
+            projection.turn_id,
+            projection.live_revision,
+            projection.assistant_text,
+            projection.tools,
+        )
+
+    @classmethod
+    def from_json(cls, value: object) -> LiveTurnKeyframe:
+        if not isinstance(value, dict) or set(value) != {
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "thread_id",
+            "turn_id",
+            "live_revision",
+            "assistant_text",
+            "tools",
+        }:
+            raise ValueError("live keyframe shape is invalid")
+        tools_raw = value["tools"]
+        if not isinstance(tools_raw, list):
+            raise ValueError("live keyframe tools are invalid")
+        tools: list[LiveToolKeyframe] = []
+        for raw in tools_raw:
+            if not isinstance(raw, dict) or set(raw) != {
+                "item_id",
+                "kind",
+                "label",
+                "state",
+                "path_present",
+                "url_present",
+                "image_present",
+            }:
+                raise ValueError("live tool keyframe shape is invalid")
+            tools.append(
+                LiveToolKeyframe(
+                    raw["item_id"],  # type: ignore[arg-type]
+                    raw["kind"],  # type: ignore[arg-type]
+                    raw["label"],  # type: ignore[arg-type]
+                    LiveToolState(raw["state"]),  # type: ignore[arg-type]
+                    raw["path_present"],  # type: ignore[arg-type]
+                    raw["url_present"],  # type: ignore[arg-type]
+                    raw["image_present"],  # type: ignore[arg-type]
+                )
+            )
+        return cls(
+            value["dispatch_id"],  # type: ignore[arg-type]
+            value["generation"],  # type: ignore[arg-type]
+            value["attempt"],  # type: ignore[arg-type]
+            ThreadIdentity(value["thread_id"]),  # type: ignore[arg-type]
+            value["turn_id"],  # type: ignore[arg-type]
+            value["live_revision"],  # type: ignore[arg-type]
+            value["assistant_text"],  # type: ignore[arg-type]
+            tuple(tools),
+        )
+
+    def to_json(self) -> JsonObject:
+        return {
+            "dispatch_id": str(self.dispatch_id),
+            "generation": self.generation,
+            "attempt": self.attempt,
+            "thread_id": self.thread_id.id,
+            "turn_id": self.turn_id,
+            "live_revision": self.live_revision,
+            "assistant_text": self.assistant_text,
+            "tools": [tool.to_json() for tool in self.tools],
+        }
+
+
+class LiveSubscriptionEventKind(str, Enum):
+    KEYFRAME = "keyframe"
+    TERMINAL = "terminal"
+
+
+@dataclass(frozen=True, slots=True)
+class LiveSubscriptionEvent:
+    """One bounded event from the authenticated ephemeral live subscription."""
+
+    kind: LiveSubscriptionEventKind
+    dispatch_id: DispatchId
+    generation: int
+    attempt: int
+    thread_id: ThreadIdentity
+    turn_id: str
+    keyframe: LiveTurnKeyframe | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, LiveSubscriptionEventKind):
+            object.__setattr__(self, "kind", LiveSubscriptionEventKind(self.kind))
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int) or self.generation < 1:
+            raise ValueError("live subscription generation is invalid")
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or self.attempt < 1:
+            raise ValueError("live subscription attempt is invalid")
+        if not isinstance(self.thread_id, ThreadIdentity):
+            object.__setattr__(self, "thread_id", ThreadIdentity(self.thread_id))
+        if (
+            not isinstance(self.turn_id, str)
+            or not self.turn_id
+            or any(character.isspace() for character in self.turn_id)
+        ):
+            raise ValueError("live subscription turn identity is invalid")
+        if self.kind is LiveSubscriptionEventKind.KEYFRAME:
+            if self.keyframe is None:
+                raise ValueError("live keyframe event requires a keyframe")
+            if (
+                self.keyframe.dispatch_id != self.dispatch_id
+                or self.keyframe.generation != self.generation
+                or self.keyframe.attempt != self.attempt
+                or self.keyframe.thread_id != self.thread_id
+                or self.keyframe.turn_id != self.turn_id
+            ):
+                raise ValueError("live keyframe identity conflicts with its subscription event")
+        elif self.keyframe is not None:
+            raise ValueError("terminal live event cannot carry a keyframe")
 
 
 _SECRET_PATTERNS = (

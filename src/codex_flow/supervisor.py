@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
 import select
 import signal
@@ -39,6 +40,8 @@ from .contracts import (
 from .domain import (
     CONVERSATION_MAX_CONCURRENT_READS,
     CONVERSATION_READ_DEADLINE_SECONDS,
+    LIVE_MAX_SUBSCRIBERS,
+    LIVE_SUBSCRIBER_QUEUE_MAX_ENTRIES,
     CompatibilityRebind,
     ControlCommandKind,
     ControlCommandState,
@@ -52,6 +55,7 @@ from .domain import (
     ConversationHistoryStatus,
     ConversationSubjectKind,
     DispatchId,
+    LiveTurnKeyframe,
     NativePermissionMode,
     ProgramControllerActionKind,
     ProgramControllerDecisionStatus,
@@ -159,6 +163,21 @@ class WorkerResultRejected(IpcError):
     def __init__(self, code: WorkerResultRejectionCode) -> None:
         self.code = code
         super().__init__(code.value)
+
+
+class _LiveSubscriber:
+    """One bounded, identity-bound in-memory live-frame subscriber."""
+
+    def __init__(self, dispatch_id: str, generation: int, attempt: int, thread_id: str, turn_id: str) -> None:
+        self.subscription_id = uuid.uuid4().hex
+        self.dispatch_id = dispatch_id
+        self.generation = generation
+        self.attempt = attempt
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.frames: queue.Queue[LiveTurnKeyframe] = queue.Queue(maxsize=LIVE_SUBSCRIBER_QUEUE_MAX_ENTRIES)
+        self.wake = threading.Event()
+        self.terminal = False
 
 
 IPC_ACCEPTED_FRAME_TIMEOUT_SECONDS = 2.0
@@ -342,6 +361,9 @@ class Supervisor:
         self._conversation_requests: dict[str, dict[str, object]] = {}
         self._conversation_requests_lock = threading.Lock()
         self._conversation_read_slots = threading.BoundedSemaphore(CONVERSATION_MAX_CONCURRENT_READS)
+        self._live_subscribers: dict[str, _LiveSubscriber] = {}
+        self._live_subscribers_lock = threading.Lock()
+        self._live_revisions: dict[tuple[str, int, int, str, str], int] = {}
 
     def _refresh_checkpoint_deadline(self) -> None:
         value = self.ledger.next_checkpoint_deadline()
@@ -364,6 +386,7 @@ class Supervisor:
         return min(deadlines)
 
     def close(self) -> None:
+        self._close_live_subject()
         for child in (*self._children.values(), *self._controller_children.values()):
             if child.poll() is None:
                 try:
@@ -1277,7 +1300,9 @@ class Supervisor:
             self._resumed_children.discard(dispatch_id)
             active_turns = getattr(self, "_active_turns", None)
             if active_turns is not None:
-                active_turns.pop(dispatch_id, None)
+                active = active_turns.pop(dispatch_id, None)
+                if active is not None:
+                    self._close_live_subject(dispatch_id, active)
             # A child exit is an event even if the liveness bind raced with a
             # very fast process.  The durable transition above has either
             # closed the active row or proved that it was already terminal.
@@ -1359,7 +1384,9 @@ class Supervisor:
         self._resumed_children.discard(dispatch_id)
         active_turns = getattr(self, "_active_turns", None)
         if active_turns is not None:
-            active_turns.pop(dispatch_id, None)
+            active = active_turns.pop(dispatch_id, None)
+            if active is not None:
+                self._close_live_subject(dispatch_id, active)
         return True
 
     def _advance_pending_cancellations(self) -> bool:
@@ -2023,6 +2050,8 @@ class Supervisor:
                 return self._conversation_history(payload)
             if operation == "conversation_history_response":
                 return self._history_response(payload)
+            if operation == "live_keyframe":
+                return self._publish_live_keyframe(payload)
             if operation == "control_status":
                 if set(payload) != {"version", "operation", "command_id"}:
                     raise IpcError("control status request has an unsupported shape")
@@ -2158,6 +2187,216 @@ class Supervisor:
                 _public_activity(activity) for activity in self.ledger.recent_activity(dispatch_id, limit=limit)
             ],
         }
+
+    def _live_subscription(self, payload: dict[str, object]) -> _LiveSubscriber:
+        required = {"version", "operation", "dispatch_id", "generation", "attempt", "thread_id", "turn_id"}
+        if set(payload) != required:
+            raise IpcError("live subscription request has an unsupported shape")
+        dispatch_id = payload.get("dispatch_id")
+        thread_id = payload.get("thread_id")
+        turn_id = payload.get("turn_id")
+        generation = payload.get("generation")
+        attempt = payload.get("attempt")
+        if not isinstance(dispatch_id, str) or not isinstance(thread_id, str) or not isinstance(turn_id, str):
+            raise IpcError("live subscription identity is incomplete")
+        try:
+            DispatchId(dispatch_id)
+            ThreadIdentity(thread_id)
+        except ValueError as exc:
+            raise IpcError("live subscription identity is invalid") from exc
+        if (
+            not turn_id
+            or any(character.isspace() or ord(character) < 0x20 for character in turn_id)
+            or len(turn_id.encode("utf-8")) > 512
+        ):
+            raise IpcError("live subscription turn identity is invalid")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise IpcError("live subscription generation is invalid")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise IpcError("live subscription attempt is invalid")
+        row = self.ledger.queue_dispatch(dispatch_id)
+        active = getattr(self, "_active_turns", {}).get(dispatch_id)
+        if (
+            row.get("state") not in {"starting", "running"}
+            or active != (generation, attempt, thread_id, turn_id)
+            or row.get("generation") != generation
+            or row.get("attempt") != attempt
+            or row.get("thread_id") != thread_id
+        ):
+            raise IpcError("live subscription identity is stale")
+        lock, subscribers = self._live_state()
+        with lock:
+            if len(subscribers) >= LIVE_MAX_SUBSCRIBERS:
+                raise IpcError("live subscription capacity is busy")
+            subscriber = _LiveSubscriber(dispatch_id, generation, attempt, thread_id, turn_id)
+            subscribers[subscriber.subscription_id] = subscriber
+        return subscriber
+
+    def _live_state(self) -> tuple[threading.Lock, dict[str, _LiveSubscriber]]:
+        """Lazily initialize the in-memory broker for hermetic supervisor fixtures."""
+
+        lock = getattr(self, "_live_subscribers_lock", None)
+        subscribers = getattr(self, "_live_subscribers", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._live_subscribers_lock = lock
+        if subscribers is None:
+            subscribers = {}
+            self._live_subscribers = subscribers
+        if getattr(self, "_live_revisions", None) is None:
+            self._live_revisions: dict[tuple[str, int, int, str, str], int] = {}
+        return lock, subscribers
+
+    def _close_live_subject(
+        self, dispatch_id: str | None = None, identity: tuple[int, int, str, str] | None = None
+    ) -> None:
+        """Wake matching subscribers so terminal/replacement state is not replayed."""
+
+        lock, subscribers = self._live_state()
+        with lock:
+            for subscriber in subscribers.values():
+                if dispatch_id is not None and subscriber.dispatch_id != dispatch_id:
+                    continue
+                current = (subscriber.generation, subscriber.attempt, subscriber.thread_id, subscriber.turn_id)
+                if identity is not None and current != identity:
+                    continue
+                subscriber.terminal = True
+                while True:
+                    try:
+                        subscriber.frames.get_nowait()
+                    except queue.Empty:
+                        break
+                subscriber.wake.set()
+            revisions = self._live_revisions
+            for subject in tuple(revisions):
+                subject_dispatch, subject_generation, subject_attempt, subject_thread, subject_turn = subject
+                if dispatch_id is not None and subject_dispatch != dispatch_id:
+                    continue
+                if (
+                    identity is not None
+                    and (subject_generation, subject_attempt, subject_thread, subject_turn) != identity
+                ):
+                    continue
+                revisions.pop(subject, None)
+
+    def _publish_live_keyframe(self, payload: dict[str, object]) -> dict[str, object]:
+        required = {
+            "version",
+            "operation",
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "token",
+            "thread_id",
+            "turn_id",
+            "keyframe",
+        }
+        if set(payload) != required:
+            raise IpcError("live keyframe request has an unsupported shape")
+        row, generation, attempt, _token = self._worker_capability(payload)
+        generation, attempt, thread_id, turn_id = self._strict_worker_turn_identity(payload, row)
+        active = getattr(self, "_active_turns", {}).get(str(row["dispatch_id"]))
+        if active != (generation, attempt, thread_id, turn_id):
+            raise IpcError("live keyframe turn identity is stale")
+        try:
+            keyframe = LiveTurnKeyframe.from_json(payload["keyframe"])
+        except (TypeError, ValueError) as exc:
+            raise IpcError("live keyframe is malformed") from exc
+        if (
+            str(keyframe.dispatch_id) != str(row["dispatch_id"])
+            or keyframe.generation != generation
+            or keyframe.attempt != attempt
+            or keyframe.thread_id.id != thread_id
+            or keyframe.turn_id != turn_id
+        ):
+            raise IpcError("live keyframe identity is stale")
+        envelope = {"version": 1, "ok": True, "event": "keyframe", "keyframe": keyframe.to_json()}
+        try:
+            encode_frame(envelope)
+        except IpcError as exc:
+            raise IpcError("live keyframe exceeds its bounded frame") from exc
+        delivered = 0
+        lock, subscriber_registry = self._live_state()
+        with lock:
+            subject = (str(row["dispatch_id"]), generation, attempt, thread_id, turn_id)
+            if keyframe.live_revision <= self._live_revisions.get(subject, 0):
+                return {"version": 1, "ok": True, "operation": "live_keyframe", "delivered": 0}
+            self._live_revisions[subject] = keyframe.live_revision
+            subscribers = tuple(subscriber_registry.values())
+            for subscriber in subscribers:
+                if (
+                    subscriber.dispatch_id,
+                    subscriber.generation,
+                    subscriber.attempt,
+                    subscriber.thread_id,
+                    subscriber.turn_id,
+                ) != (str(row["dispatch_id"]), generation, attempt, thread_id, turn_id):
+                    continue
+                try:
+                    subscriber.frames.put_nowait(keyframe)
+                except queue.Full:
+                    try:
+                        subscriber.frames.get_nowait()
+                        subscriber.frames.put_nowait(keyframe)
+                    except queue.Empty:
+                        continue
+                subscriber.wake.set()
+                delivered += 1
+        return {"version": 1, "ok": True, "operation": "live_keyframe", "delivered": delivered}
+
+    def _serve_live_connection(self, connection: socket.socket, subscriber: _LiveSubscriber) -> None:
+        """Push bounded cumulative frames without blocking supervisor lifecycle work."""
+
+        try:
+            connection.settimeout(0.25)
+            try:
+                connection.sendall(encode_frame({"version": 1, "ok": True, "operation": "live_subscribe"}))
+            except OSError:
+                return
+            # Frames accumulated before the socket handshake are stale
+            # ephemeral state.  Reconnect/terminal recovery comes from the
+            # authoritative Thread.read history, so never replay this queue.
+            while True:
+                try:
+                    subscriber.frames.get_nowait()
+                except queue.Empty:
+                    break
+            while True:
+                if subscriber.terminal:
+                    terminal = {
+                        "version": 1,
+                        "ok": True,
+                        "event": "terminal",
+                        "dispatch_id": subscriber.dispatch_id,
+                        "generation": subscriber.generation,
+                        "attempt": subscriber.attempt,
+                        "thread_id": subscriber.thread_id,
+                        "turn_id": subscriber.turn_id,
+                    }
+                    try:
+                        connection.sendall(encode_frame(terminal))
+                    except OSError:
+                        pass
+                    return
+                try:
+                    keyframe = subscriber.frames.get_nowait()
+                except queue.Empty:
+                    subscriber.wake.wait()
+                    subscriber.wake.clear()
+                    continue
+                if subscriber.terminal:
+                    continue
+                try:
+                    connection.sendall(
+                        encode_frame({"version": 1, "ok": True, "event": "keyframe", "keyframe": keyframe.to_json()})
+                    )
+                except (IpcError, OSError):
+                    return
+        finally:
+            lock, subscribers = self._live_state()
+            with lock:
+                subscribers.pop(subscriber.subscription_id, None)
+            connection.close()
 
     @staticmethod
     def _public_conversation_page(page: ConversationHistoryPage) -> dict[str, object]:
@@ -2488,6 +2727,9 @@ class Supervisor:
         if active_turns is None:
             active_turns = {}
             self._active_turns = active_turns
+        previous = active_turns.get(str(row["dispatch_id"]))
+        if previous is not None and previous != (generation, attempt, thread_id, turn_id):
+            self._close_live_subject(str(row["dispatch_id"]), previous)
         active_turns[str(row["dispatch_id"])] = (
             generation,
             attempt,
@@ -2940,8 +3182,10 @@ class Supervisor:
             code = WorkerResultRejectionCode.MALFORMED_OUTPUT
             self._record_worker_result_rejection(str(row["dispatch_id"]), code)
             raise WorkerResultRejected(code) from None
-        self._record_program_queue_result(terminal)
         active = getattr(self, "_active_turns", {}).get(str(row["dispatch_id"]))
+        if active is not None:
+            self._close_live_subject(str(row["dispatch_id"]), active)
+        self._record_program_queue_result(terminal)
         if active is not None:
             _generation, _attempt, _thread_id, active_turn_id = active
             for command in self.ledger.control_commands(str(row["dispatch_id"])):
@@ -3091,6 +3335,15 @@ class Supervisor:
                     target=self._serve_conversation_connection,
                     args=(connection, request),
                     name="codex-flow-conversation-read",
+                    daemon=True,
+                ).start()
+                return operation
+            if request.get("operation") == "live_subscribe":
+                subscriber = self._live_subscription(request)
+                threading.Thread(
+                    target=self._serve_live_connection,
+                    args=(connection, subscriber),
+                    name="codex-flow-live-subscription",
                     daemon=True,
                 ).start()
                 return operation

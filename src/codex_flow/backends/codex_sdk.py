@@ -30,6 +30,9 @@ from ..domain import (
     CONVERSATION_MAX_TEXT_BYTES,
     CONVERSATION_MAX_TURNS,
     CONVERSATION_PAGE_BYTES,
+    LIVE_KEYFRAME_FRAGMENT_MAX_BYTES,
+    LIVE_KEYFRAME_MAX_TEXT_BYTES,
+    LIVE_KEYFRAME_MAX_TOOLS,
     MAX_STRUCTURED_OUTPUT_BYTES,
     STEER_TEXT_MAX_BYTES,
     Capability,
@@ -48,6 +51,9 @@ from ..domain import (
     Generation,
     JsonObject,
     LifecycleEvent,
+    LiveToolKeyframe,
+    LiveToolState,
+    LiveTurnProjection,
     LocalImageInput,
     NativePermissionAuthority,
     NativePermissionMode,
@@ -1189,6 +1195,190 @@ def _event_from_notification(event: _SdkNotification, sequence: int) -> Lifecycl
     return LifecycleEvent(sequence=sequence, method=event.method, turn_id=turn_id, text=text)
 
 
+_LIVE_TOOL_TYPES = {
+    "commandExecution": ("command", "command execution"),
+    "mcpToolCall": ("mcp", "MCP tool"),
+    "webSearchCall": ("web_search", "web search"),
+    "fileSearchCall": ("file_search", "file search"),
+}
+
+
+def _live_presence(value: object, marker: str, *, depth: int = 0, budget: list[int] | None = None) -> bool:
+    """Find typed path/URL/image presence without retaining the value."""
+
+    if budget is None:
+        budget = [64]
+    if depth > 3 or budget[0] <= 0:
+        return False
+    budget[0] -= 1
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if isinstance(key, str) and marker in key.lower():
+                return True
+            if _live_presence(child, marker, depth=depth + 1, budget=budget):
+                return True
+        return False
+    if isinstance(value, list | tuple):
+        return any(_live_presence(child, marker, depth=depth + 1, budget=budget) for child in value[:32])
+    if isinstance(value, str):
+        lower = value.lower()
+        if marker == "url":
+            return lower.startswith(("http://", "https://", "file://")) or lower.startswith("www.")
+        if marker == "path":
+            return "/" in value or "\\" in value
+        return False
+    try:
+        fields = vars(value)
+    except TypeError:
+        return False
+    return _live_presence(fields, marker, depth=depth + 1, budget=budget)
+
+
+def _live_tool_keyframe(event: _SdkNotification) -> LiveToolKeyframe | None:
+    """Project one documented tool lifecycle item into body-free state."""
+
+    method = event.method
+    progress_types = {
+        "item/commandExecution/outputDelta": ("command", "command execution"),
+        "item/mcpToolCall/progress": ("mcp", "MCP tool"),
+    }
+    if method in progress_types:
+        item_id = _read(event.payload, "item_id") or _read(event.payload, "itemId")
+        if not isinstance(item_id, str) or not item_id or any(character.isspace() for character in item_id):
+            return None
+        kind, label = progress_types[method]
+        return LiveToolKeyframe(item_id=item_id, kind=kind, label=label, state=LiveToolState.RUNNING)
+    if method not in {"item/started", "item/updated", "item/completed", "item/failed", "item/interrupted"}:
+        return None
+    item = _read(event.payload, "item")
+    root = _read(item, "root", item)
+    item_type = _read(root, "type")
+    if not isinstance(item_type, str) or item_type not in _LIVE_TOOL_TYPES:
+        return None
+    item_id = _read(root, "id")
+    if not isinstance(item_id, str) or not item_id or any(character.isspace() for character in item_id):
+        return None
+    kind, label = _LIVE_TOOL_TYPES[item_type]
+    if item_type == "mcpToolCall":
+        server = _summary_atom(_read(root, "server"))
+        tool = _summary_atom(_read(root, "tool"))
+        if server is not None and tool is not None:
+            label = f"{label} {server}/{tool}"
+    if event.method == "item/failed":
+        state = LiveToolState.FAILED
+    elif event.method == "item/interrupted":
+        state = LiveToolState.INTERRUPTED
+    elif event.method == "item/completed":
+        state = LiveToolState.COMPLETED
+    else:
+        raw_status = _enum_value(_read(root, "status"))
+        normalized = raw_status.replace("-", "_").lower() if isinstance(raw_status, str) else ""
+        state = (
+            LiveToolState.COMPLETED
+            if normalized in {"completed", "complete", "succeeded"}
+            else LiveToolState.FAILED
+            if normalized in {"failed", "error"}
+            else LiveToolState.INTERRUPTED
+            if normalized in {"interrupted", "cancelled", "canceled"}
+            else LiveToolState.RUNNING
+        )
+    return LiveToolKeyframe(
+        item_id=item_id,
+        kind=kind,
+        label=label,
+        state=state,
+        path_present=_live_presence(root, "path"),
+        url_present=_live_presence(root, "url"),
+        image_present=item_type.lower().find("image") >= 0 or _live_presence(root, "image"),
+    )
+
+
+def _live_assistant_update(event: _SdkNotification) -> tuple[str, bool] | None:
+    """Return a safe assistant replacement or delta from an SDK item event."""
+
+    method = event.method.lower()
+    if method == "item/agentmessage/delta":
+        for candidate in (
+            _read(event.payload, "delta"),
+            _read(event.payload, "text_delta"),
+            _read(event.payload, "textDelta"),
+        ):
+            if isinstance(candidate, str):
+                # AgentMessageDeltaNotification is a typed official payload
+                # with item_id/thread_id/turn_id, not an ItemStarted envelope.
+                return candidate, True
+    item = _read(event.payload, "item")
+    root = _read(item, "root", item)
+    if _read(root, "type") != "agentMessage":
+        return None
+    if "delta" in method:
+        for candidate in (
+            _read(event.payload, "delta"),
+            _read(event.payload, "text_delta"),
+            _read(event.payload, "textDelta"),
+            _read(root, "delta"),
+        ):
+            if isinstance(candidate, str):
+                return candidate, True
+    for candidate in (_read(root, "text"), _read(event.payload, "text")):
+        if isinstance(candidate, str):
+            return candidate, False
+    return None
+
+
+class _LiveTurnAccumulator:
+    """Coalesce SDK deltas into a bounded cumulative typed projection."""
+
+    def __init__(self) -> None:
+        self.assistant_text = ""
+        self.tools: dict[str, LiveToolKeyframe] = {}
+        self.live_revision = 0
+
+    def apply(self, event: _SdkNotification, *, thread: ThreadIdentity, turn_id: str) -> LiveTurnProjection | None:
+        changed = False
+        assistant = _live_assistant_update(event)
+        if assistant is not None:
+            value, is_delta = assistant
+            candidate = self.assistant_text + value if is_delta else value
+            try:
+                if len(value.encode("utf-8")) > LIVE_KEYFRAME_FRAGMENT_MAX_BYTES:
+                    return None
+                redacted, _changed = redact_conversation_text(candidate)
+                if len(redacted.encode("utf-8")) <= LIVE_KEYFRAME_MAX_TEXT_BYTES and redacted != self.assistant_text:
+                    self.assistant_text = redacted
+                    changed = True
+            except (UnicodeEncodeError, ValueError):
+                # A malformed or oversized intermediate frame is discarded;
+                # stable Thread.read history still owns terminal recovery.
+                pass
+        tool = _live_tool_keyframe(event)
+        if tool is not None:
+            prior = self.tools.get(tool.item_id)
+            if prior is not None:
+                # SDK lifecycle updates may omit fields that were present on
+                # the start notification.  Keep only their typed presence
+                # facts and stable label; never carry raw tool content.
+                tool = LiveToolKeyframe(
+                    item_id=tool.item_id,
+                    kind=prior.kind,
+                    label=prior.label,
+                    state=tool.state,
+                    path_present=prior.path_present or tool.path_present,
+                    url_present=prior.url_present or tool.url_present,
+                    image_present=prior.image_present or tool.image_present,
+                )
+            if prior != tool:
+                if prior is None and len(self.tools) >= LIVE_KEYFRAME_MAX_TOOLS:
+                    tool = None
+                else:
+                    self.tools[tool.item_id] = tool
+                    changed = True
+        if not changed and self.live_revision != 0:
+            return None
+        self.live_revision += 1
+        return LiveTurnProjection(thread, turn_id, self.live_revision, self.assistant_text, tuple(self.tools.values()))
+
+
 def _status_from_notification(event: Any) -> tuple[str | None, str | None, bool, str | None]:
     payload = cast(_SdkNotification, event).payload
     turn = _read(payload, "turn")
@@ -1794,6 +1984,7 @@ class CodexSdkAdapter:
         output_schema: Schema | None = None,
         event_callback: Callable[[LifecycleEvent], None] | None = None,
         turn_callback: Callable[[str], None] | None = None,
+        live_callback: Callable[[LiveTurnProjection], None] | None = None,
     ) -> TurnObservation:
         """Run one logical turn; recovery owns any later provider continuation."""
 
@@ -1804,6 +1995,7 @@ class CodexSdkAdapter:
             output_schema=output_schema,
             event_callback=event_callback,
             turn_callback=turn_callback,
+            live_callback=live_callback,
         )
 
     def _run_turn_once(
@@ -1815,6 +2007,7 @@ class CodexSdkAdapter:
         output_schema: Schema | None = None,
         event_callback: Callable[[LifecycleEvent], None] | None = None,
         turn_callback: Callable[[str], None] | None = None,
+        live_callback: Callable[[LiveTurnProjection], None] | None = None,
     ) -> TurnObservation:
         """Run one physical SDK turn and normalize its terminal observation."""
 
@@ -1836,6 +2029,7 @@ class CodexSdkAdapter:
             final_response: str | None = None
             status: str | None = None
             error: str | None = None
+            live_projection = _LiveTurnAccumulator()
             transient_error = False
             rate_limit_retry_at: str | None = None
             for sequence, raw_event in enumerate(raw_turn.stream()):
@@ -1846,6 +2040,15 @@ class CodexSdkAdapter:
                         event_callback(event)
                     except Exception as exc:
                         raise TerminalFailureAfterIdentity("SDK lifecycle callback failed") from exc
+                if live_callback is not None:
+                    try:
+                        projection = live_projection.apply(raw_event, thread=thread, turn_id=turn_id)
+                        if projection is not None:
+                            live_callback(projection)
+                    except TerminalFailureAfterIdentity:
+                        raise
+                    except Exception as exc:
+                        raise TerminalFailureAfterIdentity("SDK live projection callback failed") from exc
                 if event.method == "item/completed":
                     candidate = _response_from_notification(raw_event)
                     if candidate is not None:

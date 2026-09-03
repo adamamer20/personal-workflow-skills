@@ -38,6 +38,70 @@ class IpcTransportError(IpcError):
     """A transient local socket failure prevented request/ack delivery."""
 
 
+class IpcSubscription:
+    """One authenticated framed socket carrying bounded server-pushed events."""
+
+    def __init__(self, connection: socket.socket) -> None:
+        self._connection: socket.socket | None = connection
+
+    def receive(self, *, timeout: float | None = None) -> dict[str, object]:
+        if timeout is not None and timeout <= 0:
+            raise ValueError("subscription timeout must be positive")
+        connection = self._connection
+        if connection is None:
+            raise IpcTransportError("IPC subscription is closed")
+        try:
+            connection.settimeout(timeout)
+            return decode_frame(connection)
+        except IpcError as exc:
+            if "fragmented frame" in str(exc):
+                raise IpcTransportError("IPC subscription was closed") from exc
+            raise
+        except OSError as exc:
+            raise IpcTransportError("IPC subscription transport failed") from exc
+
+    def close(self) -> None:
+        connection = self._connection
+        self._connection = None
+        if connection is None:
+            return
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        connection.close()
+
+
+def open_ipc_subscription(socket_path: Path, request: Mapping[str, object], *, timeout: float = 5.0) -> IpcSubscription:
+    """Open a persistent subscription over the existing authenticated IPC framing."""
+
+    if timeout <= 0:
+        raise ValueError("subscription timeout must be positive")
+    socket_path = Path(socket_path)
+    ensure_runtime_dir(socket_path.parent)
+    if socket_path.is_symlink() or not socket_path.exists():
+        raise IpcTransportError("supervisor IPC socket is unavailable")
+    metadata = os.lstat(socket_path)
+    if not stat.S_ISSOCK(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise IpcError("supervisor IPC socket has unsafe permissions")
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.settimeout(timeout)
+    try:
+        connection.connect(os.fspath(socket_path))
+        connection.sendall(encode_frame(request))
+        acknowledgement = decode_frame(connection)
+        if acknowledgement != {"version": 1, "ok": True, "operation": "live_subscribe"}:
+            raise IpcError("IPC subscription was rejected")
+        connection.settimeout(None)
+        return IpcSubscription(connection)
+    except IpcError:
+        connection.close()
+        raise
+    except OSError as exc:
+        connection.close()
+        raise IpcTransportError("IPC subscription transport failed") from exc
+
+
 def encode_frame(value: Mapping[str, object]) -> bytes:
     if not isinstance(value, Mapping):
         raise IpcError("IPC request must be an object")
@@ -156,10 +220,12 @@ __all__ = [
     "MAX_FRAME_BYTES",
     "IpcError",
     "IpcReasonCode",
+    "IpcSubscription",
     "IpcTransportError",
     "decode_frame",
     "encode_frame",
     "ensure_runtime_dir",
+    "open_ipc_subscription",
     "peer_uid",
     "send_request",
 ]

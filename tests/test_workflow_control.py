@@ -154,6 +154,21 @@ class _StaticTerminalClient:
     async def refresh(self) -> TerminalUiSnapshot:
         return self.snapshot
 
+    def add_live_listener(self, _listener: object) -> None:
+        return None
+
+    def live_keyframe(self, _dispatch_id: str) -> None:
+        return None
+
+    def live_stream_active(self, _dispatch_id: str) -> bool:
+        return False
+
+    async def subscribe_live(self, _worker_id: str) -> None:
+        return None
+
+    async def close_live_stream(self) -> None:
+        return None
+
 
 def _terminal_snapshot(*, connected: bool = True) -> TerminalUiSnapshot:
     worker = WorkerView(

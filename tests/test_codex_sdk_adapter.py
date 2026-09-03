@@ -31,6 +31,7 @@ from codex_flow.domain import (
     ConversationHistoryStatus,
     ConversationSubjectKind,
     Generation,
+    LiveToolState,
     ReasoningEffort,
     Sandbox,
     SkillInput,
@@ -251,6 +252,135 @@ class CodexSdkAdapterTests(unittest.TestCase):
         self.assertEqual(client.thread.turn_calls[0]["model"], "gpt-test")
         self.assertEqual(client.thread.turn_calls[0]["sandbox"], "sdk-read-only")
         self.assertEqual(client.thread.turn_calls[0]["output_schema"], SCHEMA)
+
+    def test_live_callback_coalesces_redacted_assistant_deltas_and_typed_tool_states(self) -> None:
+        client = FakeClient()
+        turn = FakeTurn(
+            "turn-1",
+            [
+                _event("turn/started", SimpleNamespace(turn=SimpleNamespace(id="turn-1"))),
+                _event(
+                    "item/agentMessage/delta",
+                    SimpleNamespace(
+                        item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", id="agent-1")),
+                        delta="hello token=private ",
+                    ),
+                ),
+                _event(
+                    "item/started",
+                    SimpleNamespace(
+                        item=SimpleNamespace(
+                            root=SimpleNamespace(
+                                type="commandExecution",
+                                id="tool-1",
+                                status=SimpleNamespace(value="inProgress"),
+                                command="cat /private/secret.txt",
+                                image="/private/input.png",
+                            )
+                        )
+                    ),
+                ),
+                _event(
+                    "item/agentMessage/delta",
+                    SimpleNamespace(
+                        item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", id="agent-1")),
+                        delta="value",
+                    ),
+                ),
+                _event(
+                    "item/completed",
+                    SimpleNamespace(
+                        item=SimpleNamespace(
+                            root=SimpleNamespace(
+                                type="commandExecution",
+                                id="tool-1",
+                                status=SimpleNamespace(value="completed"),
+                                aggregated_output="token=tool-secret raw output",
+                            )
+                        )
+                    ),
+                ),
+                _event(
+                    "item/completed",
+                    SimpleNamespace(
+                        item=SimpleNamespace(root=SimpleNamespace(text=json.dumps({"ok": True}))),
+                    ),
+                ),
+                _event(
+                    "turn/completed",
+                    SimpleNamespace(
+                        turn=SimpleNamespace(id="turn-1", status=SimpleNamespace(value="completed"), error=None)
+                    ),
+                ),
+            ],
+        )
+        client.thread = FakeThread("thread-1")
+        client.thread.turn = lambda _input, **_kwargs: turn  # type: ignore[method-assign]
+        adapter = CodexSdkAdapter(self.config(), client_factory=lambda: client, sdk=_sdk())
+        identity = adapter.start_thread()
+        frames = []
+
+        adapter.run_turn(identity, "hello", output_schema=SCHEMA, live_callback=frames.append)
+
+        self.assertGreaterEqual(len(frames), 4)
+        self.assertEqual([frame.live_revision for frame in frames], sorted(frame.live_revision for frame in frames))
+        self.assertEqual(frames[-1].assistant_text, "hello token=[REDACTED] value")
+        self.assertEqual(frames[-1].tools[0].state, LiveToolState.COMPLETED)
+        self.assertTrue(frames[-1].tools[0].path_present)
+        self.assertTrue(frames[-1].tools[0].image_present)
+        self.assertNotIn("private", repr(frames))
+
+    def test_live_callback_accepts_official_delta_and_tool_progress_payload_shapes(self) -> None:
+        client = FakeClient()
+        turn = FakeTurn(
+            "turn-1",
+            [
+                _event("turn/started", SimpleNamespace(turn=SimpleNamespace(id="turn-1"))),
+                _event(
+                    "item/agentMessage/delta",
+                    SimpleNamespace(
+                        delta="official assistant fragment", item_id="agent-1", thread_id="thread-1", turn_id="turn-1"
+                    ),
+                ),
+                _event(
+                    "item/commandExecution/outputDelta",
+                    SimpleNamespace(
+                        delta="private command output", item_id="tool-1", thread_id="thread-1", turn_id="turn-1"
+                    ),
+                ),
+                _event(
+                    "item/mcpToolCall/progress",
+                    SimpleNamespace(
+                        message="private MCP progress", item_id="tool-2", thread_id="thread-1", turn_id="turn-1"
+                    ),
+                ),
+                _event(
+                    "item/completed",
+                    SimpleNamespace(
+                        item=SimpleNamespace(root=SimpleNamespace(text=json.dumps({"ok": True}))),
+                    ),
+                ),
+                _event(
+                    "turn/completed",
+                    SimpleNamespace(
+                        turn=SimpleNamespace(id="turn-1", status=SimpleNamespace(value="completed"), error=None)
+                    ),
+                ),
+            ],
+        )
+        client.thread = FakeThread("thread-1")
+        client.thread.turn = lambda _input, **_kwargs: turn  # type: ignore[method-assign]
+        adapter = CodexSdkAdapter(self.config(), client_factory=lambda: client, sdk=_sdk())
+        identity = adapter.start_thread()
+        frames = []
+
+        adapter.run_turn(identity, "hello", output_schema=SCHEMA, live_callback=frames.append)
+
+        self.assertEqual(frames[-1].assistant_text, "official assistant fragment")
+        self.assertEqual([tool.kind for tool in frames[-1].tools], ["command", "mcp"])
+        self.assertTrue(all(tool.state is LiveToolState.RUNNING for tool in frames[-1].tools))
+        self.assertNotIn("private command output", repr(frames))
+        self.assertNotIn("private MCP progress", repr(frames))
 
     def test_tool_notifications_emit_only_bounded_redacted_summaries(self) -> None:
         mcp = codex_sdk_module._event_from_notification(

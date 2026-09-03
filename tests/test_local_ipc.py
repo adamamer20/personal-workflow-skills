@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import socket
+
 import pytest
 
-from codex_flow.ipc import MAX_FRAME_BYTES, IpcError, IpcReasonCode, decode_frame, encode_frame, recv_exact
+from codex_flow.ipc import (
+    MAX_FRAME_BYTES,
+    IpcError,
+    IpcReasonCode,
+    IpcSubscription,
+    decode_frame,
+    encode_frame,
+    recv_exact,
+)
 
 
 class _FragmentedReader:
@@ -44,3 +54,15 @@ def test_ipc_classifies_non_json_response_separately_from_oversized_frame() -> N
 def test_recv_exact_rejects_peer_close_mid_frame() -> None:
     with pytest.raises(IpcError, match="fragmented frame"):
         recv_exact(_FragmentedReader(b"short"), 10)
+
+
+def test_ipc_subscription_receives_push_frames_and_closes_idempotently() -> None:
+    client, server = socket.socketpair()
+    subscription = IpcSubscription(client)
+    try:
+        server.sendall(encode_frame({"version": 1, "ok": True, "event": "keyframe"}))
+        assert subscription.receive() == {"version": 1, "ok": True, "event": "keyframe"}
+    finally:
+        subscription.close()
+        subscription.close()
+        server.close()

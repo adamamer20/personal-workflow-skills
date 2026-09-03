@@ -53,6 +53,11 @@ from codex_flow.domain import (
     DiagnosticEvent,
     DispatchId,
     Generation,
+    LiveSubscriptionEvent,
+    LiveSubscriptionEventKind,
+    LiveToolKeyframe,
+    LiveToolState,
+    LiveTurnKeyframe,
     LiveWorkerStatus,
     ReasoningEffort,
     RecoveryStrategy,
@@ -726,6 +731,9 @@ class _TerminalUiLiveClient:
     def command_status(self, _command_id: str) -> ControlCommand | None:
         return None
 
+    def live_stream_active(self, _dispatch_id: str) -> bool:
+        return False
+
 
 class _HistoryTerminalLiveClient(_TerminalUiLiveClient):
     def __init__(self) -> None:
@@ -751,6 +759,14 @@ class _HistoryTerminalLiveClient(_TerminalUiLiveClient):
             (ConversationTurnSlice(fragment.turn_id, 0 if older else 1, (fragment,)),),
             None if older else "older-token",
         )
+
+
+class _FakeLiveSubscription:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _TerminalUiDecisionClient:
@@ -1085,6 +1101,61 @@ def test_terminal_ui_loads_and_prepends_complete_history_without_polling() -> No
     asyncio.run(scenario())
 
 
+def test_terminal_ui_terminal_live_event_reconciles_stable_history() -> None:
+    live = _HistoryTerminalLiveClient()
+    client = TerminalUiClient(live, _TerminalUiDecisionClient())  # type: ignore[arg-type]
+    subscription = _FakeLiveSubscription()
+    frame = LiveTurnKeyframe(
+        DISPATCH,
+        1,
+        2,
+        ThreadIdentity("thread-1"),
+        "turn-1",
+        1,
+        "ephemeral assistant token=[REDACTED]",
+    )
+    events = iter(
+        (
+            LiveSubscriptionEvent(
+                LiveSubscriptionEventKind.KEYFRAME,
+                frame.dispatch_id,
+                frame.generation,
+                frame.attempt,
+                frame.thread_id,
+                frame.turn_id,
+                frame,
+            ),
+            LiveSubscriptionEvent(
+                LiveSubscriptionEventKind.TERMINAL,
+                frame.dispatch_id,
+                frame.generation,
+                frame.attempt,
+                frame.thread_id,
+                frame.turn_id,
+            ),
+        )
+    )
+
+    async def scenario() -> None:
+        await client.refresh()
+        binding = (DISPATCH, 1, 2, "thread-1", "turn-1")
+        client._live_binding = binding
+        client._live_subscription = subscription  # type: ignore[assignment]
+        client._live_task = asyncio.current_task()
+        await client._consume_live(subscription, binding, lambda _subscription: next(events))  # type: ignore[arg-type]
+
+        assert subscription.closed
+        assert client.live_keyframe(DISPATCH) is None
+        pages = client.conversation_pages(DISPATCH)
+        assert [message.content.text for page in pages for turn in page.turns for message in turn.messages] == [
+            "older question",
+            "newest answer",
+        ]
+        assert len(live.history_calls) == 2
+
+    asyncio.run(scenario())
+
+
 def test_terminal_ui_discards_history_on_disconnect_and_identity_replacement() -> None:
     class ReplaceableHistoryClient(_HistoryTerminalLiveClient):
         thread_id = "thread-1"
@@ -1184,6 +1255,35 @@ def test_terminal_ui_reassembles_one_message_split_across_pages() -> None:
     rendered = CodexFlowTerminalApp._conversation_messages(pages)
 
     assert rendered == ("USER · text\nfirst second",)
+
+
+def test_terminal_ui_renders_cumulative_live_assistant_and_inline_typed_tools() -> None:
+    frame = LiveTurnKeyframe(
+        DISPATCH,
+        1,
+        2,
+        ThreadIdentity("thread-1"),
+        "turn-1",
+        7,
+        "assistant text token=[REDACTED]",
+        (
+            LiveToolKeyframe(
+                "tool-1",
+                "command",
+                "command execution",
+                LiveToolState.RUNNING,
+                path_present=True,
+                url_present=False,
+                image_present=True,
+            ),
+        ),
+    )
+
+    rendered = CodexFlowTerminalApp._live_conversation(frame)
+
+    assert "assistant text token=[REDACTED]" in rendered
+    assert "TOOL … · command execution · running · path · image" in rendered
+    assert "thread-1" not in rendered
 
 
 def test_terminal_ui_driver_confirms_interrupt_and_close_has_no_lifecycle_effect() -> None:

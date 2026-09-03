@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
+from functools import partial
 from typing import Any, ClassVar
 
 from textual import events, on
@@ -12,7 +13,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static
 
 from .control_client import ControlClientError
-from .domain import ConversationHistoryPage
+from .domain import ConversationHistoryPage, LiveToolState, LiveTurnKeyframe
+from .ipc import IpcError
 from .tui_client import TerminalUiClient, TerminalUiCommandResult, TerminalUiOfflineError
 from .tui_models import DecisionView, TerminalUiSnapshot, WorkerView
 
@@ -167,6 +169,8 @@ class CodexFlowTerminalApp(App[None]):
         self._worker_ids: list[str] = []
         self._decision_ids: list[str] = []
         self._context_actions = "R Refresh · O Open · T Details"
+        self._live_target: str | None = None
+        self.client.add_live_listener(self._live_frame_received)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -289,6 +293,68 @@ class CodexFlowTerminalApp(App[None]):
             rendered.append(f"{current_key[1].upper()} · {current_key[2]}\n{''.join(current_text)}")
         return tuple(rendered)
 
+    @staticmethod
+    def _live_conversation(frame: LiveTurnKeyframe) -> str:
+        """Render only the bounded cumulative assistant/tool projection."""
+
+        blocks: list[str] = []
+        if frame.assistant_text:
+            blocks.append(f"ASSISTANT · working\n{frame.assistant_text}")
+        else:
+            blocks.append("ASSISTANT · working\nThinking…")
+        state_glyph = {
+            LiveToolState.RUNNING: "…",
+            LiveToolState.COMPLETED: "✓",
+            LiveToolState.FAILED: "!",
+            LiveToolState.INTERRUPTED: "x",
+        }
+        for tool in frame.tools:
+            presence = "".join(
+                marker
+                for marker, present in (
+                    (" · path", tool.path_present),
+                    (" · URL", tool.url_present),
+                    (" · image", tool.image_present),
+                )
+                if present
+            )
+            blocks.append(f"TOOL {state_glyph[tool.state]} · {tool.label} · {tool.state.value}{presence}")
+        return "LIVE RESPONSE · intermediate\n\n" + "\n\n".join(blocks)
+
+    def _live_frame_received(self, _frame: LiveTurnKeyframe | None) -> None:
+        """Update the selected transcript on an already-running event-loop turn."""
+
+        if not self._worker_ids:
+            return
+        worker_id = self._selected_worker_id()
+        if worker_id is None:
+            return
+        worker = next((item for item in self.client.snapshot.workers if item.dispatch_id == worker_id), None)
+        if worker is not None:
+            self._show_worker(worker)
+
+    def _ensure_live_subscription(self, worker: WorkerView) -> None:
+        active = worker.turn_id is not None and worker.state in {"running", "active"}
+        target = worker.dispatch_id if active else None
+        if target == self._live_target and self.client.live_stream_active(target):
+            return
+        self._live_target = target
+        if target is None:
+            self.run_worker(self._close_live_subscription, exclusive=True, group="live")
+        else:
+            self.run_worker(partial(self._start_live_subscription, target), exclusive=True, group="live")
+
+    async def _close_live_subscription(self) -> None:
+        await self.client.close_live_stream()
+
+    async def _start_live_subscription(self, worker_id: str) -> None:
+        try:
+            await self.client.subscribe_live(worker_id)
+        except (ControlClientError, IpcError, OSError, ValueError):
+            # A live stream is presentation-only; its loss cannot make the
+            # selected stable control snapshot or TUI lifecycle fail.
+            return
+
     def _show_worker(self, worker: WorkerView) -> None:
         header = (
             f"{worker.role_label} · {worker.state_label}\n"
@@ -296,7 +362,10 @@ class CodexFlowTerminalApp(App[None]):
         )
         pages_for = getattr(self.client, "conversation_pages", None)
         pages = pages_for(worker.dispatch_id) if callable(pages_for) else ()
-        if pages:
+        live = self.client.live_keyframe(worker.dispatch_id)
+        if live is not None:
+            conversation = self._live_conversation(live)
+        elif pages:
             conversation = (
                 "CONVERSATION · older messages available (L)"
                 if pages[0].older_token is not None
@@ -330,8 +399,12 @@ class CodexFlowTerminalApp(App[None]):
         older_available = bool(pages and pages[0].older_token is not None)
         actions += "L Load older · " if older_available else ""
         self._set_actions(actions + "C Copy · O Open · T Details")
+        self._ensure_live_subscription(worker)
 
     def _show_decision(self, decision: DecisionView) -> None:
+        if self._live_target is not None:
+            self._live_target = None
+            self.run_worker(self._close_live_subscription, exclusive=True, group="live")
         header = f"{decision.kind_label} · {decision.state_label}\nController needs a human decision"
         successors = ", ".join(decision.expected_successors) or "none"
         self.query_one("#conversation-header", Static).update(header)

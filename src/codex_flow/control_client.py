@@ -24,6 +24,9 @@ from .domain import (
     DiagnosticEvent,
     DispatchId,
     Generation,
+    LiveSubscriptionEvent,
+    LiveSubscriptionEventKind,
+    LiveTurnKeyframe,
     LiveWorkerActivity,
     LiveWorkerStatus,
     ProgramControllerContext,
@@ -36,7 +39,7 @@ from .domain import (
     conversation_history_page_from_json,
     strict_json_loads,
 )
-from .ipc import IpcError, send_request
+from .ipc import IpcError, IpcSubscription, open_ipc_subscription, send_request
 
 
 class ControlClientError(RuntimeError):
@@ -709,6 +712,78 @@ class LiveWorkerControlClient:
         # supervisor can distinguish an omitted page token from a malformed
         # one without inferring identity.
         return _decode_conversation_page(self._request("conversation_history", **facts)["page"])
+
+    def subscribe_live(
+        self, *, dispatch_id: str, generation: int, attempt: int, thread_id: str, turn_id: str
+    ) -> IpcSubscription:
+        """Open one bounded push subscription for the exact active worker turn."""
+
+        try:
+            DispatchId(dispatch_id)
+            ThreadIdentity(thread_id)
+        except ValueError as exc:
+            raise ValueError("live subscription identity is invalid") from exc
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise ValueError("live subscription generation is invalid")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise ValueError("live subscription attempt is invalid")
+        if (
+            not isinstance(turn_id, str)
+            or not turn_id
+            or any(character.isspace() or ord(character) < 0x20 for character in turn_id)
+            or len(turn_id.encode("utf-8")) > 512
+        ):
+            raise ValueError("live subscription turn identity is invalid")
+        return open_ipc_subscription(
+            self.socket_path,
+            {
+                "version": 1,
+                "operation": "live_subscribe",
+                "dispatch_id": dispatch_id,
+                "generation": generation,
+                "attempt": attempt,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+            },
+            timeout=self.timeout,
+        )
+
+    @staticmethod
+    def receive_live(subscription: IpcSubscription) -> LiveSubscriptionEvent:
+        """Decode one pushed event at the typed client boundary."""
+
+        raw = subscription.receive()
+        if not isinstance(raw, dict) or raw.get("version") != 1 or raw.get("ok") is not True:
+            raise ControlClientError("supervisor returned malformed live event")
+        kind = raw.get("event")
+        if kind == "keyframe" and set(raw) == {"version", "ok", "event", "keyframe"}:
+            try:
+                keyframe = LiveTurnKeyframe.from_json(raw["keyframe"])
+                return LiveSubscriptionEvent(
+                    LiveSubscriptionEventKind.KEYFRAME,
+                    keyframe.dispatch_id,
+                    keyframe.generation,
+                    keyframe.attempt,
+                    keyframe.thread_id,
+                    keyframe.turn_id,
+                    keyframe,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ControlClientError("supervisor returned malformed live keyframe") from exc
+        required = {"version", "ok", "event", "dispatch_id", "generation", "attempt", "thread_id", "turn_id"}
+        if kind != "terminal" or set(raw) != required:
+            raise ControlClientError("supervisor returned malformed live event")
+        try:
+            return LiveSubscriptionEvent(
+                LiveSubscriptionEventKind.TERMINAL,
+                DispatchId(raw["dispatch_id"]),  # type: ignore[arg-type]
+                raw["generation"],  # type: ignore[arg-type]
+                raw["attempt"],  # type: ignore[arg-type]
+                ThreadIdentity(raw["thread_id"]),  # type: ignore[arg-type]
+                raw["turn_id"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ControlClientError("supervisor returned malformed live terminal event") from exc
 
     def recent_activity(self, dispatch_id: str, *, limit: int = 128) -> LiveWorkerActivity:
         try:

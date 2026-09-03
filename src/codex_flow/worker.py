@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 import errno
-import hashlib
 import json
 import os
+import queue
 import stat
 import sys
 import threading
@@ -39,6 +39,8 @@ from .domain import (
     ConversationSubjectKind,
     IntegrityFailure,
     LifecycleEvent,
+    LiveTurnKeyframe,
+    LiveTurnProjection,
     LocalImageInput,
     MalformedInputFailure,
     NativePermissionAuthority,
@@ -172,6 +174,7 @@ def _run_bounded_schema_turn(
     local_image_inputs: tuple[LocalImageInput, ...] = (),
     event_callback: Callable[[LifecycleEvent], None] | None = None,
     turn_callback: Callable[[str], None] | None = None,
+    live_callback: Callable[[LiveTurnProjection], None] | None = None,
 ) -> TurnObservation:
     """Run a turn and repair only its terminal envelope at most twice."""
 
@@ -185,6 +188,7 @@ def _run_bounded_schema_turn(
                 output_schema=output_schema,
                 event_callback=event_callback,
                 turn_callback=turn_callback,
+                live_callback=live_callback,
             )
         except SchemaOutputInvalid as exc:
             if correction >= SCHEMA_CORRECTION_BUDGET:
@@ -597,6 +601,8 @@ def run_sdk_worker(
     heartbeat: threading.Thread | None = None
     control_stop = threading.Event()
     control_thread: threading.Thread | None = None
+    live_thread: threading.Thread | None = None
+    live_queue: queue.Queue[dict[str, object] | None] = queue.Queue(maxsize=8)
     live_handle: LiveTurnHandle | None = None
     skill_binding = _verified_skill_input(plugin_requirements, plugin_snapshots, plugin_home)
     skill_binding_entered = False
@@ -842,11 +848,10 @@ def run_sdk_worker(
 
         def emit_event(event: LifecycleEvent) -> None:
             nonlocal next_event_sequence, pending_event
-            if _is_lossy_worker_diagnostic(event):
-                # High-volume command output deltas are explicitly lossy
-                # diagnostics. Completed item/turn events retain authoritative
-                # boundaries without allowing output volume to starve result
-                # ingress or supervisor lease renewal.
+            if event.method not in {"turn/started", "turn/completed", "turn/failed", "turn/interrupted"}:
+                # Assistant text and tool bodies have one owner: the
+                # ephemeral live keyframe subscription.  Only empty turn
+                # boundaries remain eligible for the legacy diagnostic ring.
                 return
             outbound_turn_id = event.turn_id or bound_turn_id
             if outbound_turn_id is None:
@@ -868,10 +873,8 @@ def run_sdk_worker(
                 "turn_id": outbound_turn_id,
                 "sequence": current_sequence,
                 "kind": event.method,
-                "text": event.text,
-                "payload_sha256": hashlib.sha256(redact_diagnostic_text(event.text).encode("utf-8")).hexdigest()
-                if event.text is not None
-                else None,
+                "text": None,
+                "payload_sha256": None,
             }
             if pending_event is not None:
                 if not deliver_event(pending_event):
@@ -890,6 +893,59 @@ def run_sdk_worker(
                 next_event_sequence = int(pending_event["sequence"])
                 pending_event = None
 
+        def emit_live_projection(projection: LiveTurnProjection) -> None:
+            """Offer one cumulative frame without joining the result path."""
+
+            try:
+                keyframe = LiveTurnKeyframe.from_projection(
+                    capability["dispatch_id"],
+                    capability["generation"],
+                    capability["attempt"],
+                    projection,
+                )
+                frame = {
+                    "version": 1,
+                    "operation": "live_keyframe",
+                    "dispatch_id": capability["dispatch_id"],
+                    "generation": capability["generation"],
+                    "attempt": capability["attempt"],
+                    "token": capability["token"],
+                    "thread_id": projection.thread_id.id,
+                    "turn_id": projection.turn_id,
+                    "keyframe": keyframe.to_json(),
+                }
+                try:
+                    live_queue.put_nowait(frame)
+                except queue.Full:
+                    try:
+                        live_queue.get_nowait()
+                        live_queue.put_nowait(frame)
+                    except (queue.Empty, queue.Full):
+                        return
+            except (queue.Empty, queue.Full, TypeError, ValueError):
+                # Intermediate live frames are intentionally lossy.  The
+                # official persisted Thread.read projection remains the only
+                # recovery/history authority.
+                return
+
+        def deliver_live() -> None:
+            """Drain frames on a bounded best-effort producer."""
+
+            while True:
+                frame = live_queue.get()
+                if frame is None:
+                    return
+                try:
+                    send_request(socket_path, frame, timeout=0.05)
+                except (IpcError, OSError):
+                    # A disconnected or slow TUI loses only this ephemeral
+                    # frame; heartbeat, controls and result ingress have
+                    # separate producer/IPC paths.
+                    continue
+
+        live_thread = threading.Thread(target=deliver_live, name="codex-flow-live-keyframes", daemon=True)
+        live_thread.start()
+
         observation = _run_bounded_schema_turn(
             adapter,
             thread,
@@ -898,6 +954,7 @@ def run_sdk_worker(
             local_image_inputs=local_image_inputs,
             event_callback=emit_event,
             turn_callback=bind_turn,
+            live_callback=emit_live_projection,
         )
         if observation.final_response is None:
             raise WorkerError("SDK worker returned no terminal agentMessage")
@@ -917,6 +974,18 @@ def run_sdk_worker(
             control_thread.join(timeout=3.0)
             if control_thread.is_alive():
                 raise WorkerError("worker control producer did not quiesce before result submission")
+        # Do not flush intermediate frames before terminal ingress.  A
+        # terminal result and its successor wake are higher priority.
+        if live_thread is not None:
+            try:
+                live_queue.put_nowait(None)
+            except queue.Full:
+                try:
+                    live_queue.get_nowait()
+                    live_queue.put_nowait(None)
+                except (queue.Empty, queue.Full):
+                    pass
+            live_thread.join(timeout=0.1)
         heartbeat_stop.set()
         if heartbeat is not None:
             heartbeat.join(timeout=3.0)
@@ -935,6 +1004,16 @@ def run_sdk_worker(
         heartbeat_stop.set()
         if heartbeat is not None:
             heartbeat.join(timeout=1.0)
+        if live_thread is not None:
+            try:
+                live_queue.put_nowait(None)
+            except queue.Full:
+                try:
+                    live_queue.get_nowait()
+                    live_queue.put_nowait(None)
+                except (queue.Empty, queue.Full):
+                    pass
+            live_thread.join(timeout=1.0)
         if skill_binding_entered:
             skill_binding.__exit__(None, None, None)
         adapter.close()

@@ -7,6 +7,7 @@ import os
 import socket
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -32,6 +33,7 @@ from codex_flow.domain import (
     ControllerGenerationState,
     ControllerGenerationStatus,
     Generation,
+    LiveTurnKeyframe,
     NativePermissionAuthority,
     NativePermissionMode,
     RecoveryActionKind,
@@ -3850,6 +3852,126 @@ def test_high_volume_worker_events_are_lossy_but_terminal_boundaries_are_not() -
     assert not worker_module._is_lossy_worker_diagnostic(
         worker_module.LifecycleEvent(4_002, "turn/completed", "turn-1")
     )
+
+
+def test_live_keyframe_broker_is_ephemeral_bounded_identity_bound_and_terminal_prioritized(
+    tmp_path: Path,
+) -> None:
+    ledger = _queued_ledger(tmp_path)
+    authority = _supervisor(ledger, tmp_path)
+    epoch = int(authority["epoch"])
+    ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="a" * 64)
+    ledger.set_queue_state(DISPATCH, "starting", epoch=epoch)
+    token = "live-keyframe-worker"
+    token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    ledger.issue_attempt_capability(
+        DISPATCH,
+        generation=1,
+        attempt=1,
+        operation="submit_result",
+        schema_sha256=model_facing_result_schema_sha256(),
+        workspace_path=tmp_path,
+        backend="sdk_headless",
+        token_sha256=token_hash,
+        expires_at="9999-12-31T23:59:59Z",
+    )
+    ledger.bind_worker_liveness(
+        DISPATCH,
+        epoch=epoch,
+        generation=1,
+        attempt=1,
+        pid=os.getpid(),
+        process_birth_identity="live-keyframe-worker",
+        lease_token_sha256=token_hash,
+    )
+    ledger.bind_worker_thread(
+        DISPATCH,
+        epoch=epoch,
+        generation=1,
+        attempt=1,
+        token=token,
+        thread_id="live-thread",
+    )
+    supervisor = _configured_supervisor(ledger, tmp_path, epoch)
+    supervisor._active_turns = {DISPATCH: (1, 1, "live-thread", "live-turn")}
+    request = {
+        "version": 1,
+        "operation": "live_subscribe",
+        "dispatch_id": DISPATCH,
+        "generation": 1,
+        "attempt": 1,
+        "thread_id": "live-thread",
+        "turn_id": "live-turn",
+    }
+    subscriber = supervisor._live_subscription(request)
+    before = "\n".join(ledger._db().iterdump())
+
+    for revision in range(1, 65):
+        keyframe = LiveTurnKeyframe(
+            DISPATCH,
+            1,
+            1,
+            ThreadIdentity("live-thread"),
+            "live-turn",
+            revision,
+            f"assistant revision {revision} token=[REDACTED]",
+        )
+        response = supervisor._publish_live_keyframe(
+            {
+                "version": 1,
+                "operation": "live_keyframe",
+                "dispatch_id": DISPATCH,
+                "generation": 1,
+                "attempt": 1,
+                "token": token,
+                "thread_id": "live-thread",
+                "turn_id": "live-turn",
+                "keyframe": keyframe.to_json(),
+            }
+        )
+        assert response["ok"] is True
+
+    assert subscriber.frames.qsize() == 8
+    newest = subscriber.frames.queue[-1]
+    assert newest.live_revision == 64
+    assert "token=[REDACTED]" in newest.assistant_text
+    replay = supervisor._publish_live_keyframe(
+        {
+            "version": 1,
+            "operation": "live_keyframe",
+            "dispatch_id": DISPATCH,
+            "generation": 1,
+            "attempt": 1,
+            "token": token,
+            "thread_id": "live-thread",
+            "turn_id": "live-turn",
+            "keyframe": LiveTurnKeyframe(
+                DISPATCH,
+                1,
+                1,
+                ThreadIdentity("live-thread"),
+                "live-turn",
+                1,
+                "replayed token=[REDACTED]",
+            ).to_json(),
+        }
+    )
+    assert replay == {"version": 1, "ok": True, "operation": "live_keyframe", "delivered": 0}
+    assert subscriber.frames.queue[-1].live_revision == 64
+    assert "private" not in json.dumps(ledger.recent_activity(DISPATCH))
+    assert "\n".join(ledger._db().iterdump()) == before
+
+    client, server = socket.socketpair()
+    stream = threading.Thread(target=supervisor._serve_live_connection, args=(server, subscriber), daemon=True)
+    stream.start()
+    assert decode_frame(client) == {"version": 1, "ok": True, "operation": "live_subscribe"}
+    supervisor._close_live_subject(DISPATCH, (1, 1, "live-thread", "live-turn"))
+    terminal = decode_frame(client)
+    assert terminal["event"] == "terminal"
+    stream.join(timeout=2)
+    assert not stream.is_alive()
+    client.close()
+    ledger.close()
 
 
 def test_foreground_worker_event_volume_does_not_rescan_and_result_ingress_stays_live(

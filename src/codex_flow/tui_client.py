@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,9 +27,13 @@ from .domain import (
     ControllerDecisionStatus,
     ConversationHistoryPage,
     ConversationHistoryStatus,
+    LiveSubscriptionEvent,
+    LiveSubscriptionEventKind,
+    LiveTurnKeyframe,
     LiveWorkerStatus,
     redact_control_text,
 )
+from .ipc import IpcError, IpcSubscription
 from .tui_models import DecisionView, TerminalUiSnapshot, WorkerView
 
 
@@ -80,6 +85,11 @@ class TerminalUiClient:
         self._pending_controls: dict[tuple[object, ...], _PendingControlRequest] = {}
         self._history_pages: dict[str, list[ConversationHistoryPage]] = {}
         self._history_bindings: dict[str, tuple[str, int | None, int | None, int | None]] = {}
+        self._live_keyframes: dict[str, LiveTurnKeyframe] = {}
+        self._live_binding: tuple[str, int, int, str, str] | None = None
+        self._live_subscription: IpcSubscription | None = None
+        self._live_task: asyncio.Task[None] | None = None
+        self._live_listeners: list[Callable[[LiveTurnKeyframe | None], None]] = []
 
     @classmethod
     def for_state_root(cls, state_root: Path) -> TerminalUiClient:
@@ -89,6 +99,135 @@ class TerminalUiClient:
     @property
     def snapshot(self) -> TerminalUiSnapshot:
         return self._last_snapshot
+
+    def add_live_listener(self, listener: Callable[[LiveTurnKeyframe | None], None]) -> None:
+        """Register one in-loop presentation listener for ephemeral frames."""
+
+        if listener not in self._live_listeners:
+            self._live_listeners.append(listener)
+
+    def live_keyframe(self, dispatch_id: str) -> LiveTurnKeyframe | None:
+        """Return only the current identity-bound ephemeral frame."""
+
+        frame = self._live_keyframes.get(dispatch_id)
+        if frame is None:
+            return None
+        status = self._worker_statuses.get(dispatch_id)
+        if status is None or status.active_turn_id != frame.turn_id:
+            return None
+        return frame
+
+    def live_stream_active(self, dispatch_id: str) -> bool:
+        """Report whether the selected worker still owns an open live stream."""
+
+        binding = self._live_binding
+        task = self._live_task
+        return binding is not None and binding[0] == dispatch_id and task is not None and not task.done()
+
+    def _notify_live(self, frame: LiveTurnKeyframe | None) -> None:
+        for listener in tuple(self._live_listeners):
+            try:
+                listener(frame)
+            except Exception:
+                # A presentation listener is never a control-plane authority.
+                continue
+
+    async def close_live_stream(self) -> None:
+        """Close one ephemeral stream and discard its in-memory frame."""
+
+        subscription = self._live_subscription
+        task = self._live_task
+        self._live_subscription = None
+        self._live_task = None
+        self._live_binding = None
+        self._live_keyframes.clear()
+        if subscription is not None:
+            subscription.close()
+        current = asyncio.current_task()
+        if task is not None and task is not current:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def subscribe_live(self, worker_id: str) -> None:
+        """Subscribe to one selected active worker without a timer or poll."""
+
+        status = self.worker_status(worker_id)
+        if status.thread_id is None or status.active_turn_id is None or status.state not in {"running", "active"}:
+            if self._live_binding is not None and self._live_binding[0] == worker_id:
+                await self.close_live_stream()
+            return
+        binding = (
+            worker_id,
+            int(status.generation),
+            status.attempt,
+            status.thread_id.id,
+            status.active_turn_id,
+        )
+        if binding == self._live_binding and self._live_task is not None and not self._live_task.done():
+            return
+        opener = getattr(self._live, "subscribe_live", None)
+        receiver = getattr(self._live, "receive_live", None)
+        if not callable(opener) or not callable(receiver):
+            return
+        await self.close_live_stream()
+        subscription = await asyncio.to_thread(
+            opener,
+            dispatch_id=worker_id,
+            generation=binding[1],
+            attempt=binding[2],
+            thread_id=binding[3],
+            turn_id=binding[4],
+        )
+        self._live_binding = binding
+        self._live_subscription = subscription
+        self._live_task = asyncio.create_task(self._consume_live(subscription, binding, receiver))
+
+    async def _consume_live(
+        self,
+        subscription: IpcSubscription,
+        binding: tuple[str, int, int, str, str],
+        receiver: Callable[[IpcSubscription], LiveSubscriptionEvent],
+    ) -> None:
+        try:
+            while True:
+                event = await asyncio.to_thread(receiver, subscription)
+                if (
+                    str(event.dispatch_id) != binding[0]
+                    or int(event.generation) != binding[1]
+                    or int(event.attempt) != binding[2]
+                    or event.thread_id.id != binding[3]
+                    or event.turn_id != binding[4]
+                ):
+                    continue
+                if event.kind is LiveSubscriptionEventKind.KEYFRAME:
+                    frame = event.keyframe
+                    if frame is not None and frame.live_revision > (
+                        self._live_keyframes.get(binding[0]).live_revision if binding[0] in self._live_keyframes else 0
+                    ):
+                        self._live_keyframes[binding[0]] = frame
+                        self._notify_live(frame)
+                    continue
+                self._live_keyframes.pop(binding[0], None)
+                self._notify_live(None)
+                try:
+                    await self.refresh()
+                    if self._last_snapshot.connected:
+                        await self.reconcile_conversation(worker_id=binding[0])
+                except (ControlClientError, OSError, ValueError):
+                    # The stable history path reports its own unavailable or
+                    # incomplete state; never manufacture a transcript here.
+                    pass
+                self._notify_live(None)
+                return
+        except (ControlClientError, IpcError, OSError):
+            self._live_keyframes.pop(binding[0], None)
+            self._notify_live(None)
+        finally:
+            if self._live_subscription is subscription:
+                self._live_subscription = None
+                self._live_task = None
+                self._live_binding = None
+            subscription.close()
 
     async def refresh(self) -> TerminalUiSnapshot:
         """Refresh only when called by a user or lifecycle event."""
@@ -100,6 +239,7 @@ class TerminalUiClient:
                 asyncio.to_thread(self._decisions.pending),
             )
         except (ControlClientError, OSError) as exc:
+            await self.close_live_stream()
             self._history_pages.clear()
             self._history_bindings.clear()
             self._last_snapshot = TerminalUiSnapshot(
@@ -144,6 +284,15 @@ class TerminalUiClient:
         )
         self._worker_statuses = {str(item.dispatch_id): item for item in workers}
         self._decision_statuses = {str(item.decision_id): item for item in decisions}
+        if self._live_binding is not None:
+            current = self._worker_statuses.get(self._live_binding[0])
+            if (
+                current is None
+                or current.active_turn_id != self._live_binding[4]
+                or current.generation != self._live_binding[1]
+                or current.attempt != self._live_binding[2]
+            ):
+                await self.close_live_stream()
         return self._last_snapshot
 
     async def load_conversation(
@@ -199,6 +348,20 @@ class TerminalUiClient:
 
     def conversation_pages(self, subject_id: str) -> tuple[ConversationHistoryPage, ...]:
         return tuple(self._history_pages.get(subject_id, ()))
+
+    async def reconcile_conversation(self, *, worker_id: str) -> tuple[ConversationHistoryPage, ...]:
+        """Rebuild the complete bounded persisted conversation after terminal/reconnect."""
+
+        page = await self.load_conversation(worker_id=worker_id)
+        pages = self._history_pages.get(worker_id, [])
+        page_count = 1
+        while page.status is ConversationHistoryStatus.AVAILABLE and page.older_token is not None:
+            page_count += 1
+            if page_count > 2_048:
+                raise ControlClientError("conversation history exceeds its bounded page count")
+            page = await self.load_conversation(worker_id=worker_id, older=True)
+            pages = self._history_pages.get(worker_id, [])
+        return tuple(pages)
 
     def worker_status(self, dispatch_id: str) -> LiveWorkerStatus:
         try:
