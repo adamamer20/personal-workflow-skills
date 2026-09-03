@@ -78,6 +78,7 @@ _RESPONSE_FIELDS = {
     "controller_reset_generation_delivery": {"version", "ok", "generation"},
     "program_pending": {"version", "ok", "decisions"},
     "program_status": {"version", "ok", "decision"},
+    "program_start": {"version", "ok", "decision"},
     "program_context": {"version", "ok", "context"},
     "program_claim": {"version", "ok", "claim"},
     "program_submit_actions": {"version", "ok", "receipt"},
@@ -87,8 +88,22 @@ _RESPONSE_FIELDS = {
     "conversation_history": {"version", "ok", "page"},
 }
 
+_SAFE_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _sanitized_reason(value: object) -> str | None:
+    """Return one bounded protocol reason without exposing peer detail."""
+
+    if isinstance(value, str) and _SAFE_REASON_CODE.fullmatch(value):
+        return value
+    return None
+
 
 def _response(response: object, *, operation: str) -> dict[str, object]:
+    if isinstance(response, dict) and response.get("ok") is False:
+        reason = _sanitized_reason(response.get("reason_code")) or _sanitized_reason(response.get("error"))
+        if reason is not None:
+            raise ControlClientError(f"control request rejected: {reason}")
     expected = _RESPONSE_FIELDS.get(operation)
     if (
         expected is None
@@ -590,7 +605,12 @@ class LiveWorkerControlClient:
                 send_request(self.socket_path, {"version": 1, "operation": operation, **facts}, timeout=self.timeout),
                 operation=operation,
             )
-        except (IpcError, OSError) as exc:
+        except IpcError as exc:
+            reason = _sanitized_reason(getattr(exc, "reason_code", None))
+            if reason is not None:
+                raise ControlClientError(f"supervisor control response rejected: {reason}") from exc
+            raise ControlClientError("supervisor control endpoint is unavailable") from exc
+        except OSError as exc:
             raise ControlClientError("supervisor control endpoint is unavailable") from exc
 
     def _send_control(self, operation: str, **facts: object) -> dict[str, object]:
@@ -602,12 +622,28 @@ class LiveWorkerControlClient:
                 {"version": 1, "operation": operation, **facts},
                 timeout=self.timeout,
             )
-        except (IpcError, OSError) as exc:
+        except IpcError as exc:
+            reason = _sanitized_reason(getattr(exc, "reason_code", None))
+            if reason is not None:
+                raise ControlCommandPostSendUncertain(
+                    f"live-control reply was not observed; reason={reason}; durable command state is uncertain"
+                ) from exc
             raise ControlCommandPostSendUncertain(
                 "live-control reply was not observed; durable command state is uncertain"
             ) from exc
-        if response == {"version": 1, "ok": False, "error": "request_rejected"}:
-            raise ControlCommandRejected("supervisor explicitly rejected the live-control command")
+        except OSError as exc:
+            raise ControlCommandPostSendUncertain(
+                "live-control reply was not observed; durable command state is uncertain"
+            ) from exc
+        if isinstance(response, dict) and response.get("ok") is False:
+            reason = _sanitized_reason(response.get("reason_code")) or _sanitized_reason(response.get("error"))
+            if response.get("error") == "request_rejected":
+                detail = f": {reason}" if reason is not None else ""
+                raise ControlCommandRejected(f"supervisor explicitly rejected the live-control command{detail}")
+            if reason == "response_too_large":
+                raise ControlCommandPostSendUncertain(
+                    "live-control response exceeded the bounded frame; durable command state is uncertain"
+                )
         try:
             return _response(response, operation=operation)
         except ControlClientError as exc:
@@ -917,7 +953,12 @@ class ControllerDecisionClient:
             response = send_request(
                 self.socket_path, {"version": 1, "operation": operation, **facts}, timeout=self.timeout
             )
-        except (IpcError, OSError) as exc:
+        except IpcError as exc:
+            reason = _sanitized_reason(getattr(exc, "reason_code", None))
+            if reason is not None:
+                raise ControlClientError(f"supervisor control response rejected: {reason}") from exc
+            raise ControlClientError("supervisor control endpoint is unavailable") from exc
+        except OSError as exc:
             raise ControlClientError("supervisor control endpoint is unavailable") from exc
         return _response(response, operation=operation)
 
@@ -945,6 +986,16 @@ class ControllerDecisionClient:
     def program_status(self, decision_id: str) -> ProgramControllerDecisionStatus:
         identity = ControllerDecisionId(decision_id)
         return _decode_program_status(self._request("program_status", decision_id=str(identity))["decision"])
+
+    def program_start(self, program_id: str, *, event_key: str = "start") -> ProgramControllerDecisionStatus:
+        """Emit one idempotent program-start event through the supervisor."""
+
+        if not isinstance(program_id, str) or not program_id.strip():
+            raise ValueError("program id is invalid")
+        if not isinstance(event_key, str) or not event_key.strip():
+            raise ValueError("program event key is invalid")
+        response = self._request("program_start", program_id=program_id, event_key=event_key)
+        return _decode_program_status(response["decision"])
 
     def program_context(
         self,

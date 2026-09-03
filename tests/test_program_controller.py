@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 import codex_flow.cli as cli_module
+import codex_flow.control_client as control_client_module
+import codex_flow.controller as controller_module
+import codex_flow.supervisor as supervisor_module
 from codex_flow.backends.codex_sdk import _provider_output_schema
 from codex_flow.cli import app
 from codex_flow.contracts import (
@@ -15,6 +18,7 @@ from codex_flow.contracts import (
     ModelFacingProgramControllerActionBundle,
     model_facing_program_controller_action_schema,
 )
+from codex_flow.control_client import ControlClientError, ControllerDecisionClient
 from codex_flow.domain import (
     AcceptanceMode,
     ControllerActionReceipt,
@@ -48,7 +52,7 @@ from codex_flow.domain import (
     validate_output_schema,
     validate_structured_output,
 )
-from codex_flow.ipc import decode_frame, encode_frame
+from codex_flow.ipc import IpcError, IpcReasonCode, decode_frame, encode_frame
 from codex_flow.ledger import Ledger, StaleWriter
 from codex_flow.program_controller import ProgramControllerGenerationRecovery, ProgramControllerGenerationRunner
 from codex_flow.supervisor import Supervisor
@@ -516,6 +520,147 @@ def test_program_context_ipc_projection_is_typed_and_revision_bound(tmp_path: Pa
             )
     finally:
         supervisor.close()
+
+
+def test_program_status_ipc_thaws_nested_payload_before_bounded_framing(tmp_path: Path) -> None:
+    supervisor = Supervisor(tmp_path)
+    try:
+        supervisor.ledger.register_program(_graph(tmp_path))
+        decision = supervisor.ledger.start_program("program")
+        client, server = socket.socketpair()
+        try:
+            client.sendall(
+                encode_frame(
+                    {
+                        "version": 1,
+                        "operation": "program_status",
+                        "decision_id": str(decision.decision_id),
+                    }
+                )
+            )
+            assert supervisor._accept_connection(server) == "program_status"
+            response = decode_frame(client)
+        finally:
+            client.close()
+        assert response["ok"] is True
+        decision_payload = response["decision"]
+        assert isinstance(decision_payload, dict)
+        payload = decision_payload["payload"]
+        assert isinstance(payload, dict)
+        assert isinstance(payload["payload"], dict)
+        assert isinstance(payload["payload"]["ready_milestones"], list)
+    finally:
+        supervisor.close()
+
+
+def test_program_start_ipc_routes_through_controller_and_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = Supervisor(tmp_path)
+    try:
+        supervisor.ledger.register_program(_graph(tmp_path))
+        calls: list[tuple[str, str]] = []
+
+        class _Controller:
+            def __init__(self, state_root: Path, *, worktrees: object) -> None:
+                assert state_root == tmp_path.resolve()
+                assert worktrees is supervisor._worktrees
+
+            def start_program(self, program_id: str, *, event_key: str) -> object:
+                calls.append((program_id, event_key))
+                return supervisor.ledger.start_program(program_id, event_key=event_key)
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(controller_module, "Controller", _Controller)
+        request = {
+            "version": 1,
+            "operation": "program_start",
+            "program_id": "program",
+            "event_key": "start",
+        }
+        first = supervisor._controller_request(request)
+        second = supervisor._controller_request(request)
+        assert calls == [("program", "start"), ("program", "start")]
+        assert first == second
+        assert "program_start" in supervisor_module.QUEUE_TRIGGERING_OPERATIONS
+    finally:
+        supervisor.close()
+
+
+def test_program_controller_child_preidentity_exit_is_closed_once_and_not_respawned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = Supervisor(tmp_path)
+    try:
+        supervisor.ledger.register_program(_graph(tmp_path))
+        decision = supervisor.ledger.start_program("program")
+        supervisor.ledger.prepare_controller_generation(decision.decision_id, generation=1)
+
+        class _ExitedChild:
+            def poll(self) -> int:
+                return 2
+
+        decision_id = str(decision.decision_id)
+        supervisor._controller_children[decision_id] = _ExitedChild()  # type: ignore[assignment]
+        assert supervisor._reap_controller_generations() is True
+        status = supervisor.ledger.program_controller_decision(decision.decision_id)
+        generation = supervisor.ledger.controller_generation(decision.decision_id)
+        assert status.state is ControllerDecisionState.HUMAN_ATTENTION_REQUIRED
+        assert generation.state is ControllerGenerationState.AMBIGUOUS
+        assert generation.inspection_outcome == ControllerGenerationState.AMBIGUOUS.value
+        assert supervisor._reap_controller_generations() is False
+
+        spawned: list[bool] = []
+
+        def unexpected_spawn(_status: ProgramControllerDecisionStatus, *, recovery: bool = False) -> bool:
+            spawned.append(recovery)
+            return True
+
+        monkeypatch.setattr(supervisor, "_spawn_program_controller_generation", unexpected_spawn)
+        supervisor.epoch = 1
+        assert supervisor._schedule_program_controller_generations() is False
+        assert spawned == []
+    finally:
+        supervisor.close()
+
+
+def test_program_start_client_preserves_ipc_reason_codes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    client = ControllerDecisionClient(tmp_path / "supervisor.sock")
+    monkeypatch.setattr(
+        control_client_module,
+        "send_request",
+        lambda *_args, **_kwargs: {"version": 1, "ok": False, "error": "response_too_large"},
+    )
+    with pytest.raises(ControlClientError, match="response_too_large"):
+        client.program_start("program")
+
+    def malformed(*_args: object, **_kwargs: object) -> object:
+        raise IpcError("malformed response", reason_code=IpcReasonCode.RESPONSE_NOT_JSON)
+
+    monkeypatch.setattr(control_client_module, "send_request", malformed)
+    with pytest.raises(ControlClientError, match="response_not_json"):
+        client.program_start("program")
+
+
+def test_program_start_client_emits_one_typed_ipc_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    client = ControllerDecisionClient(tmp_path / "supervisor.sock")
+    captured: dict[str, object] = {}
+    status = _runner_status()
+
+    def response(_socket: Path, request: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        captured.update(request)
+        return {"version": 1, "ok": True, "decision": Supervisor._program_status_payload(status)}
+
+    monkeypatch.setattr(control_client_module, "send_request", response)
+    assert client.program_start("program", event_key="operator-start").decision_id == status.decision_id
+    assert captured == {
+        "version": 1,
+        "operation": "program_start",
+        "program_id": "program",
+        "event_key": "operator-start",
+    }
 
 
 def test_program_revision_allows_only_one_claim_and_coalesces_stale_events(tmp_path: Path) -> None:

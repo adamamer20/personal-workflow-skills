@@ -66,8 +66,9 @@ from .domain import (
     is_lossy_worker_diagnostic_method,
     redact_diagnostic_text,
     strict_json_loads,
+    thaw_json,
 )
-from .ipc import IpcError, decode_frame, encode_frame, ensure_runtime_dir, peer_uid
+from .ipc import IpcError, IpcReasonCode, decode_frame, encode_frame, ensure_runtime_dir, peer_uid
 from .ledger import Ledger, LedgerError, RecordNotFound, StaleWriter, SupervisorRefreshBlocked
 from .native_profile import NativeProfileProjection
 from .plugin_capabilities import PluginCapabilityError, _verified_skill_input
@@ -174,6 +175,7 @@ QUEUE_TRIGGERING_OPERATIONS = frozenset(
         "controller_submit_recovered_actions",
         "program_submit_actions",
         "program_submit_recovered_actions",
+        "program_start",
     }
 )
 
@@ -389,6 +391,54 @@ class Supervisor:
         for decision_id, child in tuple(self._controller_children.items()):
             return_code = child.poll()
             if return_code is None:
+                continue
+            # Program-controller children have no queue dispatch row.  A
+            # process that exits while its generation is still
+            # ``delivery_starting`` has not crossed the SDK identity
+            # boundary; close that exact lineage through the existing
+            # inspection CAS before removing it from the in-memory registry.
+            # Otherwise the scheduler would treat the orphan as recoverable
+            # and launch it again on every steady-state cycle.
+            try:
+                program_status = self.ledger.program_controller_decision(decision_id)
+            except RecordNotFound:
+                program_status = None
+            if program_status is not None:
+                try:
+                    generation = self.ledger.controller_generation(
+                        program_status.decision_id, int(program_status.current_generation)
+                    )
+                except RecordNotFound:
+                    generation = None
+                if generation is not None and (
+                    generation.state is ControllerGenerationState.DELIVERY_STARTING
+                    and generation.controller_thread_id is None
+                    and generation.controller_turn_id is None
+                    and generation.inspection_outcome is None
+                ):
+                    try:
+                        inspection = self.ledger.reserve_controller_recovery_inspection(program_status.decision_id)
+                        self.ledger.complete_controller_recovery_inspection(
+                            program_status.decision_id,
+                            inspection_outcome=ControllerGenerationState.AMBIGUOUS.value,
+                            claim=inspection,
+                        )
+                    except StaleWriter:
+                        # Another owner may have completed the exact
+                        # pre-identity transition between the two reads.
+                        # The durable CAS remains authoritative and the child
+                        # can be reaped idempotently.
+                        pass
+                    except (LedgerError, ValueError) as exc:
+                        # Do not silently discard a generation whose durable
+                        # closure lost a CAS race or failed validation.  The
+                        # supervisor must remain fail-closed until an owner
+                        # can reconcile the exact persisted facts.
+                        raise SupervisorError(
+                            "program controller pre-identity failure could not be terminalized"
+                        ) from exc
+                self._controller_children.pop(decision_id, None)
+                changed = True
                 continue
             if return_code == WORKER_EXIT_PROFILE:
                 try:
@@ -1432,6 +1482,9 @@ class Supervisor:
 
         if not isinstance(status, ProgramControllerDecisionStatus):
             raise IpcError("program decision status is not typed")
+        payload = thaw_json(status.payload)
+        if not isinstance(payload, dict):
+            raise IpcError("program decision payload is not JSON")
         return {
             "decision_id": str(status.decision_id),
             "program_id": str(status.program_id),
@@ -1448,7 +1501,7 @@ class Supervisor:
             "action_id": status.action_id,
             "action_sha256": status.action_sha256,
             "deadline": status.deadline,
-            "payload": status.payload,
+            "payload": payload,
         }
 
     @staticmethod
@@ -1537,6 +1590,22 @@ class Supervisor:
                 raise IpcError("program status request has an unsupported shape")
             status = self.ledger.program_controller_decision(ControllerDecisionId(payload["decision_id"]))
             return {"version": 1, "ok": True, "decision": self._program_status_payload(status)}
+        if operation == "program_start":
+            required = {"version", "operation", "program_id", "event_key"}
+            if set(payload) != required:
+                raise IpcError("program start request has an unsupported shape")
+            program_id = payload["program_id"]
+            event_key = payload["event_key"]
+            if not isinstance(program_id, str) or not isinstance(event_key, str):
+                raise IpcError("program start identity is invalid")
+            from .controller import Controller
+
+            controller = Controller(self.state_root, worktrees=self._worktrees)
+            try:
+                decision = controller.start_program(program_id, event_key=event_key)
+            finally:
+                controller.close()
+            return {"version": 1, "ok": True, "decision": self._program_status_payload(decision)}
         if operation == "program_context":
             required = {
                 "version",
@@ -3046,7 +3115,7 @@ class Supervisor:
         try:
             frame = encode_frame(response)
         except IpcError:
-            frame = encode_frame({"version": 1, "ok": False, "error": "response_too_large"})
+            frame = encode_frame({"version": 1, "ok": False, "error": IpcReasonCode.RESPONSE_TOO_LARGE.value})
         try:
             connection.sendall(frame)
         except OSError:

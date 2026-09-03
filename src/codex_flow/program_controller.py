@@ -171,18 +171,21 @@ class ProgramControllerGenerationRunner:
         )
 
     def run(self) -> ProgramControllerGenerationResult:
-        status = self.client.program_status(str(self.decision_id))
-        claim = self.client.program_claim(
-            str(self.decision_id),
-            claimant_id=self.claimant_id,
-            expected_revision=status.revision,
-            generation=int(status.current_generation),
-        )
-        generation = int(claim.generation)
+        status: ProgramControllerDecisionStatus | None = None
+        claim: ControllerDecisionClaim | None = None
+        generation = 0
         identity_bound = False
         thread_started = False
         bound_turn_id: str | None = None
         try:
+            status = self.client.program_status(str(self.decision_id))
+            claim = self.client.program_claim(
+                str(self.decision_id),
+                claimant_id=self.claimant_id,
+                expected_revision=status.revision,
+                generation=int(status.current_generation),
+            )
+            generation = int(claim.generation)
             summary = thaw_json(status.payload)
             if not isinstance(summary, dict):
                 raise RuntimeError("program controller decision summary is malformed")
@@ -251,6 +254,11 @@ class ProgramControllerGenerationRunner:
             # A pre-identity failure can be safely reclaimed; after a thread
             # identity or turn binding, the generation is preserved for the
             # one-shot recovery inspection path.
+            if claim is None or status is None:
+                # The supervisor owns the durable pre-identity closure when
+                # status/claim IPC itself fails.  There is no safe revision
+                # or claimant capability available to reset from this child.
+                raise
             if identity_bound:
                 try:
                     self.client.complete_generation(

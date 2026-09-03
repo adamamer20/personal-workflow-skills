@@ -8,6 +8,7 @@ import socket
 import stat
 import struct
 from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
 
 from .domain import strict_json_loads
@@ -18,6 +19,19 @@ _HEADER = struct.Struct("!I")
 
 class IpcError(RuntimeError):
     """A local protocol or endpoint safety check failed."""
+
+    def __init__(self, message: str, *, reason_code: IpcReasonCode | str | None = None) -> None:
+        self.reason_code = reason_code.value if isinstance(reason_code, IpcReasonCode) else reason_code
+        super().__init__(message)
+
+
+class IpcReasonCode(str, Enum):
+    """Stable, sanitized reasons for bounded response/protocol failures."""
+
+    REQUEST_NOT_JSON = "request_not_json"
+    RESPONSE_NOT_JSON = "response_not_json"
+    FRAME_OVERSIZED = "frame_oversized"
+    RESPONSE_TOO_LARGE = "response_too_large"
 
 
 class IpcTransportError(IpcError):
@@ -32,15 +46,15 @@ def encode_frame(value: Mapping[str, object]) -> bytes:
             "utf-8"
         )
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise IpcError("IPC request is not strict JSON") from exc
+        raise IpcError("IPC request is not strict JSON", reason_code=IpcReasonCode.REQUEST_NOT_JSON) from exc
     if not payload or len(payload) > MAX_FRAME_BYTES:
-        raise IpcError("IPC frame exceeds the bounded payload limit")
+        raise IpcError("IPC frame exceeds the bounded payload limit", reason_code=IpcReasonCode.FRAME_OVERSIZED)
     return _HEADER.pack(len(payload)) + payload
 
 
 def recv_exact(connection: socket.socket, size: int) -> bytes:
     if size < 0 or size > MAX_FRAME_BYTES + _HEADER.size:
-        raise IpcError("IPC frame length is invalid")
+        raise IpcError("IPC frame length is invalid", reason_code=IpcReasonCode.FRAME_OVERSIZED)
     chunks: list[bytes] = []
     remaining = size
     while remaining:
@@ -56,12 +70,12 @@ def decode_frame(connection: socket.socket) -> dict[str, object]:
     header = recv_exact(connection, _HEADER.size)
     size = _HEADER.unpack(header)[0]
     if size == 0 or size > MAX_FRAME_BYTES:
-        raise IpcError("IPC frame exceeds the bounded payload limit")
+        raise IpcError("IPC frame exceeds the bounded payload limit", reason_code=IpcReasonCode.FRAME_OVERSIZED)
     raw = recv_exact(connection, size)
     try:
         decoded = strict_json_loads(raw, max_bytes=MAX_FRAME_BYTES)
     except ValueError as exc:
-        raise IpcError("IPC frame is not strict UTF-8 JSON") from exc
+        raise IpcError("IPC frame is not strict UTF-8 JSON", reason_code=IpcReasonCode.RESPONSE_NOT_JSON) from exc
     if not isinstance(decoded, dict):
         raise IpcError("IPC frame root must be an object")
     return decoded
@@ -141,6 +155,7 @@ def send_request(socket_path: Path, request: Mapping[str, object], *, timeout: f
 __all__ = [
     "MAX_FRAME_BYTES",
     "IpcError",
+    "IpcReasonCode",
     "IpcTransportError",
     "decode_frame",
     "encode_frame",

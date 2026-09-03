@@ -354,17 +354,12 @@ def program_start(
 ) -> None:
     """Emit one coalesced start event to the detached supervisor."""
 
-    controller: Controller | None = None
     try:
-        controller = _controller(state_root)
-        decision = controller.start_program(program_id, event_key=event_key)
+        decision = _controller_decision_client(state_root).program_start(program_id, event_key=event_key)
         _emit_program_payload(_program_decision_payload(decision), as_json=as_json)
     except (ControllerError, ControlClientError, ValueError, OSError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
-    finally:
-        if controller is not None:
-            controller.close()
 
 
 @program_app.command("status")
