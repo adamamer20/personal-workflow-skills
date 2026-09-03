@@ -8385,6 +8385,51 @@ It does not replay the worker, rerun the consumed provider attempt or treat the
 candidate as promoted. The controller can then start the declared objective
 and architecture reviews; the cancelled visual review is not reinstated.
 
+### Review repair and concurrent-baseline reconciliation
+
+The first fixed candidate `a2230ad79d2883d8bb2c5955b37709cce0e12315`
+received one objective P1 and four architecture P1 findings. All five are one
+same-owner serial repair; the tip is not promoted or installed. The repair
+must close:
+
+- `CANDIDATE-PROMOTION-BLOCKER-BYPASS`: `PROMOTE_CANDIDATE` must evaluate the
+  current exact candidate's durable terminal blocker in addition to review
+  findings. A `promotion_blocking` blocker permits review and repair but never
+  promotion until one typed controller action resolves or supersedes it.
+- `ARCH-P1-002`: migration from an installed v18 predecessor is an explicit
+  one-shot transition. The refresh path validates the exact legacy unit,
+  connects only to its verified `supervisor.sock`, arms and observes the old
+  shutdown fence, waits for exact PID/unit inactivity, then performs the v19
+  migration, replaces the unit/command/socket and starts `harness`. This
+  migration-only legacy handoff is deleted from reachability after success and
+  is not a runtime alias, dual command, dual socket listener or fallback.
+- `ARCH-P1-003`: before candidate recording and again before
+  promotion/integration, `WorktreeManager` validates every commit and changed
+  path from the capsule base against exact mutable/protected ownership. An
+  out-of-scope or protected committed path produces a typed candidate-integrity
+  blocker and never `VERIFIED_COMMIT`.
+- `ARCH-P1-004`: retained evidence binds the final successor tip and exact
+  reviewed range, while preserving `9c3dcbc` and `a2230ad` only as superseded
+  predecessor provenance. A later repair commit cannot inherit their review
+  identity.
+- `ARCH-P1-001`: before the worker START, three concurrent dirty paths were
+  observed and explicitly excluded from the planning commit:
+  `plugins/personal-workflow-skills/skills/collect-evidence/SKILL.md`,
+  `plugins/personal-workflow-skills/skills/recover-milestone/SKILL.md`, and
+  `schemas/evidence.schema.json`. They were subsequently committed by their
+  separate owner as `6fa09a3701d97f39a5183701687b4b8bcf62dc17` while this
+  serial task was outstanding. This plan neither claims nor reverts those
+  bytes. For this milestone, `6fa09a3` is the frozen external trunk baseline;
+  implementation ownership and evidence begin strictly after it. Reviewers
+  verify that boundary separately and review the final successor range
+  `6fa09a3..final-tip`, without attributing the baseline commit to this owner.
+
+The failed installed v18 service and already-migrated real checkout ledger are
+diagnostic state, not implementation evidence. Repair tests use disposable
+units and ledgers only. After fresh objective and architecture acceptance, the
+integration owner performs one controlled installation/recovery of the real
+unit; the implementation worker does not mutate it.
+
 The implementation architecture map is:
 
 - Rename `src/codex_flow/supervisor.py` to `src/codex_flow/harness.py` and
@@ -8396,15 +8441,18 @@ The implementation architecture map is:
   four model result status strings or ask the model to serialize Git facts.
 - Modify `src/codex_flow/ledger.py` through one forward migration and atomic
   result-plus-candidate transition. Keep SQLite as the only durable state
-  authority and keep last promoted trunk SHA distinct from physical candidate
-  HEAD.
+  authority, reject promotion while the exact candidate retains a blocking
+  terminal fact, and keep last promoted trunk SHA distinct from physical
+  candidate HEAD.
 - Modify `src/codex_flow/program_controller.py` and
   `src/codex_flow/worktrees.py` only for candidate-bearing state transitions,
-  serial logical promotion and parallel integration validation.
+  exact committed-path/history ownership validation, serial logical promotion
+  and parallel integration validation.
 - Modify `src/codex_flow/cli.py`, `src/codex_flow/service.py`, worker/control
   clients and internal imports for the no-alias harness cutover and one typed
-  candidate adoption/recovery command. The service remains one repository unit
-  and refresh remains forbidden while a worker or controller child is active.
+  candidate adoption/recovery command. The service remains one repository unit;
+  refresh handles one verified legacy predecessor as a migration-only handoff
+  and remains forbidden while a worker or controller child is active.
 - Rename focused supervisor test/evidence terminology where it is current,
   retain immutable historical names where provenance requires them, and add
   one semantic evidence record
@@ -8427,26 +8475,33 @@ ModelFacingCapsule(
     decomposition=(
         "Record a verified commit or preserved dirty-workspace fact atomically for every terminal worker status.",
         "Project typed blocker kind, scope and promotion impact so the controller can review, repair, replan, adopt or abandon without losing work.",
+        "Validate every committed candidate path and terminal promotion blocker before candidate recording, promotion or integration.",
         "Implement serial in-place logical promotion and retain existing exact-worktree integration for parallel mutable lanes.",
-        "Rename the deterministic runtime, CLI, service, socket and current persisted authority from supervisor to harness through one forward-only migration with no alias.",
+        "Rename the deterministic runtime, CLI, service, socket and current persisted authority from supervisor to harness through one fenced migration-only legacy handoff with no surviving alias.",
         "Recover exact terminal-UI commit 925d505 as an unpromoted candidate and prove the controller can start its objective and architecture reviews without replaying the worker.",
     ),
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
         "Completed, external_blocked, needs_decision and failed worker results each preserve a coherent exact workspace commit when present; dirty or commitless failure remains inspectable and never becomes a fabricated candidate.",
         "A candidate-bearing external block, decision or failure can be reviewed and repaired by the controller, while promotion still requires the exact declared review authorities and zero promotion-blocking P0/P1 findings.",
+        "A current candidate with a durable promotion-blocking terminal blocker cannot be promoted or integrated after clean reviews until one revision-bound typed action resolves or supersedes that blocker.",
         "Typed blocker scope prevents a future-milestone prerequisite from blocking the current candidate or independent ready nodes; malformed, stale and cross-program blocker/candidate facts fail closed.",
+        "Candidate recording and promotion reject any commit range that changes a path outside capsule mutable ownership or inside protected ownership, including a clean committed out-of-scope edit.",
         "A serial candidate already committed in the program worktree advances by logical promotion without a same-checkout Git mutation; a parallel candidate still requires exact-base controller-authorized WorktreeManager integration.",
-        "Only codex-flow harness, WorkflowHarness, harness.py and the harness socket/current authority remain reachable after migration; old supervisor commands/imports/current persisted identities fail rather than aliasing.",
+        "One exact installed v18 unit is fenced and stopped through its verified legacy socket before migration; afterward only codex-flow harness, WorkflowHarness, harness.py and the harness socket/current authority remain reachable, and old commands/imports/socket/current persisted identities fail rather than aliasing.",
         "Exact commit 925d505 is adopted only after ancestry, dispatch-workspace and unrelated-commit validation, remains unpromoted, and becomes eligible for objective and architecture review without a provider retry or visual review.",
+        "Evidence binds the final successor commit and exact review range after external baseline 6fa09a3; predecessor candidates remain historical and the three baseline plugin/evidence-schema paths are neither claimed nor reverted.",
         "Focused result, ledger migration, controller, harness, IPC, service, worktree and CLI tests, affected semantic partitions, exact-wheel install/refresh proof, full make check and independent objective/architecture reviews close with P0=0/P1=0.",
     ),
     mutable_surfaces=(
         "src/codex_flow/domain.py",
         "src/codex_flow/contracts.py",
+        "schemas/result.schema.json",
         "src/codex_flow/ledger.py",
         "src/codex_flow/supervisor.py -> src/codex_flow/harness.py",
         "src/codex_flow/program_controller.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/controller_recovery.py",
         "src/codex_flow/worktrees.py",
         "src/codex_flow/cli.py",
         "src/codex_flow/service.py",
@@ -8454,9 +8509,13 @@ ModelFacingCapsule(
         "src/codex_flow/ipc.py",
         "src/codex_flow/control_client.py",
         "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
         "src/codex_flow/tui.py",
         "src/codex_flow/projection.py",
+        "src/codex_flow/live_control_sentinel.py",
+        "src/codex_flow/workflow_control_pilot.py",
         "scripts/install_personal_workflow_skills.py",
+        "scripts/validate.py",
         "README.md",
         "Makefile",
         "workflow.toml",
@@ -8467,9 +8526,13 @@ ModelFacingCapsule(
         "tests/test_live_worker_control.py",
         "tests/test_local_ipc.py",
         "tests/test_controller_execution.py",
+        "tests/test_controller_turn_recovery.py",
+        "tests/test_descriptive_naming.py",
         "tests/test_production_pilots.py",
         "tests/test_plan_compilation.py",
         "tests/test_plugin_installation.py",
+        "tests/test_public_api_semantic_cutover.py",
+        "tests/test_service_lifecycle.py",
         "docs/reviews/evidence/terminal-candidate-retention-and-harness-cutover.json",
     ),
     protected_surfaces=(
@@ -8479,6 +8542,7 @@ ModelFacingCapsule(
         "model-facing capsule/result status compatibility outside the additive typed blocker projection",
         "native authentication/profile and plugin capability authority",
         "historical immutable evidence and migration definitions",
+        "plugins/personal-workflow-skills/skills/collect-evidence/SKILL.md, plugins/personal-workflow-skills/skills/recover-milestone/SKILL.md and schemas/evidence.schema.json at external baseline 6fa09a3",
         "global Codex/App state, remotes, pushes, rebases, resets, history rewrites and implicit cleanup",
     ),
     authorities=(
@@ -8492,7 +8556,7 @@ ModelFacingCapsule(
         "typed blocker scope; support direct serial logical promotion and existing parallel WorktreeManager "
         "integration. Rename supervisor to harness everywhere current with no command/import/socket/persisted "
         "alias, using one forward migration. Do not replay the TUI worker, consume a provider attempt, run a "
-        "visual review, push, rebase, reset or clean work. Run all named gates, stage only owned surfaces, inspect "
+        "visual review, push, rebase, reset or clean work. Close all five named P1 findings, including terminal-blocker promotion gating, committed-path ownership validation, exact final-tip evidence and the migration-only v18 unit/socket handoff. Treat 6fa09a3 as the external baseline and neither claim nor revert its three paths. Run all named gates, stage only owned surfaces, inspect "
         "the staged diff, create one coherent local commit and return one terminal result with reviews pending."
     ),
     recovery_policy="completion_biased",

@@ -164,7 +164,7 @@ def test_remaining_program_graph_is_serial_and_visual_review_stays_cancelled() -
         "9f3d55ee8c1bcaacb8203103cf30617a2d80abd6feb3c45ca0cc79396211b3b2"
     )
     assert graph.node("terminal-candidate-retention-and-harness-cutover").capsule.source_block_sha256 == (
-        "7501940270ceac19075b9ffc41fbd6f824c8409d5efadf4e55b38bba73129304"
+        "3fe79f220dfd041a1e7174941a4a845cffd2ca02bd36a24cc0537be7772eee50"
     )
     assert graph.node("live-plan-dag-revision").capsule.source_block_sha256 == (
         "ce06ff868b44e2d214ec64a12ba53380fd2cdc520220bda8de3d115e4c138b8f"
