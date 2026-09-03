@@ -7666,6 +7666,16 @@ the frozen DAG base.  A dirty baseline that cannot be separated from unrelated
 user bytes blocks fan-out until this plan records a safe separation; a digest
 or test result does not substitute for the commit.
 
+A serial milestone with one mutable owner may work and commit directly in this
+program worktree. Its coherent local commit is both the physical workspace
+candidate and the input to logical promotion; integrating it never invokes a
+same-checkout merge, cherry-pick or reset. The ledger records the last promoted
+trunk SHA separately from the current physical workspace/candidate HEAD. Only
+a promoted serial commit unlocks its successors. A rejected or blocked serial
+commit remains in forward-only local history so repair can continue on top;
+abandoning it requires an explicit controller-authorized revert or replan,
+never implicit cleanup.
+
 Parallel mutable milestones use semantic child lanes in physical sibling Git
 worktrees at
 `<repo-parent>/<repo-name>.worktrees/<program-slug>-<lane-slug>`, each created
@@ -8208,7 +8218,8 @@ to one typed attention event.  The retained wheel is SHA-256
 `0b12f4a62bd6cd36d654034ca650407bfb08e7493e78f52a387b82a4921b0250`,
 421586 bytes.  The canonical installer and protected supervisor refresh have
 activated these bytes at supervisor epoch 46 with no active worker lease or
-refresh fence.  The terminal-UI successor is executable.
+refresh fence. The terminal-UI successor was executed directly in the serial
+program worktree.
 
 ## Next execution — live-coding-agent-terminal-ui
 
@@ -8297,12 +8308,204 @@ ModelFacingCapsule(
 )
 ```
 
+### Terminal-UI candidate and recovery diagnosis
+
+The implementation is a coherent local serial commit
+`925d505d55e963c1d01dd541f67c939f1f716e5c`. Its provider-free implementation
+and package gates passed, but its worker truthfully returned
+`external_blocked` because the separately authorized real delayed-streaming
+sentinel and independent objective/architecture reviews remained outstanding.
+That outcome exposed a controller defect rather than invalidating the commit.
+
+Program `codex-flow-remaining-milestones` currently records durable trunk
+`05516e208225aadd1f87343c41bd8e345170baec`, revision 4, program state
+`needs_decision`, and the terminal-UI node as `FAILED` with no candidate. The
+physical program worktree nevertheless contains exact candidate `925d505`.
+The harness currently records a candidate only when the model result status is
+`completed`; consequently the controller cannot review, repair, adopt or
+promote useful committed work returned as `external_blocked`,
+`needs_decision` or `failed`. The next milestone repairs that state model
+before any retry of the streaming worker or either later milestone.
+
+## Next execution — terminal-candidate-retention-and-harness-cutover
+
+This serial repair separates three facts that are currently conflated:
+executor outcome, candidate existence, and promotion readiness. Every terminal
+worker result first closes the SDK/IPC attempt, then the deterministic harness
+inspects the exact execution workspace and records either one verified commit
+candidate or an explicit preserved-dirty-workspace fact. It never resets,
+deletes or hides work because a worker returned a non-success status. The
+worker's `next_action` remains advisory; the event-driven controller owns
+review, repair, replan, adoption, promotion, integration or abandonment.
+
+Candidate-bearing terminal outcomes map to milestone state without inventing
+success: `completed` becomes `COMPLETED`, `external_blocked` becomes `BLOCKED`,
+`needs_decision` becomes `NEEDS_DECISION`, and `failed` becomes
+`REPAIR_REQUIRED`. A `failed` result without a coherent commit remains
+`FAILED`; any dirty workspace is preserved and identified but is not promoted.
+Review and same-owner repair may target any verified candidate. Direct
+promotion still requires the milestone's exact objective/architecture gates
+and P0/P1 zero, regardless of the worker's suggested outcome.
+
+A new closed typed blocker projection binds `gate_id`, `kind` (`external`,
+`decision`, or `execution`), `scope` (`current_promotion`, `current_repair`,
+`future_milestone`, or `whole_program`), `promotion_blocking`, and a bounded
+`required_action`. A future-milestone decision cannot block review or promotion
+of the current candidate or an independent ready DAG lane. Missing or malformed
+blocker facts fail closed as an execution blocker for the current milestone,
+without erasing the candidate. Raw provider text, transcript, tool output and
+secrets never enter these facts.
+
+The same milestone performs the requested forward-only terminology cutover.
+The deterministic process becomes `WorkflowHarness` in `harness.py`; the CLI
+is `codex-flow harness`; the private entrypoint, service description, socket,
+authority and current persisted identifiers use `harness`. `Supervisor`,
+`supervisor.py`, the `supervisor` command and the old socket are removed with no
+runtime alias, fallback import, dual read or dual command. Historical immutable
+schema/evidence text may retain its published spelling only as provenance. A
+single forward schema migration converts live current authority rows and
+recovery state before the replacement harness starts; migration failure leaves
+the old installed process stopped and the new process unstarted rather than
+serving mixed identities.
+
+The Git policy is hybrid and uses ordinary Git. Serial milestones, including
+this one, commit directly in the program integration worktree and need only a
+logical promotion receipt; parallel mutable milestones use semantic sibling
+worktrees from the exact promoted base and require controller-authorized
+integration through the existing `WorktreeManager`. The harness owns workspace
+creation, exact-HEAD/CAS verification, deterministic integration and later
+cleanup. Workers use normal `git status`, `git diff`, `git add` and `git
+commit`; no wrapper VCS, automatic push, rebase, reset or history rewrite is
+introduced.
+
+The one bounded existing-program recovery verifies that `925d505` descends
+from durable trunk `05516e2`, matches the terminal-UI dispatch workspace and
+contains no unrelated commit before registering it as that node's candidate.
+It does not replay the worker, rerun the consumed provider attempt or treat the
+candidate as promoted. The controller can then start the declared objective
+and architecture reviews; the cancelled visual review is not reinstated.
+
+The implementation architecture map is:
+
+- Rename `src/codex_flow/supervisor.py` to `src/codex_flow/harness.py` and
+  `Supervisor`/`SupervisorError` to `WorkflowHarness`/`HarnessError`; this
+  module remains the only deterministic queue, lease, child-process, IPC,
+  candidate-inspection and program-effect runtime owner.
+- Modify `src/codex_flow/domain.py` and `src/codex_flow/contracts.py` for the
+  closed candidate/blocker values and controller projection. Do not change the
+  four model result status strings or ask the model to serialize Git facts.
+- Modify `src/codex_flow/ledger.py` through one forward migration and atomic
+  result-plus-candidate transition. Keep SQLite as the only durable state
+  authority and keep last promoted trunk SHA distinct from physical candidate
+  HEAD.
+- Modify `src/codex_flow/program_controller.py` and
+  `src/codex_flow/worktrees.py` only for candidate-bearing state transitions,
+  serial logical promotion and parallel integration validation.
+- Modify `src/codex_flow/cli.py`, `src/codex_flow/service.py`, worker/control
+  clients and internal imports for the no-alias harness cutover and one typed
+  candidate adoption/recovery command. The service remains one repository unit
+  and refresh remains forbidden while a worker or controller child is active.
+- Rename focused supervisor test/evidence terminology where it is current,
+  retain immutable historical names where provenance requires them, and add
+  one semantic evidence record
+  `docs/reviews/evidence/terminal-candidate-retention-and-harness-cutover.json`.
+
+The durable-artifact budget is one forward migration and one evidence record;
+the module and focused test renames are replacements, not parallel artifacts.
+New semantic vocabulary is limited to the verified candidate disposition and
+the typed blocker because they encode distinct Git/recovery and gating
+invariants. No second database, scheduler, transport, service, model loop,
+worktree manager or compatibility facade may be added.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Preserve every coherent terminal worker candidate independently of executor outcome, let the "
+        "controller recover it safely, and complete the no-alias supervisor-to-harness cutover."
+    ),
+    decomposition=(
+        "Record a verified commit or preserved dirty-workspace fact atomically for every terminal worker status.",
+        "Project typed blocker kind, scope and promotion impact so the controller can review, repair, replan, adopt or abandon without losing work.",
+        "Implement serial in-place logical promotion and retain existing exact-worktree integration for parallel mutable lanes.",
+        "Rename the deterministic runtime, CLI, service, socket and current persisted authority from supervisor to harness through one forward-only migration with no alias.",
+        "Recover exact terminal-UI commit 925d505 as an unpromoted candidate and prove the controller can start its objective and architecture reviews without replaying the worker.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Completed, external_blocked, needs_decision and failed worker results each preserve a coherent exact workspace commit when present; dirty or commitless failure remains inspectable and never becomes a fabricated candidate.",
+        "A candidate-bearing external block, decision or failure can be reviewed and repaired by the controller, while promotion still requires the exact declared review authorities and zero promotion-blocking P0/P1 findings.",
+        "Typed blocker scope prevents a future-milestone prerequisite from blocking the current candidate or independent ready nodes; malformed, stale and cross-program blocker/candidate facts fail closed.",
+        "A serial candidate already committed in the program worktree advances by logical promotion without a same-checkout Git mutation; a parallel candidate still requires exact-base controller-authorized WorktreeManager integration.",
+        "Only codex-flow harness, WorkflowHarness, harness.py and the harness socket/current authority remain reachable after migration; old supervisor commands/imports/current persisted identities fail rather than aliasing.",
+        "Exact commit 925d505 is adopted only after ancestry, dispatch-workspace and unrelated-commit validation, remains unpromoted, and becomes eligible for objective and architecture review without a provider retry or visual review.",
+        "Focused result, ledger migration, controller, harness, IPC, service, worktree and CLI tests, affected semantic partitions, exact-wheel install/refresh proof, full make check and independent objective/architecture reviews close with P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py -> src/codex_flow/harness.py",
+        "src/codex_flow/program_controller.py",
+        "src/codex_flow/worktrees.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui.py",
+        "src/codex_flow/projection.py",
+        "scripts/install_personal_workflow_skills.py",
+        "README.md",
+        "Makefile",
+        "workflow.toml",
+        "config/test-partitions.toml",
+        "tests/test_supervisor_recovery.py -> tests/test_harness_recovery.py",
+        "tests/test_program_controller.py",
+        "tests/test_ledger_integrity.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_local_ipc.py",
+        "tests/test_controller_execution.py",
+        "tests/test_production_pilots.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_plugin_installation.py",
+        "docs/reviews/evidence/terminal-candidate-retention-and-harness-cutover.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "src/codex_flow/backends/codex_sdk.py and live TUI event projection",
+        "model-facing capsule/result status compatibility outside the additive typed blocker projection",
+        "native authentication/profile and plugin capability authority",
+        "historical immutable evidence and migration definitions",
+        "global Codex/App state, remotes, pushes, rebases, resets, history rewrites and implicit cleanup",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only terminal-candidate-retention-and-harness-cutover in the existing "
+        "python-sdk-controller program integration worktree. Preserve the serial terminal-UI commit 925d505 "
+        "and all unrelated bytes. Separate result status, candidate existence and promotion readiness; add "
+        "typed blocker scope; support direct serial logical promotion and existing parallel WorktreeManager "
+        "integration. Rename supervisor to harness everywhere current with no command/import/socket/persisted "
+        "alias, using one forward migration. Do not replay the TUI worker, consume a provider attempt, run a "
+        "visual review, push, rebase, reset or clean work. Run all named gates, stage only owned surfaces, inspect "
+        "the staged diff, create one coherent local commit and return one terminal result with reviews pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
 ## Next execution — live-plan-dag-revision
 
 This serial successor makes the canonical plan safely revisable while a
-program is running.  It starts only after the terminal-UI candidate is
-accepted and integrated because both milestones touch the program action
-contract, supervisor IPC and shared domain types.  The user-facing rule is
+program is running. It starts only after the terminal-candidate/harness repair
+and the terminal-UI candidate are accepted because these milestones touch the
+program action contract, harness IPC and shared domain types. The user-facing rule is
 explicit: future, never-started milestones may be changed without waiting for
 an unrelated active worker; a milestone whose immutable capsule has already
 been dispatched changes only through one typed durable `ReplanNotice`.
@@ -8348,13 +8551,13 @@ The implementation architecture map is:
   accepts only exact `Next execution` capsules and explicit dependencies.
 - Modify `src/codex_flow/ledger.py` for the one forward migration, program
   revision CAS, future-node replacement and pending active-node transition.
-- Modify `src/codex_flow/supervisor.py` and
+- Modify `src/codex_flow/harness.py` and
   `src/codex_flow/program_controller.py` only to apply/reconcile the notice at
   event boundaries; neither polls nor edits Markdown.
 - Modify `src/codex_flow/cli.py` and `src/codex_flow/control_client.py` for one
   authenticated `codex-flow program replan` command using the compiled plan,
   expected revision and disposition.
-- Modify the existing program, plan-compilation, ledger, supervisor, CLI and
+- Modify the existing program, plan-compilation, ledger, harness, CLI and
   production-pilot tests, and create the one semantic retained evidence record
   `docs/reviews/evidence/live-plan-dag-revision.json`.
 - Preserve worker SDK execution, TUI rendering/history, Git integration,
@@ -8378,7 +8581,7 @@ ModelFacingCapsule(
         "Compile an exact old-to-new complete graph delta from the canonical plan without executing plan text.",
         "Apply future-node additions, removals, capsule changes and dependency changes atomically under program-revision CAS.",
         "Defer an active-node replacement until its current immutable dispatch terminates, then continue from its retained candidate as a same-lane repair.",
-        "Expose one authenticated program replan command and reconcile notices through the existing event-driven supervisor.",
+        "Expose one authenticated program replan command and reconcile notices through the existing event-driven harness.",
         "Prove restart, stale notice, cross-program, active-writer, historical-node and independent-worker behavior with no polling or lost work.",
     ),
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
@@ -8388,21 +8591,21 @@ ModelFacingCapsule(
         "Accepted, integrated or otherwise historical nodes cannot be rewritten or removed, and stale revision, digest, trunk, cross-program, overlapping-ownership or cyclic graph changes fail before mutation.",
         "Markdown remains static intent authority and the existing SQLite ledger remains dynamic authority; notice rows retain no transcript, tool output, secret or duplicate full plan.",
         "Restart before and after notice application is idempotent, one program revision has at most one pending notice, and no timer, polling controller or second scheduler is introduced.",
-        "Focused compiler/ledger/supervisor/CLI tests, affected semantic partitions, migration compatibility, exact-wheel parity, full make check and independent objective/architecture reviews close with P0=0/P1=0.",
+        "Focused compiler/ledger/harness/CLI tests, affected semantic partitions, migration compatibility, exact-wheel parity, full make check and independent objective/architecture reviews close with P0=0/P1=0.",
     ),
     mutable_surfaces=(
         "src/codex_flow/domain.py",
         "src/codex_flow/contracts.py",
         "src/codex_flow/plan_capsule.py",
         "src/codex_flow/ledger.py",
-        "src/codex_flow/supervisor.py",
+        "src/codex_flow/harness.py",
         "src/codex_flow/program_controller.py",
         "src/codex_flow/cli.py",
         "src/codex_flow/control_client.py",
         "tests/test_plan_compilation.py",
         "tests/test_program_controller.py",
         "tests/test_ledger_integrity.py",
-        "tests/test_supervisor_recovery.py",
+        "tests/test_harness_recovery.py",
         "tests/test_controller_execution.py",
         "tests/test_production_pilots.py",
         "docs/reviews/evidence/live-plan-dag-revision.json",
@@ -8444,7 +8647,7 @@ ModelFacingCapsule(
 
 This successor reduces the accidental coupling in the largest Python modules
 after live DAG revision is accepted and integrated.  It is deliberately a
-behavior-preserving structural milestone, not a rewrite of SQLite, supervisor
+behavior-preserving structural milestone, not a rewrite of SQLite, harness
 lifecycle or public APIs.  The dependency is serial because the preceding two
 milestones add their final live-view and replan types to the same source
 modules; extracting before those contracts settle would create duplicate
@@ -8468,7 +8671,7 @@ The first bounded decomposition targets four already coherent boundaries:
   authentication and command methods.
 
 Dependencies point inward from the existing facade modules to these pure
-boundary modules.  The new modules must not import `Ledger`, `Supervisor`,
+boundary modules.  The new modules must not import `Ledger`, `WorkflowHarness`,
 `Controller` or a concrete control client, open SQLite, spawn processes, touch
 Git, own sockets or add runtime configuration.  Existing documented imports
 remain valid through explicit re-exports; there is one canonical class object
@@ -8516,7 +8719,7 @@ ModelFacingCapsule(
         "src/codex_flow/controller.py",
         "src/codex_flow/control_client.py",
         "src/codex_flow/backends/codex_sdk.py",
-        "src/codex_flow/supervisor.py",
+        "src/codex_flow/harness.py",
         "src/codex_flow/worker.py",
         "src/codex_flow/ipc.py",
         "src/codex_flow/tui_client.py",
@@ -8558,10 +8761,22 @@ ModelFacingCapsule(
         "Use execute-milestone for only module-responsibility-decomposition after live-plan-dag-revision is "
         "accepted and integrated. Perform only the four frozen behavior-preserving extractions. Keep one canonical "
         "type object and compatibility re-exports, no fallback imports or duplicate code, and preserve Ledger, "
-        "Controller, supervisor and control-client side-effect ownership. Run all named gates, commit only owned "
+        "Controller, harness and control-client side-effect ownership. Run all named gates, commit only owned "
         "surfaces and return one typed result."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000,
 )
 ```
+
+## Active selection after terminal-candidate replan
+
+`terminal-candidate-retention-and-harness-cutover` is the sole next executable
+mutable milestone. It runs serially in the program integration worktree from
+the planning commit that contains this section. The existing terminal-UI
+implementation commit `925d505d55e963c1d01dd541f67c939f1f716e5c` is frozen
+input to its recovery discriminator, not a worker to retry.
+`live-plan-dag-revision` remains blocked on this repair plus
+objective/architecture acceptance of that terminal-UI candidate;
+`module-responsibility-decomposition` remains blocked on the live-plan
+successor. The cancelled visual review remains cancelled.

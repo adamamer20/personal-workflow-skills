@@ -138,6 +138,7 @@ def test_remaining_program_graph_is_serial_and_visual_review_stays_cancelled() -
     plan = Path("docs/reviews/peer-thread-workflow.md")
     milestones = (
         "live-coding-agent-terminal-ui",
+        "terminal-candidate-retention-and-harness-cutover",
         "live-plan-dag-revision",
         "module-responsibility-decomposition",
     )
@@ -146,23 +147,32 @@ def test_remaining_program_graph_is_serial_and_visual_review_stays_cancelled() -
         program_id="codex-flow-remaining-plan",
         milestone_ids=milestones,
         dependencies={
-            "live-plan-dag-revision": ("live-coding-agent-terminal-ui",),
+            "terminal-candidate-retention-and-harness-cutover": ("live-coding-agent-terminal-ui",),
+            "live-plan-dag-revision": ("terminal-candidate-retention-and-harness-cutover",),
             "module-responsibility-decomposition": ("live-plan-dag-revision",),
         },
     )
 
     assert tuple(node.milestone_id for node in graph.nodes) == milestones
     assert graph.node("live-coding-agent-terminal-ui").dependencies == ()
-    assert graph.node("live-plan-dag-revision").dependencies == ("live-coding-agent-terminal-ui",)
+    assert graph.node("terminal-candidate-retention-and-harness-cutover").dependencies == (
+        "live-coding-agent-terminal-ui",
+    )
+    assert graph.node("live-plan-dag-revision").dependencies == (
+        "terminal-candidate-retention-and-harness-cutover",
+    )
     assert graph.node("module-responsibility-decomposition").dependencies == ("live-plan-dag-revision",)
     assert graph.node("live-coding-agent-terminal-ui").capsule.source_block_sha256 == (
         "9f3d55ee8c1bcaacb8203103cf30617a2d80abd6feb3c45ca0cc79396211b3b2"
     )
+    assert graph.node("terminal-candidate-retention-and-harness-cutover").capsule.source_block_sha256 == (
+        "7501940270ceac19075b9ffc41fbd6f824c8409d5efadf4e55b38bba73129304"
+    )
     assert graph.node("live-plan-dag-revision").capsule.source_block_sha256 == (
-        "d4837f238b7744ad6b094a8b57ff4a6a3a18f07fe02d7b63f7f480435a952a8b"
+        "ce06ff868b44e2d214ec64a12ba53380fd2cdc520220bda8de3d115e4c138b8f"
     )
     assert graph.node("module-responsibility-decomposition").capsule.source_block_sha256 == (
-        "0a4b9b7aec055239e10f804ec429b77549d5658471d5c9cdb2c3b906a1c10bbb"
+        "3c5e23c8560eb84404f394414c9745d19dbe55879f51db1ded17c634f5daebc1"
     )
     for node in graph.nodes:
         assert node.capsule.capsule.acceptance_modes == (
