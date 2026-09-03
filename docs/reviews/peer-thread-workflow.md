@@ -8197,7 +8197,20 @@ ModelFacingCapsule(
 )
 ```
 
-## Blocked successor — live-coding-agent-terminal-ui
+### Event-driven controller promotion
+
+The bounded controller recovery is accepted at exact program-trunk commit
+`7833c01b2908dff63c9fb45c7280c1996e275b79`.  Independent objective and
+architecture reviews both report P0=0/P1=0.  Post-CAS recovery now synchronizes
+the checkout only while its index, tracked files and relevant untracked state
+still match the exact pre-CAS authority; external work is preserved and routed
+to one typed attention event.  The retained wheel is SHA-256
+`0b12f4a62bd6cd36d654034ca650407bfb08e7493e78f52a387b82a4921b0250`,
+421586 bytes.  The canonical installer and protected supervisor refresh have
+activated these bytes at supervisor epoch 46 with no active worker lease or
+refresh fence.  The terminal-UI successor is executable.
+
+## Next execution — live-coding-agent-terminal-ui
 
 ```python
 ModelFacingCapsule(
@@ -8224,37 +8237,329 @@ ModelFacingCapsule(
         "Focused adapter, worker, supervisor, IPC, client and TUI tests, a provider-free slow-consumer stress proof, one authorized real streaming sentinel, affected partitions, full make check, exact-wheel service proof and objective/architecture reviews close with P0=0/P1=0; the cancelled independent visual review is not reinstated.",
     ),
     mutable_surfaces=(
-        "src/codex_flow/domain.py only for non-persisted live-view types",
-        "src/codex_flow/backends/codex_sdk.py only for official live event projection",
-        "src/codex_flow/worker.py only for bounded active-turn accumulation and publication",
-        "src/codex_flow/supervisor.py only for the ephemeral identity-bound live-view broker",
-        "src/codex_flow/ipc.py only for subscription helpers over existing 64 KiB framing",
+        "src/codex_flow/domain.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/ipc.py",
         "src/codex_flow/control_client.py",
         "src/codex_flow/tui_client.py",
         "src/codex_flow/tui_models.py",
         "src/codex_flow/tui.py",
-        "tests/test_codex_sdk_adapter.py, tests/test_local_ipc.py, tests/test_supervisor_recovery.py, tests/test_live_worker_control.py, tests/test_workflow_control.py, tests/test_production_pilots.py and tests/test_plan_compilation.py",
-        "docs/reviews/evidence/human-terminal-ui.json and the existing human-terminal-ui visual contract plus four render sentinels",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_local_ipc.py",
+        "tests/test_supervisor_recovery.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_workflow_control.py",
+        "tests/test_production_pilots.py",
+        "tests/test_plan_compilation.py",
+        "docs/reviews/evidence/human-terminal-ui.json",
+        "docs/reviews/evidence/human-terminal-ui/conversation-first-visual-contract.md",
+        "docs/reviews/evidence/human-terminal-ui/conversation-first-visual-contract.yaml",
+        "docs/reviews/evidence/human-terminal-ui/conversation-light-wide.svg",
+        "docs/reviews/evidence/human-terminal-ui/conversation-dark-wide.svg",
+        "docs/reviews/evidence/human-terminal-ui/conversation-light-80x24.svg",
+        "docs/reviews/evidence/human-terminal-ui/conversation-no-color-80x24.svg",
     ),
     protected_surfaces=(
-        "docs/reviews/peer-thread-workflow.md after this capsule is frozen and AGENTS.md",
-        "ledger schema/tables/migrations and controller lifecycle, scheduling, decisions, retry, recovery and terminal result authority",
-        "capsule/result public schemas, contracts, projection and SDK start/resume/run writer behavior outside live event projection",
-        "service and CLI production entrypoints, plugin and native-profile authority, packaging, dependencies and retained wheels",
-        "Codex authentication, global configuration, App state, remotes, Git history, unrelated evidence and unrelated dirty bytes",
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/program_controller.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/plan_capsule.py",
+        "src/codex_flow/projection.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/native_profile.py",
+        "src/codex_flow/app_native.py",
+        "pyproject.toml",
+        "uv.lock",
+        "Makefile",
+        "workflow.toml",
     ),
     authorities=(
         ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
     ),
     prompt=(
-        "Use execute-milestone for only live-coding-agent-terminal-ui in the existing dirty "
-        "python-sdk-controller worktree after the controller records a successful repaired-supervisor "
-        "real smoke. Preserve the frozen architecture and zero durable-artifact budget. Keep Textual, "
+        "Use execute-milestone for only live-coding-agent-terminal-ui in the registered python-sdk-controller "
+        "program worktree after the accepted event-driven controller cutover. Preserve the frozen architecture "
+        "and zero durable-artifact budget. Keep Textual, "
         "the official SDK and the single supervisor/SQLite authority; add no polling, alternate TUI, "
         "transport, module, schema, table, dependency or App lifecycle call. Stream only bounded redacted "
         "ephemeral cumulative assistant/tool keyframes, prioritize terminal result ingress, reconcile from "
         "Thread.read, run the exact objective/architecture gates and return one typed terminal result."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+## Next execution — live-plan-dag-revision
+
+This serial successor makes the canonical plan safely revisable while a
+program is running.  It starts only after the terminal-UI candidate is
+accepted and integrated because both milestones touch the program action
+contract, supervisor IPC and shared domain types.  The user-facing rule is
+explicit: future, never-started milestones may be changed without waiting for
+an unrelated active worker; a milestone whose immutable capsule has already
+been dispatched changes only through one typed durable `ReplanNotice`.
+
+The Markdown plan remains the sole static authority for intent, architecture,
+ownership, dependencies and acceptance.  SQLite remains the sole dynamic
+authority for program revision, node state, dispatch identity, results,
+reviews and integration.  A replan compiles the complete new graph through the
+existing non-executing plan parser, computes a closed old-to-new graph delta
+and applies it with expected program revision, old and new plan digest and
+exact trunk HEAD.  It never executes Markdown, asks a model to serialize JSON,
+or creates a second scheduler, plan store or controller.
+
+Never-started nodes in `PLANNED` or dependency-blocked state may be added,
+removed or replaced atomically when they have no dispatch, candidate, review,
+promotion, integration or external-effect fact.  Completed, accepted or
+integrated nodes are immutable historical authority.  Independent active
+nodes continue under their issued capsule while future-node changes become
+visible immediately.  When the notice changes the active node itself, its
+only v1 disposition is `supersede_after_terminal`: the current SDK writer is
+not interrupted, refreshed or given a changed contract.  Its terminal result
+and worktree commit are retained, integration under the old capsule is
+forbidden, and the new revision continues as a same-lane repair from that
+exact candidate.  A missing terminal result, ambiguous writer or dirty
+workspace becomes controller attention; no blind replacement is started.
+
+`ReplanNotice` binds program id, expected program revision, old and new plan
+digests, exact trunk HEAD, ordered node changes, dependency changes, active
+disposition and a bounded reason.  The forward schema migration adds one
+`program_replan_notices` table inside the existing ledger solely to preserve a
+pending active-node transition and its applied/rejected receipt.  It is not a
+plan replica: the full compiled graph remains in the existing `runs` program
+record, and notice payloads contain identities and deltas rather than prompts
+or transcripts.  At most one unapplied notice exists per program revision.
+
+The implementation architecture map is:
+
+- Modify `src/codex_flow/domain.py` for `ReplanNotice`, closed node-change and
+  active-disposition values only.
+- Modify `src/codex_flow/contracts.py` for the model-facing request/replan
+  action branch without changing capsule or result compatibility.
+- Modify `src/codex_flow/plan_capsule.py` for a pure complete-graph diff that
+  accepts only exact `Next execution` capsules and explicit dependencies.
+- Modify `src/codex_flow/ledger.py` for the one forward migration, program
+  revision CAS, future-node replacement and pending active-node transition.
+- Modify `src/codex_flow/supervisor.py` and
+  `src/codex_flow/program_controller.py` only to apply/reconcile the notice at
+  event boundaries; neither polls nor edits Markdown.
+- Modify `src/codex_flow/cli.py` and `src/codex_flow/control_client.py` for one
+  authenticated `codex-flow program replan` command using the compiled plan,
+  expected revision and disposition.
+- Modify the existing program, plan-compilation, ledger, supervisor, CLI and
+  production-pilot tests, and create the one semantic retained evidence record
+  `docs/reviews/evidence/live-plan-dag-revision.json`.
+- Preserve worker SDK execution, TUI rendering/history, Git integration,
+  service lifecycle, native authentication/profile, plugin authority, model
+  routing, unrelated evidence and App/global state.
+
+The durable-artifact budget is one schema table and one evidence record.  No
+production module, database, daemon, service, socket, transport, registry or
+alternate plan file may be added.  New vocabulary is limited to the notice,
+its node delta and its active disposition because each carries a persisted
+revision or transition invariant.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Allow a running codex-flow program to adopt a revised canonical milestone DAG through one "
+        "typed durable ReplanNotice without interrupting unrelated active work or creating another authority."
+    ),
+    decomposition=(
+        "Compile an exact old-to-new complete graph delta from the canonical plan without executing plan text.",
+        "Apply future-node additions, removals, capsule changes and dependency changes atomically under program-revision CAS.",
+        "Defer an active-node replacement until its current immutable dispatch terminates, then continue from its retained candidate as a same-lane repair.",
+        "Expose one authenticated program replan command and reconcile notices through the existing event-driven supervisor.",
+        "Prove restart, stale notice, cross-program, active-writer, historical-node and independent-worker behavior with no polling or lost work.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A revision-bound notice may change or add never-started future nodes while an independent worker remains active; that worker's dispatch, lease, capsule and result contract remain byte-identical.",
+        "A notice that changes the active node is durable and pending until its exact dispatch terminates; the old candidate and commit are retained, old-revision integration is forbidden and the new revision starts only one same-lane repair.",
+        "Accepted, integrated or otherwise historical nodes cannot be rewritten or removed, and stale revision, digest, trunk, cross-program, overlapping-ownership or cyclic graph changes fail before mutation.",
+        "Markdown remains static intent authority and the existing SQLite ledger remains dynamic authority; notice rows retain no transcript, tool output, secret or duplicate full plan.",
+        "Restart before and after notice application is idempotent, one program revision has at most one pending notice, and no timer, polling controller or second scheduler is introduced.",
+        "Focused compiler/ledger/supervisor/CLI tests, affected semantic partitions, migration compatibility, exact-wheel parity, full make check and independent objective/architecture reviews close with P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/plan_capsule.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/program_controller.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/control_client.py",
+        "tests/test_plan_compilation.py",
+        "tests/test_program_controller.py",
+        "tests/test_ledger_integrity.py",
+        "tests/test_supervisor_recovery.py",
+        "tests/test_controller_execution.py",
+        "tests/test_production_pilots.py",
+        "docs/reviews/evidence/live-plan-dag-revision.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/tui.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/native_profile.py",
+        "src/codex_flow/worktrees.py",
+        "pyproject.toml",
+        "uv.lock",
+        "Makefile",
+        "workflow.toml",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only live-plan-dag-revision after live-coding-agent-terminal-ui is "
+        "accepted and integrated. Implement the frozen ReplanNotice architecture with one forward migration "
+        "and no second plan, scheduler, controller or transport. Future untouched nodes may change immediately; "
+        "an active node keeps its immutable worker and changes only after its exact terminal result, preserving "
+        "the candidate as a same-lane repair. Run all named gates, commit only owned surfaces and return one typed result."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000,
+)
+```
+
+## Next execution — module-responsibility-decomposition
+
+This successor reduces the accidental coupling in the largest Python modules
+after live DAG revision is accepted and integrated.  It is deliberately a
+behavior-preserving structural milestone, not a rewrite of SQLite, supervisor
+lifecycle or public APIs.  The dependency is serial because the preceding two
+milestones add their final live-view and replan types to the same source
+modules; extracting before those contracts settle would create duplicate
+movement and unstable ownership.
+
+The first bounded decomposition targets four already coherent boundaries:
+
+- Create `src/codex_flow/ledger_schema.py` for schema versions, canonical DDL,
+  migration definitions, schema inventory/fingerprint and read-only
+  compatibility inspection.  `Ledger` remains the sole connection,
+  transaction, lifecycle and record authority.
+- Create `src/codex_flow/conversation.py` for conversation/live-view value
+  types, redaction and JSON codecs.  `domain.py` retains compatibility
+  re-exports, identifiers and workflow/program lifecycle types.
+- Create `src/codex_flow/capsule_codec.py` for pure execution-capsule and
+  execution-record JSON conversion currently embedded in `controller.py`.
+  `Controller` retains execution, validation, recovery and Git authority.
+- Create `src/codex_flow/control_decoding.py` for closed response-shape and
+  typed IPC decoding currently embedded in `control_client.py`.
+  `LiveWorkerControlClient` and `ControllerDecisionClient` retain transport,
+  authentication and command methods.
+
+Dependencies point inward from the existing facade modules to these pure
+boundary modules.  The new modules must not import `Ledger`, `Supervisor`,
+`Controller` or a concrete control client, open SQLite, spawn processes, touch
+Git, own sockets or add runtime configuration.  Existing documented imports
+remain valid through explicit re-exports; there is one canonical class object
+per public type, not parallel legacy/new representations.  Circular imports,
+runtime import fallbacks, star exports and compatibility copies are forbidden.
+
+The durable-artifact budget is the four named production modules and one
+semantic evidence record
+`docs/reviews/evidence/module-responsibility-decomposition.json`.  No public
+class, protocol, state enum, schema table, command, dependency, service or
+configuration file is added.  Line counts and import-graph size are diagnostic
+only; promotion depends on preserved behavior, identity, ownership and a
+strictly acyclic import graph.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Split codex-flow's largest modules along four existing responsibility boundaries while preserving "
+        "one lifecycle authority, public type identity and all observable behavior."
+    ),
+    decomposition=(
+        "Extract static SQLite schema definition and compatibility inspection from the transactional Ledger implementation.",
+        "Extract conversation and live-view values, redaction and codecs from the general workflow domain module.",
+        "Extract pure capsule/record serialization from controller execution and pure closed IPC decoding from control clients.",
+        "Preserve explicit compatibility re-exports and prove there is one class/type identity and one production call path.",
+        "Delete the moved definitions from their former modules and verify an acyclic dependency direction without fallback imports.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Every selected definition has exactly one implementation in its responsibility module; old supported import paths resolve to the same object identity and no duplicate compatibility implementation remains.",
+        "Ledger alone owns SQLite connections, transactions, migration execution and records; extracted schema code is pure data/inspection and introduces no store or lifecycle authority.",
+        "Controller and control clients retain all side effects, process/Git/transport ownership and public commands; the extracted codecs/decoders are pure closed boundary functions.",
+        "The conversation and live-view production paths retain exact ordering, paging, redaction, subscription identity and memory bounds after extraction.",
+        "The import graph for the five affected source modules and four new modules is acyclic with no star import, dynamic import, getattr interface fallback or test-only production seam.",
+        "Focused import-identity, schema migration, controller, IPC, conversation and TUI tests, affected semantic partitions, exact-wheel source parity, full make check and independent objective/architecture reviews close with P0=0/P1=0.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/ledger_schema.py",
+        "src/codex_flow/conversation.py",
+        "src/codex_flow/capsule_codec.py",
+        "src/codex_flow/control_decoding.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/domain.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/backends/codex_sdk.py",
+        "src/codex_flow/supervisor.py",
+        "src/codex_flow/worker.py",
+        "src/codex_flow/ipc.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
+        "src/codex_flow/tui.py",
+        "tests/test_h2_ledger.py",
+        "tests/test_ledger_integrity.py",
+        "tests/test_controller_execution.py",
+        "tests/test_codex_sdk_adapter.py",
+        "tests/test_local_ipc.py",
+        "tests/test_live_worker_control.py",
+        "tests/test_workflow_control.py",
+        "tests/test_program_controller.py",
+        "tests/test_production_pilots.py",
+        "docs/reviews/evidence/module-responsibility-decomposition.json",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md",
+        "AGENTS.md",
+        "src/codex_flow/program_controller.py",
+        "src/codex_flow/worktrees.py",
+        "src/codex_flow/service.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/native_profile.py",
+        "src/codex_flow/app_native.py",
+        "src/codex_flow/contracts.py",
+        "src/codex_flow/plan_capsule.py",
+        "src/codex_flow/projection.py",
+        "pyproject.toml",
+        "uv.lock",
+        "Makefile",
+        "workflow.toml",
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer")),
+    ),
+    prompt=(
+        "Use execute-milestone for only module-responsibility-decomposition after live-plan-dag-revision is "
+        "accepted and integrated. Perform only the four frozen behavior-preserving extractions. Keep one canonical "
+        "type object and compatibility re-exports, no fallback imports or duplicate code, and preserve Ledger, "
+        "Controller, supervisor and control-client side-effect ownership. Run all named gates, commit only owned "
+        "surfaces and return one typed result."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000,

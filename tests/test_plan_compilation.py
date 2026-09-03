@@ -10,7 +10,7 @@ import pytest
 from codex_flow.contracts import model_facing_result_schema_sha256
 from codex_flow.domain import AcceptanceMode, DispatchId
 from codex_flow.ledger import Ledger, StaleWriter
-from codex_flow.plan_capsule import PlanCapsuleError, compile_canonical_plan
+from codex_flow.plan_capsule import PlanCapsuleError, compile_canonical_plan, compile_program_graph
 
 
 def test_canonical_plan_compiler_accepts_only_the_requested_typed_block() -> None:
@@ -132,6 +132,44 @@ def test_event_driven_program_controller_capsule_is_the_frozen_pre_tui_owner() -
     assert any("controller-model turns" in criterion for criterion in compiled.capsule.acceptance_criteria)
     assert "event-driven-program-controller" in compiled.capsule.prompt
     assert compiled.capsule.plugin_requirements == ()
+
+
+def test_remaining_program_graph_is_serial_and_visual_review_stays_cancelled() -> None:
+    plan = Path("docs/reviews/peer-thread-workflow.md")
+    milestones = (
+        "live-coding-agent-terminal-ui",
+        "live-plan-dag-revision",
+        "module-responsibility-decomposition",
+    )
+    graph = compile_program_graph(
+        plan,
+        program_id="codex-flow-remaining-plan",
+        milestone_ids=milestones,
+        dependencies={
+            "live-plan-dag-revision": ("live-coding-agent-terminal-ui",),
+            "module-responsibility-decomposition": ("live-plan-dag-revision",),
+        },
+    )
+
+    assert tuple(node.milestone_id for node in graph.nodes) == milestones
+    assert graph.node("live-coding-agent-terminal-ui").dependencies == ()
+    assert graph.node("live-plan-dag-revision").dependencies == ("live-coding-agent-terminal-ui",)
+    assert graph.node("module-responsibility-decomposition").dependencies == ("live-plan-dag-revision",)
+    assert graph.node("live-coding-agent-terminal-ui").capsule.source_block_sha256 == (
+        "9f3d55ee8c1bcaacb8203103cf30617a2d80abd6feb3c45ca0cc79396211b3b2"
+    )
+    assert graph.node("live-plan-dag-revision").capsule.source_block_sha256 == (
+        "d4837f238b7744ad6b094a8b57ff4a6a3a18f07fe02d7b63f7f480435a952a8b"
+    )
+    assert graph.node("module-responsibility-decomposition").capsule.source_block_sha256 == (
+        "0a4b9b7aec055239e10f804ec429b77549d5658471d5c9cdb2c3b906a1c10bbb"
+    )
+    for node in graph.nodes:
+        assert node.capsule.capsule.acceptance_modes == (
+            AcceptanceMode.OBJECTIVE,
+            AcceptanceMode.ARCHITECTURE,
+        )
+        assert all(authority.mode is not AcceptanceMode.VISUAL for authority in node.capsule.capsule.authorities)
 
 
 def test_active_capsule_rejects_an_injected_non_python_fence(tmp_path: Path) -> None:
