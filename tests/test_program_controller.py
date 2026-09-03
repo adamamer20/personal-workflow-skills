@@ -108,6 +108,8 @@ def _bundle(
     status: ProgramControllerDecisionStatus,
     claim: ControllerDecisionClaim,
     action: ModelFacingProgramControllerAction,
+    *,
+    trunk_head: str = TRUNK_HEAD,
 ) -> ModelFacingProgramControllerActionBundle:
     return ModelFacingProgramControllerActionBundle(
         1,
@@ -118,7 +120,7 @@ def _bundle(
         status.event_kind,
         status.event_key,
         status.payload["program_revision"],  # type: ignore[arg-type]
-        TRUNK_HEAD,
+        trunk_head,
         (action,),
         "bounded deterministic program effect",
     )
@@ -128,6 +130,8 @@ def _claim_and_apply(
     ledger: Ledger,
     status: ProgramControllerDecisionStatus,
     action: ModelFacingProgramControllerAction,
+    *,
+    trunk_head: str = TRUNK_HEAD,
 ) -> ControllerActionReceipt:
     claim = ledger.claim_program_controller_decision(
         status.decision_id,
@@ -135,7 +139,7 @@ def _claim_and_apply(
         expected_revision=status.revision,
         generation=int(status.current_generation),
     )
-    bundle = _bundle(status, claim, action)
+    bundle = _bundle(status, claim, action, trunk_head=trunk_head)
     receipt = ledger.submit_program_controller_actions(
         bundle,
         claimant_id=claim.claimant_id,
@@ -157,6 +161,92 @@ def _claim_and_apply(
         state=ControllerGenerationState.COMPLETED,
     )
     return receipt
+
+
+def _prepare_program_integration(
+    ledger: Ledger,
+    *,
+    candidate_sha: str,
+    trunk_head: str,
+) -> ModelFacingProgramControllerActionBundle:
+    start = ledger.start_program("program")
+    _claim_and_apply(
+        ledger,
+        start,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_READY_MILESTONES,
+            milestone_ids=("first",),
+        ),
+        trunk_head=trunk_head,
+    )
+    ledger.claim_dispatch("program", "first", "executor", 1)
+    ledger.record_program_executor_result(
+        "program",
+        "first",
+        candidate_sha=candidate_sha,
+        terminal_status="completed",
+        dispatch_id="program/first/executor/1",
+    )
+    implementation = next(
+        item
+        for item in ledger.program_controller_decisions()
+        if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
+    )
+    _claim_and_apply(
+        ledger,
+        implementation,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_REVIEWS,
+            milestone_id="first",
+            candidate_sha=candidate_sha,
+            review_roles=("architecture-reviewer", "code-reviewer"),
+        ),
+        trunk_head=trunk_head,
+    )
+    for review_id, role, mode in (
+        ("architecture-accepted", "architecture-reviewer", AcceptanceMode.ARCHITECTURE),
+        ("code-accepted", "code-reviewer", AcceptanceMode.OBJECTIVE),
+    ):
+        ledger.record_program_review(
+            "program",
+            "first",
+            ReviewResult(review_id, RoleId(role), True, (), candidate_sha, acceptance_mode=mode),
+        )
+    review_completion = next(
+        item for item in ledger.program_controller_decisions() if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+    )
+    _claim_and_apply(
+        ledger,
+        review_completion,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.PROMOTE_CANDIDATE,
+            milestone_id="first",
+            candidate_sha=candidate_sha,
+            review_ids=("architecture-accepted", "code-accepted"),
+        ),
+        trunk_head=trunk_head,
+    )
+    integration = ledger.record_program_event("program", ProgramEventKind.INTEGRATION_COMPLETED, "integration-request")
+    claim = ledger.claim_program_controller_decision(
+        integration.decision_id,
+        claimant_id="program-controller/integration",
+        expected_revision=integration.revision,
+        generation=1,
+    )
+    bundle = _bundle(
+        integration,
+        claim,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.INTEGRATE_CANDIDATE,
+            milestone_id="first",
+            candidate_sha=candidate_sha,
+            expected_trunk_head=trunk_head,
+            integration_strategy="merge",
+        ),
+        trunk_head=trunk_head,
+    )
+    ledger.submit_program_controller_actions(bundle, claimant_id=claim.claimant_id, token=str(claim.token))
+    return bundle
 
 
 def test_program_graph_rejects_cycles_and_overlapping_mutable_surfaces(tmp_path: Path) -> None:
@@ -1296,6 +1386,43 @@ def _integration_repositories(tmp_path: Path, strategy: str) -> tuple[Path, Path
     return repository, candidate, _git(repository, "rev-parse", "HEAD"), candidate_sha
 
 
+def _integration_graph(repository: Path, candidate: Path, expected: str) -> ProgramGraph:
+    candidate_head = _git(candidate, "rev-parse", "HEAD")
+    base = _git(repository, "merge-base", expected, candidate_head)
+    capsule = ExecutionCapsule(
+        2,
+        RunId("program"),
+        MilestoneId("first"),
+        repository,
+        WorkspaceMode.EXISTING_WORKTREE,
+        candidate,
+        "agent/candidate",
+        base,
+        "program-first",
+        ("candidate.txt",),
+        ("base.txt",),
+        ValidationSpec(("git", "diff", "--check"), 5),
+        "gpt-test",
+        ReasoningEffort.MEDIUM,
+        "complete the bounded program node and return its typed result",
+        {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+            "additionalProperties": False,
+        },
+        permission_mode=NativePermissionMode.READ_ONLY,
+        acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    )
+    return ProgramGraph(
+        ProgramId("program"),
+        repository / "canonical-plan.md",
+        PLAN_DIGEST,
+        (ProgramNodeSpec(MilestoneId("first"), capsule),),
+        expected,
+    )
+
+
 @pytest.mark.parametrize("strategy", ["fast_forward", "merge", "cherry_pick"])
 def test_program_git_integration_recovers_exact_applied_effect_after_receipt_crash(
     tmp_path: Path, strategy: str
@@ -1331,6 +1458,113 @@ def test_program_git_integration_recovers_exact_applied_effect_after_receipt_cra
     assert recovered["after_trunk_head"] == first["after_trunk_head"]
     assert recovered["parents"] == first["parents"]
     assert recovered["tree"] == first["tree"]
+
+
+def test_program_git_integration_recovers_checkout_after_ref_commit(tmp_path: Path) -> None:
+    repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "merge")
+    read_tree_calls = 0
+
+    def interrupted_runner(argv: tuple[str, ...] | list[str], cwd: Path) -> CommandResult:
+        nonlocal read_tree_calls
+        if cwd == repository and tuple(argv[:4]) == ("git", "read-tree", "--reset", "-u"):
+            read_tree_calls += 1
+            if read_tree_calls == 1:
+                raise RuntimeError("simulated process interruption after ref CAS")
+        completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
+        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+    with pytest.raises(RuntimeError, match="simulated process interruption"):
+        WorktreeManager(runner=interrupted_runner).integrate_candidate(
+            repository_root=repository,
+            candidate_workspace=candidate,
+            candidate_branch="agent/candidate",
+            candidate_sha=candidate_sha,
+            expected_trunk_head=expected,
+            strategy="merge",
+        )
+    applied_head = _git(repository, "rev-parse", "--verify", "HEAD^{commit}")
+    assert applied_head != expected
+    assert _git(repository, "status", "--porcelain", "--untracked-files=all")
+
+    recovered = WorktreeManager().integrate_candidate(
+        repository_root=repository,
+        candidate_workspace=candidate,
+        candidate_branch="agent/candidate",
+        candidate_sha=candidate_sha,
+        expected_trunk_head=expected,
+        strategy="merge",
+    )
+    assert recovered["recovered"] is True
+    assert recovered["after_trunk_head"] == applied_head
+    assert _git(repository, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_program_git_integration_rolls_back_exact_ref_after_persistent_checkout_failure(tmp_path: Path) -> None:
+    repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "merge")
+
+    def failed_checkout_runner(argv: tuple[str, ...] | list[str], cwd: Path) -> CommandResult:
+        if cwd == repository and tuple(argv[:4]) == ("git", "read-tree", "--reset", "-u") and argv[-1] != expected:
+            return CommandResult(1, "", "persistent checkout failure")
+        completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
+        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+    with pytest.raises(WorktreeError, match="ref was rolled back"):
+        WorktreeManager(runner=failed_checkout_runner).integrate_candidate(
+            repository_root=repository,
+            candidate_workspace=candidate,
+            candidate_branch="agent/candidate",
+            candidate_sha=candidate_sha,
+            expected_trunk_head=expected,
+            strategy="merge",
+        )
+    assert _git(repository, "rev-parse", "--verify", "HEAD^{commit}") == expected
+    assert _git(repository, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_program_integration_records_applied_after_transient_checkout_failure(tmp_path: Path) -> None:
+    repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "merge")
+    exclude = repository / ".git" / "info" / "exclude"
+    exclude.write_text(f"{exclude.read_text(encoding='utf-8')}\n.codex-flow/\n", encoding="utf-8")
+    supervisor = Supervisor(repository)
+    try:
+        supervisor.ledger.register_program(_integration_graph(repository, candidate, expected))
+        bundle = _prepare_program_integration(
+            supervisor.ledger,
+            candidate_sha=candidate_sha,
+            trunk_head=expected,
+        )
+        read_tree_failures = 0
+
+        def transient_runner(argv: tuple[str, ...] | list[str], cwd: Path) -> CommandResult:
+            nonlocal read_tree_failures
+            if (
+                cwd == repository
+                and tuple(argv[:4]) == ("git", "read-tree", "--reset", "-u")
+                and read_tree_failures == 0
+            ):
+                read_tree_failures += 1
+                return CommandResult(1, "", "transient checkout failure")
+            completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
+            return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+        supervisor._worktrees = WorktreeManager(
+            runner=transient_runner,
+            mutation_lock_path=repository / ".codex-flow" / "controller.lock",
+        )
+        assert supervisor._apply_program_action_bundle(bundle) is True
+        assert read_tree_failures == 1
+        assert supervisor.ledger.program_status("program").nodes[0].integrated is True
+        assert supervisor.ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
+        assert _git(repository, "status", "--porcelain", "--untracked-files=all") == ""
+    finally:
+        supervisor.close()
+
+    restarted = Supervisor(repository)
+    try:
+        assert restarted._reconcile_program_action_outboxes() is False
+        assert restarted.ledger.program_status("program").nodes[0].integrated is True
+    finally:
+        restarted.close()
 
 
 def test_program_git_integration_recovery_rejects_unknown_trunk_advance(tmp_path: Path) -> None:

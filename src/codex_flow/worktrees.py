@@ -340,7 +340,6 @@ class WorktreeManager:
         candidate_head = self._git(candidate, "rev-parse", "--verify", "HEAD^{commit}")
         if candidate_head != candidate_sha:
             raise WorkspaceConflict("candidate workspace HEAD does not match the authorized commit")
-        self._require_clean_checkout(repository, label="trunk")
         self._require_clean_checkout(candidate, label="candidate")
         ancestry = self._runner(("git", "merge-base", "--is-ancestor", candidate_sha, candidate_branch), candidate)
         if ancestry.returncode != 0:
@@ -360,6 +359,7 @@ class WorktreeManager:
             if recovered is None:
                 raise WorkspaceConflict("trunk HEAD changed before integration")
             return recovered
+        self._require_clean_checkout(repository, label="trunk")
 
         if strategy == "fast_forward":
             ancestry = self._runner(
@@ -408,10 +408,12 @@ class WorktreeManager:
         applied = self._runner(("git", "update-ref", trunk_ref, target_head, expected_trunk_head), repository)
         if applied.returncode != 0:
             raise WorkspaceConflict("trunk HEAD changed during integration CAS")
-        checkout = self._runner(("git", "read-tree", "--reset", "-u", target_head), repository)
-        if checkout.returncode != 0:
-            detail = checkout.stderr.strip() or checkout.stdout.strip() or f"exit {checkout.returncode}"
-            raise WorktreeError(f"Git integration checkout update failed: {detail}")
+        self._synchronize_checkout_or_rollback(
+            repository,
+            trunk_ref=trunk_ref,
+            target_head=target_head,
+            rollback_head=expected_trunk_head,
+        )
         after = self._git(repository, "rev-parse", "--verify", "HEAD^{commit}")
         if after == before:
             raise WorkspaceConflict("Git integration did not advance the trunk")
@@ -495,6 +497,15 @@ class WorktreeManager:
                 )
         if not matches:
             return None
+        trunk_ref = self._git(repository, "symbolic-ref", "--quiet", "HEAD")
+        if not trunk_ref.startswith("refs/heads/"):
+            raise WorkspaceConflict("integration trunk HEAD is not an exact branch authority")
+        self._synchronize_checkout_or_rollback(
+            repository,
+            trunk_ref=trunk_ref,
+            target_head=actual_trunk_head,
+            rollback_head=expected_trunk_head,
+        )
         self._require_clean_checkout(repository, label="recovered integrated trunk")
         return {
             "before_trunk_head": expected_trunk_head,
@@ -507,6 +518,28 @@ class WorktreeManager:
             "parents": parents,
             "tree": actual_tree,
         }
+
+    def _synchronize_checkout_or_rollback(
+        self,
+        repository: Path,
+        *,
+        trunk_ref: str,
+        target_head: str,
+        rollback_head: str,
+    ) -> None:
+        """Converge an exact applied ref or CAS-roll it back before failure."""
+
+        for _attempt in range(2):
+            checkout = self._runner(("git", "read-tree", "--reset", "-u", target_head), repository)
+            if checkout.returncode == 0:
+                return
+        rollback = self._runner(("git", "update-ref", trunk_ref, rollback_head, target_head), repository)
+        if rollback.returncode != 0:
+            raise WorkspaceConflict("trunk HEAD changed after integration CAS")
+        restored = self._runner(("git", "read-tree", "--reset", "-u", rollback_head), repository)
+        if restored.returncode != 0:
+            raise WorktreeError("Git integration checkout rollback failed")
+        raise WorktreeError("Git integration checkout update failed and the ref was rolled back")
 
     def _commit_parents(self, repository: Path, commit: str) -> list[str]:
         values = self._git(repository, "rev-list", "--parents", "-n", "1", commit).split()
