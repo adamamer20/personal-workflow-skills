@@ -411,23 +411,25 @@ class Supervisor:
                 except RecordNotFound:
                     generation = None
                 if generation is not None and (
-                    generation.state is ControllerGenerationState.DELIVERY_STARTING
+                    generation.state in {ControllerGenerationState.DELIVERY_STARTING, ControllerGenerationState.ACTIVE}
                     and generation.controller_thread_id is None
                     and generation.controller_turn_id is None
                     and generation.inspection_outcome is None
                 ):
                     try:
-                        inspection = self.ledger.reserve_controller_recovery_inspection(program_status.decision_id)
-                        self.ledger.complete_controller_recovery_inspection(
+                        self.ledger._mark_controller_generation_launch_ambiguous(
                             program_status.decision_id,
-                            inspection_outcome=ControllerGenerationState.AMBIGUOUS.value,
-                            claim=inspection,
+                            generation=program_status.current_generation,
+                            expected_revision=program_status.revision,
+                            expected_state=program_status.state,
+                            expected_claimant_kind=program_status.claimant_kind,
+                            expected_claimant_id=program_status.claimant_id,
                         )
                     except StaleWriter:
                         # Another owner may have completed the exact
                         # pre-identity transition between the two reads.
-                        # The durable CAS remains authoritative and the child
-                        # can be reaped idempotently.
+                        # The durable launch CAS remains authoritative and the
+                        # child can be reaped idempotently.
                         pass
                     except (LedgerError, ValueError) as exc:
                         # Do not silently discard a generation whose durable

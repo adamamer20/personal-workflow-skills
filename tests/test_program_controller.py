@@ -589,7 +589,7 @@ def test_program_start_ipc_routes_through_controller_and_is_idempotent(
         supervisor.close()
 
 
-def test_program_controller_child_preidentity_exit_is_closed_once_and_not_respawned(
+def test_program_controller_child_preidentity_exit_with_expired_deadline_is_closed_once_and_not_respawned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     supervisor = Supervisor(tmp_path)
@@ -597,6 +597,11 @@ def test_program_controller_child_preidentity_exit_is_closed_once_and_not_respaw
         supervisor.ledger.register_program(_graph(tmp_path))
         decision = supervisor.ledger.start_program("program")
         supervisor.ledger.prepare_controller_generation(decision.decision_id, generation=1)
+        supervisor.ledger._db().execute(
+            "UPDATE controller_decisions SET deadline = '2000-01-01T00:00:00Z' WHERE decision_id = ?",
+            (str(decision.decision_id),),
+        )
+        supervisor.ledger._db().commit()
 
         class _ExitedChild:
             def poll(self) -> int:

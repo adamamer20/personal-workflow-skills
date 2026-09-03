@@ -12835,7 +12835,7 @@ class Ledger:
         expected_claimant_kind: ControllerClaimantKind | str | None,
         expected_claimant_id: str | None,
         now: str | None = None,
-    ) -> ControllerDecisionStatus:
+    ) -> ControllerDecisionStatus | ProgramControllerDecisionStatus:
         """Close an orphaned controller launch as durable human attention.
 
         A controller recovery process is reserved in SQLite before ``Popen``.
@@ -12929,6 +12929,8 @@ class Ledger:
                 .fetchone()
             )
             assert updated is not None
+            if updated["program_id"] is not None:
+                return self._program_decision_status_from_row(updated)
             return self._decision_status_from_row(updated)
 
     def _controller_claim_token_hash(self, token: str) -> str:
