@@ -1499,6 +1499,45 @@ def test_program_git_integration_recovers_checkout_after_ref_commit(tmp_path: Pa
     assert _git(repository, "status", "--porcelain", "--untracked-files=all") == ""
 
 
+def test_program_git_integration_recovery_preserves_external_tracked_edit(tmp_path: Path) -> None:
+    repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "merge")
+    read_tree_calls = 0
+
+    def interrupted_runner(argv: tuple[str, ...] | list[str], cwd: Path) -> CommandResult:
+        nonlocal read_tree_calls
+        if cwd == repository and tuple(argv[:4]) == ("git", "read-tree", "--reset", "-u"):
+            read_tree_calls += 1
+            if read_tree_calls == 1:
+                raise RuntimeError("simulated process interruption after ref CAS")
+        completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
+        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+    with pytest.raises(RuntimeError, match="simulated process interruption"):
+        WorktreeManager(runner=interrupted_runner).integrate_candidate(
+            repository_root=repository,
+            candidate_workspace=candidate,
+            candidate_branch="agent/candidate",
+            candidate_sha=candidate_sha,
+            expected_trunk_head=expected,
+            strategy="merge",
+        )
+    applied_head = _git(repository, "rev-parse", "--verify", "HEAD^{commit}")
+    (repository / "base.txt").write_text("external edit after interruption\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceConflict, match="checkout changed after integration CAS"):
+        WorktreeManager().integrate_candidate(
+            repository_root=repository,
+            candidate_workspace=candidate,
+            candidate_branch="agent/candidate",
+            candidate_sha=candidate_sha,
+            expected_trunk_head=expected,
+            strategy="merge",
+        )
+
+    assert _git(repository, "rev-parse", "--verify", "HEAD^{commit}") == applied_head
+    assert (repository / "base.txt").read_text(encoding="utf-8") == "external edit after interruption\n"
+
+
 def test_program_git_integration_rolls_back_exact_ref_after_persistent_checkout_failure(tmp_path: Path) -> None:
     repository, candidate, expected, candidate_sha = _integration_repositories(tmp_path, "merge")
 

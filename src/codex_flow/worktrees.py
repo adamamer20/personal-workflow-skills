@@ -413,6 +413,7 @@ class WorktreeManager:
             trunk_ref=trunk_ref,
             target_head=target_head,
             rollback_head=expected_trunk_head,
+            expected_checkout_head=expected_trunk_head,
         )
         after = self._git(repository, "rev-parse", "--verify", "HEAD^{commit}")
         if after == before:
@@ -505,6 +506,7 @@ class WorktreeManager:
             trunk_ref=trunk_ref,
             target_head=actual_trunk_head,
             rollback_head=expected_trunk_head,
+            expected_checkout_head=expected_trunk_head,
         )
         self._require_clean_checkout(repository, label="recovered integrated trunk")
         return {
@@ -526,20 +528,45 @@ class WorktreeManager:
         trunk_ref: str,
         target_head: str,
         rollback_head: str,
+        expected_checkout_head: str,
     ) -> None:
         """Converge an exact applied ref or CAS-roll it back before failure."""
 
         for _attempt in range(2):
+            if self._checkout_matches_head(repository, target_head):
+                return
+            if not self._checkout_matches_head(repository, expected_checkout_head):
+                raise WorkspaceConflict("integration checkout changed after integration CAS")
             checkout = self._runner(("git", "read-tree", "--reset", "-u", target_head), repository)
             if checkout.returncode == 0:
                 return
+        if self._checkout_matches_head(repository, target_head):
+            return
+        if not self._checkout_matches_head(repository, expected_checkout_head):
+            raise WorkspaceConflict("integration checkout changed after integration CAS")
         rollback = self._runner(("git", "update-ref", trunk_ref, rollback_head, target_head), repository)
         if rollback.returncode != 0:
             raise WorkspaceConflict("trunk HEAD changed after integration CAS")
-        restored = self._runner(("git", "read-tree", "--reset", "-u", rollback_head), repository)
-        if restored.returncode != 0:
-            raise WorktreeError("Git integration checkout rollback failed")
+        self._require_clean_checkout(repository, label="rolled-back integration trunk")
         raise WorktreeError("Git integration checkout update failed and the ref was rolled back")
+
+    def _checkout_matches_head(self, repository: Path, expected_head: str) -> bool:
+        """Return whether index, tracked files and relevant untracked state match a commit."""
+
+        index = self._runner(("git", "diff-index", "--cached", "--quiet", expected_head, "--"), repository)
+        if index.returncode == 1:
+            return False
+        if index.returncode != 0:
+            raise WorktreeError("Git integration index identity is unavailable")
+        tracked = self._runner(("git", "diff-files", "--quiet", "--"), repository)
+        if tracked.returncode == 1:
+            return False
+        if tracked.returncode != 0:
+            raise WorktreeError("Git integration checkout identity is unavailable")
+        untracked = self._runner(("git", "ls-files", "--others", "--exclude-standard"), repository)
+        if untracked.returncode != 0:
+            raise WorktreeError("Git integration untracked-state identity is unavailable")
+        return not untracked.stdout.strip()
 
     def _commit_parents(self, repository: Path, commit: str) -> list[str]:
         values = self._git(repository, "rev-list", "--parents", "-n", "1", commit).split()

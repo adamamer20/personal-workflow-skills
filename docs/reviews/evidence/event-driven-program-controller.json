@@ -4,7 +4,7 @@
   "milestone": "event-driven-program-controller-review-repair",
   "candidate": {
     "base_sha": "43901ab2f9e42e95e483a2eea5a954706cc873a8",
-    "candidate_digest_sha256": "10c3dac7f62c5ac42c07a6eb52e123b8553aca8ea6f66ad864037e2ecfd8c0d9",
+    "candidate_digest_sha256": "f3a007e57f6d57ec6a78938b41d449452fe76f76002dce402af412906e40a8c0",
     "digest_basis": "SHA-256 over the UTF-8 line codex-flow/event-driven-program-controller-repair-candidate/v1, followed by each sorted digest_scope path encoded as UTF-8, one NUL byte, and its exact file bytes. This evidence record and ignored retained wheels are excluded.",
     "digest_scope_count": 9,
     "digest_scope": [
@@ -38,7 +38,7 @@
     "git_topology": "ordinary canonical workspace aliases remain supported while raw repository and candidate paths used for Git integration reject symlink traversal",
     "action_schema": "the discriminated action union has independently closed oneOf branches locally and projects to the supported provider anyOf form",
     "dag_ownership": "serial or transitive reuse of a mutable surface is valid; concurrent incomparable owners remain invalid",
-    "integration_recovery": "fast-forward, merge and cherry-pick construct their exact strategy-specific target without moving the branch, then advance the branch with an expected-predecessor update-ref CAS; CAS failure leaves an unknown external HEAD untouched, post-CAS checkout interruption recovers the exact target on replay, and persistent checkout failure rolls back only through target-bound CAS",
+    "integration_recovery": "fast-forward, merge and cherry-pick construct their exact strategy-specific target without moving the branch, then advance the branch with an expected-predecessor update-ref CAS; CAS failure leaves an unknown external HEAD untouched, post-CAS checkout interruption recovers the exact target only while index, tracked files and relevant untracked state still match the exact pre-CAS checkout, external changes fail closed without mutation, and persistent checkout failure rolls back only through target-bound CAS",
     "cli_projection": "program decisions use the program decision API and convert frozen JSON values to ordinary JSON before rendering"
   },
   "outcome": {
@@ -52,8 +52,8 @@
     "strategy_specific_git_recovery": true
   },
   "validation": {
-    "focused_controller_ledger_supervisor_ipc": "410 passed across tests/test_program_controller.py, tests/test_supervisor_recovery.py and tests/test_controller_execution.py",
-    "full_pytest": "821 passed",
+    "focused_controller_ledger_supervisor_ipc": "411 passed across tests/test_program_controller.py, tests/test_supervisor_recovery.py and tests/test_controller_execution.py",
+    "full_pytest": "822 passed",
     "make_check": "passed: Ruff format/check, pytest, validator, compileall and all pre-commit hooks",
     "validator": "validated 16 cross-project skills and 7 workflow schemas",
     "git_diff_check": "passed",
@@ -70,8 +70,8 @@
     "version": "0.2.0",
     "python": "3.12.13",
     "sdk": "openai-codex 0.147.0",
-    "wheel_sha256": "8eee9828ccf0391a69d73f587990447a706a6a3b5fff1710eef7926820a2ad67",
-    "wheel_bytes": 421364,
+    "wheel_sha256": "0b12f4a62bd6cd36d654034ca650407bfb08e7493e78f52a387b82a4921b0250",
+    "wheel_bytes": 421586,
     "reproducible_builds": "two SOURCE_DATE_EPOCH=0 builds were byte-identical",
     "topology": "regular single-link file",
     "temporary_virtualenv_install": "passed",
