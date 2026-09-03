@@ -4,7 +4,7 @@
   "milestone": "event-driven-program-controller-review-repair",
   "candidate": {
     "base_sha": "43901ab2f9e42e95e483a2eea5a954706cc873a8",
-    "candidate_digest_sha256": "8cf9218373783214e0fd511e92d6d74bde04f2fa8184342f5fb47f656da14d1a",
+    "candidate_digest_sha256": "d52e9458d566ff2e0d961013cb34b9ab50966c44463b294c10a8090217ebe298",
     "digest_basis": "SHA-256 over the UTF-8 line codex-flow/event-driven-program-controller-repair-candidate/v1, followed by each sorted digest_scope path encoded as UTF-8, one NUL byte, and its exact file bytes. This evidence record and ignored retained wheels are excluded.",
     "digest_scope_count": 9,
     "digest_scope": [
@@ -32,13 +32,13 @@
   },
   "repair_closure": {
     "terminal_replay": "executor terminal facts bind dispatch id, terminal state, candidate and result digest; exact replay is idempotent and conflicting replay fails closed before workspace access",
-    "program_revision_cas": "only one controller generation may own one program revision; stale decisions are superseded and coalesced into one revision-bound checkpoint",
+    "program_revision_cas": "only one controller generation may own one program revision; an inspected active writer remains deferred until a newly armed explicit checkpoint durably supersedes that claim and permits exactly one new claim on the same revision",
     "controller_context": "the controller reads one closed 48 KiB revision- and trunk-bound DAG projection containing plan, node, dependency, ownership, readiness, candidate, review, finding and acceptance-role facts",
     "external_effect_recovery": "start, review, repair and integration effects have durable identities; applied and failed facts are terminal and replay-idempotent, all-terminal actions acknowledge their original outbox exactly once, and one action-bound attention event owns failed-effect recovery",
     "git_topology": "ordinary canonical workspace aliases remain supported while raw repository and candidate paths used for Git integration reject symlink traversal",
     "action_schema": "the discriminated action union has independently closed oneOf branches locally and projects to the supported provider anyOf form",
     "dag_ownership": "serial or transitive reuse of a mutable surface is valid; concurrent incomparable owners remain invalid",
-    "integration_recovery": "fast-forward, merge and cherry-pick recover only an exact already-applied authorized Git effect with predecessor, resulting HEAD, parents and tree proof; unknown trunk advancement remains a conflict",
+    "integration_recovery": "fast-forward, merge and cherry-pick construct their exact strategy-specific target without moving the branch, then advance the branch with an expected-predecessor update-ref CAS; CAS failure leaves an unknown external HEAD untouched and exact applied effects remain recoverable by resulting HEAD, parents and tree",
     "cli_projection": "program decisions use the program decision API and convert frozen JSON values to ordinary JSON before rendering"
   },
   "outcome": {
@@ -52,8 +52,8 @@
     "strategy_specific_git_recovery": true
   },
   "validation": {
-    "focused_controller_ledger_supervisor_ipc": "406 passed across tests/test_program_controller.py, tests/test_supervisor_recovery.py and tests/test_controller_execution.py",
-    "full_pytest": "817 passed",
+    "focused_controller_ledger_supervisor_ipc": "407 passed across tests/test_program_controller.py, tests/test_supervisor_recovery.py and tests/test_controller_execution.py",
+    "full_pytest": "818 passed",
     "make_check": "passed: Ruff format/check, pytest, validator, compileall and all pre-commit hooks",
     "validator": "validated 16 cross-project skills and 7 workflow schemas",
     "git_diff_check": "passed",
@@ -70,8 +70,8 @@
     "version": "0.2.0",
     "python": "3.12.13",
     "sdk": "openai-codex 0.147.0",
-    "wheel_sha256": "eb799c15fbe72b09788f6d5301dbf41b703e161722b8c3cbbcdaac12823ed5db",
-    "wheel_bytes": 420720,
+    "wheel_sha256": "eddcea614cb7dc6887be2fca0f4b953c26d9b2d6c98f84696f1e765e1d75e1ef",
+    "wheel_bytes": 421170,
     "reproducible_builds": "two SOURCE_DATE_EPOCH=0 builds were byte-identical",
     "topology": "regular single-link file",
     "temporary_virtualenv_install": "passed",

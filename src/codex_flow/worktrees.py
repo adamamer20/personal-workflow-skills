@@ -361,13 +361,40 @@ class WorktreeManager:
                 raise WorkspaceConflict("trunk HEAD changed before integration")
             return recovered
 
-        preflight = self._runner(("git", "merge-tree", "--write-tree", expected_trunk_head, candidate_sha), repository)
-        if preflight.returncode != 0:
-            detail = preflight.stderr.strip() or preflight.stdout.strip() or "conflict-free preflight failed"
-            raise WorktreeError(f"Git integration preflight failed: {detail}")
+        if strategy == "fast_forward":
+            ancestry = self._runner(
+                ("git", "merge-base", "--is-ancestor", expected_trunk_head, candidate_sha), repository
+            )
+            if ancestry.returncode != 0:
+                raise WorktreeError("Git integration preflight failed: candidate is not a fast-forward")
+            expected_tree = self._git(repository, "rev-parse", "--verify", f"{candidate_sha}^{{tree}}")
+            target_head = candidate_sha
+        else:
+            candidate_parents = self._commit_parents(candidate, candidate_sha)
+            if strategy == "cherry_pick" and len(candidate_parents) != 1:
+                raise WorkspaceConflict("cherry-pick integration requires a single-parent candidate")
+            expected_tree = self._merge_tree(
+                repository,
+                expected_trunk_head,
+                candidate_sha,
+                merge_base=candidate_parents[0] if strategy == "cherry_pick" else None,
+            )
+            if expected_tree is None:
+                raise WorktreeError("Git integration preflight failed: conflict-free tree is unavailable")
+            parents = (
+                ("-p", expected_trunk_head, "-p", candidate_sha) if strategy == "merge" else ("-p", expected_trunk_head)
+            )
+            target_head = self._git(
+                repository,
+                "commit-tree",
+                expected_tree,
+                *parents,
+                "-m",
+                f"codex-flow {strategy.replace('_', '-')} {candidate_sha}",
+            )
 
-        # Recheck the identities and topology immediately before the first
-        # mutating command.  This closes the race between preflight and apply.
+        # Recheck immediately before moving the branch or checkout. Prepared
+        # objects remain unreachable unless the expected-old-value CAS wins.
         if self._git(repository, "rev-parse", "--verify", "HEAD^{commit}") != expected_trunk_head:
             raise WorkspaceConflict("trunk HEAD changed after integration preflight")
         if self._git(candidate, "rev-parse", "--verify", "HEAD^{commit}") != candidate_sha:
@@ -375,17 +402,16 @@ class WorktreeManager:
         self._require_clean_checkout(repository, label="trunk")
         self._require_clean_checkout(candidate, label="candidate")
 
-        command = {
-            "merge": ("git", "merge", "--no-ff", "--no-edit", candidate_sha),
-            "fast_forward": ("git", "merge", "--ff-only", candidate_sha),
-            "cherry_pick": ("git", "cherry-pick", candidate_sha),
-        }[strategy]
-        applied = self._runner(command, repository)
+        trunk_ref = self._git(repository, "symbolic-ref", "--quiet", "HEAD")
+        if not trunk_ref.startswith("refs/heads/"):
+            raise WorkspaceConflict("integration trunk HEAD is not an exact branch authority")
+        applied = self._runner(("git", "update-ref", trunk_ref, target_head, expected_trunk_head), repository)
         if applied.returncode != 0:
-            abort = "cherry-pick" if strategy == "cherry_pick" else "merge"
-            self._runner(("git", abort, "--abort"), repository)
-            detail = applied.stderr.strip() or applied.stdout.strip() or f"exit {applied.returncode}"
-            raise WorktreeError(f"Git integration failed: {detail}")
+            raise WorkspaceConflict("trunk HEAD changed during integration CAS")
+        checkout = self._runner(("git", "read-tree", "--reset", "-u", target_head), repository)
+        if checkout.returncode != 0:
+            detail = checkout.stderr.strip() or checkout.stdout.strip() or f"exit {checkout.returncode}"
+            raise WorktreeError(f"Git integration checkout update failed: {detail}")
         after = self._git(repository, "rev-parse", "--verify", "HEAD^{commit}")
         if after == before:
             raise WorkspaceConflict("Git integration did not advance the trunk")
@@ -395,20 +421,10 @@ class WorktreeManager:
             if after != candidate_sha:
                 raise WorkspaceConflict("fast-forward integration produced an unexpected trunk HEAD")
         elif strategy == "merge":
-            expected_tree = self._merge_tree(repository, expected_trunk_head, candidate_sha)
-            if parents != [before, candidate_sha] or expected_tree is None or tree != expected_tree:
+            if parents != [before, candidate_sha] or tree != expected_tree:
                 raise WorkspaceConflict("merge integration produced an unexpected Git post-state")
         else:
-            candidate_parents = self._commit_parents(candidate, candidate_sha)
-            if len(candidate_parents) != 1:
-                raise WorkspaceConflict("cherry-pick integration requires a single-parent candidate")
-            expected_tree = self._merge_tree(
-                repository,
-                expected_trunk_head,
-                candidate_sha,
-                merge_base=candidate_parents[0],
-            )
-            if parents != [before] or expected_tree is None or tree != expected_tree:
+            if parents != [before] or tree != expected_tree:
                 raise WorkspaceConflict("cherry-pick integration produced an unexpected Git post-state")
         self._require_clean_checkout(repository, label="integrated trunk")
         return {

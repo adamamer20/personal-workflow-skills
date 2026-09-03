@@ -10525,6 +10525,24 @@ class Ledger:
         identity = ProgramId(str(program_id))
         kind = event_kind if isinstance(event_kind, ProgramEventKind) else ProgramEventKind(event_kind)
         with self._transaction():
+            if kind is ProgramEventKind.CHECKPOINT:
+                now = utc_now()
+                # An ACTIVE inspection is a durable deferral, not a terminal
+                # program revision.  Only a newly armed explicit checkpoint
+                # may retire that claim and make another controller decision
+                # on the same program revision claimable.
+                self._db().execute(
+                    "UPDATE controller_decisions SET state = 'superseded', superseded_at = ?, "
+                    "claim_lease_expires_at = NULL, human_attention_reason = NULL, updated_at = ? "
+                    "WHERE program_id = ? AND program_revision = ("
+                    "SELECT program_revision FROM runs WHERE run_id = ?) "
+                    "AND action_id IS NULL AND state IN ('awaiting_claim','claimed','human_attention_required') "
+                    "AND EXISTS (SELECT 1 FROM controller_decision_generations g "
+                    "WHERE g.decision_id = controller_decisions.decision_id "
+                    "AND g.generation = controller_decisions.current_generation "
+                    "AND g.inspection_outcome = 'active')",
+                    (now, now, str(identity), str(identity)),
+                )
             return self._ensure_program_decision_in_transaction(
                 identity, event_kind=kind, event_key=event_key, payload=payload or {}
             )
@@ -11619,16 +11637,10 @@ class Ledger:
                         str(program),
                     ),
                 )
-                self._ensure_program_decision_in_transaction(
-                    program,
-                    event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
-                    event_key=f"milestone/{milestone}/integration/{candidate_sha}/{state}",
-                    payload={
-                        "milestone_id": str(milestone),
-                        "candidate_sha": candidate_sha,
-                        "integration_state": state,
-                    },
-                )
+                # Integration is an external effect of a committed program
+                # action.  Its action-bound failed-effect decision is the sole
+                # recovery authority; emitting another milestone decision here
+                # would create two independent claims for one failure.
             refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
             assert refreshed is not None
             return self._program_status_from_row(refreshed)

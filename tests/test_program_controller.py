@@ -526,6 +526,32 @@ def test_active_recovery_inspection_defers_without_repeated_controller_spawn(
         with pytest.raises(StaleWriter, match="already consumed"):
             supervisor.ledger.reserve_controller_recovery_inspection(decision.decision_id)
         assert claim.claimant_id == "program-controller/test"
+
+        checkpoint = supervisor.ledger.record_program_event(
+            "program",
+            ProgramEventKind.CHECKPOINT,
+            "explicit-rearm",
+            payload={"summary": "explicit controller checkpoint"},
+        )
+        assert supervisor.ledger.program_controller_decision(decision.decision_id).state is (
+            ControllerDecisionState.SUPERSEDED
+        )
+        assert supervisor._schedule_program_controller_generations() is True
+        assert spawned == [False]
+        checkpoint_claim = supervisor.ledger.claim_program_controller_decision(
+            checkpoint.decision_id,
+            claimant_id="program-controller/rearmed",
+            expected_revision=checkpoint.revision,
+            generation=1,
+        )
+        with pytest.raises(StaleWriter, match="not claimable"):
+            supervisor.ledger.claim_program_controller_decision(
+                checkpoint.decision_id,
+                claimant_id="program-controller/duplicate",
+                expected_revision=checkpoint.revision,
+                generation=1,
+            )
+        assert checkpoint_claim.claimant_id == "program-controller/rearmed"
     finally:
         supervisor.close()
 
@@ -615,6 +641,137 @@ def test_program_partial_external_effect_failure_is_durable_and_not_replayed(
             for item in restarted.ledger.program_controller_decisions()
             if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
             and item.payload.get("payload", {}).get("effect_id") == "start:second"  # type: ignore[union-attr]
+        ]
+        assert len(attention) == 1
+    finally:
+        restarted.close()
+
+
+def test_program_integration_conflict_has_one_action_bound_attention_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = Supervisor(tmp_path)
+    try:
+        ledger = supervisor.ledger
+        ledger.register_program(_graph(tmp_path))
+        start = ledger.start_program("program")
+        _claim_and_apply(
+            ledger,
+            start,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+        )
+        ledger.claim_dispatch("program", "first", "executor", 1)
+        ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=CANDIDATE_SHA,
+            terminal_status="completed",
+            dispatch_id="program/first/executor/1",
+        )
+        implementation = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
+        )
+        _claim_and_apply(
+            ledger,
+            implementation,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_REVIEWS,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                review_roles=("architecture-reviewer", "code-reviewer"),
+            ),
+        )
+        for review_id, role, mode in (
+            ("architecture-accepted", "architecture-reviewer", AcceptanceMode.ARCHITECTURE),
+            ("code-accepted", "code-reviewer", AcceptanceMode.OBJECTIVE),
+        ):
+            ledger.record_program_review(
+                "program",
+                "first",
+                ReviewResult(review_id, RoleId(role), True, (), CANDIDATE_SHA, acceptance_mode=mode),
+            )
+        review_completion = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+        )
+        _claim_and_apply(
+            ledger,
+            review_completion,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                review_ids=("architecture-accepted", "code-accepted"),
+            ),
+        )
+        integration_decision = ledger.record_program_event(
+            "program",
+            ProgramEventKind.INTEGRATION_COMPLETED,
+            "integration-request",
+            payload={"milestone_id": "first"},
+        )
+        claim = ledger.claim_program_controller_decision(
+            integration_decision.decision_id,
+            claimant_id="program-controller/integration",
+            expected_revision=integration_decision.revision,
+            generation=1,
+        )
+        bundle = _bundle(
+            integration_decision,
+            claim,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.INTEGRATE_CANDIDATE,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                expected_trunk_head=TRUNK_HEAD,
+                integration_strategy="merge",
+            ),
+        )
+        ledger.submit_program_controller_actions(
+            bundle,
+            claimant_id=claim.claimant_id,
+            token=str(claim.token),
+        )
+        calls = 0
+
+        def conflict(**_facts: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            raise WorkspaceConflict("concurrent trunk advancement")
+
+        monkeypatch.setattr(supervisor._worktrees, "integrate_candidate", conflict)
+        with pytest.raises(WorkspaceConflict, match="concurrent trunk advancement"):
+            supervisor._apply_program_action_bundle(bundle)
+        assert calls == 1
+        assert ledger.program_action_outboxes("program")[0]["state"] == "acknowledged"
+        attention = [
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+        ]
+        assert len(attention) == 1
+        assert attention[0].event_key == f"action-effect/{bundle.action_id}/failed"
+    finally:
+        supervisor.close()
+
+    restarted = Supervisor(tmp_path)
+    try:
+        monkeypatch.setattr(
+            restarted._worktrees,
+            "integrate_candidate",
+            lambda **_facts: (_ for _ in ()).throw(AssertionError("terminal effect replayed")),
+        )
+        assert restarted._reconcile_program_action_outboxes() is False
+        attention = [
+            item
+            for item in restarted.ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
         ]
         assert len(attention) == 1
     finally:
@@ -1209,7 +1366,8 @@ def test_program_git_integration_detects_concurrent_advance_after_preflight(tmp_
                 _git(repository, "commit", "-m", "external advancement")
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
-    with pytest.raises(WorkspaceConflict, match="unexpected Git post-state"):
+    commits_before = int(_git(repository, "rev-list", "--all", "--count"))
+    with pytest.raises(WorkspaceConflict, match="integration CAS"):
         WorktreeManager(runner=runner).integrate_candidate(
             repository_root=repository,
             candidate_workspace=candidate,
@@ -1220,7 +1378,10 @@ def test_program_git_integration_detects_concurrent_advance_after_preflight(tmp_
         )
     assert injected is True
     assert head_reads >= 2
-    assert _git(repository, "rev-parse", "--verify", "HEAD^{commit}") != expected
+    external_head = _git(repository, "rev-parse", "--verify", "HEAD^{commit}")
+    assert external_head != expected
+    assert _git(repository, "rev-list", "--all", "--count") == str(commits_before + 1)
+    assert _git(repository, "rev-list", "--parents", "-n", "1", external_head).split()[1:] == [expected]
     assert (repository / "concurrent.txt").read_text(encoding="utf-8") == "external advancement\n"
 
 
