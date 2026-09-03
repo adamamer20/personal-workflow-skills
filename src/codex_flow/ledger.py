@@ -1294,6 +1294,10 @@ class UnsupportedSchemaVersion(SchemaError):
     """The ledger was written by a newer or unsupported schema."""
 
 
+class MigrationRequired(SchemaError):
+    """An older ledger requires an explicit, fenced migration authority."""
+
+
 class RecordNotFound(LedgerError):
     """A requested run, milestone, or dispatch does not exist."""
 
@@ -1333,6 +1337,34 @@ def utc_now() -> str:
     """Return a sortable, explicit UTC timestamp."""
 
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _default_executor_blocker(terminal_status: str) -> TypedBlocker:
+    """Project a missing terminal blocker without losing its lifecycle scope."""
+
+    if terminal_status == "external_blocked":
+        return TypedBlocker(
+            gate_id="executor-terminal-facts",
+            kind=BlockerKind.EXTERNAL,
+            scope=BlockerScope.CURRENT_PROMOTION,
+            promotion_blocking=True,
+            required_action="Resolve the external prerequisite before promoting the retained candidate.",
+        )
+    if terminal_status == "needs_decision":
+        return TypedBlocker(
+            gate_id="executor-terminal-facts",
+            kind=BlockerKind.DECISION,
+            scope=BlockerScope.CURRENT_REPAIR,
+            promotion_blocking=True,
+            required_action="Resolve the controller decision before promoting or repairing the retained candidate.",
+        )
+    return TypedBlocker(
+        gate_id="executor-terminal-facts",
+        kind=BlockerKind.EXECUTION,
+        scope=BlockerScope.CURRENT_REPAIR,
+        promotion_blocking=True,
+        required_action="Inspect the retained terminal workspace and choose repair or abandonment.",
+    )
 
 
 def _identifier(value: str, constructor: Callable[[str], Any], label: str) -> Any:
@@ -1573,12 +1605,17 @@ class Ledger:
         *,
         timeout: float = 5.0,
         fault_injector: FaultInjector | None = None,
+        migrate: bool = False,
+        allow_legacy: bool = False,
     ) -> None:
         if timeout <= 0:
             raise ValueError("SQLite busy timeout must be positive")
         self.path = _absolute_path(path)
         self._timeout = timeout
         self._fault_injector = fault_injector
+        self._migrate_requested = migrate
+        self._allow_legacy = allow_legacy
+        self._legacy_schema_version: SchemaVersion | None = None
         self._connection: sqlite3.Connection | None = None
         self._database_fd: int | None = None
         self._directory_fds: tuple[int, ...] = ()
@@ -1822,6 +1859,20 @@ class Ledger:
             raise UnsupportedSchemaVersion(f"ledger schema {version} is unsupported")
         self._validate_schema_metadata(version)
         if version < CURRENT_SCHEMA_VERSION:
+            self._validate_shape(version)
+            try:
+                self._validate_rows()
+            except ValueError as exc:
+                raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
+            if self._allow_legacy:
+                # Legacy access is deliberately read/transition scoped.  It
+                # lets the service arm the predecessor refresh fence without
+                # changing its schema underneath an older installed owner.
+                self._legacy_schema_version = version
+                return
+            if not self._migrate_requested:
+                raise MigrationRequired(f"ledger schema {version} requires explicit fenced migration authority")
+            self._assert_migration_fenced(version)
             self._migrate(version)
         with self._read_transaction():
             self._validate_schema_metadata(CURRENT_SCHEMA_VERSION)
@@ -1830,6 +1881,18 @@ class Ledger:
                 self._validate_rows()
             except ValueError as exc:
                 raise CorruptSchemaError("workflow ledger contains invalid typed values") from exc
+
+    def _assert_migration_fenced(self, version: SchemaVersion) -> None:
+        """Require the predecessor owner to be durably fenced before upgrade."""
+
+        if version < SchemaVersion(18):
+            return
+        authority_table = "supervisor_authority" if version == SchemaVersion(18) else "harness_authority"
+        row = self._db().execute(f"SELECT requested_shutdown FROM {authority_table} WHERE singleton = 1").fetchone()
+        if row is not None and int(row["requested_shutdown"]) != 1:
+            raise MigrationRequired(
+                f"schema {version} migration requires the predecessor {authority_table} refresh fence"
+            )
 
     def _migrate_empty_v9_draft(self) -> None:
         row = (
@@ -10922,6 +10985,8 @@ class Ledger:
         candidate: CandidateRecord,
         *,
         dispatch_id: DispatchId | str | None = None,
+        terminal_status: str | None = None,
+        blocker: TypedBlocker | None = None,
     ) -> ProgramStatus:
         """Register one independently verified existing candidate for review."""
 
@@ -10930,6 +10995,15 @@ class Ledger:
             or candidate.disposition is not CandidateDisposition.VERIFIED_COMMIT
         ):
             raise ValueError("program adoption requires a verified commit candidate")
+        if terminal_status is not None and terminal_status not in {
+            "completed",
+            "failed",
+            "external_blocked",
+            "needs_decision",
+        }:
+            raise ValueError("program adoption terminal status is unsupported")
+        if blocker is not None and not isinstance(blocker, TypedBlocker):
+            raise TypeError("program adoption blocker must be typed")
         assert candidate.commit_sha is not None
         program = ProgramId(str(program_id))
         milestone = MilestoneId(str(milestone_id))
@@ -10947,6 +11021,22 @@ class Ledger:
             if row is None or row["program_digest"] is None or milestone_row is None:
                 raise RecordNotFound(f"program candidate does not exist: {program}/{milestone}")
             facts = self.review_lifecycle(program, milestone)
+            inherited_status = terminal_status
+            if inherited_status is None:
+                for fact in reversed(facts):
+                    if fact.kind != "executor_terminal":
+                        continue
+                    value = fact.data.get("terminal_status")
+                    if isinstance(value, str) and value in {
+                        "completed",
+                        "failed",
+                        "external_blocked",
+                        "needs_decision",
+                    }:
+                        inherited_status = value
+                        break
+            if blocker is None and inherited_status is not None and inherited_status != "completed":
+                blocker = _default_executor_blocker(inherited_status)
             existing = self._program_candidate_sha(program, milestone)
             if existing is not None and existing != candidate.commit_sha:
                 raise StaleWriter("program candidate commit changed before adoption")
@@ -10957,11 +11047,30 @@ class Ledger:
             ):
                 raise StaleWriter("program candidate is already promoted or integrated")
             current = WorkflowState(str(milestone_row["current_state"]))
-            if current in {WorkflowState.FAILED, WorkflowState.BLOCKED, WorkflowState.NEEDS_DECISION}:
+            target_state = (
+                WorkflowState.BLOCKED
+                if inherited_status == "external_blocked"
+                or (
+                    blocker is not None
+                    and blocker.kind is BlockerKind.EXTERNAL
+                    and blocker.scope is BlockerScope.CURRENT_PROMOTION
+                )
+                else WorkflowState.REPAIR_REQUIRED
+            )
+            if (
+                current
+                in {
+                    WorkflowState.FAILED,
+                    WorkflowState.BLOCKED,
+                    WorkflowState.NEEDS_DECISION,
+                    WorkflowState.REPAIR_REQUIRED,
+                }
+                and current is not target_state
+            ):
                 self._transition_program_state_in_transaction(
                     program,
                     milestone,
-                    WorkflowState.REPAIR_REQUIRED,
+                    target_state,
                     expected_state=current,
                     reason=ReasonCode.TERMINAL_OUTCOME,
                 )
@@ -10979,6 +11088,8 @@ class Ledger:
                     "candidate_dirty": candidate.dirty,
                     "candidate_reason": candidate.reason,
                     "dispatch_id": dispatch_value,
+                    "terminal_status": inherited_status,
+                    "blocker": blocker.to_json() if blocker is not None else None,
                 },
             )
             self._ensure_program_decision_in_transaction(
@@ -11075,6 +11186,94 @@ class Ledger:
                 )
             return fact
 
+    def reconcile_program_candidate(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId | str,
+        candidate_sha: str,
+        *,
+        terminal_status: str,
+        blocker: TypedBlocker,
+        dispatch_id: DispatchId | str | None = None,
+    ) -> ProgramStatus:
+        """Repair an adopted candidate's missing terminal blocker idempotently."""
+
+        if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+            raise ValueError("program candidate commit is invalid")
+        if terminal_status not in {"failed", "external_blocked", "needs_decision"}:
+            raise ValueError("candidate reconciliation terminal status is unsupported")
+        if not isinstance(blocker, TypedBlocker):
+            raise TypeError("candidate reconciliation blocker must be typed")
+        if terminal_status == "external_blocked" and (
+            blocker.kind is not BlockerKind.EXTERNAL or blocker.scope is not BlockerScope.CURRENT_PROMOTION
+        ):
+            raise ValueError("external candidate reconciliation requires a current-promotion external blocker")
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        dispatch_value = str(dispatch_id) if dispatch_id is not None else None
+        data = {
+            "candidate_sha": candidate_sha,
+            "terminal_status": terminal_status,
+            "blocker": blocker.to_json(),
+            "dispatch_id": dispatch_value,
+        }
+        with self._transaction():
+            row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            milestone_row = (
+                self._db()
+                .execute(
+                    "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                    (str(program), str(milestone)),
+                )
+                .fetchone()
+            )
+            if row is None or row["program_digest"] is None or milestone_row is None:
+                raise RecordNotFound(f"program candidate does not exist: {program}/{milestone}")
+            facts = self.review_lifecycle(program, milestone)
+            if not any(
+                fact.kind in {"candidate_adopted", "candidate_recorded", "candidate_reconciled"}
+                and fact.data.get("candidate_sha") == candidate_sha
+                for fact in facts
+            ):
+                raise RecordNotFound(f"program candidate is not adopted: {program}/{milestone}/{candidate_sha}")
+            for fact in reversed(facts):
+                if fact.kind != "candidate_reconciled" or fact.data.get("candidate_sha") != candidate_sha:
+                    continue
+                if fact.data != data:
+                    raise StaleWriter("candidate reconciliation conflicts with its durable blocker")
+                return self._program_status_from_row(row)
+            current = WorkflowState(str(milestone_row["current_state"]))
+            target = WorkflowState.BLOCKED if terminal_status == "external_blocked" else WorkflowState.REPAIR_REQUIRED
+            if current is not target:
+                self._transition_program_state_in_transaction(
+                    program,
+                    milestone,
+                    target,
+                    expected_state=current,
+                    reason=ReasonCode.TERMINAL_OUTCOME,
+                )
+            self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.RECOVERY,
+                kind="candidate_reconciled",
+                data=data,
+            )
+            self._ensure_program_decision_in_transaction(
+                program,
+                event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                event_key=f"milestone/{milestone}/candidate/{candidate_sha}/reconciled",
+                payload={
+                    "milestone_id": str(milestone),
+                    "candidate_sha": candidate_sha,
+                    "terminal_status": terminal_status,
+                    "blocker": blocker.to_json(),
+                },
+            )
+            refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            assert refreshed is not None
+            return self._program_status_from_row(refreshed)
+
     def _program_candidate_sha(self, program_id: ProgramId | str, milestone_id: MilestoneId | str) -> str | None:
         facts = self.review_lifecycle(program_id, milestone_id)
         for fact in reversed(facts):
@@ -11165,13 +11364,7 @@ class Ledger:
         else:
             candidate_disposition = CandidateDisposition.NO_CANDIDATE
         if terminal_status != "completed" and blocker is None:
-            blocker = TypedBlocker(
-                gate_id="executor-terminal-facts",
-                kind=BlockerKind.EXECUTION,
-                scope=BlockerScope.CURRENT_REPAIR,
-                promotion_blocking=True,
-                required_action="Inspect the retained terminal workspace and choose repair or abandonment.",
-            )
+            blocker = _default_executor_blocker(terminal_status)
         dispatch_value = str(dispatch_id) if dispatch_id is not None else None
         terminal_fact = {
             "dispatch_id": dispatch_value,
@@ -14946,6 +15139,28 @@ class Ledger:
                 return None
             self._db().execute("UPDATE harness_authority SET requested_shutdown = 1 WHERE singleton = 1")
             row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
+            return self._queue_row(row)
+
+    def arm_predecessor_refresh_fence(self) -> JsonObject | None:
+        """Fence a v18 supervisor before an explicit v18 -> v19 migration.
+
+        This method is available only on an ``allow_legacy`` opener.  It is
+        intentionally narrower than the normal harness fence: no current
+        schema validation or migration is performed, and the caller must
+        stop the fenced predecessor before opening a migrating Ledger.
+        """
+
+        if self._legacy_schema_version != SchemaVersion(18):
+            raise MigrationRequired("predecessor refresh fencing requires a legacy schema-v18 opener")
+        with self._transaction(validate_authority=False):
+            self._raise_if_active_harness_children_in_transaction()
+            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            if row is None:
+                return None
+            if int(row["requested_shutdown"]) not in {0, 1}:
+                raise CorruptSchemaError("supervisor authority shutdown fence is malformed")
+            self._db().execute("UPDATE supervisor_authority SET requested_shutdown = 1 WHERE singleton = 1")
+            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
             return self._queue_row(row)
 
     def acquire_harness(

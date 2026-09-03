@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
 from .ipc import IpcError, send_request
-from .ledger import HarnessRefreshBlocked, Ledger, LedgerError
+from .ledger import CURRENT_SCHEMA_VERSION, HarnessRefreshBlocked, Ledger, LedgerError, ledger_schema_compatibility
 
 
 class ServiceError(RuntimeError):
@@ -533,14 +533,25 @@ def refresh_with_credential(
         allow_profile_identity_update=True,
     )
     owned_ledger = ledger
+    migration_required = False
     if owned_ledger is None:
         ledger_path = unit.state_root / ".codex-flow" / "workflow.db"
         if not ledger_path.is_file():
             raise ServiceRefreshFailed("harness ledger is unavailable")
         try:
-            owned_ledger = Ledger(ledger_path)
+            compatibility = ledger_schema_compatibility(ledger_path)
+            migration_required = bool(compatibility.get("migration_required"))
+            if migration_required:
+                # Keep the predecessor schema intact while the old service is
+                # fenced and stopped.  The migrating opener is created only
+                # below, after that handoff has been observed.
+                owned_ledger = Ledger(ledger_path, allow_legacy=True)
+            else:
+                owned_ledger = Ledger(ledger_path)
         except LedgerError as exc:
             raise ServiceRefreshFailed("harness ledger cannot be opened") from exc
+    elif isinstance(ledger, Ledger) and ledger.schema_version < CURRENT_SCHEMA_VERSION:
+        raise ServiceRefreshFailed("explicit schema migration requires a service-owned ledger opener")
 
     assert owned_ledger is not None
     close_ledger = ledger is None
@@ -558,7 +569,11 @@ def refresh_with_credential(
     imported = False
     try:
         try:
-            fence = owned_ledger.arm_harness_refresh_fence()
+            fence = (
+                owned_ledger.arm_predecessor_refresh_fence()
+                if migration_required
+                else owned_ledger.arm_harness_refresh_fence()
+            )
         except HarnessRefreshBlocked as exc:
             raise ServiceRefreshDeferred(str(exc)) from exc
         except LedgerError as exc:
@@ -585,6 +600,12 @@ def refresh_with_credential(
             remaining()
             sleeper(min(0.05, remaining()))
             old_process_live = live_checker(old_pid, old_birth_identity)
+
+        if migration_required:
+            # The old authority is now fenced and its process/unit are gone;
+            # only this explicit handoff may mutate the schema identity.
+            owned_ledger.close()
+            owned_ledger = Ledger(ledger_path, migrate=True)
 
         if profile_sha256 is not None and native_compatibility_sha256 is not None:
             owned_ledger.authorize_controller_profile_refresh(
@@ -644,7 +665,7 @@ def refresh_with_credential(
             raise ServiceRefreshFailed("harness refresh failed") from exc
         raise
     finally:
-        if close_ledger:
+        if close_ledger and owned_ledger is not None:
             owned_ledger.close()
 
 

@@ -4091,6 +4091,9 @@ def test_migrated_v7_predecessor_without_terminal_snapshot_requires_explicit_rec
         connection.commit()
         connection.close()
 
+        migrated = Ledger(database, migrate=True)
+        migrated.close()
+
         adapter_creations = 0
 
         def successor_factory(config: CodexSdkConfig) -> FirstOutputAdapter:

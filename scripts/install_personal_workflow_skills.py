@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from codex_flow.ledger import HarnessRefreshBlocked, Ledger, LedgerError
+from codex_flow.ledger import HarnessRefreshBlocked, Ledger, LedgerError, ledger_schema_compatibility
 
 PLUGIN_NAME = "personal-workflow-skills"
 MARKETPLACE_NAME = "adam-workflows"
@@ -189,12 +189,18 @@ class Bootstrap:
         if not ledger_path.is_file():
             raise BootstrapError("matching harness ledger is unavailable")
         try:
-            ledger = Ledger(ledger_path)
+            compatibility = ledger_schema_compatibility(ledger_path)
+            if bool(compatibility.get("migration_required")):
+                ledger = Ledger(ledger_path, allow_legacy=True)
+                fence_method = ledger.arm_predecessor_refresh_fence
+            else:
+                ledger = Ledger(ledger_path)
+                fence_method = ledger.arm_harness_refresh_fence
         except LedgerError as exc:
             raise BootstrapError("matching harness ledger cannot be opened") from exc
         try:
             try:
-                authority = ledger.arm_harness_refresh_fence()
+                authority = fence_method()
             except HarnessRefreshBlocked as exc:
                 raise BootstrapError(f"harness refresh deferred: {exc}") from exc
             except LedgerError as exc:

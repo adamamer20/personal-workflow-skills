@@ -53,7 +53,14 @@ from codex_flow.harness import (
     process_birth_identity,
 )
 from codex_flow.ipc import IpcError, IpcTransportError, decode_frame, encode_frame
-from codex_flow.ledger import CorruptSchemaError, Ledger, LedgerError, StaleWriter, UnsupportedSchemaVersion, utc_now
+from codex_flow.ledger import (
+    CorruptSchemaError,
+    Ledger,
+    LedgerError,
+    StaleWriter,
+    UnsupportedSchemaVersion,
+    utc_now,
+)
 from codex_flow.plugin_capabilities import PluginCapabilityError, discover_plugin_capabilities
 from codex_flow.worker import (
     WORKER_EXIT_RESPONSE_CHAIN_INVALID,
@@ -5081,7 +5088,7 @@ def test_v11_opener_refuses_to_migrate_under_live_v10_harness() -> None:
         connection.close()
 
         with pytest.raises(UnsupportedSchemaVersion, match="live schema-v10 supervisor"):
-            Ledger(path)
+            Ledger(path, migrate=True)
 
         check = sqlite3.connect(path)
         assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "10"
@@ -5099,4 +5106,4 @@ def test_v11_marker_with_v12_recovery_residue_fails_closed() -> None:
         ledger._db().commit()
         ledger.close()
         with pytest.raises(CorruptSchemaError, match="unexpected v12 recovery state"):
-            Ledger(root / "workflow.db")
+            Ledger(root / "workflow.db", migrate=True)

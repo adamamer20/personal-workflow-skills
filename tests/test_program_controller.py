@@ -23,6 +23,10 @@ from codex_flow.contracts import (
 from codex_flow.control_client import ControlClientError, ControllerDecisionClient
 from codex_flow.domain import (
     AcceptanceMode,
+    BlockerKind,
+    BlockerScope,
+    CandidateDisposition,
+    CandidateRecord,
     ControllerActionReceipt,
     ControllerClaimantKind,
     ControllerDecisionClaim,
@@ -48,6 +52,7 @@ from codex_flow.domain import (
     RunId,
     ThreadIdentity,
     TurnObservation,
+    TypedBlocker,
     ValidationSpec,
     WorkflowState,
     WorkspaceMode,
@@ -463,6 +468,84 @@ def test_program_executor_terminal_replay_is_idempotent_and_dispatch_bound(tmp_p
                 dispatch_id=dispatch_id,
                 result_sha256="2" * 64,
             )
+    finally:
+        ledger.close()
+
+
+def test_candidate_blocker_scope_survives_adoption_reconciliation(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        candidate = CandidateRecord(
+            CandidateDisposition.VERIFIED_COMMIT,
+            tmp_path,
+            commit_sha=CANDIDATE_SHA,
+            workspace_head=CANDIDATE_SHA,
+            workspace_digest="f" * 64,
+        )
+        adopted = ledger.adopt_program_candidate("program", "first", candidate)
+        assert adopted.nodes[0].candidate_sha == CANDIDATE_SHA
+        assert adopted.nodes[0].blocker is None
+
+        blocker = TypedBlocker(
+            "real-streaming-sentinel",
+            BlockerKind.EXTERNAL,
+            BlockerScope.CURRENT_PROMOTION,
+            True,
+            "Authorize one fresh provider attempt before promotion.",
+        )
+        reconciled = ledger.reconcile_program_candidate(
+            "program",
+            "first",
+            CANDIDATE_SHA,
+            terminal_status="external_blocked",
+            blocker=blocker,
+        )
+        node = reconciled.nodes[0]
+        assert node.state == WorkflowState.BLOCKED.value
+        assert node.candidate_sha == CANDIDATE_SHA
+        assert node.candidate_disposition is CandidateDisposition.VERIFIED_COMMIT
+        assert node.blocker == blocker
+        replayed = ledger.reconcile_program_candidate(
+            "program",
+            "first",
+            CANDIDATE_SHA,
+            terminal_status="external_blocked",
+            blocker=blocker,
+        )
+        assert replayed.nodes[0].blocker == blocker
+    finally:
+        ledger.close()
+
+
+def test_external_executor_candidate_projects_blocked_scope(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        start = ledger.start_program("program")
+        _claim_and_apply(
+            ledger,
+            start,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+        )
+        ledger.claim_dispatch("program", "first", "executor", 1)
+        status = ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=CANDIDATE_SHA,
+            terminal_status="external_blocked",
+            dispatch_id="program/first/executor/1",
+            result_sha256="1" * 64,
+        )
+        node = status.nodes[0]
+        assert node.state == WorkflowState.BLOCKED.value
+        assert node.candidate_sha == CANDIDATE_SHA
+        assert node.blocker is not None
+        assert node.blocker.kind is BlockerKind.EXTERNAL
+        assert node.blocker.scope is BlockerScope.CURRENT_PROMOTION
     finally:
         ledger.close()
 

@@ -54,6 +54,7 @@ from codex_flow.ledger import (
     DispatchConflict,
     InvalidTransition,
     Ledger,
+    MigrationRequired,
     RecordNotFound,
     SchemaError,
     StaleWriter,
@@ -748,14 +749,14 @@ class LedgerTests(unittest.TestCase):
                     raise RuntimeError(stage)
 
             with self.assertRaisesRegex(RuntimeError, "after_migration"):
-                Ledger(path, fault_injector=fault)
+                Ledger(path, fault_injector=fault, migrate=True)
             connection = sqlite3.connect(path)
             self.assertEqual(
                 connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0], "1"
             )
             self.assertNotIn("closed_at", {row[1] for row in connection.execute("PRAGMA table_info(runs)")})
             connection.close()
-            migrated = Ledger(path)
+            migrated = Ledger(path, migrate=True)
             self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
             self.assertIn("closed_at", migrated.schema_columns("runs"))
             self.assertEqual(migrated.current_state("r", "m"), WorkflowState.STARTING)
@@ -773,6 +774,69 @@ class LedgerTests(unittest.TestCase):
             connection.close()
             with self.assertRaises(UnsupportedSchemaVersion):
                 Ledger(path)
+
+    def test_legacy_open_is_read_only_until_explicit_migration(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            ledger = Ledger(path)
+            ledger.close()
+            connection = sqlite3.connect(path)
+            connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+            connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(18)],),
+            )
+            connection.commit()
+            connection.close()
+
+            with self.assertRaises(MigrationRequired):
+                Ledger(path)
+            check = sqlite3.connect(path)
+            self.assertEqual(
+                check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0], "18"
+            )
+            check.close()
+
+            migrated = Ledger(path, migrate=True)
+            self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
+            migrated.close()
+
+    def test_v18_migration_requires_predecessor_fence(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "workflow.db"
+            ledger = Ledger(path)
+            ledger.acquire_harness(
+                repository_root=root,
+                state_root=root,
+                pid=os.getpid(),
+                process_birth_identity="legacy-process",
+                executable_digest="a" * 64,
+                version="0.2.0",
+                owner_nonce_sha256="b" * 64,
+            )
+            ledger.close()
+            connection = sqlite3.connect(path)
+            connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+            connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(18)],),
+            )
+            connection.commit()
+            connection.close()
+
+            with self.assertRaisesRegex(MigrationRequired, "refresh fence"):
+                Ledger(path, migrate=True)
+            legacy = Ledger(path, allow_legacy=True)
+            fence = legacy.arm_predecessor_refresh_fence()
+            self.assertIsNotNone(fence)
+            self.assertEqual(fence["requested_shutdown"], 1)
+            legacy.close()
+            migrated = Ledger(path, migrate=True)
+            self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
+            migrated.close()
 
     def test_schema_v16_to_v17_migration_is_atomic_and_preserves_recovery_facts(self) -> None:
         with TemporaryDirectory() as directory:
@@ -828,7 +892,7 @@ class LedgerTests(unittest.TestCase):
                     raise RuntimeError(stage)
 
             with self.assertRaisesRegex(RuntimeError, "after_copy_retry_policies"):
-                Ledger(path, fault_injector=fault)
+                Ledger(path, fault_injector=fault, migrate=True)
             connection = sqlite3.connect(path)
             self.assertEqual(
                 connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0], "16"
@@ -840,7 +904,7 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM recovery_controls").fetchone()[0], 1)
             connection.close()
 
-            migrated = Ledger(path)
+            migrated = Ledger(path, migrate=True)
             self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
             self.assertEqual(migrated.retry_policy("run/milestone/executor/1")["provider_transient_budget"], 3)
             self.assertEqual(migrated.retry_policy("run/milestone/executor/1")["provider_transient_used"], 0)
@@ -919,7 +983,7 @@ class LedgerTests(unittest.TestCase):
             connection.commit()
             connection.close()
 
-            migrated = Ledger(path)
+            migrated = Ledger(path, migrate=True)
             self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
             self.assertEqual(
                 migrated._db()
@@ -985,7 +1049,7 @@ class LedgerTests(unittest.TestCase):
             connection.commit()
             connection.close()
 
-            migrated = Ledger(path)
+            migrated = Ledger(path, migrate=True)
             self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
             self.assertEqual(migrated._parse_queue_result(claim.dispatch_id, raw).status.value, "completed")
             with self.assertRaisesRegex(ValueError, "retired"):
