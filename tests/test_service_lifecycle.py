@@ -651,8 +651,9 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
     assert [call[2] for call in calls] == ["is-active"]
 
 
-def test_v18_refresh_migration_failure_restores_legacy_pair_and_retries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("failure_stage", ["before_commit", "after_commit"])
+def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -700,18 +701,28 @@ def test_v18_refresh_migration_failure_restores_legacy_pair_and_retries(
             return Result(3)
         return Result(0)
 
-    original_init = Ledger.__init__
+    if failure_stage == "before_commit":
+        original_init = Ledger.__init__
 
-    def migration_fault(stage: str) -> None:
-        if stage == "after_migration":
-            raise RuntimeError("injected migration opener failure")
+        def migration_fault(stage: str) -> None:
+            if stage == "after_migration":
+                raise RuntimeError("injected pre-commit migration opener failure")
 
-    def fail_migration(self: Ledger, path: str | Path, **kwargs: object) -> None:
-        if kwargs.get("migrate"):
-            kwargs["fault_injector"] = migration_fault
-        original_init(self, path, **kwargs)
+        def fail_migration(self: Ledger, path: str | Path, **kwargs: object) -> None:
+            if kwargs.get("migrate"):
+                kwargs["fault_injector"] = migration_fault
+            original_init(self, path, **kwargs)
 
-    monkeypatch.setattr(Ledger, "__init__", fail_migration)
+        monkeypatch.setattr(Ledger, "__init__", fail_migration)
+    else:
+        original_ensure_h4_store = Ledger._ensure_h4_store
+
+        def fail_after_committed_migration(self: Ledger) -> None:
+            original_ensure_h4_store(self)
+            if self._migrate_requested:
+                raise RuntimeError("injected post-commit migration opener failure")
+
+        monkeypatch.setattr(Ledger, "_ensure_h4_store", fail_after_committed_migration)
     with pytest.raises(ServiceRefreshFailed, match="harness refresh failed"):
         refresh_with_credential(
             unit,

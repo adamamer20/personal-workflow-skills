@@ -1657,6 +1657,20 @@ class Ledger:
         database_fd: int | None = None
         connection: sqlite3.Connection | None = None
         created = False
+        restore_fenced_v18_on_failure = False
+
+        def restore_failed_migration() -> None:
+            if not restore_fenced_v18_on_failure or self._connection is None:
+                return
+            try:
+                self._restore_fenced_v18_after_failed_open()
+            except BaseException as rollback_error:
+                self._close_connection()
+                self.close()
+                raise CorruptSchemaError(
+                    "failed v18 migration opener could not restore the fenced predecessor schema"
+                ) from rollback_error
+
         try:
             directory_fds = _open_parent_chain(self.path)
             try:
@@ -1713,24 +1727,38 @@ class Ledger:
             connection.execute(f"PRAGMA busy_timeout = {int(self._timeout * 1000)}")
             self._connection = connection
             connection = None
+            if self._migrate_requested:
+                schema_meta = (
+                    self._db()
+                    .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'")
+                    .fetchone()
+                )
+                if schema_meta is not None:
+                    source_version = (
+                        self._db().execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+                    )
+                    restore_fenced_v18_on_failure = source_version is not None and str(source_version[0]) == "18"
             self._ensure_schema()
             self._ensure_h4_store()
             self._validate_live_identity()
             if self._expected_identity is None:
                 self._expected_identity = identity
         except sqlite3.DatabaseError as exc:
+            restore_failed_migration()
             self._close_connection()
             if created and self._expected_identity is None:
                 self._cleanup_failed_first_open()
             self.close()
             raise SchemaError(f"unable to open workflow ledger {self.path}") from exc
         except OSError as exc:
+            restore_failed_migration()
             self._close_connection()
             if created and self._expected_identity is None:
                 self._cleanup_failed_first_open()
             self.close()
             raise SchemaError(f"unable to pin workflow ledger {self.path}") from exc
         except BaseException:
+            restore_failed_migration()
             self._close_connection()
             if created and self._expected_identity is None:
                 self._cleanup_failed_first_open()
@@ -1767,6 +1795,50 @@ class Ledger:
             "phase TEXT NOT NULL, kind TEXT NOT NULL, data_json TEXT NOT NULL, occurred_at TEXT NOT NULL, "
             "PRIMARY KEY(run_id, milestone_id, sequence))"
         )
+
+    def _restore_fenced_v18_after_failed_open(self) -> None:
+        """Compensate a committed v18-to-v19 rename when the opener later fails.
+
+        Service refresh treats the constructor return as the migration commit
+        boundary.  A failure after the SQLite migration transaction commits
+        must therefore put the exact fenced predecessor identity back before
+        the caller restores its legacy unit.
+        """
+
+        connection = self._db()
+        version = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        identity = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()
+        if version is None or identity is None:
+            raise CorruptSchemaError("failed migration opener lost schema metadata")
+        if str(version[0]) == "18" and str(identity[0]) == _SCHEMA_IDENTITIES[SchemaVersion(18)]:
+            self._validate_schema_metadata(SchemaVersion(18))
+            self._validate_shape(SchemaVersion(18))
+            self._validate_rows()
+            return
+        if str(version[0]) != "19" or str(identity[0]) != _SCHEMA_IDENTITIES[SchemaVersion(19)]:
+            raise CorruptSchemaError("failed migration opener reached an unknown schema identity")
+        supervisor_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supervisor_authority'"
+        ).fetchone()
+        harness_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'harness_authority'"
+        ).fetchone()
+        authority = connection.execute(
+            "SELECT requested_shutdown FROM harness_authority WHERE singleton = 1"
+        ).fetchone()
+        if supervisor_exists is not None or harness_exists is None or authority is None or int(authority[0]) != 1:
+            raise CorruptSchemaError("failed migration opener cannot prove the fenced v19 authority")
+        with self._transaction(validate_authority=False):
+            connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+            connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(18)],),
+            )
+            connection.execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+        self._validate_schema_metadata(SchemaVersion(18))
+        self._validate_shape(SchemaVersion(18))
+        self._validate_rows()
 
     def _cleanup_failed_first_open(self) -> None:
         if self._database_fd is None or not self._directory_fds or self._open_identity is None:
