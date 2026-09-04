@@ -6,7 +6,7 @@
   "outcome": {
     "executor_status": "completed",
     "implementation_candidate_disposition": "verified_commit",
-    "implementation_candidate_sha": "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
+    "implementation_candidate_sha": "874a42044547186e49097374e6d1d6e4aa3a3e80",
     "milestone_state": "COMPLETED",
     "promotion_state": "unpromoted",
     "adopted_candidate_milestone_state": "BLOCKED",
@@ -15,23 +15,24 @@
     "dirty_workspace_preserved": true
   },
   "implementation_candidate": {
-    "commit_sha": "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
-    "parent_commit": "047804807a21ed4ad84b0985dbc349127f5b97cb",
+    "commit_sha": "874a42044547186e49097374e6d1d6e4aa3a3e80",
+    "parent_commit": "e3e2c7c66a835ee3569a1dbdbfc4f8eae15b3f36",
     "direct_parent_matches_repair_base": true,
-    "repair_base_commit": "047804807a21ed4ad84b0985dbc349127f5b97cb",
-    "successor_of": "047804807a21ed4ad84b0985dbc349127f5b97cb",
+    "repair_base_commit": "e3e2c7c66a835ee3569a1dbdbfc4f8eae15b3f36",
+    "successor_of": "e3e2c7c66a835ee3569a1dbdbfc4f8eae15b3f36",
     "candidate_role": "terminal-candidate-retention-and-harness-cutover-repair",
     "distinct_from_adopted_tui_candidate": true
   },
   "reviewed_range": {
     "external_baseline": "6fa09a3701d97f39a5183701687b4b8bcf62dc17",
-    "final_successor_tip": "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
-    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
+    "final_successor_tip": "874a42044547186e49097374e6d1d6e4aa3a3e80",
+    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..874a42044547186e49097374e6d1d6e4aa3a3e80",
     "superseded_predecessors": [
       "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
       "a2230ad79d2883d8bb2c5955b37709cce0e12315",
       "1f24975b02d599ba12102d6fc17a96a3c3c64574",
-      "047804807a21ed4ad84b0985dbc349127f5b97cb"
+      "047804807a21ed4ad84b0985dbc349127f5b97cb",
+      "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b"
     ]
   },
   "external_baseline": {
@@ -119,6 +120,7 @@
     "historical_result_rows_readable": true,
     "new_dispatch_rejects_historical_digest": true,
     "migration_failure_is_fail_closed": true,
+    "migration_failure_rollback": "Injected Ledger(..., migrate=True) failure restored exact supervisor unit bytes and mode, preserved schema-v18/supervisor_authority with requested_shutdown=1, and left the replacement unstarted; a subsequent normal refresh completed the fenced v18 -> v19 handoff.",
     "default_ledger_open": "refuses legacy migration with MigrationRequired",
     "legacy_fence_opener": "Ledger(..., allow_legacy=True).arm_predecessor_refresh_fence",
     "explicit_migration_opener": "Ledger(..., migrate=True) after predecessor fence and process inactivity",
@@ -126,15 +128,19 @@
   },
   "retained_wheel": {
     "path": "dist/integrated-runtime/codex_flow-0.2.0-py3-none-any.whl",
-    "sha256": "6808eaf2c5687b6f8f132969dd81cd9a74c8ab2f395c5d3e18690000d22e8618",
-    "size_bytes": 446760,
-    "source_commit": "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
+    "sha256": "15ea3bd02ec842b09bbc00576930f49583ae1fded561ce0b39787f7ab03f9d5a",
+    "size_bytes": 446930,
+    "source_commit": "874a42044547186e49097374e6d1d6e4aa3a3e80",
+    "reproducible_builds": "two SOURCE_DATE_EPOCH=0 builds were byte-identical",
+    "source_byte_parity": "33 source package files matched exact repository bytes",
+    "record_hash_parity": "48 hashed RECORD entries matched exact bytes and sizes",
+    "asset_byte_parity": "11 workflow assets matched exact repository bytes",
     "retained_wheel_pilot": "passed",
     "source_import_bypass": true,
     "global_installation_or_plugin_mutation": false
   },
   "validation": {
-    "full_pytest": "859 passed in 235.93s",
+    "full_pytest": "860 passed in 258.21s",
     "ruff_format": "passed",
     "ruff_check": "passed",
     "schema_validator": "passed",
@@ -142,10 +148,10 @@
     "pre_commit": "passed",
     "migration_regression": "passed, including repository and executable paths containing supervisor",
     "targeted_retained_wheel": "passed",
-    "repair_focused": "105 passed in 24.57s across candidate, ledger and service partitions",
+    "repair_focused": "63 passed in 27.75s across tests/test_service_lifecycle.py and tests/test_ledger_integrity.py",
     "git_diff_check": "passed",
     "independent_reviews": "pending",
-    "full_make_check": "passed: Ruff format/check, 859 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
+    "full_make_check": "passed: Ruff format/check, 860 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
   },
   "changed_surfaces": [
     "config/test-partitions.toml",
