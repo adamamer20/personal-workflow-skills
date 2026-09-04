@@ -1063,27 +1063,31 @@ class WorkflowHarness:
                 candidate_sha = action.candidate_sha
                 for role in action.review_roles:
                     generation = self.ledger.next_program_dispatch_generation(bundle.program_id, milestone_id, role)
+
+                    def enqueue_review_worker(
+                        role_value: str = role,
+                        milestone_value: str = milestone_id,
+                        candidate_value: str = candidate_sha,
+                        generation_value: int = generation,
+                    ) -> bool:
+                        return self._enqueue_program_worker(
+                            program_id=str(bundle.program_id),
+                            milestone_id=milestone_value,
+                            role=role_value,
+                            generation=generation_value,
+                            action_context={
+                                "program_id": str(bundle.program_id),
+                                "milestone_id": milestone_value,
+                                "candidate_sha": candidate_value,
+                                "review_role": role_value,
+                            },
+                        )
+
                     changed = (
                         self._apply_program_external_effect(
                             bundle,
                             f"review:{milestone_id}:{role}",
-                            lambda role=role,
-                            milestone_id=milestone_id,
-                            candidate_sha=candidate_sha,
-                            generation=generation: (
-                                self._enqueue_program_worker(
-                                    program_id=str(bundle.program_id),
-                                    milestone_id=milestone_id,
-                                    role=role,
-                                    generation=generation,
-                                    action_context={
-                                        "program_id": str(bundle.program_id),
-                                        "milestone_id": milestone_id,
-                                        "candidate_sha": candidate_sha,
-                                        "review_role": role,
-                                    },
-                                )
-                            ),
+                            enqueue_review_worker,
                         )
                         or changed
                     )
@@ -1094,28 +1098,32 @@ class WorkflowHarness:
                 candidate_sha = action.candidate_sha
                 finding_ids = action.finding_ids
                 generation = self.ledger.next_program_dispatch_generation(bundle.program_id, milestone_id, "executor")
+
+                def enqueue_repair_worker(
+                    milestone_value: str = milestone_id,
+                    candidate_value: str = candidate_sha,
+                    finding_values: tuple[str, ...] = finding_ids,
+                    generation_value: int = generation,
+                ) -> bool:
+                    return self._enqueue_program_worker(
+                        program_id=str(bundle.program_id),
+                        milestone_id=milestone_value,
+                        role="executor",
+                        generation=generation_value,
+                        action_context={
+                            "program_id": str(bundle.program_id),
+                            "milestone_id": milestone_value,
+                            "candidate_sha": candidate_value,
+                            "finding_ids": list(finding_values),
+                            "repair": True,
+                        },
+                    )
+
                 changed = (
                     self._apply_program_external_effect(
                         bundle,
                         f"repair:{milestone_id}",
-                        lambda milestone_id=milestone_id,
-                        candidate_sha=candidate_sha,
-                        finding_ids=finding_ids,
-                        generation=generation: (
-                            self._enqueue_program_worker(
-                                program_id=str(bundle.program_id),
-                                milestone_id=milestone_id,
-                                role="executor",
-                                generation=generation,
-                                action_context={
-                                    "program_id": str(bundle.program_id),
-                                    "milestone_id": milestone_id,
-                                    "candidate_sha": candidate_sha,
-                                    "finding_ids": list(finding_ids),
-                                    "repair": True,
-                                },
-                            )
-                        ),
+                        enqueue_repair_worker,
                     )
                     or changed
                 )
