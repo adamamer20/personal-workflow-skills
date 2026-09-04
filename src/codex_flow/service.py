@@ -674,11 +674,14 @@ def refresh_with_credential(
 
     legacy_unit_raw: bytes | None = None
     legacy_unit_mode: int | None = None
-    if migration_required:
+    interrupted_unit_staged = False
+    if migration_required or interrupted_recovery:
         # Keep an exact rollback image until the v18 ledger has crossed its
         # migration fence.  Installing the replacement before migration means
         # an install failure leaves the fenced v18 pair retryable, never a v19
-        # ledger paired only with a stopped predecessor unit.
+        # ledger paired only with a stopped predecessor unit.  The same image
+        # protects an interrupted v19 handoff while its replacement unit is
+        # being staged or health-checked.
         legacy_unit_raw, _legacy_unit_text, legacy_unit_mode = _read_installed_unit(unit_path_value)
 
     def restore_legacy_unit() -> None:
@@ -801,6 +804,7 @@ def refresh_with_credential(
             )
 
         if not migration_required:
+            interrupted_unit_staged = interrupted_recovery
             install_unit(unit, config_home=config_home)
         if unit.runtime != "harness":
             raise ServiceRefreshFailed("replacement service unit runtime is not harness")
@@ -840,6 +844,11 @@ def refresh_with_credential(
                 }
             sleeper(min(0.05, remaining()))
     except BaseException as exc:
+        if interrupted_recovery and interrupted_unit_staged:
+            try:
+                restore_legacy_unit()
+            except BaseException as restore_error:
+                raise ServiceRefreshFailed("interrupted refresh legacy service unit rollback failed") from restore_error
         if imported:
             try:
                 _run_manager(("unset-environment", key), runner=runner)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import socket
@@ -30,6 +31,7 @@ from codex_flow.control_client import (
     _response,
 )
 from codex_flow.domain import (
+    CONTROL_LIST_RESPONSE_MAX_BYTES,
     ControlAcknowledgement,
     ControlCommand,
     ControlCommandKind,
@@ -42,6 +44,10 @@ from codex_flow.domain import (
     ControllerDecisionState,
     ControllerDecisionStatus,
     ControllerDecisionSummary,
+    ControlListKind,
+    ControlListPage,
+    ControlListRequest,
+    ControlListVisibility,
     ConversationContent,
     ConversationContentKind,
     ConversationHistoryPage,
@@ -68,7 +74,7 @@ from codex_flow.domain import (
     ThreadIdentity,
 )
 from codex_flow.harness import WorkflowHarness
-from codex_flow.ipc import IpcError, encode_frame
+from codex_flow.ipc import IpcError, decode_frame, encode_frame
 from codex_flow.ledger import Ledger, StaleWriter
 from codex_flow.tui import CodexFlowTerminalApp, ConfirmActionScreen, SteerActionScreen
 from codex_flow.tui_client import TerminalUiClient, TerminalUiOfflineError
@@ -1475,6 +1481,221 @@ def test_terminal_ui_reaches_real_local_harness_socket_without_provider_or_app_c
     assert len(commands) == 1 and commands[0]["payload"] == "provider-free steer"
     assert harness._children == {}
     harness.close()
+
+
+def test_control_pages_frame_dot_containing_hmac_and_exhaust_large_snapshot(tmp_path: Path) -> None:
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+    ledger = harness.ledger
+    route_json = '{"leaf_worker_policy":{"agents.enabled":false,"features.multi_agent":false,"config_overrides":[]}}'
+    for index in range(120):
+        run_id = f"run-{index:03d}"
+        milestone_id = f"milestone-{index:03d}"
+        dispatch_id = f"{run_id}/{milestone_id}/executor/1"
+        ledger.create_run(run_id)
+        ledger.create_milestone(run_id, milestone_id)
+        ledger.claim_dispatch(run_id, milestone_id, "executor", 1)
+        ledger.enqueue_dispatch(
+            dispatch_id,
+            backend="sdk_headless",
+            capsule_json=f'{{"model":"test","prompt":"bounded-{index}"}}',
+            route_json=route_json,
+            workspace_path=tmp_path,
+            result_contract_sha256=model_facing_result_schema_sha256(),
+        )
+    harness.acquire()
+    request = ControlListRequest(ControlListKind.WORKERS, page_items=24)
+    first_response: dict[str, object] | None = None
+    try:
+        legacy_response = harness._request_ack({"version": 1, "operation": "status"})
+        client_socket, server_socket = socket.socketpair()
+        try:
+            harness._send_response(server_socket, legacy_response)
+            assert decode_frame(client_socket) == {"version": 1, "ok": False, "error": "response_too_large"}
+        finally:
+            client_socket.close()
+            server_socket.close()
+
+        for nonce_index in range(256):
+            harness.owner_nonce = f"token-framing-regression-{nonce_index}"
+            candidate = harness._control_list_page(request)
+            token = candidate["page"]["next_token"]  # type: ignore[index]
+            assert isinstance(token, str)
+            assert token.count(".") == 1
+            _body_part, signature_part = token.split(".")
+            signature = base64.b64decode(
+                (signature_part + "=" * (-len(signature_part) % 4)).encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
+            if b"." in signature:
+                first_response = candidate
+                break
+        assert first_response is not None, "deterministic nonce search did not produce a dot-containing HMAC"
+
+        pages = [first_response]
+        token = first_response["page"]["next_token"]  # type: ignore[index]
+        while token is not None:
+            page = harness._control_list_page(ControlListRequest(ControlListKind.WORKERS, page_token=token))
+            pages.append(page)
+            token = page["page"]["next_token"]  # type: ignore[index]
+
+        identities = [
+            item["dispatch_id"]
+            for response in pages
+            for item in response["page"]["items"]  # type: ignore[index]
+        ]
+        assert len(pages) == 5
+        assert len(identities) == 120
+        assert len(set(identities)) == 120
+        assert all(len(encode_frame(response)) - 4 < CONTROL_LIST_RESPONSE_MAX_BYTES for response in pages)
+        assert pages[-1]["page"]["complete"] is True  # type: ignore[index]
+    finally:
+        harness.close()
+
+
+def test_terminal_ui_pages_are_explicit_and_visibility_resets_accumulation() -> None:
+    historical = LiveWorkerStatus(
+        DispatchId("run-history/milestone-history/executor/1"),
+        "completed",
+        1,
+        1,
+        None,
+        None,
+        RetryPolicyFacts(),
+        (),
+    )
+
+    class PagedLive(_TerminalUiLiveClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.page_calls: list[tuple[ControlListVisibility, str | None]] = []
+
+        def status_page(
+            self,
+            *,
+            visibility: ControlListVisibility,
+            page_token: str | None = None,
+            page_items: int = 24,
+        ) -> ControlListPage[LiveWorkerStatus]:
+            del page_items
+            self.page_calls.append((visibility, page_token))
+            if visibility is ControlListVisibility.ACTIVE:
+                return ControlListPage(
+                    ControlListKind.WORKERS,
+                    visibility,
+                    "a" * 64,
+                    (_tui_worker(),),
+                    None,
+                    True,
+                )
+            if page_token is None:
+                return ControlListPage(
+                    ControlListKind.WORKERS,
+                    visibility,
+                    "a" * 64,
+                    (_tui_worker(),),
+                    "worker-more",
+                    False,
+                )
+            return ControlListPage(
+                ControlListKind.WORKERS,
+                visibility,
+                "a" * 64,
+                (historical,),
+                None,
+                True,
+            )
+
+    class PagedDecisions(_TerminalUiDecisionClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.page_calls: list[tuple[ControlListVisibility, str | None]] = []
+
+        def pending_page(
+            self,
+            *,
+            visibility: ControlListVisibility,
+            page_token: str | None = None,
+            page_items: int = 24,
+        ) -> ControlListPage[ControllerDecisionStatus]:
+            del page_items
+            self.page_calls.append((visibility, page_token))
+            return ControlListPage(
+                ControlListKind.DECISIONS,
+                visibility,
+                "b" * 64,
+                (),
+                None,
+                True,
+            )
+
+    live = PagedLive()
+    decisions = PagedDecisions()
+    client = TerminalUiClient(live, decisions)  # type: ignore[arg-type]
+
+    first = asyncio.run(client.refresh())
+    assert first.connected and len(first.workers) == 1 and not first.workers_complete
+    loaded = asyncio.run(client.load_more_sessions())
+    assert loaded.connected and len(loaded.workers) == 2 and loaded.workers_complete
+    assert live.page_calls == [
+        (ControlListVisibility.ALL, None),
+        (ControlListVisibility.ALL, "worker-more"),
+    ]
+    active = asyncio.run(client.toggle_visibility())
+    assert active.connected and active.visibility == "active" and len(active.workers) == 1
+    assert active.workers_complete and active.decisions_complete
+    assert live.page_calls[-1] == (ControlListVisibility.ACTIVE, None)
+    assert decisions.page_calls == [
+        (ControlListVisibility.ALL, None),
+        (ControlListVisibility.ACTIVE, None),
+    ]
+    bindings = {binding[0] for binding in CodexFlowTerminalApp.BINDINGS}
+    assert {"f", "m"} <= bindings
+
+
+def test_control_page_token_identity_and_stale_snapshot_fail_closed(tmp_path: Path) -> None:
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+    ledger = harness.ledger
+    route_json = '{"leaf_worker_policy":{"agents.enabled":false,"features.multi_agent":false,"config_overrides":[]}}'
+    for index in range(2):
+        run_id = f"run-{index}"
+        milestone_id = f"milestone-{index}"
+        ledger.create_run(run_id)
+        ledger.create_milestone(run_id, milestone_id)
+        dispatch_id = f"{run_id}/{milestone_id}/executor/1"
+        ledger.claim_dispatch(run_id, milestone_id, "executor", 1)
+        ledger.enqueue_dispatch(
+            dispatch_id,
+            backend="sdk_headless",
+            capsule_json=f'{{"model":"test","prompt":"bounded-{index}"}}',
+            route_json=route_json,
+            workspace_path=tmp_path,
+            result_contract_sha256=model_facing_result_schema_sha256(),
+        )
+    harness.acquire()
+    request = ControlListRequest(ControlListKind.WORKERS, page_items=1)
+    try:
+        first = harness._control_list_page(request)
+        token = first["page"]["next_token"]  # type: ignore[index]
+        assert isinstance(token, str)
+        with pytest.raises(IpcError) as malformed:
+            harness._control_list_page(ControlListRequest(ControlListKind.WORKERS, page_token="not-a-token"))
+        assert malformed.value.reason_code == "malformed_page_token"
+        with pytest.raises(IpcError) as cross_operation:
+            harness._control_list_page(ControlListRequest(ControlListKind.DECISIONS, page_token=token))
+        assert cross_operation.value.reason_code == "page_token_identity_mismatch"
+        with pytest.raises(IpcError) as cross_visibility:
+            harness._control_list_page(ControlListRequest(ControlListKind.WORKERS, ControlListVisibility.ACTIVE, token))
+        assert cross_visibility.value.reason_code == "page_token_identity_mismatch"
+
+        row_id = str(first["page"]["items"][0]["dispatch_id"])  # type: ignore[index]
+        ledger._db().execute("UPDATE dispatch_queue SET state = 'running' WHERE dispatch_id = ?", (row_id,))
+        ledger._db().commit()
+        stale = harness._control_list_page(ControlListRequest(ControlListKind.WORKERS, page_token=token, page_items=1))
+        assert stale["page"]["status"] == "stale"  # type: ignore[index]
+        assert stale["page"]["items"] == []  # type: ignore[index]
+    finally:
+        harness.close()
 
 
 def test_inactive_history_read_is_read_only_ephemeral_and_identity_bound(

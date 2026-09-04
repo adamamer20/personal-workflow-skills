@@ -1618,7 +1618,12 @@ class WorkflowHarness:
             separators=(",", ":"),
         ).encode("ascii")
         signature = hmac.new(self.owner_nonce.encode("ascii"), body, hashlib.sha256).digest()
-        token = base64.urlsafe_b64encode(body + b"." + signature).decode("ascii").rstrip("=")
+        # Keep the framing delimiter outside the authenticated byte strings.
+        # A raw HMAC digest may itself contain 0x2e, so framing the body and
+        # digest before one base64 encoding is ambiguous on decode.
+        body_part = base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
+        signature_part = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+        token = f"{body_part}.{signature_part}"
         if len(token) > 1_024:
             raise IpcError("page continuation token is too large", reason_code="malformed_page_token")
         return token
@@ -1632,9 +1637,13 @@ class WorkflowHarness:
         ):
             raise IpcError("page continuation token is malformed", reason_code="malformed_page_token")
         try:
-            encoded = token + "=" * (-len(token) % 4)
-            raw = base64.b64decode(encoded.encode("ascii"), altchars=b"-_", validate=True)
-            body, signature = raw.rsplit(b".", 1)
+            body_part, signature_part = token.split(".", 1)
+            if not body_part or not signature_part or "." in signature_part:
+                raise ValueError("page token framing is invalid")
+            body_encoded = body_part + "=" * (-len(body_part) % 4)
+            signature_encoded = signature_part + "=" * (-len(signature_part) % 4)
+            body = base64.b64decode(body_encoded.encode("ascii"), altchars=b"-_", validate=True)
+            signature = base64.b64decode(signature_encoded.encode("ascii"), altchars=b"-_", validate=True)
             expected = hmac.new(self.owner_nonce.encode("ascii"), body, hashlib.sha256).digest()
             if not hmac.compare_digest(signature, expected):
                 raise ValueError("page token signature is invalid")
