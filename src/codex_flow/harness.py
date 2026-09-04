@@ -3350,7 +3350,11 @@ class WorkflowHarness:
                     result = ModelFacingResult.from_agent_message(raw)
                 except (TypeError, ValueError):
                     result = None
-                if result is not None and result.blocker is not None:
+                # A candidate-integrity failure is authored by the harness
+                # from exact workspace/path validation and outranks any
+                # advisory blocker emitted by the model result.  Never let
+                # provider output replace or downgrade that durable fact.
+                if blocker is None and result is not None and result.blocker is not None:
                     blocker = result.blocker
                 candidate_sha = candidate_record.commit_sha if candidate_record is not None else None
                 self.ledger.record_program_executor_result(

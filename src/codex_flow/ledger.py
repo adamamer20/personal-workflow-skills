@@ -129,6 +129,7 @@ from .domain import (
     WorkflowState,
     WorkspaceLeaseRecord,
     WorkspaceMode,
+    blocker_applies_to,
     coerce_state,
     is_transition_allowed,
     redact_control_text,
@@ -11334,6 +11335,32 @@ class Ledger:
                 blocker = None
         return blocker
 
+    def _program_applicable_blocker(
+        self,
+        program_id: ProgramId | str,
+        *,
+        operation: str,
+        target_milestone_id: MilestoneId | str,
+    ) -> TypedBlocker | None:
+        """Return the first current blocker governing one program operation."""
+
+        status = self.program_status(program_id)
+        target_id = MilestoneId(str(target_milestone_id))
+        target = next((node for node in status.nodes if node.milestone_id == target_id), None)
+        if target is None:
+            raise RecordNotFound(f"program milestone does not exist: {program_id}/{target_id}")
+        for source in status.nodes:
+            blocker = source.blocker
+            if blocker is not None and blocker_applies_to(
+                blocker,
+                operation=operation,
+                source_milestone_id=source.milestone_id,
+                target_milestone_id=target_id,
+                target_dependencies=target.dependencies,
+            ):
+                return blocker
+        return None
+
     def _transition_program_state_in_transaction(
         self,
         program_id: ProgramId | str,
@@ -11619,6 +11646,15 @@ class Ledger:
                 for milestone_id in selected:
                     if milestone_id not in nodes:
                         raise StaleWriter("program start action names an unknown milestone")
+                    if (
+                        self._program_applicable_blocker(
+                            bundle.program_id,
+                            operation="start",
+                            target_milestone_id=milestone_id,
+                        )
+                        is not None
+                    ):
+                        raise StaleWriter("program start action has a blocking program prerequisite")
                     surfaces = set(nodes[milestone_id].get("mutable_surfaces", []))
                     if seen & surfaces:
                         raise StaleWriter("program start action has overlapping mutable ownership")
@@ -11639,6 +11675,15 @@ class Ledger:
                     bundle.program_id, action.milestone_id
                 ):
                     raise StaleWriter("program review action does not target the exact candidate")
+                if (
+                    self._program_applicable_blocker(
+                        bundle.program_id,
+                        operation="start",
+                        target_milestone_id=action.milestone_id,
+                    )
+                    is not None
+                ):
+                    raise StaleWriter("program review action has a blocking program prerequisite")
                 capsule = nodes[action.milestone_id].get("capsule")
                 modes = capsule.get("acceptance_modes", []) if isinstance(capsule, dict) else []
                 expected_roles = tuple(
@@ -11785,10 +11830,12 @@ class Ledger:
                     for item in facts
                 ):
                     raise StaleWriter("program promotion has a promotion-blocking finding")
-                terminal_blocker = self._program_candidate_blocker(
-                    bundle.program_id, action.milestone_id, action.candidate_sha
+                terminal_blocker = self._program_applicable_blocker(
+                    bundle.program_id,
+                    operation="promote",
+                    target_milestone_id=action.milestone_id,
                 )
-                if terminal_blocker is not None and terminal_blocker.promotion_blocking:
+                if terminal_blocker is not None:
                     raise StaleWriter("program promotion has a promotion-blocking terminal blocker")
                 if not any(
                     item.kind == "promotion_accepted" and item.data.get("candidate_sha") == action.candidate_sha
@@ -11826,10 +11873,12 @@ class Ledger:
                     for item in facts
                 ):
                     raise StaleWriter("program integration requires an exact promotion receipt")
-                terminal_blocker = self._program_candidate_blocker(
-                    bundle.program_id, action.milestone_id, action.candidate_sha
+                terminal_blocker = self._program_applicable_blocker(
+                    bundle.program_id,
+                    operation="integrate",
+                    target_milestone_id=action.milestone_id,
                 )
-                if terminal_blocker is not None and terminal_blocker.promotion_blocking:
+                if terminal_blocker is not None:
                     raise StaleWriter("program integration has a promotion-blocking terminal blocker")
                 integration_id = f"integration/{bundle.program_id}/{action.milestone_id}/{action.candidate_sha}"
                 existing = (

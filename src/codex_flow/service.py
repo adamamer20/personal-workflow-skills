@@ -683,8 +683,8 @@ def refresh_with_credential(
             )
 
         install_unit(unit, config_home=config_home)
-        if "supervisor" in unit.text.lower() or unit.runtime != "harness":
-            raise ServiceRefreshFailed("replacement service unit retains a supervisor runtime alias")
+        if unit.runtime != "harness":
+            raise ServiceRefreshFailed("replacement service unit runtime is not harness")
         _validate_installed_unit(
             unit,
             config_home=config_home,

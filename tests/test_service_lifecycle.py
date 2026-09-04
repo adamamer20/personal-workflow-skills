@@ -481,9 +481,10 @@ def test_refresh_timeout_is_explicit_and_leaves_fence_armed(tmp_path: Path) -> N
 
 
 def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_path: Path) -> None:
-    repository = tmp_path / "repo"
+    repository = tmp_path / "supervisor-repository"
     repository.mkdir()
-    executable = tmp_path / "codex-flow"
+    executable = tmp_path / "supervisor-bin" / "codex-flow-supervisor"
+    executable.parent.mkdir()
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o755)
     state_root = repository / ".codex-flow"
@@ -565,7 +566,8 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     )
     assert result["refreshed"] is True
     installed = (config_home / "systemd" / "user" / unit.unit_name).read_text(encoding="utf-8")
-    assert "harness run" in installed and "supervisor" not in installed
+    exec_lines = [line for line in installed.splitlines() if line.startswith("ExecStart=")]
+    assert exec_lines == [f"ExecStart={executable} harness run --foreground --state-root {repository}"]
     assert [call[2] for call in calls] == ["is-active", "daemon-reload", "import-environment", "start", "is-active"]
     migrated = Ledger(ledger_path)
     try:

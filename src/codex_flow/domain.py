@@ -2018,6 +2018,40 @@ class TypedBlocker:
         )
 
 
+def blocker_applies_to(
+    blocker: TypedBlocker,
+    *,
+    operation: str,
+    source_milestone_id: MilestoneId,
+    target_milestone_id: MilestoneId | None = None,
+    target_dependencies: tuple[MilestoneId, ...] = (),
+) -> bool:
+    """Return whether one typed blocker governs a program operation.
+
+    Blocker scope is intentionally interpreted at one boundary so status
+    projections and controller actions cannot drift.  Current promotion and
+    repair blockers govern only their own candidate's promotion/integration;
+    future-milestone blockers govern dependent readiness/start; and a whole
+    program blocker governs every operation.  Non-promotion-blocking facts
+    remain advisory for all of these gates.
+    """
+
+    if operation not in {"ready", "start", "promote", "integrate"}:
+        raise ValueError("unsupported blocker operation")
+    if not blocker.promotion_blocking:
+        return False
+    if blocker.scope is BlockerScope.WHOLE_PROGRAM:
+        return True
+    if target_milestone_id is None:
+        raise ValueError("blocker operation requires a target milestone")
+    if operation in {"promote", "integrate"}:
+        return source_milestone_id == target_milestone_id and blocker.scope in {
+            BlockerScope.CURRENT_PROMOTION,
+            BlockerScope.CURRENT_REPAIR,
+        }
+    return blocker.scope is BlockerScope.FUTURE_MILESTONE and source_milestone_id in target_dependencies
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateRecord:
     """Workspace inspection fact retained independently of executor status."""
@@ -3921,11 +3955,24 @@ class ProgramStatus:
     @property
     def ready_milestones(self) -> tuple[MilestoneId, ...]:
         integrated = {node.milestone_id for node in self.nodes if node.integrated}
-        return tuple(
-            node.milestone_id
-            for node in self.nodes
-            if node.ready and all(dependency in integrated for dependency in node.dependencies)
-        )
+        ready: list[MilestoneId] = []
+        for node in self.nodes:
+            if not node.ready or not all(dependency in integrated for dependency in node.dependencies):
+                continue
+            if any(
+                source.blocker is not None
+                and blocker_applies_to(
+                    source.blocker,
+                    operation="ready",
+                    source_milestone_id=source.milestone_id,
+                    target_milestone_id=node.milestone_id,
+                    target_dependencies=node.dependencies,
+                )
+                for source in self.nodes
+            ):
+                continue
+            ready.append(node.milestone_id)
+        return tuple(ready)
 
 
 @dataclass(frozen=True, slots=True)

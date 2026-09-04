@@ -46,6 +46,9 @@ from codex_flow.domain import (
     ProgramGraph,
     ProgramId,
     ProgramNodeSpec,
+    ProgramNodeStatus,
+    ProgramState,
+    ProgramStatus,
     ReasoningEffort,
     ReviewResult,
     RoleId,
@@ -554,6 +557,184 @@ def test_external_executor_candidate_projects_blocked_scope(tmp_path: Path) -> N
         assert node.blocker.scope is BlockerScope.CURRENT_PROMOTION
     finally:
         ledger.close()
+
+
+def test_future_and_whole_program_blockers_filter_only_their_applicable_ready_lanes() -> None:
+    future = TypedBlocker(
+        "future-prerequisite",
+        BlockerKind.DECISION,
+        BlockerScope.FUTURE_MILESTONE,
+        True,
+        "Resolve the future milestone prerequisite.",
+    )
+    whole = TypedBlocker(
+        "program-integrity",
+        BlockerKind.EXECUTION,
+        BlockerScope.WHOLE_PROGRAM,
+        True,
+        "Resolve the program-wide integrity issue.",
+    )
+    status = ProgramStatus(
+        ProgramId("program"),
+        ProgramState.RUNNING,
+        0,
+        PLAN_DIGEST,
+        TRUNK_HEAD,
+        (
+            ProgramNodeStatus("first", WorkflowState.COMPLETED.value, integrated=True, blocker=future),
+            ProgramNodeStatus("dependent", WorkflowState.PLANNED.value, dependencies=(MilestoneId("first"),)),
+            ProgramNodeStatus("independent", WorkflowState.PLANNED.value),
+        ),
+    )
+    assert status.ready_milestones == (MilestoneId("independent"),)
+    blocked_status = replace(status, nodes=(replace(status.nodes[0], blocker=whole), *status.nodes[1:]))
+    assert blocked_status.ready_milestones == ()
+
+
+def test_future_milestone_blocker_does_not_block_current_candidate_promotion(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        start = ledger.start_program("program")
+        _claim_and_apply(
+            ledger,
+            start,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+        )
+        ledger.claim_dispatch("program", "first", "executor", 1)
+        ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=CANDIDATE_SHA,
+            terminal_status="completed",
+            dispatch_id="program/first/executor/1",
+            result_sha256="1" * 64,
+            blocker=TypedBlocker(
+                "future-prerequisite",
+                BlockerKind.DECISION,
+                BlockerScope.FUTURE_MILESTONE,
+                True,
+                "Resolve the future milestone prerequisite.",
+            ),
+        )
+        implementation = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
+        )
+        _claim_and_apply(
+            ledger,
+            implementation,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_REVIEWS,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                review_roles=("architecture-reviewer", "code-reviewer"),
+            ),
+        )
+        for review_id, role, mode in (
+            ("architecture-future", "architecture-reviewer", AcceptanceMode.ARCHITECTURE),
+            ("code-future", "code-reviewer", AcceptanceMode.OBJECTIVE),
+        ):
+            ledger.record_program_review(
+                "program",
+                "first",
+                ReviewResult(review_id, RoleId(role), True, (), CANDIDATE_SHA, acceptance_mode=mode),
+            )
+        review_completion = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+        )
+        _claim_and_apply(
+            ledger,
+            review_completion,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                review_ids=("architecture-future", "code-future"),
+            ),
+        )
+        assert ledger.program_status("program").nodes[0].state == WorkflowState.ACCEPTED.value
+        integration = ledger.record_program_event(
+            "program", ProgramEventKind.INTEGRATION_COMPLETED, "future-integration"
+        )
+        claim = ledger.claim_program_controller_decision(
+            integration.decision_id,
+            claimant_id="program-controller/future-integration",
+            expected_revision=integration.revision,
+            generation=1,
+        )
+        bundle = _bundle(
+            integration,
+            claim,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.INTEGRATE_CANDIDATE,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                expected_trunk_head=TRUNK_HEAD,
+                integration_strategy="merge",
+            ),
+        )
+        ledger.submit_program_controller_actions(bundle, claimant_id=claim.claimant_id, token=str(claim.token))
+        assert ledger._db().execute("SELECT state FROM integration_outbox").fetchone()[0] == "pending"
+    finally:
+        ledger.close()
+
+
+def test_harness_integrity_blocker_is_not_overwritten_by_model_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = WorkflowHarness(tmp_path)
+    try:
+        harness.ledger.register_program(_graph(tmp_path))
+
+        def reject_candidate(_capsule: ExecutionCapsule) -> CandidateRecord:
+            raise CandidateIntegrityError("unauthorized path")
+
+        monkeypatch.setattr(harness._worktrees, "inspect_terminal_workspace", reject_candidate)
+        row = {
+            "run_id": "program",
+            "milestone_id": "first",
+            "dispatch_id": "program/first/executor/1",
+            "role": "executor",
+            "terminal_status": "completed",
+            "raw_result_sha256": "1" * 64,
+            "raw_result_json": json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "completed",
+                    "summary": "done",
+                    "changed_surfaces": [],
+                    "validations": [],
+                    "durable_status": "completed",
+                    "next_action": None,
+                    "blocker": {
+                        "gate_id": "model-advisory",
+                        "kind": "decision",
+                        "scope": "future_milestone",
+                        "promotion_blocking": False,
+                        "required_action": "Ignore this advisory.",
+                    },
+                }
+            ),
+        }
+        harness._record_program_queue_result(row)
+        node = harness.ledger.program_status("program").nodes[0]
+        assert node.candidate_sha is None
+        assert node.blocker == TypedBlocker(
+            "candidate-integrity",
+            BlockerKind.EXECUTION,
+            BlockerScope.CURRENT_PROMOTION,
+            True,
+            "Inspect the retained commit range and repair or abandon unauthorized paths.",
+        )
+    finally:
+        harness.close()
 
 
 @pytest.mark.parametrize("terminal_status", ["external_blocked", "needs_decision", "failed"])
