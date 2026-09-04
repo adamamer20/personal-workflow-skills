@@ -437,6 +437,137 @@ def test_interrupted_v19_refresh_rejects_arbitrary_legacy_unit_drift_before_mana
         connection.close()
 
 
+def test_started_replacement_health_failure_is_refenced_stopped_and_restored_before_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, unit, ledger_path, config_home, installed_path = _interrupted_refresh_fixture(tmp_path)
+    before_bytes = installed_path.read_bytes()
+    before_mode = stat.S_IMODE(installed_path.stat().st_mode)
+    replacement = {"started": False}
+    process_live = {(500, "old-birth"): False, (501, "replacement-birth"): False}
+    service_active = {"value": False}
+    calls: list[tuple[str, ...]] = []
+    fence_calls = 0
+    original_fence = Ledger.arm_harness_refresh_fence
+
+    def count_fence(self: Ledger) -> object:
+        nonlocal fence_calls
+        fence_calls += 1
+        return original_fence(self)
+
+    monkeypatch.setattr(Ledger, "arm_harness_refresh_fence", count_fence)
+
+    class Result:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def runner(argv: tuple[str, ...], **_: object) -> Result:
+        calls.append(argv)
+        operation = argv[2]
+        if operation == "is-active":
+            return Result(0 if service_active["value"] else 3)
+        if operation == "start":
+            replacement["started"] = True
+            service_active["value"] = True
+            acquired = Ledger(ledger_path)
+            try:
+                acquired.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=501,
+                    process_birth_identity="replacement-birth",
+                    executable_digest="c" * 64,
+                    version=unit.version,
+                    owner_nonce_sha256="d" * 64,
+                )
+            finally:
+                acquired.close()
+        elif operation == "stop":
+            service_active["value"] = False
+            process_live[(501, "replacement-birth")] = False
+        return Result(0)
+
+    current_ledger = Ledger(ledger_path)
+    try:
+        with pytest.raises(ServiceRefreshFailed, match="health check failed"):
+            refresh_with_credential(
+                unit,
+                config_home=config_home,
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=runner,
+                process_is_live=lambda pid, birth: process_live.get((pid, birth), False),
+                clock=lambda: 0.0,
+                sleeper=lambda _delay: pytest.fail("replacement rollback should complete without waiting"),
+                shutdown_sender=lambda *_args: pytest.fail("fenced predecessor must not be shut down again"),
+                ledger=current_ledger,
+            )
+    finally:
+        current_ledger.close()
+
+    assert replacement["started"] is True
+    assert [call[2] for call in calls] == [
+        "is-active",
+        "is-active",
+        "daemon-reload",
+        "import-environment",
+        "start",
+        "is-active",
+        "stop",
+        "is-active",
+        "unset-environment",
+    ]
+    assert fence_calls == 1
+    assert installed_path.read_bytes() == before_bytes
+    assert stat.S_IMODE(installed_path.stat().st_mode) == before_mode == 0o600
+    check = Ledger(ledger_path)
+    try:
+        authority = check.harness_authority()
+        assert authority is not None
+        assert authority["epoch"] == 2
+        assert authority["pid"] == 501
+        assert authority["process_birth_identity"] == "replacement-birth"
+        assert authority["requested_shutdown"] == 1
+    finally:
+        check.close()
+
+    retry_started = {"value": False}
+
+    def retry_runner(argv: tuple[str, ...], **_: object) -> Result:
+        operation = argv[2]
+        if operation == "is-active":
+            return Result(0 if retry_started["value"] else 3)
+        if operation == "start":
+            retry_started["value"] = True
+            acquired = Ledger(ledger_path)
+            try:
+                acquired.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=502,
+                    process_birth_identity="retry-birth",
+                    executable_digest="e" * 64,
+                    version=unit.version,
+                    owner_nonce_sha256="f" * 64,
+                )
+            finally:
+                acquired.close()
+        return Result(0)
+
+    result = refresh_with_credential(
+        unit,
+        config_home=config_home,
+        environment={"OPENAI_API_KEY": "secret"},
+        runner=retry_runner,
+        process_is_live=lambda pid, birth: pid == 502 and birth == "retry-birth" and retry_started["value"],
+        clock=lambda: 0.0,
+        sleeper=lambda _delay: pytest.fail("canonical retry should complete without waiting"),
+        shutdown_sender=lambda *_args: pytest.fail("stopped replacement must not be shut down again"),
+    )
+    assert result["refreshed"] is True
+    assert result["old_epoch"] == 2
+    assert result["new_epoch"] == 3
+
+
 def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(tmp_path: Path) -> None:
     _repository, unit, ledger, processes, service_state = _refresh_fixture(tmp_path)
     calls: list[tuple[str, ...]] = []

@@ -136,6 +136,13 @@ def _authority_identity(authority: Mapping[str, object]) -> tuple[int, str, int]
     return pid, birth_identity, epoch
 
 
+def _authority_shutdown_bit(authority: Mapping[str, object]) -> int:
+    value = authority.get("requested_shutdown")
+    if isinstance(value, bool) or not isinstance(value, int) or value not in {0, 1}:
+        raise ServiceRefreshFailed("harness authority shutdown fence is malformed")
+    return value
+
+
 def _authority_matches_unit(authority: Mapping[str, object], unit: ServiceUnit) -> None:
     for field, expected in (
         ("repository_root", os.fspath(unit.repository_root.resolve())),
@@ -162,9 +169,9 @@ def _replacement_is_healthy(
         pid = authority["pid"]
         birth_identity = authority["process_birth_identity"]
         epoch = authority["epoch"]
-        requested_shutdown = authority["requested_shutdown"]
     except KeyError as exc:
         raise ServiceRefreshFailed("replacement harness authority is incomplete") from exc
+    requested_shutdown = _authority_shutdown_bit(authority)
     if (
         isinstance(pid, bool)
         or not isinstance(pid, int)
@@ -630,7 +637,7 @@ def refresh_with_credential(
             authority_value = inspection.get("authority")
             if not isinstance(authority_value, Mapping):
                 raise ServiceRefreshFailed("harness authority is unavailable")
-            if int(authority_value.get("requested_shutdown", 0)) != 1:
+            if _authority_shutdown_bit(authority_value) != 1:
                 raise ServiceRefreshFailed("interrupted refresh predecessor is not fenced")
             if any(
                 int(inspection.get(name, 0)) != 0
@@ -719,6 +726,87 @@ def refresh_with_credential(
         return value
 
     imported = False
+    replacement_authority_seen = False
+    replacement_identity: tuple[int, str, int] | None = None
+
+    def rollback_failed_replacement(
+        replacement: Mapping[str, object],
+        *,
+        old_pid: int,
+        old_birth_identity: str,
+        old_epoch: int,
+    ) -> None:
+        """Fence, stop, and roll back one unhealthy acquired replacement.
+
+        The replacement row is the only authority for the process identity.
+        A second harness fence is deliberately taken only after that row has
+        been validated; no unit bytes are restored until the same fenced row,
+        exact unit inactivity, and birth-bound process death are all proven.
+        """
+
+        if not isinstance(replacement, Mapping):
+            raise ServiceRefreshFailed("replacement harness authority is ambiguous")
+        _authority_matches_unit(replacement, unit)
+        replacement_pid, replacement_birth, replacement_epoch = _authority_identity(replacement)
+        if replacement_epoch <= old_epoch:
+            raise ServiceRefreshFailed("replacement harness authority epoch did not advance")
+        if replacement_pid == old_pid and replacement_birth == old_birth_identity:
+            raise ServiceRefreshFailed("replacement harness authority reused the predecessor identity")
+        if _authority_shutdown_bit(replacement) != 0:
+            raise ServiceRefreshFailed("replacement harness authority is already fenced")
+        identity = (replacement_pid, replacement_birth, replacement_epoch)
+        if replacement_identity is not None and identity != replacement_identity:
+            raise ServiceRefreshFailed("replacement harness authority identity drifted")
+
+        _validate_installed_unit(
+            unit,
+            config_home=config_home,
+            expected_profile_sha256=profile_sha256,
+            credential_value=value,
+        )
+
+        try:
+            fenced = owned_ledger.arm_harness_refresh_fence()
+        except HarnessRefreshBlocked as exc:
+            raise ServiceRefreshDeferred(str(exc)) from exc
+        except LedgerError as exc:
+            raise ServiceRefreshFailed("replacement harness refresh fence could not be armed") from exc
+        if not isinstance(fenced, Mapping):
+            raise ServiceRefreshFailed("replacement harness authority is unavailable")
+        _authority_matches_unit(fenced, unit)
+        fenced_pid, fenced_birth, fenced_epoch = _authority_identity(fenced)
+        if (fenced_pid, fenced_birth, fenced_epoch) != identity or _authority_shutdown_bit(fenced) != 1:
+            raise ServiceRefreshFailed("replacement harness authority changed while fencing")
+
+        if _run_manager(("stop", unit.unit_name), runner=runner) != 0:
+            raise ServiceRefreshFailed("user service replacement stop failed")
+
+        while True:
+            remaining()
+            if not _unit_is_active(unit, runner=runner) and not live_checker(fenced_pid, fenced_birth):
+                break
+            sleeper(min(0.05, remaining()))
+
+        current = owned_ledger.harness_authority()
+        if not isinstance(current, Mapping):
+            raise ServiceRefreshFailed("replacement harness authority disappeared after stop")
+        _authority_matches_unit(current, unit)
+        current_pid, current_birth, current_epoch = _authority_identity(current)
+        if (current_pid, current_birth, current_epoch) != identity or _authority_shutdown_bit(current) != 1:
+            raise ServiceRefreshFailed("replacement harness authority changed after stop")
+
+        _validate_installed_unit(
+            unit,
+            config_home=config_home,
+            expected_profile_sha256=profile_sha256,
+            credential_value=value,
+        )
+
+        restore_legacy_unit()
+        restored_raw, _restored_text, restored_mode = _read_installed_unit(unit_path_value)
+        if restored_raw != legacy_unit_raw or restored_mode != legacy_unit_mode:
+            raise ServiceRefreshFailed("legacy service unit rollback was not exact")
+
     try:
         try:
             fence = (
@@ -825,14 +913,46 @@ def refresh_with_credential(
         while True:
             remaining()
             replacement = owned_ledger.harness_authority()
-            if _unit_is_active(unit, runner=runner) and _replacement_is_healthy(
+            if replacement is None:
+                replacement_authority_seen = True
+                raise ServiceRefreshFailed("replacement harness authority is unavailable")
+            if not isinstance(replacement, Mapping):
+                replacement_authority_seen = True
+                raise ServiceRefreshFailed("replacement harness authority is ambiguous")
+            try:
+                _authority_matches_unit(replacement, unit)
+                replacement_pid, replacement_birth, replacement_epoch = _authority_identity(replacement)
+            except ServiceRefreshFailed:
+                replacement_authority_seen = True
+                raise
+
+            # The original fenced row remains in place until a replacement
+            # atomically acquires a greater epoch.  It is not an acquired
+            # replacement and retains the pre-staging rollback behavior.
+            if (
+                replacement_epoch == old_epoch
+                and replacement_pid == old_pid
+                and replacement_birth == old_birth_identity
+                and _authority_shutdown_bit(replacement) == 1
+            ):
+                sleeper(min(0.05, remaining()))
+                continue
+
+            replacement_authority_seen = True
+            identity = (replacement_pid, replacement_birth, replacement_epoch)
+            if replacement_identity is None:
+                replacement_identity = identity
+            elif replacement_identity != identity:
+                raise ServiceRefreshFailed("replacement harness authority identity drifted")
+            healthy = _unit_is_active(unit, runner=runner) and _replacement_is_healthy(
                 replacement,
                 unit=unit,
                 old_pid=old_pid,
                 old_birth_identity=old_birth_identity,
                 old_epoch=old_epoch,
                 process_is_live=live_checker,
-            ):
+            )
+            if healthy:
                 assert replacement is not None
                 return {
                     "refreshed": True,
@@ -842,9 +962,15 @@ def refresh_with_credential(
                     "new_epoch": int(replacement["epoch"]),
                     "unit_path": os.fspath(unit_path_value),
                 }
-            sleeper(min(0.05, remaining()))
+            rollback_failed_replacement(
+                replacement,
+                old_pid=old_pid,
+                old_birth_identity=old_birth_identity,
+                old_epoch=old_epoch,
+            )
+            raise ServiceRefreshFailed("replacement harness health check failed")
     except BaseException as exc:
-        if interrupted_recovery and interrupted_unit_staged:
+        if interrupted_recovery and interrupted_unit_staged and not replacement_authority_seen:
             try:
                 restore_legacy_unit()
             except BaseException as restore_error:

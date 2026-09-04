@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import select
 import socket
 import threading
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ from codex_flow.control_client import (
     ControlClientError,
     ControlCommandPostSendUncertain,
     ControlCommandRejected,
+    ControllerDecisionClient,
     LiveWorkerControlClient,
     _decode_action,
     _decode_command,
@@ -1550,6 +1552,127 @@ def test_control_pages_frame_dot_containing_hmac_and_exhaust_large_snapshot(tmp_
         assert all(len(encode_frame(response)) - 4 < CONTROL_LIST_RESPONSE_MAX_BYTES for response in pages)
         assert pages[-1]["page"]["complete"] is True  # type: ignore[index]
     finally:
+        harness.close()
+
+
+def test_real_clients_traverse_worker_and_decision_pages_and_tui_resets_filters_and_stale_state(
+    tmp_path: Path,
+) -> None:
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+    ledger = harness.ledger
+    route_json = '{"leaf_worker_policy":{"agents.enabled":false,"features.multi_agent":false,"config_overrides":[]}}'
+    dispatch_ids: list[str] = []
+    decision_ids: list[str] = []
+    try:
+        for index in range(120):
+            run_id = f"run-page-{index:03d}"
+            milestone_id = f"milestone-page-{index:03d}"
+            dispatch_id = f"{run_id}/{milestone_id}/executor/1"
+            ledger.create_run(run_id)
+            ledger.create_milestone(run_id, milestone_id)
+            ledger.claim_dispatch(run_id, milestone_id, "executor", 1)
+            ledger.enqueue_dispatch(
+                dispatch_id,
+                backend="sdk_headless",
+                capsule_json=f'{{"model":"test","prompt":"page-{index}"}}',
+                route_json=route_json,
+                workspace_path=tmp_path,
+                result_contract_sha256=model_facing_result_schema_sha256(),
+            )
+            decision = ledger.create_controller_decision(
+                dispatch_id,
+                kind="checkpoint",
+            )
+            dispatch_ids.append(dispatch_id)
+            decision_ids.append(str(decision.decision_id))
+
+        harness.acquire()
+        endpoint = harness._socket
+        assert endpoint is not None
+        endpoint.setblocking(True)
+        stop = threading.Event()
+        server_errors: list[BaseException] = []
+
+        def serve() -> None:
+            try:
+                while not stop.is_set():
+                    ready, _write, _error = select.select([endpoint], [], [], 0.1)
+                    if not ready:
+                        continue
+                    connection, _ = endpoint.accept()
+                    harness._accept_connection(connection)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                if not stop.is_set():
+                    server_errors.append(exc)
+
+        server = threading.Thread(target=serve, name="real-control-page-harness")
+        server.start()
+
+        live = LiveWorkerControlClient.for_state_root(tmp_path)
+        workers = []
+        token: str | None = None
+        while True:
+            page = live.status_page(page_token=token)
+            workers.extend(page.items)
+            if page.next_token is None:
+                break
+            assert isinstance(page.next_token, str) and page.next_token.count(".") == 1
+            token = page.next_token
+        decisions_client = ControllerDecisionClient.for_state_root(tmp_path)
+        decisions = []
+        token = None
+        while True:
+            page = decisions_client.pending_page(page_token=token)
+            decisions.extend(page.items)
+            if page.next_token is None:
+                break
+            assert isinstance(page.next_token, str) and page.next_token.count(".") == 1
+            token = page.next_token
+        assert len(workers) == len(dispatch_ids) == 120
+        assert {str(item.dispatch_id) for item in workers} == set(dispatch_ids)
+        assert len(decisions) == len(decision_ids) == 120
+        assert {str(item.decision_id) for item in decisions} == set(decision_ids)
+
+        terminal = TerminalUiClient.for_state_root(tmp_path)
+
+        async def exercise_terminal() -> None:
+            first = await terminal.refresh()
+            assert first.connected and len(first.workers) == len(first.decisions) == 24
+            assert not first.workers_complete and not first.decisions_complete
+            for _ in range(4):
+                loaded = await terminal.load_more_sessions()
+                assert loaded.connected
+            assert len(terminal.snapshot.workers) == len(terminal.snapshot.decisions) == 120
+            assert terminal.snapshot.workers_complete and terminal.snapshot.decisions_complete
+
+            active = await terminal.toggle_visibility()
+            assert active.connected and active.visibility == ControlListVisibility.ACTIVE.value
+            assert len(active.workers) == len(active.decisions) == 24
+            assert not active.workers_complete and not active.decisions_complete
+            all_sessions = await terminal.toggle_visibility()
+            assert all_sessions.connected and all_sessions.visibility == ControlListVisibility.ALL.value
+            assert len(all_sessions.workers) == len(all_sessions.decisions) == 24
+            assert not all_sessions.workers_complete and not all_sessions.decisions_complete
+
+            ledger._db().execute(
+                "UPDATE dispatch_queue SET state = 'completed' WHERE dispatch_id = ?", (dispatch_ids[0],)
+            )
+            ledger._db().commit()
+            stale = await terminal.load_more_sessions()
+            assert not stale.connected and stale.workers == () and stale.decisions == ()
+            fresh = await terminal.refresh()
+            assert fresh.connected and len(fresh.workers) == len(fresh.decisions) == 24
+
+        asyncio.run(exercise_terminal())
+        stop.set()
+        server.join(timeout=2)
+        assert not server.is_alive()
+        assert server_errors == []
+    finally:
+        if "stop" in locals():
+            stop.set()
+        if "server" in locals():
+            server.join(timeout=2)
         harness.close()
 
 

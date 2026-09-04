@@ -328,3 +328,73 @@ def test_bootstrap_rejects_unsafe_harness_unit_before_shared_tool_install(
         bootstrap.execute()
     assert bootstrap.completed == ["preflight"]
     assert not any(call[1:3] == ("tool", "install") for call in runner.calls)
+
+
+def test_bootstrap_execute_refreshes_one_exact_fenced_v19_harness_without_installer_drift(
+    standard_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = Path(__file__).parents[1].resolve()
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(config_home))
+    runner = FakeRunner(root)
+    unit_path = installer.Bootstrap(root, runner=runner)._matching_harness_unit()
+    unit_path.parent.mkdir(parents=True)
+    unit_path.write_text("exact stopped v18 predecessor\n", encoding="utf-8")
+    before_script = hashlib.sha256((root / "scripts" / "install_personal_workflow_skills.py").read_bytes()).digest()
+    calls: list[tuple[str, ...]] = []
+
+    authority = {
+        "repository_root": os.fspath(root),
+        "state_root": os.fspath(root),
+        "version": installer.CONTROLLER_VERSION,
+        "epoch": 7,
+        "pid": 123,
+        "process_birth_identity": "birth-v19",
+        "requested_shutdown": 1,
+    }
+
+    class FencedV19Ledger:
+        def __init__(self, path: Path, **_: object) -> None:
+            assert path == root / ".codex-flow" / "workflow.db"
+
+        def arm_harness_refresh_fence(self) -> dict[str, object]:
+            calls.append(("arm_harness_refresh_fence",))
+            return authority
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+    monkeypatch.setattr(
+        installer,
+        "ledger_schema_compatibility",
+        lambda path: {"ledger_schema_version": 19, "migration_required": False},
+    )
+    monkeypatch.setattr(installer, "Ledger", FencedV19Ledger)
+    bootstrap = installer.Bootstrap(root, runner=runner)
+    facts = bootstrap.execute()
+
+    refresh_calls = [call for call in runner.calls if call[1:3] == ("harness", "refresh")]
+    assert refresh_calls == [
+        (
+            os.fspath(standard_home / ".local" / "bin" / "codex-flow"),
+            "harness",
+            "refresh",
+            "--state-root",
+            os.fspath(root),
+        )
+    ]
+    assert calls == [("arm_harness_refresh_fence",), ("close",)]
+    assert bootstrap.completed == [
+        "preflight",
+        "harness-refresh-fenced",
+        "controller-installed",
+        "harness-refreshed",
+        "marketplace-ready",
+        "plugin-installed",
+        "verified",
+    ]
+    assert facts["controller_version"] == installer.CONTROLLER_VERSION
+    assert (
+        hashlib.sha256((root / "scripts" / "install_personal_workflow_skills.py").read_bytes()).digest()
+        == before_script
+    )
