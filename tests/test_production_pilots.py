@@ -36,7 +36,7 @@ from codex_flow.production_pilots import (
 )
 
 INTEGRATED_WHEEL = Path("dist/integrated-runtime/codex_flow-0.2.0-py3-none-any.whl")
-INTEGRATED_WHEEL_SHA256 = "93c7256adebf3e2337e7f783407afbf0bb3c34dc5c395139c1951aa0d9daba50"
+INTEGRATED_WHEEL_SHA256 = "8b4ad3c07102d8f951672ae86d239a09727c63df4d110c250dc2a2848e0ed1bc"
 INTEGRATED_DISPATCHES = (
     "integrated/worker-one/executor/1",
     "integrated/worker-two/executor/1",
