@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import stat
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -648,6 +649,147 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
     finally:
         check.close()
     assert [call[2] for call in calls] == ["is-active"]
+
+
+def test_v18_refresh_migration_failure_restores_legacy_pair_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    executable = tmp_path / "codex-flow"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    state_root = repository / ".codex-flow"
+    state_root.mkdir()
+    ledger_path = state_root / "workflow.db"
+    ledger = Ledger(ledger_path)
+    ledger.acquire_harness(
+        repository_root=repository,
+        state_root=repository,
+        pid=500,
+        process_birth_identity="old-birth",
+        executable_digest="a" * 64,
+        version="0.2.0",
+        owner_nonce_sha256="b" * 64,
+    )
+    ledger.close()
+    connection = sqlite3.connect(ledger_path)
+    connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = 'codex_flow_event_driven_program_controller_v18' WHERE key = 'schema_identity'"
+    )
+    connection.commit()
+    connection.close()
+
+    unit = generate_unit(repository, executable=executable, provider_env_key="OPENAI_API_KEY")
+    legacy = service_module._legacy_supervisor_unit(unit)
+    config_home = tmp_path / "config"
+    installed_path = install_unit(legacy, config_home=config_home)
+    before_bytes = installed_path.read_bytes()
+    before_mode = stat.S_IMODE(installed_path.stat().st_mode)
+    calls: list[tuple[str, ...]] = []
+
+    class Result:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def runner(argv: tuple[str, ...], **_: object) -> Result:
+        calls.append(argv)
+        if argv[2] == "is-active":
+            return Result(3)
+        return Result(0)
+
+    original_init = Ledger.__init__
+
+    def migration_fault(stage: str) -> None:
+        if stage == "after_migration":
+            raise RuntimeError("injected migration opener failure")
+
+    def fail_migration(self: Ledger, path: str | Path, **kwargs: object) -> None:
+        if kwargs.get("migrate"):
+            kwargs["fault_injector"] = migration_fault
+        original_init(self, path, **kwargs)
+
+    monkeypatch.setattr(Ledger, "__init__", fail_migration)
+    with pytest.raises(ServiceRefreshFailed, match="harness refresh failed"):
+        refresh_with_credential(
+            unit,
+            config_home=config_home,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda _pid, _birth: False,
+            shutdown_sender=lambda *_args: {"version": 1, "ok": True, "operation": "shutdown"},
+        )
+
+    assert installed_path.read_bytes() == before_bytes
+    assert stat.S_IMODE(installed_path.stat().st_mode) == before_mode
+    assert [call[2] for call in calls] == ["is-active"]
+    check = sqlite3.connect(ledger_path)
+    try:
+        assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "18"
+        assert (
+            check.execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()[0]
+            == "codex_flow_event_driven_program_controller_v18"
+        )
+        assert (
+            check.execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()[0] == 1
+        )
+        assert check.execute("SELECT 1 FROM sqlite_master WHERE name = 'harness_authority'").fetchone() is None
+    finally:
+        check.close()
+
+    monkeypatch.undo()
+    retry_calls: list[tuple[str, ...]] = []
+    replacement = {"started": False}
+
+    def retry_runner(argv: tuple[str, ...], **_: object) -> Result:
+        retry_calls.append(argv)
+        operation = argv[2]
+        if operation == "is-active":
+            return Result(0 if replacement["started"] else 3)
+        if operation == "start":
+            replacement["started"] = True
+            migrated = Ledger(ledger_path)
+            try:
+                migrated.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=501,
+                    process_birth_identity="new-birth",
+                    executable_digest="c" * 64,
+                    version=unit.version,
+                    owner_nonce_sha256="d" * 64,
+                )
+            finally:
+                migrated.close()
+        return Result(0)
+
+    result = refresh_with_credential(
+        unit,
+        config_home=config_home,
+        environment={"OPENAI_API_KEY": "secret"},
+        runner=retry_runner,
+        process_is_live=lambda pid, birth: pid == 501 and birth == "new-birth" and replacement["started"],
+        clock=lambda: 0.0,
+        sleeper=lambda _delay: None,
+        shutdown_sender=lambda *_args: pytest.fail("stopped predecessor must not be shut down again"),
+    )
+    assert result["refreshed"] is True
+    assert replacement["started"] is True
+    assert [call[2] for call in retry_calls] == [
+        "is-active",
+        "daemon-reload",
+        "import-environment",
+        "start",
+        "is-active",
+    ]
+    migrated = Ledger(ledger_path)
+    try:
+        assert migrated.schema_version.value == 19
+        assert migrated.harness_authority() is not None
+    finally:
+        migrated.close()
 
 
 def test_v18_refresh_rejects_dangling_or_new_socket_symlink_before_start(tmp_path: Path) -> None:

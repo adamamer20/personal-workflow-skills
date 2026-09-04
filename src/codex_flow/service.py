@@ -379,7 +379,7 @@ def _assert_existing_unit(unit: ServiceUnit, *, config_home: Path | None = None)
     return path
 
 
-def _read_installed_unit(path: Path) -> tuple[bytes, str]:
+def _read_installed_unit(path: Path) -> tuple[bytes, str, int]:
     """Read one private installed unit without following a replacement link."""
 
     _assert_no_symlink_ancestors(path)
@@ -396,6 +396,7 @@ def _read_installed_unit(path: Path) -> tuple[bytes, str]:
             or stat.S_IMODE(metadata.st_mode) != 0o600
         ):
             raise ServiceError("installed service unit is not a private regular file")
+        mode = stat.S_IMODE(metadata.st_mode)
         with os.fdopen(fd, "rb") as handle:
             fd = -1
             raw = handle.read(131_073)
@@ -412,7 +413,7 @@ def _read_installed_unit(path: Path) -> tuple[bytes, str]:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ServiceError("installed service unit is not valid UTF-8") from exc
-    return raw, text
+    return raw, text, mode
 
 
 def _validate_installed_unit(
@@ -432,7 +433,7 @@ def _validate_installed_unit(
     if expected_profile_sha256 != unit.profile_sha256:
         raise ServiceError("provider profile identity conflicts with the exact service unit")
     path = unit_path(config_home=config_home, repository_root=unit.repository_root)
-    raw, text = _read_installed_unit(path)
+    raw, text, _mode = _read_installed_unit(path)
     expected = unit.text.encode("utf-8")
     if credential_value and (credential_value in text or credential_value in unit.text):
         raise ServiceError("service unit contains credential material")
@@ -614,12 +615,26 @@ def refresh_with_credential(
         )
 
     legacy_unit_raw: bytes | None = None
+    legacy_unit_mode: int | None = None
     if migration_required:
         # Keep an exact rollback image until the v18 ledger has crossed its
         # migration fence.  Installing the replacement before migration means
         # an install failure leaves the fenced v18 pair retryable, never a v19
         # ledger paired only with a stopped predecessor unit.
-        legacy_unit_raw, _legacy_unit_text = _read_installed_unit(unit_path_value)
+        legacy_unit_raw, _legacy_unit_text, legacy_unit_mode = _read_installed_unit(unit_path_value)
+
+    def restore_legacy_unit() -> None:
+        if legacy_unit_raw is None or legacy_unit_mode is None:
+            return
+        try:
+            _assert_no_symlink_ancestors(unit_path_value)
+            metadata = unit_path_value.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise OSError("service unit path is not a private regular file")
+            unit_path_value.write_bytes(legacy_unit_raw)
+            os.chmod(unit_path_value, legacy_unit_mode)
+        except OSError as restore_error:
+            raise ServiceRefreshFailed("legacy service unit rollback failed") from restore_error
 
     assert owned_ledger is not None
     close_ledger = ledger is None or migration_required
@@ -698,15 +713,18 @@ def refresh_with_credential(
                     credential_value=value,
                 )
             except BaseException:
-                if legacy_unit_raw is not None:
-                    try:
-                        unit_path_value.write_bytes(legacy_unit_raw)
-                        os.chmod(unit_path_value, 0o600)
-                    except OSError as restore_error:
-                        raise ServiceRefreshFailed("legacy service unit rollback failed") from restore_error
+                restore_legacy_unit()
                 raise
             owned_ledger.close()
-            owned_ledger = Ledger(ledger_path, migrate=True)
+            try:
+                owned_ledger = Ledger(ledger_path, migrate=True)
+            except BaseException:
+                # The v18 fence is committed before the replacement unit is
+                # staged.  If opening or migrating the ledger fails, keep the
+                # exact fenced supervisor/unit pair so the next refresh can
+                # retry the handoff without a mixed v19 ledger.
+                restore_legacy_unit()
+                raise
 
         if profile_sha256 is not None and native_compatibility_sha256 is not None:
             owned_ledger.authorize_controller_profile_refresh(
