@@ -263,6 +263,18 @@ def _configured_harness(ledger: Ledger, root: Path, epoch: int) -> WorkflowHarne
     return harness
 
 
+def test_harness_start_rejects_dangling_legacy_socket_entry_before_claim(tmp_path: Path) -> None:
+    harness = WorkflowHarness(tmp_path)
+    try:
+        legacy = harness.runtime_root / "supervisor.sock"
+        legacy.symlink_to(harness.runtime_root / "missing.sock")
+        with pytest.raises(HarnessError, match="legacy supervisor socket path remains"):
+            harness.acquire()
+        assert harness.ledger.harness_authority() is None
+    finally:
+        harness.close()
+
+
 def _compatibility_attention_ledger(
     root: Path,
     *,

@@ -820,6 +820,178 @@ def test_terminal_candidate_blocker_cannot_bypass_clean_review_promotion(tmp_pat
         ledger.close()
 
 
+def test_successor_candidate_replaces_rejected_candidate_and_resolves_current_blocker(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        start = ledger.start_program("program")
+        _claim_and_apply(
+            ledger,
+            start,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+        )
+        first = CandidateRecord(
+            CandidateDisposition.VERIFIED_COMMIT,
+            tmp_path,
+            commit_sha=CANDIDATE_SHA,
+            workspace_head=CANDIDATE_SHA,
+            workspace_digest="1" * 64,
+        )
+        ledger.claim_dispatch("program", "first", "executor", 1)
+        ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=CANDIDATE_SHA,
+            terminal_status="failed",
+            dispatch_id="program/first/executor/1",
+            candidate_record=first,
+            blocker=TypedBlocker(
+                "review-rejected",
+                BlockerKind.EXECUTION,
+                BlockerScope.FUTURE_MILESTONE,
+                False,
+                "Repair the rejected candidate.",
+            ),
+        )
+        repair = ledger.claim_program_repair_dispatch("program", "first", generation=2)
+        successor_sha = "e" * 40
+        successor = CandidateRecord(
+            CandidateDisposition.VERIFIED_COMMIT,
+            tmp_path,
+            commit_sha=successor_sha,
+            workspace_head=successor_sha,
+            workspace_digest="2" * 64,
+        )
+        status = ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=successor_sha,
+            terminal_status="failed",
+            dispatch_id=str(repair.dispatch_id),
+            candidate_record=successor,
+        )
+        assert status.nodes[0].candidate_sha == successor_sha
+        assert status.nodes[0].blocker is not None
+        assert status.nodes[0].blocker.scope is BlockerScope.CURRENT_REPAIR
+        assert status.nodes[0].blocker.promotion_blocking is True
+        assert any(
+            fact.kind == "candidate_superseded"
+            and fact.data.get("predecessor_sha") == CANDIDATE_SHA
+            and fact.data.get("candidate_sha") == successor_sha
+            for fact in ledger.review_lifecycle("program", "first")
+        )
+
+        attention = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+        )
+        _claim_and_apply(
+            ledger,
+            attention,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER,
+                milestone_id="first",
+                candidate_sha=successor_sha,
+                blocker_gate_id="executor-terminal-facts",
+                blocker_resolution="resolve",
+            ),
+        )
+        assert ledger.program_status("program").nodes[0].blocker is None
+    finally:
+        ledger.close()
+
+
+def test_terminal_model_blocker_is_normalized_to_current_promotion_scope(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        start = ledger.start_program("program")
+        _claim_and_apply(
+            ledger,
+            start,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+        )
+        ledger.claim_dispatch("program", "first", "executor", 1)
+        status = ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=CANDIDATE_SHA,
+            terminal_status="external_blocked",
+            dispatch_id="program/first/executor/1",
+            blocker=TypedBlocker(
+                "model-advisory",
+                BlockerKind.DECISION,
+                BlockerScope.FUTURE_MILESTONE,
+                False,
+                "This was only an advisory.",
+            ),
+        )
+        blocker = status.nodes[0].blocker
+        assert blocker is not None
+        assert blocker.gate_id == "model-advisory"
+        assert blocker.scope is BlockerScope.CURRENT_PROMOTION
+        assert blocker.promotion_blocking is True
+    finally:
+        ledger.close()
+
+
+def test_program_dispatch_generations_are_historical_and_reopenable(tmp_path: Path) -> None:
+    path = tmp_path / "workflow.db"
+    ledger = Ledger(path)
+    ledger.register_program(_graph(tmp_path))
+    start = ledger.start_program("program")
+    _claim_and_apply(
+        ledger,
+        start,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_READY_MILESTONES,
+            milestone_ids=("first",),
+        ),
+    )
+    ledger.claim_dispatch("program", "first", "executor", 1)
+    ledger.record_program_executor_result(
+        "program",
+        "first",
+        candidate_sha=CANDIDATE_SHA,
+        terminal_status="failed",
+        dispatch_id="program/first/executor/1",
+    )
+    repair = ledger.claim_program_repair_dispatch("program", "first", generation=2)
+    ledger.record_program_executor_result(
+        "program",
+        "first",
+        candidate_sha="e" * 40,
+        terminal_status="failed",
+        dispatch_id=str(repair.dispatch_id),
+    )
+    third = ledger.claim_program_repair_dispatch("program", "first", generation=3)
+    assert third.generation == 3
+    ledger.record_program_executor_result(
+        "program",
+        "first",
+        candidate_sha="e" * 40,
+        terminal_status="failed",
+        dispatch_id=str(third.dispatch_id),
+    )
+    first_review = ledger.claim_program_review_dispatch("program", "first", "code-reviewer", generation=1)
+    second_review = ledger.claim_program_review_dispatch("program", "first", "code-reviewer", generation=2)
+    assert first_review.dispatch_id != second_review.dispatch_id
+    ledger.close()
+    reopened = Ledger(path)
+    try:
+        assert reopened.get_dispatch(str(third.dispatch_id)).generation == 3
+        assert reopened.get_dispatch(str(second_review.dispatch_id)).generation == 2
+    finally:
+        reopened.close()
+
+
 def test_program_context_contains_exact_graph_and_rejects_stale_revision(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path / "workflow.db")
     try:
@@ -2060,6 +2232,38 @@ def test_candidate_history_rejects_clean_out_of_scope_or_protected_commits(tmp_p
 
     with pytest.raises(CandidateIntegrityError):
         WorktreeManager().validate_candidate(capsule, candidate_sha)
+
+
+def test_serial_promotion_accepts_one_clean_linear_repair_chain(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "Codex Flow Test")
+    _git(repository, "config", "user.email", "codex-flow@example.invalid")
+    (repository / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repository, "add", "base.txt")
+    _git(repository, "commit", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    (repository / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    _git(repository, "add", "candidate.txt")
+    _git(repository, "commit", "-m", "candidate")
+    rejected = _git(repository, "rev-parse", "HEAD")
+    (repository / "repair.txt").write_text("repair\n", encoding="utf-8")
+    _git(repository, "add", "repair.txt")
+    _git(repository, "commit", "-m", "repair successor")
+    successor = _git(repository, "rev-parse", "HEAD")
+    capsule = _capsule(repository, "first", "candidate.txt")
+    capsule = replace(capsule, base_sha=base, mutable_paths=("candidate.txt", "repair.txt"))
+    receipt = WorktreeManager().verify_serial_candidate(
+        repository_root=repository,
+        candidate_sha=successor,
+        expected_trunk_head=base,
+        strategy="fast_forward",
+        capsule=capsule,
+    )
+    assert receipt["logical_promotion"] is True
+    assert receipt["lineage"] == [base, rejected, successor]
+    assert receipt["parents"] == [rejected]
 
 
 @pytest.mark.parametrize("strategy", ["fast_forward", "merge", "cherry_pick"])

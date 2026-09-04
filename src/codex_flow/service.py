@@ -613,6 +613,14 @@ def refresh_with_credential(
             allow_profile_identity_update=True,
         )
 
+    legacy_unit_raw: bytes | None = None
+    if migration_required:
+        # Keep an exact rollback image until the v18 ledger has crossed its
+        # migration fence.  Installing the replacement before migration means
+        # an install failure leaves the fenced v18 pair retryable, never a v19
+        # ledger paired only with a stopped predecessor unit.
+        legacy_unit_raw, _legacy_unit_text = _read_installed_unit(unit_path_value)
+
     assert owned_ledger is not None
     close_ledger = ledger is None or migration_required
     live_checker = process_is_live or (
@@ -648,6 +656,13 @@ def refresh_with_credential(
         socket_path = (
             unit.state_root / ".codex-flow" / "runtime" / ("supervisor.sock" if migration_required else "harness.sock")
         )
+        if migration_required and os.path.lexists(socket_path):
+            try:
+                socket_metadata = os.lstat(socket_path)
+            except OSError as exc:
+                raise ServiceRefreshFailed("legacy supervisor socket path is unavailable") from exc
+            if stat.S_ISLNK(socket_metadata.st_mode):
+                raise ServiceRefreshFailed("legacy supervisor socket path must not be a symlink")
         old_process_live = live_checker(old_pid, old_birth_identity)
         if old_process_live:
             shutdown_sender(socket_path, remaining())
@@ -668,11 +683,28 @@ def refresh_with_credential(
 
         if migration_required:
             # The old authority is now fenced and its process/unit are gone;
-            # only this explicit handoff may mutate the schema identity.
+            # stage the replacement unit before mutating the schema identity.
             if ledger_path is None:
                 raise ServiceRefreshFailed("legacy ledger path is unavailable")
-            if (unit.state_root / ".codex-flow" / "runtime" / "supervisor.sock").exists():
+            legacy_socket = unit.state_root / ".codex-flow" / "runtime" / "supervisor.sock"
+            if os.path.lexists(legacy_socket):
                 raise ServiceRefreshFailed("legacy supervisor socket remains after predecessor stop")
+            try:
+                install_unit(unit, config_home=config_home)
+                _validate_installed_unit(
+                    unit,
+                    config_home=config_home,
+                    expected_profile_sha256=profile_sha256,
+                    credential_value=value,
+                )
+            except BaseException:
+                if legacy_unit_raw is not None:
+                    try:
+                        unit_path_value.write_bytes(legacy_unit_raw)
+                        os.chmod(unit_path_value, 0o600)
+                    except OSError as restore_error:
+                        raise ServiceRefreshFailed("legacy service unit rollback failed") from restore_error
+                raise
             owned_ledger.close()
             owned_ledger = Ledger(ledger_path, migrate=True)
 
@@ -682,7 +714,8 @@ def refresh_with_credential(
                 native_compatibility_sha256=native_compatibility_sha256,
             )
 
-        install_unit(unit, config_home=config_home)
+        if not migration_required:
+            install_unit(unit, config_home=config_home)
         if unit.runtime != "harness":
             raise ServiceRefreshFailed("replacement service unit runtime is not harness")
         _validate_installed_unit(

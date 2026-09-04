@@ -577,3 +577,113 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
         )
     finally:
         migrated.close()
+
+
+def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    executable = tmp_path / "codex-flow"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    state_root = repository / ".codex-flow"
+    state_root.mkdir()
+    ledger_path = state_root / "workflow.db"
+    ledger = Ledger(ledger_path)
+    ledger.acquire_harness(
+        repository_root=repository,
+        state_root=repository,
+        pid=500,
+        process_birth_identity="old-birth",
+        executable_digest="a" * 64,
+        version="0.2.0",
+        owner_nonce_sha256="b" * 64,
+    )
+    ledger.close()
+    connection = sqlite3.connect(ledger_path)
+    connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = 'codex_flow_event_driven_program_controller_v18' WHERE key = 'schema_identity'"
+    )
+    connection.commit()
+    connection.close()
+    unit = generate_unit(repository, executable=executable, provider_env_key="OPENAI_API_KEY")
+    legacy = service_module._legacy_supervisor_unit(unit)
+    config_home = tmp_path / "config"
+    installed_path = install_unit(legacy, config_home=config_home)
+    before = installed_path.read_bytes()
+    calls: list[tuple[str, ...]] = []
+
+    class Result:
+        returncode = 0
+
+    def runner(argv: tuple[str, ...], **_: object) -> Result:
+        calls.append(argv)
+        if argv[2] == "is-active":
+            return type("InactiveResult", (), {"returncode": 3})()
+        return Result()
+
+    def fail_install(*_args: object, **_kwargs: object) -> Path:
+        raise ServiceError("staged unit install failed")
+
+    monkeypatch.setattr(service_module, "install_unit", fail_install)
+    with pytest.raises(ServiceError, match="staged unit install failed"):
+        refresh_with_credential(
+            unit,
+            config_home=config_home,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda _pid, _birth: False,
+            shutdown_sender=lambda *_args: {"version": 1, "ok": True, "operation": "shutdown"},
+        )
+    assert installed_path.read_bytes() == before
+    check = sqlite3.connect(ledger_path)
+    try:
+        assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "18"
+        assert (
+            check.execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()[0] == 1
+        )
+    finally:
+        check.close()
+    assert [call[2] for call in calls] == ["is-active"]
+
+
+def test_v18_refresh_rejects_dangling_or_new_socket_symlink_before_start(tmp_path: Path) -> None:
+    repository, unit, ledger, processes, service_state = _refresh_fixture(tmp_path)
+    # Convert the fixture's v19 ledger/unit pair into a disposable v18
+    # predecessor, then leave a legacy socket directory entry behind.
+    ledger.close()
+    ledger_path = repository / ".codex-flow" / "workflow.db"
+    connection = sqlite3.connect(ledger_path)
+    connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = 'codex_flow_event_driven_program_controller_v18' WHERE key = 'schema_identity'"
+    )
+    connection.commit()
+    connection.close()
+    legacy = service_module._legacy_supervisor_unit(unit)
+    config_home = tmp_path / "config"
+    install_unit(legacy, config_home=config_home)
+    runtime = repository / ".codex-flow" / "runtime"
+    runtime.mkdir(exist_ok=True)
+    (runtime / "supervisor.sock").symlink_to(runtime / "harness.sock")
+    calls: list[tuple[str, ...]] = []
+
+    class Result:
+        returncode = 3
+
+    with pytest.raises(ServiceRefreshFailed, match="must not be a symlink"):
+        refresh_with_credential(
+            unit,
+            config_home=config_home,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=lambda argv, **_: calls.append(argv) or Result(),
+            process_is_live=lambda _pid, _birth: False,
+            ledger=Ledger(ledger_path, allow_legacy=True),
+        )
+    assert [call[2] for call in calls] == []
+    assert processes[(500, "old-birth")] is True
+    assert service_state["active"] is True

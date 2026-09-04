@@ -2168,6 +2168,7 @@ def is_transition_allowed(from_state: WorkflowState | str, to_state: WorkflowSta
             }
         case WorkflowState.REPAIR_REQUIRED:
             return target in {
+                WorkflowState.STARTING,
                 WorkflowState.RUNNING,
                 WorkflowState.REVIEWING,
                 WorkflowState.BLOCKED,

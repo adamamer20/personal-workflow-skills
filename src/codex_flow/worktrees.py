@@ -280,6 +280,7 @@ class WorktreeManager:
         *,
         candidate_sha: str | None = None,
         require_direct_candidate: bool = False,
+        predecessor_sha: str | None = None,
     ) -> CandidateRecord:
         """Inspect an executor checkout without mutating it.
 
@@ -299,7 +300,7 @@ class WorktreeManager:
         if status.returncode != 0:
             raise WorktreeError("unable to inspect terminal workspace status")
         status_digest = hashlib.sha256(status.stdout.encode("utf-8")).hexdigest() if status.stdout else None
-        if status.stdout and candidate_sha is None:
+        if status.stdout and candidate_sha is None and predecessor_sha is None:
             return CandidateRecord(
                 CandidateDisposition.PRESERVED_DIRTY_WORKSPACE,
                 workspace,
@@ -321,6 +322,8 @@ class WorktreeManager:
             parents = self._commit_parents(workspace, selected)
             if parents != [capsule.base_sha]:
                 raise WorkspaceConflict("candidate commit contains an unrelated or non-direct history")
+        if predecessor_sha is not None:
+            self._validate_linear_successor(workspace, predecessor_sha, selected)
         return CandidateRecord(
             CandidateDisposition.VERIFIED_COMMIT,
             workspace,
@@ -377,9 +380,8 @@ class WorktreeManager:
             raise WorkspaceConflict("serial candidate is not the current program checkout HEAD")
         if capsule is not None:
             self._validate_candidate_history(capsule, root, candidate_sha)
+        lineage = self._linear_successor_lineage(root, expected_trunk_head, candidate_sha)
         parents = self._commit_parents(root, candidate_sha)
-        if parents != [expected_trunk_head]:
-            raise WorkspaceConflict("serial candidate is not a direct descendant of the durable trunk")
         tree = self._git(root, "show", "-s", "--format=%T", candidate_sha)
         if strategy not in {"merge", "fast_forward", "cherry_pick"}:
             raise WorktreeError("serial promotion strategy is unsupported")
@@ -387,10 +389,37 @@ class WorktreeManager:
             "before_trunk_head": expected_trunk_head,
             "after_trunk_head": candidate_sha,
             "parents": parents,
+            "lineage": lineage,
+            "linear_chain": True,
             "tree": tree,
             "logical_promotion": True,
             "strategy": strategy,
         }
+
+    def _linear_successor_lineage(self, repository: Path, predecessor_sha: str, candidate_sha: str) -> list[str]:
+        """Return one direct-parent chain from a durable predecessor to a candidate."""
+
+        if predecessor_sha == candidate_sha:
+            raise WorkspaceConflict("serial candidate is not ahead of the durable trunk")
+        lineage: list[str] = [candidate_sha]
+        current = candidate_sha
+        for _ in range(4096):
+            parents = self._commit_parents(repository, current)
+            if len(parents) != 1:
+                raise WorkspaceConflict("serial candidate history contains a merge or unrelated ancestry")
+            current = parents[0]
+            lineage.append(current)
+            if current == predecessor_sha:
+                lineage.reverse()
+                return lineage
+        raise WorkspaceConflict("serial candidate history exceeds the bounded linear chain")
+
+    def _validate_linear_successor(self, repository: Path, predecessor_sha: str, candidate_sha: str) -> None:
+        """Require a repair candidate to be a forward-only direct-parent successor."""
+
+        if len(predecessor_sha) != 40 or any(character not in "0123456789abcdef" for character in predecessor_sha):
+            raise CandidateIntegrityError("candidate predecessor identity is invalid")
+        self._linear_successor_lineage(repository, predecessor_sha, candidate_sha)
 
     def integrate_candidate(
         self,

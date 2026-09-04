@@ -406,7 +406,7 @@ class WorkflowHarness:
             self._socket.close()
             self._socket = None
         try:
-            if self.socket_path.exists() and not self.socket_path.is_symlink():
+            if os.path.lexists(self.socket_path) and not self.socket_path.is_symlink():
                 self.socket_path.unlink()
         except OSError:
             pass
@@ -1062,16 +1062,20 @@ class WorkflowHarness:
                 milestone_id = action.milestone_id
                 candidate_sha = action.candidate_sha
                 for role in action.review_roles:
+                    generation = self.ledger.next_program_dispatch_generation(bundle.program_id, milestone_id, role)
                     changed = (
                         self._apply_program_external_effect(
                             bundle,
                             f"review:{milestone_id}:{role}",
-                            lambda role=role, milestone_id=milestone_id, candidate_sha=candidate_sha: (
+                            lambda role=role,
+                            milestone_id=milestone_id,
+                            candidate_sha=candidate_sha,
+                            generation=generation: (
                                 self._enqueue_program_worker(
                                     program_id=str(bundle.program_id),
                                     milestone_id=milestone_id,
                                     role=role,
-                                    generation=1,
+                                    generation=generation,
                                     action_context={
                                         "program_id": str(bundle.program_id),
                                         "milestone_id": milestone_id,
@@ -1089,16 +1093,20 @@ class WorkflowHarness:
                 milestone_id = action.milestone_id
                 candidate_sha = action.candidate_sha
                 finding_ids = action.finding_ids
+                generation = self.ledger.next_program_dispatch_generation(bundle.program_id, milestone_id, "executor")
                 changed = (
                     self._apply_program_external_effect(
                         bundle,
                         f"repair:{milestone_id}",
-                        lambda milestone_id=milestone_id, candidate_sha=candidate_sha, finding_ids=finding_ids: (
+                        lambda milestone_id=milestone_id,
+                        candidate_sha=candidate_sha,
+                        finding_ids=finding_ids,
+                        generation=generation: (
                             self._enqueue_program_worker(
                                 program_id=str(bundle.program_id),
                                 milestone_id=milestone_id,
                                 role="executor",
-                                generation=2,
+                                generation=generation,
                                 action_context={
                                     "program_id": str(bundle.program_id),
                                     "milestone_id": milestone_id,
@@ -1412,6 +1420,9 @@ class WorkflowHarness:
         return changed
 
     def acquire(self) -> dict[str, object]:
+        legacy_socket = self.runtime_root / "supervisor.sock"
+        if os.path.lexists(legacy_socket):
+            raise HarnessError("legacy supervisor socket path remains")
         existing = self.ledger.harness_authority()
         if existing is not None and int(existing["pid"]) != os.getpid():
             try:
@@ -1434,7 +1445,7 @@ class WorkflowHarness:
             lease_seconds=self.lease_seconds,
         )
         self.epoch = int(fact["epoch"])
-        if self.socket_path.exists():
+        if os.path.lexists(self.socket_path):
             if self.socket_path.is_symlink() or not self.socket_path.is_socket():
                 raise HarnessError("harness socket path is unsafe")
             self.socket_path.unlink()
@@ -3330,8 +3341,25 @@ class WorkflowHarness:
                 graph = self.ledger.program_graph(program_id)
                 candidate_record: CandidateRecord | None = None
                 blocker: TypedBlocker | None = None
+                predecessor_sha: str | None = None
+                action_context = row.get("action_json")
+                if isinstance(action_context, str):
+                    try:
+                        context_value = strict_json_loads(action_context, max_bytes=16_384)
+                    except ValueError:
+                        context_value = None
+                    if isinstance(context_value, dict) and isinstance(context_value.get("candidate_sha"), str):
+                        predecessor_sha = context_value["candidate_sha"]
                 try:
-                    candidate_record = self._worktrees.inspect_terminal_workspace(graph.node(milestone_id).capsule)
+                    if predecessor_sha is None:
+                        candidate_record = self._worktrees.inspect_terminal_workspace(
+                            graph.node(milestone_id).capsule,
+                        )
+                    else:
+                        candidate_record = self._worktrees.inspect_terminal_workspace(
+                            graph.node(milestone_id).capsule,
+                            predecessor_sha=predecessor_sha,
+                        )
                 except CandidateIntegrityError:
                     # A committed but out-of-scope/protected candidate is a
                     # durable integrity blocker, never a verified candidate.

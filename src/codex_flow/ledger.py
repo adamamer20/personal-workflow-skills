@@ -16,7 +16,7 @@ import re
 import secrets
 import sqlite3
 import stat
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1365,6 +1365,32 @@ def _default_executor_blocker(terminal_status: str) -> TypedBlocker:
         scope=BlockerScope.CURRENT_REPAIR,
         promotion_blocking=True,
         required_action="Inspect the retained terminal workspace and choose repair or abandonment.",
+    )
+
+
+def _normalize_terminal_blocker(terminal_status: str, blocker: TypedBlocker | None) -> TypedBlocker | None:
+    """Keep terminal outcomes promotion-blocking at the harness boundary.
+
+    Provider/model blocker facts are advisory input.  A non-completed terminal
+    result always retains a current-candidate blocker; only an already stronger
+    harness-authored integrity blocker may pass through unchanged.
+    """
+
+    if terminal_status == "completed":
+        return blocker
+    if blocker is None:
+        return _default_executor_blocker(terminal_status)
+    if blocker.gate_id == "candidate-integrity" and blocker.promotion_blocking:
+        return blocker
+    scope = BlockerScope.CURRENT_PROMOTION if terminal_status == "external_blocked" else BlockerScope.CURRENT_REPAIR
+    if blocker.promotion_blocking and blocker.scope is scope:
+        return blocker
+    return TypedBlocker(
+        blocker.gate_id,
+        blocker.kind,
+        scope,
+        True,
+        blocker.required_action,
     )
 
 
@@ -4146,6 +4172,8 @@ class Ledger:
                             if item.kind is ProgramControllerActionKind.START_REVIEWS
                             else f"repair:{item.milestone_id}"
                             if item.kind is ProgramControllerActionKind.REQUEST_REPAIR
+                            else f"resolve-blocker:{item.milestone_id}:{item.blocker_gate_id}"
+                            if item.kind is ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER
                             else f"promote:{item.milestone_id}"
                             if item.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE
                             else f"integrate:{item.milestone_id}"
@@ -4269,7 +4297,11 @@ class Ledger:
         dispatch_keys = set()
         dispatches_by_id: dict[DispatchId, DispatchClaim] = {}
         for row in dispatch_rows:
-            key = (str(row["run_id"]), str(row["milestone_id"]), str(row["role"]))
+            key = (
+                (str(row["run_id"]), str(row["milestone_id"]), str(row["role"]), int(row["generation"]))
+                if self._has_complete_program_schema()
+                else (str(row["run_id"]), str(row["milestone_id"]), str(row["role"]))
+            )
             if key in dispatch_keys:
                 raise CorruptSchemaError("duplicate dispatch ownership")
             dispatch_keys.add(key)
@@ -4283,6 +4315,11 @@ class Ledger:
             dispatches_by_id[dispatch.dispatch_id] = dispatch
         event_rows = self._db().execute("SELECT * FROM events ORDER BY run_id, milestone_id, sequence").fetchall()
         events_by_milestone: dict[tuple[str, str], list[EventRecord]] = {}
+        # Executor dispatches own milestone lifecycle transitions and therefore
+        # require one causal claim event.  Program reviewer dispatches are
+        # historical audit rows only; they may have a legacy low-level claim
+        # event, but program review claims do not reopen or transition the
+        # milestone and consequently may have no event to replay.
         claim_counts = dict.fromkeys(dispatches_by_id, 0)
         for row in event_rows:
             event = self._event_from_row(row)
@@ -4300,8 +4337,6 @@ class Ledger:
                     event.dispatch_id is None
                     or event.reason is None
                     or event.reason.code is not ReasonCode.DISPATCH_CLAIMED
-                    or event.from_state is not WorkflowState.PLANNED
-                    or event.to_state is not WorkflowState.STARTING
                 ):
                     raise CorruptSchemaError("dispatch claim event has an invalid causal contract")
                 dispatch = dispatches_by_id.get(event.dispatch_id)
@@ -4310,6 +4345,19 @@ class Ledger:
                     event.milestone_id,
                 ):
                     raise CorruptSchemaError("dispatch claim event does not match its dispatch row")
+                initial_claim = (
+                    dispatch.generation == Generation(1)
+                    and event.from_state is WorkflowState.PLANNED
+                    and event.to_state is WorkflowState.STARTING
+                )
+                repair_claim = (
+                    dispatch.role == RoleId("executor")
+                    and dispatch.generation > Generation(1)
+                    and event.from_state is WorkflowState.REPAIR_REQUIRED
+                    and event.to_state is WorkflowState.STARTING
+                )
+                if not (initial_claim or repair_claim):
+                    raise CorruptSchemaError("dispatch claim event has an invalid causal contract")
                 claim_counts[event.dispatch_id] += 1
             elif event.dispatch_id is not None or (
                 event.reason is not None and event.reason.code is ReasonCode.DISPATCH_CLAIMED
@@ -4317,8 +4365,12 @@ class Ledger:
                 raise CorruptSchemaError("normal state transition carries dispatch authority")
             elif event.from_state is WorkflowState.PLANNED and event.to_state is WorkflowState.STARTING:
                 raise CorruptSchemaError("PLANNED -> STARTING requires a dispatch claim event")
-        if any(count != 1 for count in claim_counts.values()):
-            raise CorruptSchemaError("every dispatch row must have exactly one matching claim event")
+        for dispatch_id, count in claim_counts.items():
+            dispatch = dispatches_by_id[dispatch_id]
+            if (dispatch.role == RoleId("executor") and count != 1) or (
+                dispatch.role != RoleId("executor") and count > 1
+            ):
+                raise CorruptSchemaError("dispatch claim event count violates its role contract")
         for row in milestone_rows:
             key = (str(row["run_id"]), str(row["milestone_id"]))
             milestone = self._milestone_from_row(row)
@@ -5971,6 +6023,41 @@ class Ledger:
     # Dispatch claims and state transitions
     # ------------------------------------------------------------------
 
+    def next_program_dispatch_generation(
+        self, run_id: RunId | str, milestone_id: MilestoneId | str, role: RoleId | str
+    ) -> int:
+        """Return the next historical generation for one program role."""
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        role_value = _role(role)
+        row = (
+            self._db()
+            .execute(
+                "SELECT COALESCE(MAX(generation), 0) AS generation FROM dispatches "
+                "WHERE run_id = ? AND milestone_id = ? AND role = ?",
+                (str(run), str(milestone), str(role_value)),
+            )
+            .fetchone()
+        )
+        return int(row["generation"]) + 1 if row is not None else 1
+
+    def _require_next_dispatch_generation(
+        self, run: RunId, milestone: MilestoneId, role: RoleId, generation: int
+    ) -> None:
+        row = (
+            self._db()
+            .execute(
+                "SELECT COALESCE(MAX(generation), 0) AS generation FROM dispatches "
+                "WHERE run_id = ? AND milestone_id = ? AND role = ?",
+                (str(run), str(milestone), str(role)),
+            )
+            .fetchone()
+        )
+        latest = int(row["generation"]) if row is not None else 0
+        if generation != latest + 1:
+            raise DispatchConflict(f"milestone {milestone} role {role} requires successor generation {latest + 1}")
+
     def claim_dispatch(
         self,
         run_id: RunId | str,
@@ -5982,6 +6069,8 @@ class Ledger:
         milestone = _milestone_id(milestone_id)
         role_value = _role(role)
         generation_value = _generation(generation)
+        if generation_value != Generation(1):
+            raise DispatchConflict("initial dispatch claim requires generation 1")
         dispatch_id = DispatchId.from_parts(run, milestone, role_value, generation_value)
         now = utc_now()
         with self._transaction():
@@ -6071,16 +6160,7 @@ class Ledger:
             )
             if existing is not None:
                 return self._verify_dispatch(self._dispatch_from_row(existing))
-            owner = (
-                self._db()
-                .execute(
-                    "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = ?",
-                    (str(run), str(milestone), str(role_value)),
-                )
-                .fetchone()
-            )
-            if owner is not None:
-                raise DispatchConflict(f"milestone {milestone} role {role_value} is owned by {owner['dispatch_id']}")
+            self._require_next_dispatch_generation(run, milestone, role_value, int(generation_value))
             current = self.current_state(run, milestone)
             if current not in {
                 WorkflowState.COMPLETED,
@@ -6125,13 +6205,14 @@ class Ledger:
             owner = (
                 self._db()
                 .execute(
-                    "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = 'executor'",
+                    "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = 'executor' LIMIT 1",
                     (str(run), str(milestone)),
                 )
                 .fetchone()
             )
             if owner is None:
                 raise StaleWriter("program repair requires the original executor owner")
+            self._require_next_dispatch_generation(run, milestone, RoleId("executor"), int(generation_value))
             current = self.current_state(run, milestone)
             if current is not WorkflowState.REPAIR_REQUIRED:
                 raise InvalidTransition(f"program repair dispatch requires REPAIR_REQUIRED, found {current.value}")
@@ -10408,6 +10489,11 @@ class Ledger:
             for fact in self.review_lifecycle(row["run_id"], milestone_id):
                 value = fact.data
                 if isinstance(value.get("candidate_sha"), str):
+                    if candidate != value["candidate_sha"]:
+                        # A same-owner repair/adoption may supersede a
+                        # rejected candidate.  Blockers belong to the exact
+                        # candidate identity and must not leak forward.
+                        blocker = None
                     candidate = str(value["candidate_sha"])
                     candidate_disposition = CandidateDisposition.VERIFIED_COMMIT
                 raw_disposition = value.get("candidate_disposition")
@@ -10417,7 +10503,7 @@ class Ledger:
                     except ValueError as exc:
                         raise CorruptSchemaError("program candidate disposition is invalid") from exc
                 raw_blocker = value.get("blocker")
-                if raw_blocker is not None:
+                if raw_blocker is not None and value.get("candidate_sha") == candidate:
                     if not isinstance(raw_blocker, Mapping):
                         raise CorruptSchemaError("program blocker projection is invalid")
                     try:
@@ -10824,7 +10910,10 @@ class Ledger:
     def program_controller_decisions(self) -> tuple[ProgramControllerDecisionStatus, ...]:
         rows = (
             self._db()
-            .execute("SELECT * FROM controller_decisions WHERE program_id IS NOT NULL ORDER BY deadline, decision_id")
+            .execute(
+                "SELECT * FROM controller_decisions WHERE program_id IS NOT NULL "
+                "ORDER BY program_revision DESC, deadline, decision_id"
+            )
             .fetchall()
         )
         return tuple(self._program_decision_status_from_row(row) for row in rows)
@@ -11057,11 +11146,9 @@ class Ledger:
                     }:
                         inherited_status = value
                         break
-            if blocker is None and inherited_status is not None and inherited_status != "completed":
-                blocker = _default_executor_blocker(inherited_status)
+            if inherited_status is not None:
+                blocker = _normalize_terminal_blocker(inherited_status, blocker)
             existing = self._program_candidate_sha(program, milestone)
-            if existing is not None and existing != candidate.commit_sha:
-                raise StaleWriter("program candidate commit changed before adoption")
             if any(
                 item.kind in {"promotion_accepted", "integration_completed"}
                 and item.data.get("candidate_sha") == candidate.commit_sha
@@ -11069,6 +11156,26 @@ class Ledger:
             ):
                 raise StaleWriter("program candidate is already promoted or integrated")
             current = WorkflowState(str(milestone_row["current_state"]))
+            predecessor_sha: str | None = None
+            if existing is not None and existing != candidate.commit_sha:
+                if (
+                    current
+                    not in {
+                        WorkflowState.BLOCKED,
+                        WorkflowState.NEEDS_DECISION,
+                        WorkflowState.REPAIR_REQUIRED,
+                    }
+                    or dispatch_value is None
+                ):
+                    raise StaleWriter("program candidate commit changed before adoption")
+                try:
+                    dispatch = DispatchId(dispatch_value)
+                except ValueError as exc:
+                    raise StaleWriter("program candidate adoption dispatch identity is invalid") from exc
+                prior_generation = self._candidate_dispatch_generation(facts, existing)
+                if dispatch.parts[2] != RoleId("executor") or int(dispatch.parts[3]) <= prior_generation:
+                    raise StaleWriter("program candidate adoption is not a successor generation")
+                predecessor_sha = existing
             target_state = (
                 WorkflowState.BLOCKED
                 if inherited_status == "external_blocked"
@@ -11114,6 +11221,18 @@ class Ledger:
                     "blocker": blocker.to_json() if blocker is not None else None,
                 },
             )
+            if predecessor_sha is not None:
+                self._record_program_fact_in_transaction(
+                    program,
+                    milestone,
+                    phase=LifecyclePhase.REPAIR,
+                    kind="candidate_superseded",
+                    data={
+                        "predecessor_sha": predecessor_sha,
+                        "candidate_sha": candidate.commit_sha,
+                        "dispatch_id": dispatch_value,
+                    },
+                )
             self._ensure_program_decision_in_transaction(
                 program,
                 event_kind=ProgramEventKind.IMPLEMENTATION_COMPLETED,
@@ -11304,6 +11423,25 @@ class Ledger:
                 return value
         return None
 
+    @staticmethod
+    def _candidate_dispatch_generation(facts: Sequence[LifecycleRecord], candidate_sha: str) -> int:
+        """Return the greatest executor generation that recorded one candidate."""
+
+        generation = 0
+        for fact in facts:
+            if fact.data.get("candidate_sha") != candidate_sha:
+                continue
+            dispatch_value = fact.data.get("dispatch_id")
+            if not isinstance(dispatch_value, str):
+                continue
+            try:
+                dispatch = DispatchId(dispatch_value)
+            except ValueError:
+                continue
+            if dispatch.parts[2] == RoleId("executor"):
+                generation = max(generation, int(dispatch.parts[3]))
+        return generation
+
     def _program_candidate_blocker(
         self, program_id: ProgramId | str, milestone_id: MilestoneId | str, candidate_sha: str
     ) -> TypedBlocker | None:
@@ -11442,8 +11580,7 @@ class Ledger:
             candidate_disposition = CandidateDisposition.VERIFIED_COMMIT
         else:
             candidate_disposition = CandidateDisposition.NO_CANDIDATE
-        if terminal_status != "completed" and blocker is None:
-            blocker = _default_executor_blocker(terminal_status)
+        blocker = _normalize_terminal_blocker(terminal_status, blocker)
         dispatch_value = str(dispatch_id) if dispatch_id is not None else None
         terminal_fact = {
             "dispatch_id": dispatch_value,
@@ -11536,8 +11673,28 @@ class Ledger:
             elif current is not target_state and target_state is not WorkflowState.COMPLETED:
                 raise StaleWriter(f"program executor result requires a launchable milestone, found {current.value}")
             existing = self._program_candidate_sha(program, milestone)
+            predecessor_sha: str | None = None
             if existing not in {None, candidate_sha}:
-                raise StaleWriter("program candidate commit changed after executor completion")
+                if candidate_sha is None or current not in {
+                    WorkflowState.STARTING,
+                    WorkflowState.RUNNING,
+                    WorkflowState.REPAIR_REQUIRED,
+                    WorkflowState.BLOCKED,
+                    WorkflowState.NEEDS_DECISION,
+                }:
+                    raise StaleWriter("program candidate commit changed after executor completion")
+                if dispatch_value is None:
+                    raise StaleWriter("program candidate successor requires a bound dispatch")
+                try:
+                    dispatch = DispatchId(dispatch_value)
+                except ValueError as exc:
+                    raise StaleWriter("program candidate successor dispatch identity is invalid") from exc
+                prior_generation = self._candidate_dispatch_generation(
+                    self.review_lifecycle(program, milestone), existing
+                )
+                if dispatch.parts[2] != RoleId("executor") or int(dispatch.parts[3]) <= prior_generation:
+                    raise StaleWriter("program candidate successor is not a newer executor generation")
+                predecessor_sha = existing
             self._record_program_fact_in_transaction(
                 program,
                 milestone,
@@ -11545,6 +11702,18 @@ class Ledger:
                 kind="candidate_recorded",
                 data=terminal_fact,
             )
+            if predecessor_sha is not None:
+                self._record_program_fact_in_transaction(
+                    program,
+                    milestone,
+                    phase=LifecyclePhase.REPAIR,
+                    kind="candidate_superseded",
+                    data={
+                        "predecessor_sha": predecessor_sha,
+                        "candidate_sha": candidate_sha,
+                        "dispatch_id": dispatch_value,
+                    },
+                )
             if target_state is WorkflowState.COMPLETED and candidate_sha is not None:
                 self._ensure_program_decision_in_transaction(
                     program,
@@ -11692,16 +11861,20 @@ class Ledger:
                 if tuple(action.review_roles) != expected_roles:
                     raise StaleWriter("program review action does not name every declared authority")
                 for role in action.review_roles:
-                    existing = (
+                    latest = (
                         self._db()
                         .execute(
-                            "SELECT 1 FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = ?",
+                            "SELECT d.dispatch_id, q.state FROM dispatches d LEFT JOIN dispatch_queue q "
+                            "ON q.dispatch_id = d.dispatch_id WHERE d.run_id = ? AND d.milestone_id = ? "
+                            "AND d.role = ? ORDER BY d.generation DESC LIMIT 1",
                             (str(bundle.program_id), action.milestone_id, role),
                         )
                         .fetchone()
                     )
-                    if existing is not None:
-                        raise StaleWriter("program review action would duplicate a reviewer START")
+                    if latest is not None and (
+                        latest["state"] is None or str(latest["state"]) not in {"completed", "failed", "cancelled"}
+                    ):
+                        raise StaleWriter("program review action would duplicate a current reviewer START")
                 state = self.current_state(bundle.program_id, action.milestone_id)
                 if state in {
                     WorkflowState.COMPLETED,
@@ -12160,10 +12333,23 @@ class Ledger:
                     raise ValueError("applied program integration requires an exact commit tree")
                 strategy = expected["strategy"]
                 logical_promotion = receipt_value.get("logical_promotion") is True
-                if logical_promotion and parents != [expected["expected_trunk_head"]]:
-                    raise StaleWriter("logical promotion receipt has unexpected commit parents")
                 if logical_promotion and after != candidate_sha:
                     raise StaleWriter("logical promotion receipt has an unexpected resulting HEAD")
+                if logical_promotion:
+                    lineage = receipt_value.get("lineage")
+                    if (
+                        receipt_value.get("linear_chain") is not True
+                        or not isinstance(lineage, list)
+                        or len(lineage) < 2
+                        or any(
+                            not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{40}", item) is None for item in lineage
+                        )
+                        or lineage[0] != expected["expected_trunk_head"]
+                        or lineage[-1] != candidate_sha
+                        or len(set(lineage)) != len(lineage)
+                        or parents != [lineage[-2]]
+                    ):
+                        raise StaleWriter("logical promotion receipt has an invalid linear candidate chain")
                 if not logical_promotion and strategy == "fast_forward" and after != candidate_sha:
                     raise StaleWriter("fast-forward integration receipt has an unexpected resulting HEAD")
                 if (
