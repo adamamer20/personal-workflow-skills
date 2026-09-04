@@ -6,7 +6,7 @@
   "outcome": {
     "executor_status": "completed",
     "implementation_candidate_disposition": "verified_commit",
-    "implementation_candidate_sha": "1f24975b02d599ba12102d6fc17a96a3c3c64574",
+    "implementation_candidate_sha": "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
     "milestone_state": "COMPLETED",
     "promotion_state": "unpromoted",
     "adopted_candidate_milestone_state": "BLOCKED",
@@ -15,21 +15,23 @@
     "dirty_workspace_preserved": true
   },
   "implementation_candidate": {
-    "commit_sha": "1f24975b02d599ba12102d6fc17a96a3c3c64574",
-    "parent_commit": "2ffd15455a51fdea5c7190b59de78e31519da487",
+    "commit_sha": "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
+    "parent_commit": "047804807a21ed4ad84b0985dbc349127f5b97cb",
     "direct_parent_matches_repair_base": true,
-    "repair_base_commit": "2ffd15455a51fdea5c7190b59de78e31519da487",
-    "successor_of": "2ffd15455a51fdea5c7190b59de78e31519da487",
+    "repair_base_commit": "047804807a21ed4ad84b0985dbc349127f5b97cb",
+    "successor_of": "047804807a21ed4ad84b0985dbc349127f5b97cb",
     "candidate_role": "terminal-candidate-retention-and-harness-cutover-repair",
     "distinct_from_adopted_tui_candidate": true
   },
   "reviewed_range": {
     "external_baseline": "6fa09a3701d97f39a5183701687b4b8bcf62dc17",
-    "final_successor_tip": "1f24975b02d599ba12102d6fc17a96a3c3c64574",
-    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..1f24975b02d599ba12102d6fc17a96a3c3c64574",
+    "final_successor_tip": "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
+    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
     "superseded_predecessors": [
       "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
-      "a2230ad79d2883d8bb2c5955b37709cce0e12315"
+      "a2230ad79d2883d8bb2c5955b37709cce0e12315",
+      "1f24975b02d599ba12102d6fc17a96a3c3c64574",
+      "047804807a21ed4ad84b0985dbc349127f5b97cb"
     ]
   },
   "external_baseline": {
@@ -124,14 +126,15 @@
   },
   "retained_wheel": {
     "path": "dist/integrated-runtime/codex_flow-0.2.0-py3-none-any.whl",
-    "sha256": "0bb3a528cd7745babfdf1b305513c622b6938c28b311706f8e63b29f0a64c73f",
-    "size_bytes": 438782,
+    "sha256": "6808eaf2c5687b6f8f132969dd81cd9a74c8ab2f395c5d3e18690000d22e8618",
+    "size_bytes": 446760,
+    "source_commit": "a3c71dbe174f74b5c6cd0ebb43e347dcb0d1c90b",
     "retained_wheel_pilot": "passed",
     "source_import_bypass": true,
     "global_installation_or_plugin_mutation": false
   },
   "validation": {
-    "full_pytest": "852 passed in 233.49s",
+    "full_pytest": "859 passed in 235.93s",
     "ruff_format": "passed",
     "ruff_check": "passed",
     "schema_validator": "passed",
@@ -142,7 +145,7 @@
     "repair_focused": "105 passed in 24.57s across candidate, ledger and service partitions",
     "git_diff_check": "passed",
     "independent_reviews": "pending",
-    "full_make_check": "passed: Ruff format/check, 852 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
+    "full_make_check": "passed: Ruff format/check, 859 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
   },
   "changed_surfaces": [
     "config/test-partitions.toml",
