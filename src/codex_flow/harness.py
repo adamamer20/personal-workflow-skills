@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
+import hmac
 import json
 import os
 import queue
@@ -39,6 +42,7 @@ from .contracts import (
     review_result_from_agent_message,
 )
 from .domain import (
+    CONTROL_LIST_RESPONSE_MAX_BYTES,
     CONVERSATION_MAX_CONCURRENT_READS,
     CONVERSATION_READ_DEADLINE_SECONDS,
     LIVE_MAX_SUBSCRIBERS,
@@ -54,6 +58,11 @@ from .domain import (
     ControllerDecisionState,
     ControllerGenerationState,
     ControllerRecoveryInspectionClaim,
+    ControlListKind,
+    ControlListPage,
+    ControlListPageStatus,
+    ControlListRequest,
+    ControlListVisibility,
     ConversationHistoryPage,
     ConversationHistoryRequest,
     ConversationHistoryStatus,
@@ -1559,6 +1568,199 @@ class WorkflowHarness:
             },
         }
 
+    def _status_page_item(self, row: Mapping[str, object]) -> dict[str, object]:
+        """Project one source-owned worker row without changing its ordering."""
+
+        item = {key: row[key] for key in _PUBLIC_QUEUE_FIELDS if key in row}
+        item["retry_policy"] = _public_retry_policy(self.ledger.retry_policy(str(row["dispatch_id"])))
+        item["recent_activity"] = [
+            _public_status_activity(activity)
+            for activity in self.ledger.recent_activity(str(row["dispatch_id"]), limit=STATUS_RECENT_ACTIVITY_LIMIT)
+        ]
+        active_turns = getattr(self, "_active_turns", {})
+        active = active_turns.get(str(row["dispatch_id"]))
+        item["active_turn_id"] = active[3] if active is not None else None
+        return item
+
+    @staticmethod
+    def _page_token_key(value: object) -> tuple[object, ...]:
+        if not isinstance(value, list) or len(value) not in {3}:
+            raise ValueError("page token ordering key is malformed")
+        if isinstance(value[0], bool) or not isinstance(value[0], int):
+            raise ValueError("page token ordering key is malformed")
+        if isinstance(value[1], bool) or not isinstance(value[1], int | str):
+            raise ValueError("page token ordering key is malformed")
+        if not isinstance(value[2], str):
+            raise ValueError("page token ordering key is malformed")
+        return (value[0], value[1], value[2])
+
+    def _encode_control_page_token(
+        self,
+        *,
+        kind: ControlListKind,
+        visibility: ControlListVisibility,
+        snapshot_id: str,
+        last_key: tuple[object, ...],
+    ) -> str:
+        if self.epoch is None:
+            raise IpcError("harness lease is not acquired")
+        body = json.dumps(
+            {
+                "kind": kind.value,
+                "visibility": visibility.value,
+                "snapshot_id": snapshot_id,
+                "schema": 19,
+                "epoch": self.epoch,
+                "ledger": hashlib.sha256(os.fspath(self.ledger.path.resolve()).encode("utf-8")).hexdigest(),
+                "last_key": list(last_key),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        signature = hmac.new(self.owner_nonce.encode("ascii"), body, hashlib.sha256).digest()
+        token = base64.urlsafe_b64encode(body + b"." + signature).decode("ascii").rstrip("=")
+        if len(token) > 1_024:
+            raise IpcError("page continuation token is too large", reason_code="malformed_page_token")
+        return token
+
+    def _decode_control_page_token(self, token: object) -> dict[str, object]:
+        if (
+            not isinstance(token, str)
+            or not token
+            or any(ord(character) > 0x7F for character in token)
+            or len(token.encode("ascii")) > 1_024
+        ):
+            raise IpcError("page continuation token is malformed", reason_code="malformed_page_token")
+        try:
+            encoded = token + "=" * (-len(token) % 4)
+            raw = base64.b64decode(encoded.encode("ascii"), altchars=b"-_", validate=True)
+            body, signature = raw.rsplit(b".", 1)
+            expected = hmac.new(self.owner_nonce.encode("ascii"), body, hashlib.sha256).digest()
+            if not hmac.compare_digest(signature, expected):
+                raise ValueError("page token signature is invalid")
+            decoded = strict_json_loads(body, max_bytes=4_096)
+        except (ValueError, TypeError, UnicodeDecodeError, binascii.Error) as exc:
+            raise IpcError("page continuation token is malformed", reason_code="malformed_page_token") from exc
+        if not isinstance(decoded, dict) or set(decoded) != {
+            "kind",
+            "visibility",
+            "snapshot_id",
+            "schema",
+            "epoch",
+            "ledger",
+            "last_key",
+        }:
+            raise IpcError("page continuation token is malformed", reason_code="malformed_page_token")
+        try:
+            ControlListKind(decoded["kind"])
+            ControlListVisibility(decoded["visibility"])
+            if (
+                not isinstance(decoded["snapshot_id"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", decoded["snapshot_id"]) is None
+            ):
+                raise ValueError("page token snapshot is malformed")
+            if decoded["schema"] != 19 or isinstance(decoded["epoch"], bool) or not isinstance(decoded["epoch"], int):
+                raise ValueError("page token schema is malformed")
+            if not isinstance(decoded["ledger"], str) or re.fullmatch(r"[0-9a-f]{64}", decoded["ledger"]) is None:
+                raise ValueError("page token ledger is malformed")
+            decoded["last_key"] = list(self._page_token_key(decoded["last_key"]))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise IpcError("page continuation token is malformed", reason_code="malformed_page_token") from exc
+        return decoded
+
+    def _control_list_page(self, request: ControlListRequest) -> dict[str, object]:
+        if self.epoch is None:
+            raise IpcError("harness lease is not acquired")
+        snapshot_id = self.ledger.control_list_fingerprint(
+            request.list_kind, request.visibility, harness_epoch=self.epoch
+        )
+        after_key: tuple[object, ...] | None = None
+        if request.page_token is not None:
+            token = self._decode_control_page_token(request.page_token)
+            token_identity = {
+                "kind": request.list_kind.value,
+                "visibility": request.visibility.value,
+                "schema": 19,
+                "epoch": self.epoch,
+                "ledger": hashlib.sha256(os.fspath(self.ledger.path.resolve()).encode("utf-8")).hexdigest(),
+            }
+            if any(token.get(key) != value for key, value in token_identity.items()):
+                raise IpcError("page continuation identity does not match", reason_code="page_token_identity_mismatch")
+            if token["snapshot_id"] != snapshot_id:
+                page = ControlListPage(
+                    request.list_kind,
+                    request.visibility,
+                    snapshot_id,
+                    (),
+                    None,
+                    False,
+                    ControlListPageStatus.STALE,
+                )
+                return {"version": 2, "ok": True, "page": page.to_json()}
+            after_key = tuple(token["last_key"])  # type: ignore[arg-type]
+
+        entries = self.ledger.control_list_rows(request.list_kind, request.visibility, after_key=after_key)
+        selected: list[dict[str, object]] = []
+        selected_keys: list[tuple[object, ...]] = []
+        for key, row in entries:
+            item = (
+                self._status_page_item(row)
+                if request.list_kind is ControlListKind.WORKERS
+                else self._controller_status_payload(self.ledger.controller_decision(str(row["decision_id"])))
+            )
+            candidate_items = [*selected, item]
+            candidate_key = key
+            candidate_next_token = (
+                self._encode_control_page_token(
+                    kind=request.list_kind,
+                    visibility=request.visibility,
+                    snapshot_id=snapshot_id,
+                    last_key=candidate_key,
+                )
+                if len(candidate_items) < len(entries)
+                else None
+            )
+            page = ControlListPage(
+                request.list_kind,
+                request.visibility,
+                snapshot_id,
+                tuple(candidate_items),
+                candidate_next_token,
+                candidate_next_token is None,
+            )
+            response = {"version": 2, "ok": True, "page": page.to_json()}
+            if len(encode_frame(response)) - 4 > CONTROL_LIST_RESPONSE_MAX_BYTES:
+                if not selected:
+                    raise IpcError("control list item exceeds page budget", reason_code="item_too_large")
+                break
+            selected.append(item)
+            selected_keys.append(candidate_key)
+            if len(selected) >= request.page_items:
+                break
+        complete = len(selected) >= len(entries)
+        if selected and len(selected) < len(entries):
+            complete = False
+        next_token = None
+        if selected and not complete:
+            next_token = self._encode_control_page_token(
+                kind=request.list_kind,
+                visibility=request.visibility,
+                snapshot_id=snapshot_id,
+                last_key=selected_keys[-1],
+            )
+        page = ControlListPage(
+            request.list_kind,
+            request.visibility,
+            snapshot_id,
+            tuple(selected),
+            next_token,
+            complete,
+        )
+        response = {"version": 2, "ok": True, "page": page.to_json()}
+        if len(encode_frame(response)) - 4 > CONTROL_LIST_RESPONSE_MAX_BYTES:
+            raise IpcError("control list page exceeds page budget", reason_code="item_too_large")
+        return response
+
     @staticmethod
     def _program_status_payload(status: object) -> dict[str, object]:
         """Project a program decision without manufacturing a dispatch id."""
@@ -2074,7 +2276,28 @@ class WorkflowHarness:
     def _request_ack(self, payload: dict[str, object]) -> dict[str, object]:
         try:
             operation = payload.get("operation")
-            if payload.get("version") != 1 or not isinstance(operation, str):
+            if not isinstance(operation, str):
+                raise IpcError("unsupported IPC request version or operation")
+            if payload.get("version") == 2 and operation in {"status", "controller_pending"}:
+                if set(payload) != {"version", "operation", "list_kind", "visibility", "page_token", "page_items"}:
+                    raise IpcError("control list request has an unsupported shape")
+                expected_kind = ControlListKind.WORKERS if operation == "status" else ControlListKind.DECISIONS
+                try:
+                    request = ControlListRequest(
+                        ControlListKind(payload["list_kind"]),  # type: ignore[arg-type]
+                        ControlListVisibility(payload["visibility"]),  # type: ignore[arg-type]
+                        payload["page_token"],  # type: ignore[arg-type]
+                        payload["page_items"],  # type: ignore[arg-type]
+                    )
+                except (TypeError, ValueError) as exc:
+                    reason = "malformed_page_token" if payload.get("page_token") is not None else None
+                    raise IpcError("control list request is malformed", reason_code=reason) from exc
+                if request.list_kind is not expected_kind:
+                    raise IpcError(
+                        "control list operation identity does not match", reason_code="page_token_identity_mismatch"
+                    )
+                return self._control_list_page(request)
+            if payload.get("version") != 1:
                 raise IpcError("unsupported IPC request version or operation")
             if operation == "wake":
                 if set(payload) != {"version", "operation"}:
@@ -2100,19 +2323,8 @@ class WorkflowHarness:
                         raise IpcError("status dispatch identity is invalid")
                     rows = tuple(row for row in rows if row.get("dispatch_id") == selected)
                 queue = []
-                active_turns = getattr(self, "_active_turns", {})
                 for row in rows:
-                    item = {key: row[key] for key in _PUBLIC_QUEUE_FIELDS if key in row}
-                    item["retry_policy"] = _public_retry_policy(self.ledger.retry_policy(str(row["dispatch_id"])))
-                    item["recent_activity"] = [
-                        _public_status_activity(activity)
-                        for activity in self.ledger.recent_activity(
-                            str(row["dispatch_id"]), limit=STATUS_RECENT_ACTIVITY_LIMIT
-                        )
-                    ]
-                    active = active_turns.get(str(row["dispatch_id"]))
-                    item["active_turn_id"] = active[3] if active is not None else None
-                    queue.append(item)
+                    queue.append(self._status_page_item(row))
                 return {"version": 1, "ok": True, "queue": queue}
             if operation == "activity":
                 return self._activity(payload)
@@ -3470,7 +3682,16 @@ class WorkflowHarness:
                 "error": "request_rejected",
                 "reason_code": exc.code.value,
             }
-        except (IpcError, OSError, LedgerError):
+        except IpcError as exc:
+            if exc.reason_code in {
+                "item_too_large",
+                "malformed_page_token",
+                "page_token_identity_mismatch",
+            }:
+                response = {"version": 2, "ok": False, "error": str(exc.reason_code)}
+            else:
+                response = {"version": 1, "ok": False, "error": "request_rejected"}
+        except (OSError, LedgerError):
             response = {"version": 1, "ok": False, "error": "request_rejected"}
         try:
             self._send_response(connection, response)

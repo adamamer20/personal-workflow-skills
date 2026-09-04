@@ -96,6 +96,8 @@ class CodexFlowTerminalApp(App[None]):
         ("k", "claim", "Claim"),
         ("a", "acknowledge", "Ack"),
         ("p", "rearm", "Re-arm"),
+        ("f", "toggle_filter", "Active/all"),
+        ("m", "load_more_sessions", "Load more"),
         ("l", "load_older", "Load older"),
         ("[", "scroll_up", "Scroll up"),
         ("]", "scroll_down", "Scroll down"),
@@ -219,7 +221,8 @@ class CodexFlowTerminalApp(App[None]):
         self.set_class(not snapshot.connected, "offline")
         self.query_one("#mode", Static).update(
             f"{snapshot.mode_label}  ·  {len(snapshot.workers)} worker conversation(s)  ·  "
-            f"{len(snapshot.decisions)} item(s) need attention"
+            f"{len(snapshot.decisions)} item(s) need attention  ·  "
+            f"{snapshot.visibility.replace('_', ' ').title()}"
         )
         worker_list = self.query_one("#workers", ListView)
         decision_list = self.query_one("#decisions", ListView)
@@ -400,7 +403,9 @@ class CodexFlowTerminalApp(App[None]):
         actions = "S Send direction · I Stop · " if active else ""
         older_available = bool(pages and pages[0].older_token is not None)
         actions += "L Load older · " if older_available else ""
-        self._set_actions(actions + "C Copy · O Open · T Details")
+        snapshot_complete = self.client.snapshot.workers_complete and self.client.snapshot.decisions_complete
+        paging = "F Active/all · " if snapshot_complete else "F Active/all · M Load more · "
+        self._set_actions(paging + actions + "C Copy · O Open · T Details")
         self._ensure_live_subscription(worker)
 
     def _show_decision(self, decision: DecisionView) -> None:
@@ -434,7 +439,12 @@ class CodexFlowTerminalApp(App[None]):
             "\nhistory scope persisted user/agent messages · non-message tool activity may be omitted"
         )
         history_action = "L Load older · " if pages and pages[0].older_token is not None else "L Load conversation · "
-        self._set_actions(history_action + "K Claim · A Ack · P Remind · O Open · T Details")
+        paging = (
+            "F Active/all · "
+            if self.client.snapshot.workers_complete and self.client.snapshot.decisions_complete
+            else "F Active/all · M Load more · "
+        )
+        self._set_actions(paging + history_action + "K Claim · A Ack · P Remind · O Open · T Details")
 
     def _set_actions(self, actions: str) -> None:
         self._context_actions = actions
@@ -508,6 +518,40 @@ class CodexFlowTerminalApp(App[None]):
 
     def action_refresh(self) -> None:
         self.run_worker(self._refresh(), exclusive=True, group="refresh")
+
+    def action_toggle_filter(self) -> None:
+        toggle = getattr(self.client, "toggle_visibility", None)
+        if not callable(toggle):
+            self._feedback("Visibility filter is unavailable")
+            return
+
+        async def apply() -> None:
+            try:
+                snapshot = await toggle()
+            except (ControlClientError, OSError, ValueError) as exc:
+                self._feedback(f"Filter change rejected · {exc}")
+                return
+            self._render_snapshot(snapshot)
+            self._feedback(f"Showing {snapshot.visibility.replace('_', ' ')} sessions")
+
+        self.run_worker(apply(), exclusive=True, group="refresh")
+
+    def action_load_more_sessions(self) -> None:
+        loader = getattr(self.client, "load_more_sessions", None)
+        if not callable(loader):
+            self._feedback("Additional sessions are unavailable")
+            return
+
+        async def load() -> None:
+            try:
+                snapshot = await loader()
+            except (ControlClientError, OSError, ValueError) as exc:
+                self._feedback(f"Session load rejected · {exc}")
+                return
+            self._render_snapshot(snapshot)
+            self._feedback("More sessions loaded")
+
+        self.run_worker(load(), exclusive=True, group="paging")
 
     def action_load_older(self) -> None:
         loader = getattr(self.client, "load_conversation", None)

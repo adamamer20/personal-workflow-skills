@@ -69,6 +69,8 @@ from .domain import (
     ControllerGenerationState,
     ControllerGenerationStatus,
     ControllerRecoveryInspectionClaim,
+    ControlListKind,
+    ControlListVisibility,
     DecisionRequest,
     DecisionResponse,
     DiagnosticEvent,
@@ -6569,6 +6571,190 @@ class Ledger:
     def queue_dispatches(self) -> tuple[JsonObject, ...]:
         rows = self._db().execute("SELECT * FROM dispatch_queue ORDER BY sequence").fetchall()
         return tuple(self._queue_row(row) for row in rows)
+
+    def _control_list_entries(
+        self, list_kind: ControlListKind | str, visibility: ControlListVisibility | str
+    ) -> tuple[tuple[tuple[object, ...], JsonObject], ...]:
+        """Return one source-owned, totally ordered control-list snapshot."""
+
+        kind = list_kind if isinstance(list_kind, ControlListKind) else ControlListKind(list_kind)
+        view = visibility if isinstance(visibility, ControlListVisibility) else ControlListVisibility(visibility)
+        if kind is ControlListKind.WORKERS:
+            attention_states = (
+                "pending_delivery",
+                "awaiting_claim",
+                "claimed",
+                "action_committed",
+                "human_attention_required",
+            )
+            attention_rows = (
+                self._db()
+                .execute(
+                    "SELECT DISTINCT dispatch_id FROM controller_decisions "
+                    "WHERE program_id IS NULL AND state IN (?, ?, ?, ?, ?)",
+                    attention_states,
+                )
+                .fetchall()
+            )
+            attention_dispatches = {str(row[0]) for row in attention_rows}
+            rows = [self._queue_row(row) for row in self._db().execute("SELECT * FROM dispatch_queue").fetchall()]
+            entries: list[tuple[tuple[object, ...], JsonObject]] = []
+            for row in rows:
+                state = str(row["state"])
+                terminal = state in {"completed", "failed", "cancelled"}
+                if (
+                    view is ControlListVisibility.ACTIVE
+                    and terminal
+                    and str(row["dispatch_id"]) not in attention_dispatches
+                ):
+                    continue
+                category = (
+                    0
+                    if state in {"claimed", "starting", "running"}
+                    else 1
+                    if not terminal or str(row["dispatch_id"]) in attention_dispatches
+                    else 2
+                )
+                key = (category, -int(row["sequence"]), str(row["dispatch_id"]))
+                entries.append((key, row))
+            entries.sort(key=lambda item: item[0])
+            return tuple(entries)
+
+        attention_states = (
+            "pending_delivery",
+            "awaiting_claim",
+            "claimed",
+            "action_committed",
+            "human_attention_required",
+        )
+        rows = [
+            self._queue_row(row)
+            for row in self._db().execute("SELECT * FROM controller_decisions WHERE program_id IS NULL").fetchall()
+        ]
+        entries = []
+        for row in rows:
+            state = str(row["state"])
+            current_attention = state in attention_states
+            if view is ControlListVisibility.ACTIVE and not current_attention:
+                continue
+            deadline = str(row["deadline"] or "")
+            key = (0 if current_attention else 1, deadline, str(row["decision_id"]))
+            entries.append((key, row))
+        entries.sort(key=lambda item: item[0])
+        return tuple(entries)
+
+    def control_list_rows(
+        self,
+        list_kind: ControlListKind | str,
+        visibility: ControlListVisibility | str,
+        *,
+        after_key: tuple[object, ...] | None = None,
+    ) -> tuple[tuple[tuple[object, ...], JsonObject], ...]:
+        """Expose ordered rows after one exact ephemeral continuation key."""
+
+        entries = self._control_list_entries(list_kind, visibility)
+        if after_key is None:
+            return entries
+        for index, (key, _row) in enumerate(entries):
+            if key == after_key:
+                return entries[index + 1 :]
+        return ()
+
+    def control_list_fingerprint(
+        self,
+        list_kind: ControlListKind | str,
+        visibility: ControlListVisibility | str,
+        *,
+        harness_epoch: int,
+    ) -> str:
+        """Hash the complete ordered source identity for one page snapshot."""
+
+        entries = self._control_list_entries(list_kind, visibility)
+        kind = list_kind if isinstance(list_kind, ControlListKind) else ControlListKind(list_kind)
+        view = visibility if isinstance(visibility, ControlListVisibility) else ControlListVisibility(visibility)
+        source: list[list[object]] = []
+        if kind is ControlListKind.WORKERS:
+            for _key, row in entries:
+                source.append(
+                    [
+                        str(row["dispatch_id"]),
+                        int(row["sequence"]),
+                        str(row["state"]),
+                        int(row["generation"]),
+                        int(row["attempt"]),
+                        str(row["updated_at"]),
+                    ]
+                )
+        else:
+            for _key, row in entries:
+                source.append(
+                    [
+                        str(row["decision_id"]),
+                        str(row["state"]),
+                        int(row["revision"]),
+                        int(row["current_generation"]),
+                        str(row["updated_at"]),
+                    ]
+                )
+        payload = [kind.value, view.value, int(CURRENT_SCHEMA_VERSION), int(harness_epoch), source]
+        return hashlib.sha256(_encode_json(payload).encode("utf-8")).hexdigest()
+
+    def refresh_state_inspection(self) -> JsonObject:
+        """Inspect the exact fenced v19 recovery state without mutation."""
+
+        if self.schema_version != CURRENT_SCHEMA_VERSION or self.schema_identity != _SCHEMA_IDENTITY:
+            raise CorruptSchemaError("refresh state requires the canonical schema-v19 identity")
+        marker = self._db().execute("SELECT value FROM schema_meta WHERE key = 'migration_marker'").fetchone()
+        if marker is None or str(marker[0]) != "complete":
+            raise CorruptSchemaError("refresh state requires a complete migration marker")
+        tables = {
+            str(row[1])
+            for row in self._db().execute("SELECT type, name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if "harness_authority" not in tables or "supervisor_authority" in tables:
+            raise CorruptSchemaError("refresh state has an ambiguous authority table")
+        authority = self.harness_authority()
+        if authority is None:
+            return {
+                "authority": None,
+                "active_dispatches": 0,
+                "live_worker_leases": 0,
+                "active_controller_generations": 0,
+                "live_controller_claims": 0,
+            }
+        active_dispatches = int(
+            self._db()
+            .execute("SELECT COUNT(*) FROM dispatch_queue WHERE state IN ('claimed', 'starting', 'running')")
+            .fetchone()[0]
+        )
+        live_worker_leases = int(
+            self._db().execute("SELECT COUNT(*) FROM worker_liveness WHERE exited_at IS NULL").fetchone()[0]
+        )
+        active_controller_generations = int(
+            self._db()
+            .execute(
+                "SELECT COUNT(*) FROM controller_decision_generations WHERE state IN ('delivery_starting', 'active')"
+            )
+            .fetchone()[0]
+        )
+        now = utc_now()
+        live_controller_claims = int(
+            self._db()
+            .execute(
+                "SELECT COUNT(*) FROM controller_decisions WHERE "
+                "claimant_kind IS NOT NULL AND claimant_id IS NOT NULL "
+                "AND claim_lease_expires_at IS NOT NULL AND claim_lease_expires_at > ?",
+                (now,),
+            )
+            .fetchone()[0]
+        )
+        return {
+            "authority": authority,
+            "active_dispatches": active_dispatches,
+            "live_worker_leases": live_worker_leases,
+            "active_controller_generations": active_controller_generations,
+            "live_controller_claims": live_controller_claims,
+        }
 
     # H6-F live-worker diagnostics, retry policy and control-command authority.
     def append_diagnostic(

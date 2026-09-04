@@ -566,7 +566,11 @@ def refresh_with_credential(
     )
     owned_ledger = ledger
     migration_required = False
+    interrupted_recovery = False
     ledger_path: Path | None = None
+    live_checker = process_is_live or (
+        lambda pid, birth_identity: _exact_process_is_live(pid, birth_identity, identity_reader)
+    )
     if owned_ledger is None:
         ledger_path = unit.state_root / ".codex-flow" / "workflow.db"
         if not ledger_path.is_file():
@@ -594,6 +598,60 @@ def refresh_with_credential(
         except LedgerError as exc:
             raise ServiceRefreshFailed("harness ledger cannot be inspected") from exc
 
+    if not migration_required:
+        # A real interrupted post-migration handoff has v19 authority and the
+        # exact stopped v18 unit. Recognize it before normal current-harness
+        # validation, without reconstructing or mutating the predecessor.
+        try:
+            _validate_installed_unit(
+                _legacy_supervisor_unit(unit),
+                config_home=config_home,
+                expected_profile_sha256=profile_sha256,
+                credential_value=value,
+                allow_profile_identity_update=True,
+            )
+        except ServiceError as legacy_error:
+            try:
+                _validate_installed_unit(
+                    unit,
+                    config_home=config_home,
+                    expected_profile_sha256=profile_sha256,
+                    credential_value=value,
+                    allow_profile_identity_update=True,
+                )
+            except ServiceError:
+                raise legacy_error from None
+        else:
+            interrupted_recovery = True
+            try:
+                inspection = owned_ledger.refresh_state_inspection()  # type: ignore[union-attr]
+            except LedgerError as exc:
+                raise ServiceRefreshFailed("harness refresh state is not canonical schema-v19") from exc
+            authority_value = inspection.get("authority")
+            if not isinstance(authority_value, Mapping):
+                raise ServiceRefreshFailed("harness authority is unavailable")
+            if int(authority_value.get("requested_shutdown", 0)) != 1:
+                raise ServiceRefreshFailed("interrupted refresh predecessor is not fenced")
+            if any(
+                int(inspection.get(name, 0)) != 0
+                for name in (
+                    "active_dispatches",
+                    "live_worker_leases",
+                    "active_controller_generations",
+                    "live_controller_claims",
+                )
+            ):
+                raise ServiceRefreshDeferred("interrupted refresh still has active children or claims")
+            old_pid, old_birth_identity, old_epoch = _authority_identity(authority_value)
+            if live_checker(old_pid, old_birth_identity):
+                raise ServiceRefreshDeferred("interrupted refresh predecessor process is still live")
+            if _unit_is_active(_legacy_supervisor_unit(unit), runner=runner):
+                raise ServiceRefreshDeferred("interrupted refresh predecessor unit is still active")
+            runtime = unit.state_root / ".codex-flow" / "runtime"
+            for socket_name in ("supervisor.sock", "harness.sock"):
+                if os.path.lexists(runtime / socket_name):
+                    raise ServiceRefreshFailed("interrupted refresh socket entry remains")
+
     if migration_required:
         # The replacement unit cannot validate an installed v18 predecessor:
         # first prove the exact old command/description, then replace it only
@@ -605,7 +663,7 @@ def refresh_with_credential(
             credential_value=value,
             allow_profile_identity_update=True,
         )
-    else:
+    elif not interrupted_recovery:
         _validate_installed_unit(
             unit,
             config_home=config_home,
@@ -649,9 +707,6 @@ def refresh_with_credential(
 
     assert owned_ledger is not None
     close_ledger = ledger is None or migration_required
-    live_checker = process_is_live or (
-        lambda pid, birth_identity: _exact_process_is_live(pid, birth_identity, identity_reader)
-    )
     deadline = clock() + deadline_seconds
 
     def remaining() -> float:
@@ -664,7 +719,9 @@ def refresh_with_credential(
     try:
         try:
             fence = (
-                owned_ledger.arm_predecessor_refresh_fence()
+                cast(Mapping[str, object], authority_value)
+                if interrupted_recovery
+                else owned_ledger.arm_predecessor_refresh_fence()
                 if migration_required
                 else owned_ledger.arm_harness_refresh_fence()
             )
@@ -678,7 +735,7 @@ def refresh_with_credential(
         authority = cast(Mapping[str, object], fence)
         _authority_matches_unit(authority, unit)
         old_pid, old_birth_identity, old_epoch = _authority_identity(authority)
-        predecessor_unit = _legacy_supervisor_unit(unit) if migration_required else unit
+        predecessor_unit = _legacy_supervisor_unit(unit) if (migration_required or interrupted_recovery) else unit
         socket_path = (
             unit.state_root / ".codex-flow" / "runtime" / ("supervisor.sock" if migration_required else "harness.sock")
         )
@@ -689,7 +746,7 @@ def refresh_with_credential(
                 raise ServiceRefreshFailed("legacy supervisor socket path is unavailable") from exc
             if stat.S_ISLNK(socket_metadata.st_mode):
                 raise ServiceRefreshFailed("legacy supervisor socket path must not be a symlink")
-        old_process_live = live_checker(old_pid, old_birth_identity)
+        old_process_live = False if interrupted_recovery else live_checker(old_pid, old_birth_identity)
         if old_process_live:
             shutdown_sender(socket_path, remaining())
             # The authenticated shutdown may synchronously close the exact
@@ -697,7 +754,7 @@ def refresh_with_credential(
             # wait loop so an already completed handoff does not incur an
             # artificial sleep or deadline edge.
             old_process_live = live_checker(old_pid, old_birth_identity)
-        elif not (
+        elif not interrupted_recovery and not (
             owned_ledger.predecessor_refresh_fenced() if migration_required else owned_ledger.harness_refresh_fenced()
         ):
             raise ServiceRefreshFailed("harness fence disappeared before shutdown")

@@ -25,6 +25,8 @@ from .domain import (
     ControllerClaimantKind,
     ControllerDecisionClaim,
     ControllerDecisionStatus,
+    ControlListPageStatus,
+    ControlListVisibility,
     ConversationHistoryPage,
     ConversationHistoryStatus,
     LiveSubscriptionEvent,
@@ -74,7 +76,13 @@ class _PendingControlRequest:
 class TerminalUiClient:
     """One explicit-refresh client; it never owns a timer or background poll."""
 
-    def __init__(self, live: LiveWorkerControlClient, decisions: ControllerDecisionClient) -> None:
+    def __init__(
+        self,
+        live: LiveWorkerControlClient,
+        decisions: ControllerDecisionClient,
+        *,
+        active_only: bool = False,
+    ) -> None:
         self._live = live
         self._decisions = decisions
         self._last_snapshot = TerminalUiSnapshot(False, datetime.now(UTC).isoformat(), (), (), "not connected")
@@ -82,6 +90,11 @@ class TerminalUiClient:
         self._claimant_id = f"terminal-ui-{uuid.uuid4().hex}"
         self._worker_statuses: dict[str, LiveWorkerStatus] = {}
         self._decision_statuses: dict[str, ControllerDecisionStatus] = {}
+        self._visibility = ControlListVisibility.ACTIVE if active_only else ControlListVisibility.ALL
+        self._worker_next_token: str | None = None
+        self._decision_next_token: str | None = None
+        self._worker_snapshot_id: str | None = None
+        self._decision_snapshot_id: str | None = None
         self._pending_controls: dict[tuple[object, ...], _PendingControlRequest] = {}
         self._history_pages: dict[str, list[ConversationHistoryPage]] = {}
         self._history_bindings: dict[str, tuple[str, int | None, int | None, int | None]] = {}
@@ -92,13 +105,58 @@ class TerminalUiClient:
         self._live_listeners: list[Callable[[LiveTurnKeyframe | None], None]] = []
 
     @classmethod
-    def for_state_root(cls, state_root: Path) -> TerminalUiClient:
+    def for_state_root(cls, state_root: Path, *, active_only: bool = False) -> TerminalUiClient:
         root = Path(state_root)
-        return cls(LiveWorkerControlClient.for_state_root(root), ControllerDecisionClient.for_state_root(root))
+        return cls(
+            LiveWorkerControlClient.for_state_root(root),
+            ControllerDecisionClient.for_state_root(root),
+            active_only=active_only,
+        )
 
     @property
     def snapshot(self) -> TerminalUiSnapshot:
         return self._last_snapshot
+
+    @property
+    def visibility(self) -> ControlListVisibility:
+        return self._visibility
+
+    def _clear_control_accumulation(self) -> None:
+        self._worker_statuses.clear()
+        self._decision_statuses.clear()
+        self._worker_next_token = None
+        self._decision_next_token = None
+        self._worker_snapshot_id = None
+        self._decision_snapshot_id = None
+
+    def _snapshot_from_statuses(
+        self, *, observed: datetime, connected: bool, error: str | None = None
+    ) -> TerminalUiSnapshot:
+        workers = tuple(WorkerView.from_status(item, now=observed) for item in self._worker_statuses.values())
+        decisions = tuple(DecisionView.from_status(item, now=observed) for item in self._decision_statuses.values())
+        return TerminalUiSnapshot(
+            connected,
+            observed.isoformat(),
+            workers,
+            decisions,
+            error,
+            self._visibility.value,
+            self._worker_next_token is None,
+            self._decision_next_token is None,
+        )
+
+    async def set_visibility(self, visibility: ControlListVisibility | str) -> TerminalUiSnapshot:
+        selected = visibility if isinstance(visibility, ControlListVisibility) else ControlListVisibility(visibility)
+        if selected is not self._visibility:
+            await self.close_live_stream()
+            self._clear_control_accumulation()
+            self._visibility = selected
+        return await self.refresh()
+
+    async def toggle_visibility(self) -> TerminalUiSnapshot:
+        return await self.set_visibility(
+            ControlListVisibility.ACTIVE if self._visibility is ControlListVisibility.ALL else ControlListVisibility.ALL
+        )
 
     def add_live_listener(self, listener: Callable[[LiveTurnKeyframe | None], None]) -> None:
         """Register one in-loop presentation listener for ephemeral frames."""
@@ -234,24 +292,64 @@ class TerminalUiClient:
 
         observed = datetime.now(UTC)
         try:
-            workers, decisions = await asyncio.gather(
-                asyncio.to_thread(self._live.status),
-                asyncio.to_thread(self._decisions.pending),
-            )
+            worker_reader = getattr(self._live, "status_page", None)
+            decision_reader = getattr(self._decisions, "pending_page", None)
+            if callable(worker_reader) and callable(decision_reader):
+                worker_page, decision_page = await asyncio.gather(
+                    asyncio.to_thread(worker_reader, visibility=self._visibility),
+                    asyncio.to_thread(decision_reader, visibility=self._visibility),
+                )
+                if (
+                    worker_page.status is ControlListPageStatus.STALE
+                    or decision_page.status is ControlListPageStatus.STALE
+                ):
+                    raise ControlClientError("control list snapshot is stale")
+                workers = worker_page.items
+                decisions = decision_page.items
+            else:
+                worker_page = decision_page = None
+                workers, decisions = await asyncio.gather(
+                    asyncio.to_thread(self._live.status),
+                    asyncio.to_thread(self._decisions.pending),
+                )
         except (ControlClientError, OSError) as exc:
             await self.close_live_stream()
             self._history_pages.clear()
             self._history_bindings.clear()
+            previous_workers = self._last_snapshot.workers
+            previous_decisions = self._last_snapshot.decisions
+            self._clear_control_accumulation()
             self._last_snapshot = TerminalUiSnapshot(
                 False,
                 observed.isoformat(),
-                self._last_snapshot.workers,
-                self._last_snapshot.decisions,
+                previous_workers,
+                previous_decisions,
                 str(exc),
+                self._visibility.value,
+                True,
+                True,
             )
             return self._last_snapshot
-        worker_views = tuple(WorkerView.from_status(item, now=observed) for item in workers)
-        decision_views = tuple(DecisionView.from_status(item, now=observed) for item in decisions)
+        if worker_page is not None and decision_page is not None:
+            new_workers = {str(item.dispatch_id): item for item in workers}
+            new_decisions = {str(item.decision_id): item for item in decisions}
+            self._worker_statuses = new_workers
+            self._decision_statuses = new_decisions
+            self._worker_next_token = worker_page.next_token
+            self._decision_next_token = decision_page.next_token
+            self._worker_snapshot_id = worker_page.snapshot_id
+            self._decision_snapshot_id = decision_page.snapshot_id
+        else:
+            self._worker_statuses = {str(item.dispatch_id): item for item in workers}
+            self._decision_statuses = {str(item.decision_id): item for item in decisions}
+            self._worker_next_token = None
+            self._decision_next_token = None
+            self._worker_snapshot_id = None
+            self._decision_snapshot_id = None
+        worker_views = tuple(WorkerView.from_status(item, now=observed) for item in self._worker_statuses.values())
+        decision_views = tuple(
+            DecisionView.from_status(item, now=observed) for item in self._decision_statuses.values()
+        )
         current_bindings = {
             str(item.dispatch_id): (
                 item.thread_id.id if item.thread_id is not None else "",
@@ -281,9 +379,11 @@ class TerminalUiClient:
             observed.isoformat(),
             worker_views,
             decision_views,
+            None,
+            self._visibility.value,
+            self._worker_next_token is None,
+            self._decision_next_token is None,
         )
-        self._worker_statuses = {str(item.dispatch_id): item for item in workers}
-        self._decision_statuses = {str(item.decision_id): item for item in decisions}
         if self._live_binding is not None:
             current = self._worker_statuses.get(self._live_binding[0])
             if (
@@ -293,6 +393,57 @@ class TerminalUiClient:
                 or current.attempt != self._live_binding[2]
             ):
                 await self.close_live_stream()
+        return self._last_snapshot
+
+    async def load_more_sessions(self) -> TerminalUiSnapshot:
+        """Load exactly one saved worker/decision page pair on explicit M."""
+
+        worker_reader = getattr(self._live, "status_page", None)
+        decision_reader = getattr(self._decisions, "pending_page", None)
+        if not callable(worker_reader) or not callable(decision_reader):
+            return self._last_snapshot
+        observed = datetime.now(UTC)
+        try:
+            requests = []
+            if self._worker_next_token is not None:
+                requests.append(
+                    asyncio.to_thread(worker_reader, visibility=self._visibility, page_token=self._worker_next_token)
+                )
+            else:
+                requests.append(asyncio.sleep(0, result=None))
+            if self._decision_next_token is not None:
+                requests.append(
+                    asyncio.to_thread(
+                        decision_reader, visibility=self._visibility, page_token=self._decision_next_token
+                    )
+                )
+            else:
+                requests.append(asyncio.sleep(0, result=None))
+            worker_page, decision_page = await asyncio.gather(*requests)
+            for page, expected_kind, expected_snapshot in (
+                (worker_page, "workers", self._worker_snapshot_id),
+                (decision_page, "decisions", self._decision_snapshot_id),
+            ):
+                if page is None:
+                    continue
+                if page.status is ControlListPageStatus.STALE or page.snapshot_id != expected_snapshot:
+                    raise ControlClientError(f"{expected_kind} control list snapshot is stale")
+                for item in page.items:
+                    identity = str(item.dispatch_id) if expected_kind == "workers" else str(item.decision_id)
+                    target = self._worker_statuses if expected_kind == "workers" else self._decision_statuses
+                    existing = target.get(identity)
+                    if existing is not None and existing != item:
+                        raise ControlClientError("control list repeated identity has conflicting content")
+                    target[identity] = item
+                if expected_kind == "workers":
+                    self._worker_next_token = page.next_token
+                else:
+                    self._decision_next_token = page.next_token
+        except (ControlClientError, OSError) as exc:
+            self._clear_control_accumulation()
+            self._last_snapshot = self._snapshot_from_statuses(observed=observed, connected=False, error=str(exc))
+            return self._last_snapshot
+        self._last_snapshot = self._snapshot_from_statuses(observed=observed, connected=True)
         return self._last_snapshot
 
     async def load_conversation(

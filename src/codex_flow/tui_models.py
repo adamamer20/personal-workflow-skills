@@ -235,6 +235,9 @@ class TerminalUiSnapshot:
     workers: tuple[WorkerView, ...]
     decisions: tuple[DecisionView, ...]
     connection_error: str | None = None
+    visibility: str = "all"
+    workers_complete: bool = True
+    decisions_complete: bool = True
 
     @property
     def mode_label(self) -> str:

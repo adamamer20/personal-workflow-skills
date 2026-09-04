@@ -13,7 +13,7 @@ import math
 import os
 import re
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -730,6 +730,158 @@ class ConversationHistoryStatus(str, Enum):
     SOURCE_TOO_LARGE = "source_too_large"
     STALE = "stale"
     MALFORMED = "malformed"
+
+
+class ControlListKind(str, Enum):
+    """The two existing authenticated control-list projections."""
+
+    WORKERS = "workers"
+    DECISIONS = "decisions"
+
+
+class ControlListVisibility(str, Enum):
+    """Whether a control list includes terminal/inactive history."""
+
+    ALL = "all"
+    ACTIVE = "active"
+
+
+class ControlListPageStatus(str, Enum):
+    AVAILABLE = "available"
+    STALE = "stale"
+
+
+CONTROL_LIST_DEFAULT_ITEMS = 24
+CONTROL_LIST_MAX_ITEMS = 24
+CONTROL_LIST_MAX_TOKEN_BYTES = 1_024
+CONTROL_LIST_RESPONSE_MAX_BYTES = 49_152
+
+
+@dataclass(frozen=True, slots=True)
+class ControlListRequest:
+    """One ephemeral, identity-bound request for a bounded control page."""
+
+    list_kind: ControlListKind
+    visibility: ControlListVisibility = ControlListVisibility.ALL
+    page_token: str | None = None
+    page_items: int = CONTROL_LIST_DEFAULT_ITEMS
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.list_kind, ControlListKind):
+            object.__setattr__(self, "list_kind", ControlListKind(self.list_kind))
+        if not isinstance(self.visibility, ControlListVisibility):
+            object.__setattr__(self, "visibility", ControlListVisibility(self.visibility))
+        if self.page_token is not None:
+            if (
+                not isinstance(self.page_token, str)
+                or not self.page_token
+                or len(self.page_token.encode("ascii", errors="ignore")) != len(self.page_token)
+                or len(self.page_token.encode("ascii")) > CONTROL_LIST_MAX_TOKEN_BYTES
+            ):
+                raise ValueError("control list page token is invalid")
+        if isinstance(self.page_items, bool) or not isinstance(self.page_items, int):
+            raise ValueError("control list page size is invalid")
+        if not 1 <= self.page_items <= CONTROL_LIST_MAX_ITEMS:
+            raise ValueError("control list page size is invalid")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "list_kind": self.list_kind.value,
+            "visibility": self.visibility.value,
+            "page_token": self.page_token,
+            "page_items": self.page_items,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ControlListPage[T]:
+    """One non-persisted page and its exact source identity."""
+
+    list_kind: ControlListKind
+    visibility: ControlListVisibility
+    snapshot_id: str
+    items: tuple[T, ...]
+    next_token: str | None
+    complete: bool
+    status: ControlListPageStatus = ControlListPageStatus.AVAILABLE
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.list_kind, ControlListKind):
+            object.__setattr__(self, "list_kind", ControlListKind(self.list_kind))
+        if not isinstance(self.visibility, ControlListVisibility):
+            object.__setattr__(self, "visibility", ControlListVisibility(self.visibility))
+        if not isinstance(self.status, ControlListPageStatus):
+            object.__setattr__(self, "status", ControlListPageStatus(self.status))
+        if not isinstance(self.snapshot_id, str) or re.fullmatch(r"[0-9a-f]{64}", self.snapshot_id) is None:
+            raise ValueError("control list snapshot identity is invalid")
+        items = tuple(self.items)
+        object.__setattr__(self, "items", items)
+        if self.next_token is not None:
+            if (
+                not isinstance(self.next_token, str)
+                or not self.next_token
+                or len(self.next_token.encode("ascii", errors="ignore")) != len(self.next_token)
+                or len(self.next_token.encode("ascii")) > CONTROL_LIST_MAX_TOKEN_BYTES
+            ):
+                raise ValueError("control list continuation token is invalid")
+        if not isinstance(self.complete, bool):
+            raise ValueError("control list completion flag is invalid")
+        if self.status is ControlListPageStatus.STALE and (items or self.next_token is not None):
+            raise ValueError("stale control list page cannot carry items or a continuation")
+
+    def to_json(self) -> JsonObject:
+        serialized: list[JsonValue] = []
+        for item in self.items:
+            if isinstance(item, Mapping):
+                value = thaw_json(item)
+            else:
+                try:
+                    value = item.to_json()  # type: ignore[attr-defined,union-attr]
+                except AttributeError as exc:
+                    raise ValueError("control list item is not JSON serializable") from exc
+            if not isinstance(value, dict):
+                raise ValueError("control list item must serialize to an object")
+            serialized.append(cast(JsonValue, value))
+        return {
+            "list_kind": self.list_kind.value,
+            "visibility": self.visibility.value,
+            "snapshot_id": self.snapshot_id,
+            "items": serialized,
+            "next_token": self.next_token,
+            "complete": self.complete,
+            "status": self.status.value,
+        }
+
+
+def control_list_page_from_json[T](value: object, *, item_decoder: Callable[[object], T]) -> ControlListPage[T]:
+    """Decode one closed control-list page with a caller-owned item codec."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "list_kind",
+        "visibility",
+        "snapshot_id",
+        "items",
+        "next_token",
+        "complete",
+        "status",
+    }:
+        raise ValueError("control list page shape is invalid")
+    raw_items = value["items"]
+    if not isinstance(raw_items, list):
+        raise ValueError("control list page items are invalid")
+    try:
+        items = tuple(item_decoder(item) for item in raw_items)
+        return ControlListPage(
+            ControlListKind(value["list_kind"]),  # type: ignore[arg-type]
+            ControlListVisibility(value["visibility"]),  # type: ignore[arg-type]
+            value["snapshot_id"],  # type: ignore[arg-type]
+            items,
+            value["next_token"],  # type: ignore[arg-type]
+            value["complete"],  # type: ignore[arg-type]
+            ControlListPageStatus(value["status"]),  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("control list page is malformed") from exc
 
 
 def redact_conversation_text(value: str) -> tuple[str, bool]:

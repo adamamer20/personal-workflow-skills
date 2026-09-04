@@ -130,6 +130,9 @@ def terminal_ui(
     state_root: Annotated[Path, typer.Option(help="Checkout that owns the local harness.")] = _DEFAULT_STATE_ROOT,
     dark: Annotated[bool, typer.Option(help="Start with the deterministic dark theme.")] = False,
     no_color: Annotated[bool, typer.Option("--no-color", help="Use the monochrome fallback.")] = False,
+    active_only: Annotated[
+        bool, typer.Option("--active-only", help="Start with active sessions and current attention.")
+    ] = False,
     resume_mode: Annotated[
         str,
         typer.Option(help="Transcript handoff: print exact argv or open it without a shell."),
@@ -151,7 +154,7 @@ def terminal_ui(
         return f"Opened SDK transcript · {argv[2]}"
 
     terminal = CodexFlowTerminalApp(
-        TerminalUiClient.for_state_root(state_root.resolve()),
+        TerminalUiClient.for_state_root(state_root.resolve(), active_only=active_only),
         resume_handler=resume_handler,
         no_color=no_color,
     )

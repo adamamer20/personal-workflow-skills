@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from .contracts import ModelFacingControllerActionBundle, ModelFacingProgramControllerActionBundle
@@ -20,6 +21,11 @@ from .domain import (
     ControllerDecisionStatus,
     ControllerGenerationStatus,
     ControllerRecoveryInspectionClaim,
+    ControlListKind,
+    ControlListPage,
+    ControlListPageStatus,
+    ControlListRequest,
+    ControlListVisibility,
     ConversationHistoryPage,
     DiagnosticEvent,
     DispatchId,
@@ -36,6 +42,7 @@ from .domain import (
     RetryBudgetChange,
     RetryPolicyFacts,
     ThreadIdentity,
+    control_list_page_from_json,
     conversation_history_page_from_json,
     strict_json_loads,
 )
@@ -102,7 +109,7 @@ def _sanitized_reason(value: object) -> str | None:
     return None
 
 
-def _response(response: object, *, operation: str) -> dict[str, object]:
+def _response(response: object, *, operation: str, version: int = 1) -> dict[str, object]:
     if isinstance(response, dict) and response.get("ok") is False:
         reason = _sanitized_reason(response.get("reason_code")) or _sanitized_reason(response.get("error"))
         if reason is not None:
@@ -112,7 +119,7 @@ def _response(response: object, *, operation: str) -> dict[str, object]:
         expected is None
         or not isinstance(response, dict)
         or set(response) != expected
-        or response.get("version") != 1
+        or response.get("version") != version
         or response.get("ok") is not True
     ):
         raise ControlClientError("control request rejected")
@@ -251,6 +258,34 @@ def _decode_status(value: object) -> LiveWorkerStatus:
         )
     except (TypeError, ValueError, ControlClientError) as exc:
         raise ControlClientError("harness returned malformed status") from exc
+
+
+def _decode_control_page_response(
+    response: object,
+    *,
+    operation: str,
+    kind: ControlListKind,
+    visibility: ControlListVisibility,
+    item_decoder: Callable[[object], object],
+) -> ControlListPage[object]:
+    if isinstance(response, dict) and response.get("ok") is False:
+        reason = _sanitized_reason(response.get("error")) or _sanitized_reason(response.get("reason_code"))
+        if reason is not None:
+            raise ControlClientError(f"control request rejected: {reason}")
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"version", "ok", "page"}
+        or response.get("version") != 2
+        or response.get("ok") is not True
+    ):
+        raise ControlClientError(f"{operation} page response is malformed")
+    try:
+        page = control_list_page_from_json(response["page"], item_decoder=item_decoder)
+    except (TypeError, ValueError) as exc:
+        raise ControlClientError(f"{operation} page is malformed") from exc
+    if page.list_kind is not kind or page.visibility is not visibility:
+        raise ControlClientError(f"{operation} page identity is malformed")
+    return page
 
 
 def _decode_command(value: object) -> ControlCommand:
@@ -654,20 +689,65 @@ class LiveWorkerControlClient:
                 "live-control reply was malformed; durable command state is uncertain"
             ) from exc
 
+    def status_page(
+        self,
+        *,
+        visibility: ControlListVisibility | str = ControlListVisibility.ALL,
+        page_token: str | None = None,
+        page_items: int = 24,
+    ) -> ControlListPage[LiveWorkerStatus]:
+        """Fetch one bounded v2 worker page."""
+
+        try:
+            request_visibility = (
+                visibility if isinstance(visibility, ControlListVisibility) else ControlListVisibility(visibility)
+            )
+            request = ControlListRequest(ControlListKind.WORKERS, request_visibility, page_token, page_items)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("status page request is invalid") from exc
+        try:
+            response = send_request(
+                self.socket_path,
+                {"version": 2, "operation": "status", **request.to_json()},
+                timeout=self.timeout,
+            )
+        except IpcError as exc:
+            reason = _sanitized_reason(getattr(exc, "reason_code", None))
+            if reason is not None:
+                raise ControlClientError(f"control request rejected: {reason}") from exc
+            raise ControlClientError("harness control endpoint is unavailable") from exc
+        except OSError as exc:
+            raise ControlClientError("harness control endpoint is unavailable") from exc
+        page = _decode_control_page_response(
+            response,
+            operation="status",
+            kind=ControlListKind.WORKERS,
+            visibility=request_visibility,
+            item_decoder=_decode_status,
+        )
+        return page  # type: ignore[return-value]
+
     def status(self, dispatch_id: str | None = None) -> tuple[LiveWorkerStatus, ...]:
         if dispatch_id is not None:
             try:
                 DispatchId(dispatch_id)
             except ValueError as exc:
                 raise ValueError("dispatch id is invalid") from exc
-        facts: dict[str, object] = {}
+        values: list[LiveWorkerStatus] = []
+        token: str | None = None
+        for _page_number in range(2_049):
+            page = self.status_page(page_token=token)
+            if page.status is ControlListPageStatus.STALE:
+                raise ControlClientError("control list snapshot is stale")
+            values.extend(page.items)
+            if page.next_token is None:
+                break
+            token = page.next_token
+        else:
+            raise ControlClientError("status list exceeds its bounded page count")
         if dispatch_id is not None:
-            facts["dispatch_id"] = dispatch_id
-        response = self._request("status", **facts)
-        queue = response.get("queue")
-        if not isinstance(queue, list):
-            raise ControlClientError("harness returned malformed status list")
-        return tuple(_decode_status(item) for item in queue)
+            return tuple(item for item in values if str(item.dispatch_id) == dispatch_id)
+        return tuple(values)
 
     def conversation_history(
         self,
@@ -1037,12 +1117,58 @@ class ControllerDecisionClient:
             raise ControlClientError("harness control endpoint is unavailable") from exc
         return _response(response, operation=operation)
 
+    def pending_page(
+        self,
+        *,
+        visibility: ControlListVisibility | str = ControlListVisibility.ALL,
+        page_token: str | None = None,
+        page_items: int = 24,
+    ) -> ControlListPage[ControllerDecisionStatus]:
+        """Fetch one bounded v2 controller-decision page."""
+
+        try:
+            request_visibility = (
+                visibility if isinstance(visibility, ControlListVisibility) else ControlListVisibility(visibility)
+            )
+            request = ControlListRequest(ControlListKind.DECISIONS, request_visibility, page_token, page_items)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("controller pending page request is invalid") from exc
+        try:
+            response = send_request(
+                self.socket_path,
+                {"version": 2, "operation": "controller_pending", **request.to_json()},
+                timeout=self.timeout,
+            )
+        except IpcError as exc:
+            reason = _sanitized_reason(getattr(exc, "reason_code", None))
+            if reason is not None:
+                raise ControlClientError(f"control request rejected: {reason}") from exc
+            raise ControlClientError("harness control endpoint is unavailable") from exc
+        except OSError as exc:
+            raise ControlClientError("harness control endpoint is unavailable") from exc
+        page = _decode_control_page_response(
+            response,
+            operation="controller_pending",
+            kind=ControlListKind.DECISIONS,
+            visibility=request_visibility,
+            item_decoder=_decode_controller_status,
+        )
+        return page  # type: ignore[return-value]
+
     def pending(self) -> tuple[ControllerDecisionStatus, ...]:
-        response = self._request("controller_pending")
-        decisions = response["decisions"]
-        if not isinstance(decisions, list):
-            raise ControlClientError("harness returned malformed controller decisions")
-        return tuple(_decode_controller_status(item) for item in decisions)
+        values: list[ControllerDecisionStatus] = []
+        token: str | None = None
+        for _page_number in range(2_049):
+            page = self.pending_page(page_token=token)
+            if page.status is ControlListPageStatus.STALE:
+                raise ControlClientError("control list snapshot is stale")
+            values.extend(page.items)
+            if page.next_token is None:
+                break
+            token = page.next_token
+        else:
+            raise ControlClientError("controller decision list exceeds its bounded page count")
+        return tuple(values)
 
     def program_pending(self) -> tuple[ProgramControllerDecisionStatus, ...]:
         """Read all durable program events that still need controller work."""
