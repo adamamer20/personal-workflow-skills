@@ -9142,13 +9142,258 @@ ModelFacingCapsule(
 
 ## Active selection after activation recovery replan
 
-`safe-refresh-and-control-list-paging` is the sole next executable mutable
-milestone. It runs serially in the existing program integration worktree from
-the planning commit containing this section. The accepted
+The first implementation and evidence commits for
+`safe-refresh-and-control-list-paging` are not promotion-ready. CI-001 is
+closed by the separate base64url token-body and HMAC-signature framing and its
+focused discriminator passes. Two independent causal reviews nevertheless
+returned `REPLAN_RECOMMENDED` because CI-002 remains reachable after the
+replacement acquires `harness_authority` and because the retained tests do not
+yet prove paging, TUI or bootstrap behavior through their production
+entrypoints. The accepted
 `terminal-candidate-retention-and-harness-cutover` history and source candidate
 `f459cccafad45511d336138aa09d3b8c6dfa8345` remain immutable inputs, not work to
-repeat. `live-plan-dag-revision` is now blocked on this activation repair,
-its independent objective/architecture acceptance, target service refresh,
-provider-free activation step 5 and the one authorized real streaming
-sentinel. `module-responsibility-decomposition` remains blocked on the
-live-plan successor. The cancelled visual review remains cancelled.
+repeat.
+
+The serial milestone DAG is now:
+
+    safe-refresh-and-control-list-paging-causal-closure [ready; one mutable owner]
+      -> independent objective and architecture causal re-reviews
+      -> integration-owner promotion/install/refresh/provider-free activation step 5
+      -> one already-authorized real streaming sentinel
+      -> live-plan-dag-revision
+      -> module-responsibility-decomposition
+
+Every edge is retained for an acceptance dependency. There is no safe mutable
+fan-out: the service failure protocol, production-path discriminators and one
+evidence record bind one candidate and one causal review range. The cancelled
+visual review remains cancelled.
+
+## Safe refresh and paging causal closure architecture replan
+
+This bounded successor keeps the existing public and persisted contracts.
+Its outcome is a retryable, durably fenced schema-v19/stopped-v18-unit state
+after every post-staging failure, including a replacement that acquired
+authority before failing health, plus retained provider-free proof that the
+already-implemented paging and TUI behavior is reached through authenticated
+production clients and that `Bootstrap.execute()` reaches the canonical
+refresh once. It does not redesign paging, repeat CI-001, change installer
+production logic, install or touch a real service, consume a provider, or
+promote the candidate.
+
+### Started-replacement failure protocol
+
+`refresh_with_credential` owns one rollback protocol after the current harness
+unit has been staged. The pre-staging discriminator and its captured exact v18
+unit bytes/mode remain unchanged. Once `systemctl --user start` has been issued,
+any exception or health deadline uses the following ordered recovery before
+legacy bytes may be restored:
+
+1. Re-read the sole `harness_authority`. If it is still the captured fenced
+   predecessor row, retain `requested_shutdown=1`. If it is a replacement,
+   require the exact repository root, state root and controller version, an
+   epoch greater than the captured predecessor, and a distinct valid PID plus
+   process-birth identity. A missing row, malformed identity, unrelated owner,
+   unexpected epoch transition or subsequent identity change is an
+   unrecoverable-in-this-invocation `ServiceRefreshFailed`; do not overwrite
+   the installed current unit.
+2. For a matching replacement, call the existing
+   `Ledger.arm_harness_refresh_fence()` exactly once. Its existing immediate
+   transaction first rejects active dispatch claims, live worker leases and
+   active controller generations, then durably sets `requested_shutdown=1`.
+   Re-read and require the same epoch/PID/birth identity with the fence set.
+   `HarnessRefreshBlocked`, a missing row or identity drift leaves the current
+   harness unit installed and fails closed; there is no direct SQL, forced
+   child termination or alternate fence.
+3. Stop only the exact repository unit with `systemctl --user stop`. Within the
+   original bounded deadline, require both unit inactivity and death of the
+   exact replacement PID/birth identity. Re-read the same authority identity
+   with `requested_shutdown=1` after the stop. Stop failure, timeout, a live
+   birth-bound process or authority replacement leaves the current unit bytes
+   in place and raises `ServiceRefreshFailed`; rollback must never hide a
+   possibly live replacement behind legacy bytes.
+4. Only after that proof, restore the captured v18 unit bytes and mode through
+   the existing private-single-link/no-symlink checks, validate those complete
+   bytes as `_legacy_supervisor_unit(expected_harness_unit)`, and require the
+   repository unit still inactive. The schema remains 19 and the same stopped
+   authority remains durably fenced. Best-effort credential unsetting remains
+   cleanup, not recovery authority.
+
+Failures before a successful start retain the existing behavior: no
+replacement authority exists, the unit is inactive, the captured authority is
+still fenced, and the exact v18 bytes may be restored directly. A successful
+rollback has one retry contract: the next canonical `harness refresh` must
+match the same interrupted schema-v19/stopped-v18 discriminator, stage one
+current unit and acquire an epoch greater than every prior authority. A failed
+or ambiguous rollback is not labelled retryable and never asks an operator to
+edit SQLite; a later invocation may proceed only if the same canonical
+preflight independently proves a safe state.
+
+This orchestration remains in `src/codex_flow/service.py`; SQLite transactions
+and child exclusion remain in the existing ledger method, and systemd remains
+the sole unit authority. No ledger, harness, service or installer authority is
+duplicated.
+
+### Frozen successor architecture map and ownership
+
+One Luna XHigh implementation owner has these exact mutable paths:
+
+- **Modify** `src/codex_flow/service.py` only for the ordered
+  started-replacement refence, stop, birth-bound verification and rollback
+  protocol above. No public API, ledger method or service entrypoint changes.
+- **Modify** `tests/test_service_lifecycle.py` for the acquired-replacement
+  health-failure discriminator, exact refence/stop/rollback facts and a
+  successful subsequent retry. Earlier post-staging failure coverage remains.
+- **Modify** `tests/test_plugin_installation.py` for one provider-free
+  `Bootstrap.execute()` invocation over the exact schema-v19, fenced
+  `harness_authority`, stopped-v18-unit state. The production bootstrap methods
+  and command sequence execute; only external command/systemd/provider/plugin
+  seams are disposable. Assert exactly one canonical `harness refresh` argv
+  reaches the service transition and closes the state.
+- **Modify** `tests/test_live_worker_control.py` for authenticated Unix-socket
+  production-path paging. Start one disposable `WorkflowHarness`, connect
+  `LiveWorkerControlClient`, `ControllerDecisionClient` and
+  `TerminalUiClient.for_state_root` through its real `harness.sock`, traverse
+  120 ordered worker rows and 120 ordered decision rows across multiple pages,
+  decode every opaque continuation through the public clients, and prove no
+  omission or duplicate. Exercise `M` accumulation and completion and `F`
+  active/all reset through the real clients; assert stale/error/filter reset
+  clears prior rows and tokens. Private `_control_list_page` and fake-client
+  tests may remain focused unit evidence but do not satisfy this gate.
+- **Modify** the existing
+  `docs/reviews/evidence/safe-refresh-and-control-list-paging.json` only to
+  correct lineage, record the new production-path discriminators and replace
+  unsupported success claims. It is the sole evidence record.
+
+**Preserve** `scripts/install_personal_workflow_skills.py`: its production
+`Bootstrap.execute -> fence_existing_harness -> install_controller ->
+refresh_existing_harness` path already delegates one refresh to the canonical
+CLI/service implementation. Preserve `src/codex_flow/ledger.py`,
+`src/codex_flow/harness.py`, `src/codex_flow/control_client.py`,
+`src/codex_flow/tui_client.py`, `src/codex_flow/tui_models.py`,
+`src/codex_flow/tui.py`, `src/codex_flow/cli.py`, all schemas/migrations and
+test-partition configuration unless a failed discriminator proves a production
+delta. Such a production delta is a material boundary change and returns to
+planning rather than widening this capsule. All other plan-protected surfaces,
+real services, retained wheels, provider/App/global state, remotes and unrelated
+worktree bytes remain protected.
+
+The new durable-artifact budget is zero. Create/remove nothing: no module,
+table, schema, migration, API, transport, service, socket, compatibility alias,
+polling path, provider/App path, fixture file, evidence file or runner. The
+semantic-vocabulary delta is also zero; the change completes the existing
+refresh invariant and exercises existing types and entrypoints.
+
+### Evidence lineage and causal review binding
+
+The evidence record must correct the known immutable lineage without claiming
+knowledge of the commit that contains itself:
+
+- original repair implementation commit:
+  `2a24c545a812b4c73a29bb7e9e79044fcdc85b2f`;
+- its actual parent and original repair base:
+  `ba05399d57da5ca65250f64727e36270f786c213`;
+- later evidence-only tip:
+  `d92b726453012c63a10f473e9b483c6b2d055f85`.
+
+The successor implementation starts from the planning commit containing this
+capsule. Its commit SHA is computed only after committing and is never embedded
+in that same commit's JSON. Both causal re-reviews bind the externally supplied
+successor commit and inspect the full inclusive change history represented by
+`ba05399d57da5ca65250f64727e36270f786c213..SUCCESSOR_COMMIT`, not merely the
+final tree. The SHA-256 and byte size of the evidence file are likewise
+computed from the committed file and carried in the external review/promotion
+receipt, never inside the file whose hash they describe. The JSON may name the
+known base, original implementation and evidence-only tip and state that final
+candidate/range/hash binding is external; it contains no fabricated hash,
+placeholder presented as evidence, or self-reference.
+
+### Closure and promotion boundary
+
+Implementation closure requires all of the following provider-free gates:
+
+- focused service rollback/retry, bootstrap reachability and authenticated
+  paging/TUI discriminators pass, including the acquired-authority health
+  failure and 120-row worker plus decision traversals;
+- every affected semantic partition passes, followed by the full `make check`;
+- one freshly built wheel has exact source parity for every packaged Python
+  path, with wheel path/hash/size and source identities retained outside the
+  self-hashing evidence record as appropriate;
+- only the five mutable paths above are staged, the staged diff is inspected,
+  `git diff --cached --check` passes, and one coherent local successor commit
+  descends from this planning commit with no unrelated commits or bytes; and
+- independent Luna XHigh objective/correctness and Sol Medium architecture
+  causal re-reviews each inspect the exact successor commit plus the complete
+  base-to-successor range and return P0=0/P1=0. Finding severity and
+  `promotion_blocking` remain distinct; every deferred lower-severity finding
+  names an owner and `defer_to`.
+
+These gates establish provider-free implementation closure only. Later
+promotion, install, target-service refresh, provider-free activation step 5,
+protected-service verification and the single already-authorized provider
+sentinel belong only to the integration owner after both reviews accept. They
+are not executor actions or claims.
+
+## Next execution — safe-refresh-and-control-list-paging-causal-closure
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close the remaining safe-refresh and control-list paging causal gaps: refence and stop an acquired "
+        "replacement before exact legacy-unit rollback, and retain authenticated production-entrypoint proof."
+    ),
+    decomposition=(
+        "Repair only service rollback after a started replacement acquires harness authority and then fails health.",
+        "Prove 120-row worker and decision traversal plus TUI F/M accumulation and reset through authenticated harness.sock clients.",
+        "Prove one Bootstrap.execute invocation routes the exact schema-v19/stopped-v18 state to the canonical harness refresh without installer duplication.",
+        "Correct known evidence lineage and bind the future commit, full review range and evidence hash externally to avoid self-reference.",
+        "Run focused, partition, repository, wheel/source parity, commit-hygiene and two independent causal review gates before any promotion."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "After replacement authority acquisition followed by health failure, the same replacement is atomically fenced, the exact unit is stopped, its PID/birth identity is dead, requested_shutdown remains 1, exact v18 bytes/mode are restored, and a later canonical retry succeeds at a higher epoch.",
+        "Identity drift, active children, fence failure, stop failure, live birth-bound process or ambiguous authority leaves current unit bytes in place and fails closed without direct SQLite edits or alternate authority.",
+        "One disposable authenticated harness.sock is traversed by LiveWorkerControlClient and ControllerDecisionClient for 120 workers and 120 decisions with public token decoding, bounded pages, and zero omissions or duplicates.",
+        "TerminalUiClient.for_state_root uses those real clients; M accumulates subsequent pages, F clears accumulation and tokens while toggling active/all, and stale/error/filter transitions reset before a fresh first page.",
+        "Bootstrap.execute production methods issue exactly one canonical harness refresh for the exact fenced schema-v19/stopped-v18 state; installer production code remains unchanged.",
+        "The existing evidence record names 2a24c545a812b4c73a29bb7e9e79044fcdc85b2f, ba05399d57da5ca65250f64727e36270f786c213 and d92b726453012c63a10f473e9b483c6b2d055f85 correctly and does not contain its own commit or file hash.",
+        "Focused tests, affected semantic partitions, full make check, exact wheel/source parity, staged diff hygiene, clean ancestry and independent objective plus architecture causal re-reviews close at P0=0/P1=0."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/service.py",
+        "tests/test_service_lifecycle.py",
+        "tests/test_plugin_installation.py",
+        "tests/test_live_worker_control.py",
+        "docs/reviews/evidence/safe-refresh-and-control-list-paging.json"
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md after this planning commit",
+        "scripts/install_personal_workflow_skills.py and all other production modules including ledger, harness, control clients, TUI and CLI",
+        "schemas, migrations, public APIs, transports, services, sockets, compatibility paths, polling and provider/App paths",
+        "real installed services, retained wheels until the parity gate, provider/App/global Codex state and prior immutable evidence",
+        "remotes, push, rebase, history rewrite, discard, implicit cleanup and unrelated worktree bytes"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt=(
+        "Use execute-milestone as the single Luna XHigh mutable owner for only "
+        "safe-refresh-and-control-list-paging-causal-closure in the existing integration worktree. Modify "
+        "only service.py, the three named existing test files and the existing evidence JSON. Reuse the ledger's "
+        "atomic harness refresh fence: after a replacement acquires authority and health fails, validate its exact "
+        "epoch/PID/birth identity, arm requested_shutdown=1, stop the exact unit, prove unit inactivity and birth-bound "
+        "death, revalidate the same fenced row, and only then restore exact v18 bytes/mode. Ambiguity leaves current "
+        "unit bytes in place and fails closed. Keep installer production code and all paging/TUI production code "
+        "unchanged unless a discriminator proves a material delta, which must return to planning. Add retained tests "
+        "through authenticated harness.sock/public clients for 120 workers and 120 decisions, token decoding and TUI "
+        "F/M behavior, plus one Bootstrap.execute canonical-refresh invocation and acquired-replacement failure/retry. "
+        "Correct known lineage without embedding the future commit or evidence file's own hash. Create no durable "
+        "artifact and touch no real service, provider, App or network. Run focused tests, affected partitions, full "
+        "make check and exact wheel/source parity; stage only owned paths, inspect the staged diff, run git diff "
+        "--cached --check, create one coherent local commit, and return one terminal result with causal re-reviews pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
