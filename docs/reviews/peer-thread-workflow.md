@@ -8833,14 +8833,322 @@ ModelFacingCapsule(
 )
 ```
 
-## Active selection after terminal-candidate replan
+## Activation recovery successor — safe-refresh-and-control-list-paging
 
-`terminal-candidate-retention-and-harness-cutover` is the sole next executable
-mutable milestone. It runs serially in the program integration worktree from
-the planning commit that contains this section. The existing terminal-UI
-implementation commit `925d505d55e963c1d01dd541f67c939f1f716e5c` is frozen
-input to its recovery discriminator, not a worker to retry.
-`live-plan-dag-revision` remains blocked on this repair plus
-objective/architecture acceptance of that terminal-UI candidate;
-`module-responsibility-decomposition` remains blocked on the live-plan
-successor. The cancelled visual review remains cancelled.
+Real activation accepted source candidate
+`f459cccafad45511d336138aa09d3b8c6dfa8345` after independent correctness and
+architecture reviews both returned `ACCEPT` with P0=0/P1=0. The later
+evidence-only trunk tip is `dbfaa59a0c6d72e5cb039ee9a54d752b91da9427`.
+The installed target service `codex-flow-937220b34ee45f7f.service` is now
+healthy only because the operator used the supported `harness install` then
+`harness refresh` sequence. It is active at observed epoch 49 with schema v19,
+`harness_authority`, `requested_shutdown=0`, `harness.sock`, and no active
+worker/controller child, lease or claim. The unrelated
+`codex-flow-71308abd5aeed226.service` remains protected.
+
+That activation exposed two bounded implementation defects. This is an
+`architecture_replan`: it preserves the accepted single harness, SQLite and
+authenticated IPC authorities while replacing two disproven implementation
+assumptions. `CANONICAL-V19-LEGACY-UNIT-RECOVERY` showed that automatic
+bootstrap assumed schema and installed unit terminology always advance
+together; the real interrupted post-migration state instead had a complete
+schema-v19 ledger and fenced `harness_authority` paired with the exact stopped
+v18 supervisor unit. `CONTROLLER-PENDING-FRAME-OVERFLOW` showed that an
+unbounded list projection cannot satisfy the existing 65,536-byte IPC frame:
+`controller_pending` returned `response_too_large`, so the headless TUI marked
+itself disconnected and hid otherwise reachable workers and decisions.
+
+The serial repair retains the existing service and IPC entrypoints. It adds no
+transport, socket, service, table, persisted page state, polling loop, App
+scrape, transcript merge or compatibility alias. Provider-free tests use only
+disposable ledgers, sockets, units and homes. The implementation worker must
+not install, refresh or stop either real service and must not consume the
+provider. After candidate acceptance, the integration owner alone refreshes
+the target service, reruns provider-free activation step 5, and then runs the
+one already-authorized real streaming sentinel exactly once.
+
+### Canonical interrupted-post-migration refresh transition
+
+`refresh_with_credential` gains one closed recovery discriminator before its
+normal unit validation. The discriminator is true only when all of these facts
+hold in one pre-mutation inspection:
+
+- `ledger_schema_compatibility` reports exact schema 19, migration marker
+  complete and no migration requirement; the sole current authority table is
+  `harness_authority` and no `supervisor_authority` table or current legacy
+  authority survives;
+- the authority row matches the exact repository root, state root and
+  installed controller version, has `requested_shutdown=1`, and its PID plus
+  process-birth identity is no longer live;
+- the repository unit is inactive with systemd's exact inactive result, is a
+  private single-link regular file, and its complete bytes match only
+  `_legacy_supervisor_unit(expected_harness_unit)`, permitting the already
+  supported well-formed profile-digest substitution and no other Description,
+  ExecStart, environment or content drift;
+- no dispatch is `claimed`, `starting` or `running`, no unexited worker
+  liveness lease exists, no controller generation is `delivery_starting` or
+  `active`, and no live human/model controller claim exists; and
+- neither `supervisor.sock` nor `harness.sock` exists as a filesystem entry.
+  A symlink, regular file, dangling link, stale socket or any other entry at
+  either path fails closed rather than being removed.
+
+When and only when that complete state matches, the same `harness refresh`
+invocation installs the exact harness unit over the recognized stopped legacy
+unit, validates the written bytes, daemon-reloads, imports only the named
+volatile credential, starts the one repository unit and waits for an active
+harness whose exact PID/birth identity is live, whose epoch is greater than
+the fenced predecessor epoch, and whose authority has
+`requested_shutdown=0`. Failure leaves the v19 fence and stopped recognized
+unit explicit for a retry; it never edits SQLite manually, reconstructs v18,
+starts the legacy command, creates another unit, or accepts arbitrary
+ExecStart drift. The canonical bootstrap continues to fence before replacing
+the installed tool and then invokes this same refresh command, so
+`make install-personal-workflow-skills` closes the exact state in one supported
+invocation.
+
+### Bounded control-list paging protocol
+
+The existing `status` and `controller_pending` authenticated operations each
+gain a closed version-2 request/page shape; `controller_pending` is paged in
+place and is not replaced by a parallel API. `ControlListRequest` carries
+`list_kind` (`workers` or `decisions`), `visibility` (`all` or `active`), a
+nullable `page_token`, and `page_items` from 1 through 24 with default 24.
+`ControlListPage[T]` carries `list_kind`, `visibility`, `snapshot_id`, ordered
+typed `items`, nullable `next_token`, `complete`, and `status` (`available` or
+`stale`). Request tokens are ASCII and at most 1,024 bytes. A successful
+encoded response is capped at 49,152 bytes, leaving framing/error headroom
+below `MAX_FRAME_BYTES=65_536`; the page builder adds whole typed items until
+either the 24-item or byte budget is reached. It never truncates an item. A
+single item that cannot fit returns the bounded `item_too_large` error.
+
+The first page computes `snapshot_id` as SHA-256 over the list kind,
+visibility, schema version, harness epoch and every ordered source identity
+plus its mutable identity fields: worker dispatch id/sequence/state/generation/
+attempt/updated-at and decision id/state/revision/current-generation/updated-at.
+The opaque continuation encodes that snapshot id, kind, visibility and the
+last deterministic ordering key, and is HMAC-SHA256 authenticated with the
+current in-memory `WorkflowHarness.owner_nonce`. No token or page is persisted.
+Every continuation recomputes the source fingerprint before selecting rows.
+A well-formed authenticated token whose fingerprint changed returns a typed
+`stale` page with zero items and no successor; a malformed token returns
+`malformed_page_token`; a token from another ledger, operation, visibility or
+harness epoch returns `page_token_identity_mismatch`. A restarted harness
+therefore rejects the old continuation, and the TUI discards all accumulated
+pages before beginning a fresh first page.
+
+Ordering is total and source-owned. Workers sort first by visibility class:
+(0) `claimed`, `starting` or `running`; (1) any nonterminal worker or a worker
+referenced by a current-attention decision; (2) terminal/inactive history;
+then by descending queue sequence and ascending dispatch id. Current-attention
+decisions are exactly `pending_delivery`, `awaiting_claim`, `claimed`,
+`action_committed` and `human_attention_required`; they sort before
+`acknowledged`, `superseded` and `legacy_closed`, then by ascending deadline
+and decision id. `visibility=active` excludes only worker class 2 and terminal
+decision history, so it can never hide a current-attention decision or its
+worker session. The ledger owns these filters and ordering keys; harness page
+projection does not sort or infer state after reading.
+
+`LiveWorkerControlClient.status_page` and
+`ControllerDecisionClient.pending_page` decode and retain the exact page
+identity. Existing `status()` and `pending()` remain source-compatible
+convenience methods for small callers and exhaust version-2 pages with a hard
+2,048-page guard; they never request the legacy unbounded response. The
+harness continues accepting version-1 `status` and `controller_pending`
+requests for installed old clients only when the complete preflight-encoded
+response fits the 65,536-byte frame; otherwise the existing bounded
+`response_too_large` error is the explicit backwards-closed result. There is
+no truncation or version fallback.
+
+`TerminalUiClient.refresh()` requests only the first worker and decision pages,
+atomically replaces its current accumulation after both identities decode,
+and can render that useful active/current-attention-first state immediately.
+`load_more_sessions()` consumes exactly the saved next tokens and deduplicates
+by dispatch/decision identity, rejecting conflicting repeated identities.
+Reconnect, offline transition, filter change or stale/error response clears
+tokens and accumulated typed status maps before a fresh first page. The TUI
+adds `F` for `Active only`/`All sessions`, `M` for explicit `Load more
+sessions`, and `tui --active-only`; attention remains visible in both modes.
+The existing `L` continues to mean conversation `Load older` and is not
+overloaded. No timer or background pagination is added.
+
+### Frozen implementation architecture map
+
+Production paths and dependency direction are exact:
+
+- Modify `src/codex_flow/domain.py` to own `ControlListKind`,
+  `ControlListVisibility`, `ControlListPageStatus`, `ControlListRequest` and
+  generic `ControlListPage`, including the 24-item, 1,024-byte token and
+  49,152-byte response limits. These are ephemeral typed boundary values, not
+  persisted/public workflow schemas.
+- Modify `src/codex_flow/ledger.py` to expose deterministic filtered worker and
+  decision source rows plus source fingerprints and continuation-key queries.
+  It also exposes one read-only exact refresh-state inspection used by the
+  service. SQLite remains the sole durable state authority; no schema version,
+  table, row or migration is added.
+- Modify `src/codex_flow/harness.py` to authenticate/validate page tokens with
+  its existing owner nonce, project whole typed items within the response
+  budget, and serve version-2 `status`/`controller_pending` plus the bounded
+  version-1 compatibility behavior. It remains the only IPC and runtime owner.
+- Modify `src/codex_flow/control_client.py` for the page decoders and client
+  convenience methods. Client -> authenticated IPC -> harness -> ledger is the
+  only dependency direction; clients never inspect SQLite.
+- Modify `src/codex_flow/tui_client.py`, `src/codex_flow/tui_models.py` and
+  `src/codex_flow/tui.py` for first-page replacement, explicit load-more,
+  visibility state, deduplication, reconnect clearing, `F` and `M`.
+- Modify `src/codex_flow/cli.py` only to pass the `--active-only` initial
+  visibility into the existing TUI. No alternate command or TUI entrypoint is
+  created.
+- Modify `src/codex_flow/service.py` for the one exact schema-v19/stopped-v18-
+  unit recovery discriminator and transition. Modify
+  `scripts/install_personal_workflow_skills.py` only so its existing fence and
+  refresh sequence recognizes and reaches that same transition; it does not
+  duplicate service logic.
+- Modify existing focused tests
+  `tests/test_service_lifecycle.py`, `tests/test_plugin_installation.py`,
+  `tests/test_local_ipc.py`, `tests/test_program_controller.py`,
+  `tests/test_harness_recovery.py`, `tests/test_live_worker_control.py` and
+  existing TUI/headless test files selected by current collection. Modify
+  `config/test-partitions.toml` only if current semantic membership requires
+  the already-existing tests to be listed.
+- Create one semantic retained evidence record at
+  `docs/reviews/evidence/safe-refresh-and-control-list-paging.json`. It binds
+  source candidate, final implementation commit, disposable large-ledger
+  reproduction, exact wheel/source parity, reviews and post-promotion
+  activation/sentinel receipts. No other production, test, schema, fixture,
+  runner or evidence path is created. Nothing is removed.
+
+The new durable-artifact budget is exactly one evidence JSON record and zero
+production modules, tables, schemas, migrations, services, sockets or
+entrypoints. `docs/reviews/peer-thread-workflow.md`, `AGENTS.md`, the accepted
+terminal-candidate/harness history, immutable prior evidence and migrations,
+SDK/provider adapter and live keyframe semantics, model-facing capsule/result
+contracts, workflow/plugin skills, retained wheels until regenerated by the
+named parity gate, global Codex/App state, both installed services, remotes and
+unrelated worktree bytes are protected during implementation except where an
+exact mutable path above is named.
+
+### Acceptance and promotion
+
+The falsification checkpoint is a disposable real-shape ledger large enough
+that the old complete `controller_pending` or `status` envelope exceeds 65,536
+bytes. Before broad work, version-2 first pages for both lists must encode below
+49,152 bytes, show active/current-attention rows, and permit an unchanged
+snapshot to load every remaining identity exactly once. Failure of that check
+returns to planning rather than increasing the frame or adding another API.
+
+Closure requires:
+
+- provider-free large-ledger tests prove the former overflow, bounded first
+  page and exhaustive all-pages traversal with no omission or duplicate;
+- active-only never hides current attention or its referenced worker and `F`
+  restores inactive rows; `M` alone loads subsequent inactive/history pages;
+- a real-shape headless TUI/control client stays connected and renders useful
+  state from its first pages, while small ledgers preserve current ordering and
+  behavior;
+- malformed, stale, cross-ledger, cross-operation, cross-visibility and
+  previous-epoch tokens fail closed with the specified bounded outcomes;
+- disposable service/bootstrap tests close the exact schema-v19,
+  fenced-harness-authority, stopped-v18-unit, no-child/no-lease/no-claim and
+  no-socket state in one invocation, while arbitrary unit drift and every
+  unsafe/ambiguous state still fail before replacement start;
+- focused service, installer, IPC, controller, control-client and TUI tests,
+  every affected semantic partition, `git diff --check`, the full
+  `make check`, and exact source/wheel parity pass;
+- independent Luna XHigh correctness and Sol Medium architecture reviews bind
+  the exact candidate and return P0=0/P1=0 before promotion; and
+- only after acceptance, the integration owner reinstalls/refreshes
+  `codex-flow-937220b34ee45f7f.service`, reruns provider-free activation step 5,
+  verifies the protected service was untouched, then consumes exactly one
+  already-authorized real streaming sentinel. Provider evidence is not an
+  implementation or planning gate and is never retried.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make canonical activation recover the exact fenced schema-v19/stopped-v18-unit state in one "
+        "supported invocation, and keep large control/TUI snapshots connected through bounded explicit paging."
+    ),
+    decomposition=(
+        "Add one closed service refresh discriminator for schema v19 plus the exact stopped legacy unit, preserving arbitrary-drift rejection.",
+        "Page the existing version-2 status and controller_pending operations with deterministic ledger ordering and harness-authenticated snapshot continuations.",
+        "Keep legacy version-1 list requests only as bounded small-response compatibility, returning response_too_large instead of truncation.",
+        "Load active/current-attention first pages immediately, expose F visibility and M load-more actions, and clear accumulation on reconnect, stale identity or filter change.",
+        "Prove the former overflow and interrupted activation in disposable provider-free fixtures, then run package, parity and review gates without touching real services or providers."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A disposable ledger whose former status/controller_pending envelope exceeds 65,536 bytes returns each first page below 49,152 bytes and all identities exactly once across unchanged continuation pages.",
+        "ControlListRequest permits 1..24 items, tokens are at most 1,024 ASCII bytes, whole items are never truncated, and an individually oversized item returns item_too_large.",
+        "Tokens bind list kind, visibility, complete ordered source fingerprint, schema, harness epoch and owner nonce; malformed, stale, cross-ledger, cross-operation, cross-visibility and previous-epoch use fails closed.",
+        "Workers order active then nonterminal/current-attention-referenced then terminal history; decisions order current attention before terminal history with the exact frozen tie-breakers.",
+        "F toggles Active only and All sessions, M explicitly loads more sessions, L remains conversation Load older, --active-only is supported, and current attention plus its worker is never hidden.",
+        "TerminalUiClient renders useful first-page state while connected, deduplicates loaded pages by exact identity, and discards accumulated rows and tokens on reconnect, stale page or visibility change.",
+        "Small ledgers preserve behavior; version-1 callers receive the complete response only when it fits and otherwise receive response_too_large without truncation or fallback.",
+        "One canonical refresh invocation accepts only complete schema v19, exact fenced harness authority, dead birth-bound predecessor, inactive exact v18 unit, no child/lease/claim and absent legacy/current sockets, then starts one healthy higher-epoch harness.",
+        "Arbitrary ExecStart/content drift, live or ambiguous authority, any active child/lease/claim, unsafe socket entry or protected service identity fails before unit replacement or start.",
+        "Focused service/installer/IPC/controller/control-client/TUI tests, affected semantic partitions, full make check, diff hygiene, exact source/wheel parity and independent correctness/architecture reviews close with P0=0/P1=0."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/harness.py",
+        "src/codex_flow/control_client.py",
+        "src/codex_flow/tui_client.py",
+        "src/codex_flow/tui_models.py",
+        "src/codex_flow/tui.py",
+        "src/codex_flow/cli.py",
+        "src/codex_flow/service.py",
+        "scripts/install_personal_workflow_skills.py",
+        "tests/test_service_lifecycle.py",
+        "tests/test_plugin_installation.py",
+        "tests/test_local_ipc.py",
+        "tests/test_program_controller.py",
+        "tests/test_harness_recovery.py",
+        "tests/test_live_worker_control.py",
+        "existing TUI/headless tests selected by current collection",
+        "config/test-partitions.toml only if current semantic membership requires it",
+        "docs/reviews/evidence/safe-refresh-and-control-list-paging.json"
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md",
+        "accepted terminal-candidate-retention-and-harness-cutover history, immutable prior evidence and migration definitions",
+        "src/codex_flow/backends/codex_sdk.py, provider/authentication/profile authority and live keyframe semantics",
+        "model-facing capsule/result contracts, workflow/plugin skills and unrelated tests or production modules",
+        "global Codex/App state, installed services codex-flow-937220b34ee45f7f.service and codex-flow-71308abd5aeed226.service, providers and retained evidence during implementation",
+        "remotes, pushes, rebases, resets, history rewrites, implicit cleanup and unrelated worktree bytes"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt=(
+        "Use execute-milestone as the single Luna XHigh mutable owner for only "
+        "safe-refresh-and-control-list-paging in the existing python-sdk-controller integration worktree. "
+        "Implement the frozen exact paths, types, 24-item/1,024-byte-token/49,152-byte-response limits and "
+        "ordering. Page version-2 status and controller_pending in place; add no API, transport, polling, "
+        "table, migration, production module, service, socket, transcript merge or compatibility alias. "
+        "Accept only the exact fenced schema-v19 plus stopped recognized v18 unit state; arbitrary drift and "
+        "ambiguous sockets/children/leases/claims fail closed. Preserve both real services and consume no "
+        "provider. Run the disposable overflow and refresh falsification checks first, then focused tests, "
+        "affected partitions, make check and exact wheel/source parity. Create only the named evidence record, "
+        "stage only owned surfaces, inspect the staged diff, run git diff --cached --check, create one coherent "
+        "local implementation commit, and return one typed terminal result with reviews pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
+## Active selection after activation recovery replan
+
+`safe-refresh-and-control-list-paging` is the sole next executable mutable
+milestone. It runs serially in the existing program integration worktree from
+the planning commit containing this section. The accepted
+`terminal-candidate-retention-and-harness-cutover` history and source candidate
+`f459cccafad45511d336138aa09d3b8c6dfa8345` remain immutable inputs, not work to
+repeat. `live-plan-dag-revision` is now blocked on this activation repair,
+its independent objective/architecture acceptance, target service refresh,
+provider-free activation step 5 and the one authorized real streaming
+sentinel. `module-responsibility-decomposition` remains blocked on the
+live-plan successor. The cancelled visual review remains cancelled.
