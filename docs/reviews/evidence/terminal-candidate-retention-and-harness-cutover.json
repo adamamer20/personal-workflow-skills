@@ -2,11 +2,11 @@
   "schema": "codex-flow/terminal-candidate-retention-and-harness-cutover/v1",
   "schema_version": 1,
   "milestone": "terminal-candidate-retention-and-harness-cutover",
-  "status": "completed_with_distinct_adopted_candidate",
+  "status": "implementation_complete_reviews_pending",
   "outcome": {
     "executor_status": "completed",
     "implementation_candidate_disposition": "verified_commit",
-    "implementation_candidate_sha": "19b5bf6f847581280079b67e41ba8788e0c303e1",
+    "implementation_candidate_sha": "1f24975b02d599ba12102d6fc17a96a3c3c64574",
     "milestone_state": "COMPLETED",
     "promotion_state": "unpromoted",
     "adopted_candidate_milestone_state": "BLOCKED",
@@ -15,18 +15,18 @@
     "dirty_workspace_preserved": true
   },
   "implementation_candidate": {
-    "commit_sha": "19b5bf6f847581280079b67e41ba8788e0c303e1",
-    "parent_commit": "31d71cf7de1677eb8b813c2c0de824e396af74c5",
-    "direct_parent_matches_repair_base": false,
-    "repair_base_commit": "1570faeed508d9dc455bdce1faa95425e50bf8bc",
-    "successor_of": "31d71cf7de1677eb8b813c2c0de824e396af74c5",
+    "commit_sha": "1f24975b02d599ba12102d6fc17a96a3c3c64574",
+    "parent_commit": "2ffd15455a51fdea5c7190b59de78e31519da487",
+    "direct_parent_matches_repair_base": true,
+    "repair_base_commit": "2ffd15455a51fdea5c7190b59de78e31519da487",
+    "successor_of": "2ffd15455a51fdea5c7190b59de78e31519da487",
     "candidate_role": "terminal-candidate-retention-and-harness-cutover-repair",
     "distinct_from_adopted_tui_candidate": true
   },
   "reviewed_range": {
     "external_baseline": "6fa09a3701d97f39a5183701687b4b8bcf62dc17",
-    "final_successor_tip": "19b5bf6f847581280079b67e41ba8788e0c303e1",
-    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..19b5bf6f847581280079b67e41ba8788e0c303e1",
+    "final_successor_tip": "1f24975b02d599ba12102d6fc17a96a3c3c64574",
+    "git_range": "6fa09a3701d97f39a5183701687b4b8bcf62dc17..1f24975b02d599ba12102d6fc17a96a3c3c64574",
     "superseded_predecessors": [
       "9c3dcbc3052a90e2da81631cbc6f8c4156d66477",
       "a2230ad79d2883d8bb2c5955b37709cce0e12315"
@@ -131,18 +131,18 @@
     "global_installation_or_plugin_mutation": false
   },
   "validation": {
-    "full_pytest": "849 passed in 267.43s",
+    "full_pytest": "852 passed in 233.49s",
     "ruff_format": "passed",
     "ruff_check": "passed",
     "schema_validator": "passed",
     "compileall": "passed",
     "pre_commit": "passed",
-    "migration_regression": "passed",
+    "migration_regression": "passed, including repository and executable paths containing supervisor",
     "targeted_retained_wheel": "passed",
-    "repair_focused": "102 passed in 26.12s across candidate, ledger and service partitions",
+    "repair_focused": "105 passed in 24.57s across candidate, ledger and service partitions",
     "git_diff_check": "passed",
     "independent_reviews": "pending",
-    "full_make_check": "passed: Ruff format/check, 849 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
+    "full_make_check": "passed: Ruff format/check, 852 tests, validator (16 skills and 7 schemas), compileall and all pre-commit hooks"
   },
   "changed_surfaces": [
     "config/test-partitions.toml",
