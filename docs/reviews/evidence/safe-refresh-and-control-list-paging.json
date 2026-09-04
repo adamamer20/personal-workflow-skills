@@ -1,0 +1,79 @@
+{
+  "schema": "codex-flow/safe-refresh-and-control-list-paging/v1",
+  "status": "implementation_complete_reviews_pending",
+  "milestone": "safe-refresh-and-control-list-paging",
+  "candidate": {
+    "implementation_commit": "846f647a1d6047bb0eebbb827fc25fe40c757da8",
+    "parent_commit": "e536c970f5792ce97825da4f6433e591f48567eb",
+    "branch": "agent/python-sdk-controller",
+    "source_candidate_commit": "f459cccafad45511d336138aa09d3b8c6dfa8345",
+    "owned_surface_count": 9,
+    "durable_artifact_count": 1,
+    "production_modules_created": 0,
+    "schema_or_migration_changes": 0,
+    "unrelated_dirty_state_preserved": true
+  },
+  "control_list_paging": {
+    "former_v1_frame_overflow_reproduced": true,
+    "disposable_worker_rows": 120,
+    "disposable_page_count": 5,
+    "first_pages_below_response_budget": true,
+    "response_budget_bytes": 49152,
+    "page_item_limit": 24,
+    "continuation_token_limit_bytes": 1024,
+    "all_worker_identities_traversed": 120,
+    "duplicate_worker_identities": 0,
+    "omitted_worker_identities": 0,
+    "legacy_v1_overflow_result": "response_too_large",
+    "legacy_v1_truncation": false,
+    "visibility_filter_source": "ledger",
+    "ordering_source": "ledger",
+    "tui_background_paging": false
+  },
+  "refresh_recovery": {
+    "canonical_schema_version": 19,
+    "authority_table": "harness_authority",
+    "predecessor_unit": "exact_stopped_v18_unit",
+    "requested_shutdown_fence": true,
+    "active_dispatches": 0,
+    "live_worker_leases": 0,
+    "active_controller_generations": 0,
+    "live_controller_claims": 0,
+    "predecessor_birth_bound_process_live": false,
+    "legacy_socket_entries": 0,
+    "current_socket_entries": 0,
+    "arbitrary_unit_drift_rejected": true,
+    "ambiguous_authority_rejected": true,
+    "unsafe_socket_entry_rejected": true,
+    "provider_calls": 0,
+    "real_service_mutation": false
+  },
+  "validation": {
+    "make_check": "passed: 862 tests, validation, compileall and pre-commit",
+    "semantic_partitions": {
+      "controller": 531,
+      "workers": 64,
+      "integrations": 75,
+      "contracts": 87,
+      "workflow_assets": 105
+    },
+    "wheel_path": "/tmp/codex-flow-parity.5S8HDH/codex_flow-0.2.0-py3-none-any.whl",
+    "wheel_sha256": "d5e36e9ac60fb7d6fad1ed0973ea912af4ba607aa399a79537219a2d44960e88",
+    "wheel_bytes": 455185,
+    "source_byte_parity": "33/33 packaged Python files matched source",
+    "git_diff_cached_check": "passed",
+    "full_diff_self_review": "complete; no open P0/P1 identified"
+  },
+  "reviews": {
+    "objective": "pending",
+    "architecture": "pending",
+    "promotion_blockers": "not_assessed_until_independent_reviews"
+  },
+  "privacy": {
+    "raw_provider_text_retained": false,
+    "raw_transcript_retained": false,
+    "secrets_retained": false,
+    "global_state_mutated": false,
+    "real_provider_or_service_run": false
+  }
+}
