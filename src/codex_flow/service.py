@@ -636,6 +636,17 @@ def refresh_with_credential(
         except OSError as restore_error:
             raise ServiceRefreshFailed("legacy service unit rollback failed") from restore_error
 
+    def restore_legacy_pair() -> None:
+        if ledger_path is None:
+            raise ServiceRefreshFailed("legacy ledger rollback cannot be verified")
+        try:
+            compatibility = ledger_schema_compatibility(ledger_path)
+        except LedgerError as rollback_error:
+            raise ServiceRefreshFailed("legacy ledger rollback cannot be verified") from rollback_error
+        if compatibility.get("ledger_schema_version") != 18:
+            raise ServiceRefreshFailed("legacy ledger rollback did not restore schema v18")
+        restore_legacy_unit()
+
     assert owned_ledger is not None
     close_ledger = ledger is None or migration_required
     live_checker = process_is_live or (
@@ -713,7 +724,7 @@ def refresh_with_credential(
                     credential_value=value,
                 )
             except BaseException:
-                restore_legacy_unit()
+                restore_legacy_pair()
                 raise
             owned_ledger.close()
             try:
@@ -723,7 +734,7 @@ def refresh_with_credential(
                 # staged.  If opening or migrating the ledger fails, keep the
                 # exact fenced supervisor/unit pair so the next refresh can
                 # retry the handoff without a mixed v19 ledger.
-                restore_legacy_unit()
+                restore_legacy_pair()
                 raise
 
         if profile_sha256 is not None and native_compatibility_sha256 is not None:

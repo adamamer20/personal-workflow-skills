@@ -651,7 +651,7 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
     assert [call[2] for call in calls] == ["is-active"]
 
 
-@pytest.mark.parametrize("failure_stage", ["before_commit", "after_commit"])
+@pytest.mark.parametrize("failure_stage", ["before_commit", "after_commit", "rollback_failure"])
 def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
 ) -> None:
@@ -723,7 +723,14 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
                 raise RuntimeError("injected post-commit migration opener failure")
 
         monkeypatch.setattr(Ledger, "_ensure_h4_store", fail_after_committed_migration)
-    with pytest.raises(ServiceRefreshFailed, match="harness refresh failed"):
+        if failure_stage == "rollback_failure":
+
+            def fail_compensation(self: Ledger) -> None:
+                raise RuntimeError("injected compensation failure")
+
+            monkeypatch.setattr(Ledger, "_restore_fenced_v18_after_failed_open", fail_compensation)
+    failure_match = "did not restore schema v18" if failure_stage == "rollback_failure" else "harness refresh failed"
+    with pytest.raises(ServiceRefreshFailed, match=failure_match):
         refresh_with_credential(
             unit,
             config_home=config_home,
@@ -733,20 +740,34 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
             shutdown_sender=lambda *_args: {"version": 1, "ok": True, "operation": "shutdown"},
         )
 
-    assert installed_path.read_bytes() == before_bytes
-    assert stat.S_IMODE(installed_path.stat().st_mode) == before_mode
+    if failure_stage == "rollback_failure":
+        assert installed_path.read_text(encoding="utf-8") == unit.text
+    else:
+        assert installed_path.read_bytes() == before_bytes
+        assert stat.S_IMODE(installed_path.stat().st_mode) == before_mode
     assert [call[2] for call in calls] == ["is-active"]
     check = sqlite3.connect(ledger_path)
     try:
-        assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "18"
+        expected_version = "19" if failure_stage == "rollback_failure" else "18"
         assert (
-            check.execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()[0]
-            == "codex_flow_event_driven_program_controller_v18"
+            check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
+            == expected_version
         )
-        assert (
-            check.execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()[0] == 1
-        )
-        assert check.execute("SELECT 1 FROM sqlite_master WHERE name = 'harness_authority'").fetchone() is None
+        if failure_stage == "rollback_failure":
+            assert check.execute("SELECT 1 FROM sqlite_master WHERE name = 'supervisor_authority'").fetchone() is None
+            assert (
+                check.execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()[0] == 1
+            )
+        else:
+            assert (
+                check.execute("SELECT value FROM schema_meta WHERE key = 'schema_identity'").fetchone()[0]
+                == "codex_flow_event_driven_program_controller_v18"
+            )
+            assert (
+                check.execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()[0]
+                == 1
+            )
+            assert check.execute("SELECT 1 FROM sqlite_master WHERE name = 'harness_authority'").fetchone() is None
     finally:
         check.close()
 
