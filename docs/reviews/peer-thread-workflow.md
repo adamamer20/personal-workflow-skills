@@ -10537,31 +10537,28 @@ promotion authority when it becomes ready.
 ModelFacingCapsule(
     schema_version=1,
     objective=(
-        "Make codex-flow control own one complete candidate/review/repair/promotion lifecycle so executor "
-        "completion cannot close a milestone while declared acceptance remains pending."
+        "Close the remaining exact-candidate terminal-authority defect so one production-shaped repair can "
+        "create, validate and re-review a distinct successor without weakening restart adoption."
     ),
     decomposition=(
-        "Retain or adopt the exact committed candidate when a single-milestone executor ends, leaving acceptance pending rather than terminal.",
-        "Start every declared exact-candidate review authority once and require all fresh accepted results before promotion.",
-        "Route P0/P1 findings to one bounded same-owner repair, invalidate prior reviews and start every declared successor re-review.",
-        "Close only with an accepted promotion receipt or a truthful terminal blocker while keeping program DAG/integration ownership separate.",
-        "Adopt source 47a8fa3d67575ef00662f1b5693efaf45c7b52bd and evidence tip 977d8f5c8c55459625dbff8133c262e12f91bba0 without rerunning implementation."
+        "Remove the historical-adoption bypass and compare the exact retained candidate, terminal workspace, Git authority and protected identity facts.",
+        "Separate generation-1 executor terminal authority from generation-2 repair terminal authority while binding the repair to its immutable predecessor and finding context.",
+        "Allow the accepted completed-execution review and one-repair states without permitting arbitrary candidate replacement or a second repair.",
+        "Prove the real Controller execution path accepts one direct clean repair successor and rejects candidate, workspace, Git-authority or protected-path drift.",
+        "Retain the already-closed exact dispatch-context validation and every existing review, promotion, program-controller and persistence boundary."
     ),
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
-        "Executor completion with pending declared authorities is nonterminal and queues every exact-candidate authority once across replay and restart.",
-        "Fresh accepted reviews from every declared authority plus no open promotion-blocking P0/P1 finding or applicable blocker are required for promotion.",
-        "One bounded repair creates a successor candidate, invalidates prior reviews and receives every declared fresh re-review; a second rejection closes truthfully without another repair.",
-        "The single-milestone lifecycle does not create a synthetic program graph or transfer review ownership to the program controller.",
-        "The exact retained 47a8fa3d source and direct 977d8f5c evidence tip are adopted from durable facts and reviewed without any executor/provider replay.",
-        "Focused and affected partitions, plan compilation, full make check, diff hygiene and independent correctness plus architecture reviews close with P0=0/P1=0."
+        "Historical 47a8fa3d -> 977d8f5c adoption succeeds only with exact retained workspace, Git-authority and protected-path identities; placeholder or conflicting digests fail closed.",
+        "A production-shaped completed execution reaches REVIEWING, records one repair request, accepts one direct clean successor with its own exact terminal facts, invalidates prior reviews and queues every fresh authority.",
+        "The successor is not compared to the generation-1 terminal HEAD, but its predecessor, findings, workspace, Git authority, protected identity and direct ancestry are all exact and immutable.",
+        "Candidate drift, dirty workspace bytes, wrong predecessor/findings, stale generation, duplicate repair or mismatched durable authority never produces a reviewable successor.",
+        "No second ordinary repair, new table, schema version, public type, transport, lifecycle owner or program-controller responsibility is introduced.",
+        "Focused production-shaped regressions, affected partitions, plan compilation, full make check, diff hygiene and fresh independent correctness plus architecture reviews close with P0=0/P1=0."
     ),
     mutable_surfaces=(
-        "src/codex_flow/cli.py",
-        "src/codex_flow/controller.py",
-        "src/codex_flow/ledger.py",
         "src/codex_flow/harness.py",
-        "tests/test_workflow_control.py",
+        "src/codex_flow/ledger.py",
         "tests/test_controller_execution.py",
         "tests/test_harness_recovery.py",
         "tests/test_plan_compilation.py",
@@ -10569,18 +10566,18 @@ ModelFacingCapsule(
     ),
     protected_surfaces=(
         "docs/reviews/peer-thread-workflow.md and AGENTS.md after this planning commit",
-        "domain, contracts, plan compiler, worktree manager, program controller, workflow configuration, schemas and migrations",
+        "CLI, Controller implementation, domain, contracts, plan compiler, worktree manager, program controller, workflow configuration, schemas and migrations",
         "SDK adapter, profile/authentication, service/IPC framing, TUI/live-keyframe behavior and reusable workflow policy surfaces",
         "all evidence including docs/reviews/evidence/safe-refresh-and-control-list-paging.json",
         "real services, providers, App/global Codex state, remotes, history rewrite, discard, implicit cleanup and unrelated worktree bytes",
-        "the 128-character durable_status contract and all unrelated tests and evidence"
+        "the closed CONTROL-DISPATCH-CONTEXT-002 behavior, 128-character durable_status contract and all unrelated tests and evidence"
     ),
     authorities=(
         ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
     ),
     prompt=(
-        "Use execute-milestone as the single Luna XHigh mutable owner for only single-milestone-acceptance-lifecycle in the existing python-sdk-controller integration worktree. Modify only the exact frozen runtime/test surfaces and request a bounded Sol plan update before adding any public option, type, table, migration, module, runner, registry, schema or entrypoint. Keep SQLite and WorkflowHarness authoritative; reuse existing candidate, review, repair, blocker, dispatch and worktree validation. A completed executor creates or retains a candidate but does not close while acceptance is pending. Queue every declared review once, permit one same-owner repair for P0/P1 findings, invalidate prior reviews, re-review the successor through every authority and terminate only at accepted promotion or a truthful blocker. Keep the program controller limited to DAG readiness, integration and successors. Preserve the durable_status 128-character contract. Add a crash/restart migration test that adopts exact 47a8fa3d67575ef00662f1b5693efaf45c7b52bd -> 977d8f5c8c55459625dbff8133c262e12f91bba0 from durable facts without rerunning implementation or consuming a provider. Run focused and affected partitions, plan compilation and full make check; stage only owned paths, inspect the staged diff, run git diff --cached --check, create one coherent local commit and return one typed result with independent reviews pending."
+        "Use recover-milestone as one Sol Medium mutable recovery owner for only CONTROL-CANDIDATE-IDENTITY-001 at exact predecessor b74c12929012404a3c614836982651ddd413cd4a in the existing clean python-sdk-controller integration worktree. Both independent reviews agree that dispatch-context reuse is closed and that historical adoption skips retained identity comparisons while the production completed-execution guard makes a distinct generation-2 repair successor unreachable. Modify only harness.py, ledger.py and the three named tests. Remove the historical early bypass; validate exact retained candidate/workspace/Git/protected facts. Make terminal authority generation-aware so a production-shaped repair binds its predecessor and findings, validates its own direct clean successor and may enter the accepted review/repair states without comparing the successor to generation-1 terminal HEAD. Preserve one repair only, exact review invalidation/requeue, SQLite and WorkflowHarness authority, program-controller separation and the closed queue-context checks. Add production-shaped Controller regressions for exact successor success and each named drift, plus make the historical placeholder-digest fixture fail. Do not add a type, table, migration, module, public option, transport or lifecycle owner; do not call providers, App connectors, services or installers. Run focused tests, affected partitions, plan compilation and full make check; stage only owned paths, inspect the staged diff, run git diff --cached --check, create one coherent recovery commit and return one terminal result with fresh objective and architecture re-reviews pending."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000
