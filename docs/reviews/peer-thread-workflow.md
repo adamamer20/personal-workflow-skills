@@ -74,6 +74,300 @@ tests/
 workflow.toml            # one routing and limit table
 ```
 
+## Active selection after replacement-state correctness review
+
+The clean integration tip is
+`17e6d2f0f1786c1fd7c35931877e595cbde70f87`: source/test commit
+`3794c7ff2cde6abfad2949ac72b4fee23d2595e0` followed by the evidence-only
+commit. Architecture/provenance review accepted the existing ledger, service,
+systemd and authenticated TUI-client authority boundaries, and the external
+wheel at `/tmp/codex-flow-wheel.FJ76dl/codex_flow-0.2.0-py3-none-any.whl`,
+SHA-256 `8c59a09260462724dbc7fc50b34f42f7b348e4919fcdd446ae739acc43a68075`,
+456829 bytes, was independently compared at 33/33 packaged Python paths.
+The evidence input is the existing JSON at tip `17e6d2f`, whose externally
+computed SHA-256 is
+`21ff83e84ab51a593818a7ec2236313e997e0915cc7e7a151f3133d646c486bc` and
+size is 5220 bytes. These wheel and evidence identities are accepted inputs
+only: successor source changes require a fresh external wheel and new external
+evidence identity and must not inherit a final parity or promotion claim.
+
+The correctness review left four promotion-blocking findings over reachable
+production paths:
+
+- `CI-003-001`: a matching higher-epoch replacement already carrying
+  `requested_shutdown=1` is rejected before the exact unit is stopped, so the
+  accepted fenced-replacement rollback transition never runs;
+- `CI-003-002`: a successful start followed only by the unchanged fenced dead
+  predecessor sleeps until timeout instead of positively proving replacement
+  absence and restoring the legacy unit bytes;
+- `CI-004-001`: `load_more_sessions()` clears its maps, tokens and snapshot
+  identities after stale/error, but `_snapshot_from_statuses()` infers both
+  completion flags as true from the cleared `None` tokens; and
+- `CI-004-TEST`: the new stale/error coverage uses fake clients and therefore
+  does not prove the production `for_state_root -> authenticated harness.sock`
+  boundary or reconnection behavior.
+
+The prior final-closure capsule is superseded. The remaining serial DAG is:
+
+    refresh-replacement-state-and-disconnected-control-proof [ready; one mutable owner]
+      -> independent Luna XHigh correctness causal re-review
+      -> independent Sol Medium architecture causal re-review
+      -> integration-owner promotion/install/refresh/provider-free activation step 5
+      -> one already-authorized real streaming sentinel
+      -> live-plan-dag-revision
+      -> module-responsibility-decomposition
+
+Every edge is an acceptance dependency. There is no fan-out: the two service
+classifications, centralized disconnected TUI transition, production-boundary
+tests and wheel-bound evidence must close as one exact candidate. The frozen
+DAG base for this serial successor is this planning commit; the full causal
+review base remains `ba05399d57da5ca65250f64727e36270f786c213`.
+
+## Exhaustive replacement-state and disconnected-control replan
+
+### Outcome, scope and non-goals
+
+The successor closes the remaining `CI-003` state machine so every matching
+fenced replacement is stopped and death-proven before rollback, while a
+genuinely absent replacement is recognized through a bounded positive
+observation sequence rather than a timeout. It closes `CI-004` through one
+central disconnected-control snapshot construction and real authenticated IPC
+tests for refresh, load-more and endpoint loss/recovery.
+
+This is not a lifecycle, ledger, IPC, paging or TUI redesign. It does not add a
+module, public or persisted type, API, table, schema, migration, transport,
+service, socket, polling loop, compatibility alias, provider path, App path,
+fixture file or runner. It does not change conversation history, token framing,
+ordering, visibility or page semantics. No real service, provider, App,
+network, install, wheel reuse/overwrite or global configuration action is
+authorized during implementation. Promotion and all later integration-owner
+actions remain outside the successor.
+
+### Exhaustive service classification and observation protocol
+
+`refresh_with_credential` remains the only production entrypoint. Reuse its
+captured predecessor identity, monotonic post-start guard, existing deadline,
+ledger fence, exact installed-unit checks, systemd manager seam, PID/birth
+liveness seam and rollback helper. The post-start classification is a single
+table-driven policy expressed within `src/codex_flow/service.py`; no second
+authority or public result is introduced.
+
+| Post-start observation | Required production action | Restore eligibility |
+| --- | --- | --- |
+| Matching higher-epoch replacement, distinct valid PID/birth identity, `requested_shutdown=0` | Arm `Ledger.arm_harness_refresh_fence` exactly once; validate the returned same identity with shutdown 1; stop the exact unit; prove unit inactivity and PID/birth death; revalidate the same fenced row and installed harness bytes | Restore only after the complete fence/stop/death/revalidation proof |
+| Matching higher-epoch replacement, distinct valid PID/birth identity, `requested_shutdown=1`, unit active or PID/birth live | Skip `Ledger.arm_harness_refresh_fence`; stop the exact unit immediately; prove unit inactivity and PID/birth death; revalidate the unchanged same fenced row and installed harness bytes | Restore only after the complete stop/death/revalidation proof |
+| Matching higher-epoch replacement with shutdown 1 already inactive and dead | Skip refence and redundant stop only when both inactivity and birth-bound death are already true; revalidate the unchanged fenced row and installed harness bytes | Restore after the same death/revalidation proof |
+| Exact captured predecessor row with `requested_shutdown=1`, unchanged epoch/PID/birth, inactive unit, dead predecessor PID/birth and absent current `harness.sock` entry | Run the bounded consecutive-observation protocol below | Restore only after that positive absence proof |
+| Exact predecessor but unit active, predecessor PID/birth live, current socket present, or any liveness fact uncertain | Continue observing only while the state remains safely classifiable and the deadline remains; otherwise fail closed | Ineligible without the full positive absence proof |
+| Matching predecessor or replacement with malformed/missing `requested_shutdown`, including `2` | Leave current harness bytes installed and raise | Permanently ineligible for this invocation |
+| Missing, malformed or ambiguous authority; repository/state/version mismatch; unexpected epoch; invalid PID/birth; predecessor/replacement identity drift | Leave current harness bytes installed and raise; issue no direct SQL | Permanently ineligible for this invocation |
+| Start returns nonzero/raises before a positive absence proof, or start outcome is otherwise uncertain/live | Leave current harness bytes installed and raise | Ineligible |
+| Fence, stop, unit-inactivity, PID/birth-death, same-row revalidation or installed-unit validation fails | Leave current harness bytes installed and raise | Ineligible |
+
+The positive no-replacement proof is concrete and bounded. After start returns
+success, count three consecutive complete observations of the exact unchanged
+captured predecessor row with `requested_shutdown=1`, the exact unit inactive,
+the predecessor PID/birth dead and no filesystem entry at the current
+`harness.sock`. Separate observation 1 from 2 and 2 from 3 with the existing
+sleeper by at least 50 milliseconds; all reads and waits consume the existing
+refresh deadline. Any replacement identity, malformed/ambiguous row, active or
+uncertain process/unit, socket entry or deadline exhaustion aborts this proof
+and follows the table. Immediately before restoration, re-read all four facts
+and require the same predecessor epoch/PID/birth and fence again. This final
+revalidation plus the stable observation window distinguishes a delayed or
+uncertain acquisition from positive absence without creating a new timer,
+thread or polling authority. A test clock may advance the same sleeper seam;
+production retains the existing 30-second outer deadline.
+
+The already-fenced replacement branch is not an error and never calls
+`arm_harness_refresh_fence`. It still owns the exact same stop, inactivity,
+birth-death, row revalidation, installed-byte validation and legacy restoration
+sequence as a replacement that the refresh invocation fenced itself. The
+ordinary shutdown-0 branch continues to fence exactly once. Both branches
+leave the higher-epoch row fenced after rollback so the accepted later retry
+can acquire the next epoch.
+
+### Central disconnected-control snapshot construction
+
+`TerminalUiClient` gains one private, centralized disconnected-control snapshot
+construction inside `src/codex_flow/tui_client.py`. Every disconnected exit
+from `refresh()`, `load_more_sessions()` and the existing offline transition
+must call it after closing/clearing the relevant live state. The construction
+clears `_worker_statuses`, `_decision_statuses`, both next-page tokens and both
+snapshot ids, then returns a `TerminalUiSnapshot` with empty worker and decision
+rows and explicit `workers_complete=False` and `decisions_complete=False`.
+It must not route through token-derived completeness or retain previous control
+rows. `_snapshot_from_statuses()` remains the connected accumulated-page
+projection and derives completeness only for a valid connected snapshot.
+
+The next `refresh()` after any disconnected snapshot sends `page_token=None`
+to both production clients, accepts only a fresh pair of first pages, atomically
+replaces the empty accumulation and derives completeness from those fresh
+pages. Conversation history, selected-subject reconciliation, live keyframes,
+visibility and `L`/`M`/`F` behavior remain unchanged.
+
+### Frozen implementation architecture map and ownership
+
+One Luna XHigh implementation owner has exactly five mutable paths:
+
+- **Modify** `src/codex_flow/service.py`: complete the table-driven
+  post-start classification, already-fenced replacement transition and bounded
+  positive no-replacement observations using only existing authorities and
+  private mechanics.
+- **Modify** `src/codex_flow/tui_client.py`: centralize the private
+  disconnected-control snapshot construction and route refresh, load-more and
+  offline exits through it without changing public types or APIs.
+- **Modify** `tests/test_service_lifecycle.py`: add public
+  `refresh_with_credential` table rows for every frozen classification and
+  exact call/liveness/byte assertions.
+- **Modify** `tests/test_live_worker_control.py`: replace or extend fake-only
+  assertions with production-boundary `TerminalUiClient.for_state_root` tests
+  over the existing authenticated disposable `harness.sock`.
+- **Modify** the existing
+  `docs/reviews/evidence/safe-refresh-and-control-list-paging.json` only after
+  the fresh wheel parity gate, recording exact successor facts without an
+  embedded self-hash.
+
+**Preserve** `src/codex_flow/ledger.py`, `src/codex_flow/harness.py`,
+`src/codex_flow/control_client.py`, `src/codex_flow/tui_models.py`,
+`src/codex_flow/tui.py`, `src/codex_flow/cli.py`,
+`scripts/install_personal_workflow_skills.py`,
+`tests/test_plugin_installation.py`, all other production/test/evidence paths,
+test partitions, schemas, migrations, contracts, entrypoints, services,
+sockets, provider/App/global state, remotes and unrelated worktree bytes. A
+discriminating failure that requires any protected path or boundary returns to
+planning rather than widening the capsule.
+
+Create and remove nothing. The new durable-artifact budget is zero. The
+semantic delta is completion of two existing invariants: one exhaustive
+replacement-state transition and one centralized disconnected-control
+projection. The only new identifier permitted is a descriptive private helper
+inside `TerminalUiClient` if needed to make that projection single-sourced; it
+is not a public/domain concept or compatibility surface. No new class,
+protocol, enum, model, registry, runner or public method is justified.
+
+### Production-boundary test contract
+
+The service suite must use a parameterized state table through the public
+`refresh_with_credential` entrypoint. Each row records the authority sequence,
+unit active sequence, PID/birth liveness sequence, socket presence, manager
+calls, fence count, final installed bytes and restore eligibility. It must
+cover: malformed, missing and ambiguous authority; repository/state/version or
+identity drift; shutdown-0 replacement fenced exactly once; shutdown-1
+replacement skipping refence but following stop/death/revalidation; already
+inactive/dead shutdown-1 replacement; matching predecessor completing the
+three-observation plus final-revalidation absence proof; predecessor becoming a
+replacement during that window; uncertain/live or failed start; and every
+fence, stop, inactivity, death and revalidation failure. Unsafe cases retain
+current harness bytes; only the two proven rollback classifications restore
+legacy bytes. The accepted higher-epoch retry remains green.
+
+The TUI suite must instantiate `TerminalUiClient.for_state_root` against the
+existing authenticated socket of a disposable `WorkflowHarness`, first obtain
+rows plus non-null page tokens/snapshot ids, and then exercise both failures:
+
+1. mutate a disposable worker or decision source fingerprint between first
+   page and `load_more_sessions()` so the production harness returns `stale`;
+2. close or deterministically fault that disposable harness endpoint so a
+   production client request reaches the bounded IPC/client error and offline
+   transition.
+
+For each failure, assert the public snapshot has empty rows and false
+completeness and the internal worker/decision maps, tokens and snapshot ids are
+all cleared. Then use the same state root to start/reacquire the disposable
+harness endpoint, reconnect with `refresh()`, prove both outgoing continuation
+tokens are `None`, and prove only fresh first-page rows and completeness are
+published. Fake clients may remain for narrow model tests but cannot satisfy
+`CI-004-TEST`. No real service or provider is involved.
+
+### Artifact sequence, validation and promotion
+
+The artifact sequence is fixed:
+
+1. stage only the four source/test paths, inspect the staged diff, run
+   `git diff --cached --check`, and create one coherent source/test commit on
+   this planning commit;
+2. afterward build one fresh wheel from that exact commit into a fresh external
+   temporary directory and independently enumerate and compare all 33 packaged
+   Python paths against source; the accepted 17e6d2f wheel is an input, never
+   the successor wheel;
+3. only after exact 33/33 parity, update the existing evidence JSON with the
+   source/test commit, external wheel path/SHA-256/size, enumerated parity and
+   gate results, explicitly superseding the 17e6d2f wheel/evidence identities
+   without embedding the evidence file's own hash; and
+4. stage only that JSON, inspect it, run `git diff --cached --check`, create one
+   evidence-only commit, then compute its final hash/size externally.
+
+Closure requires the focused exhaustive service matrix and production-boundary
+TUI stale/error/recovery tests; accepted IPC, bootstrap, token, 120/120 paging,
+visibility and higher-epoch retry regressions; every affected service and
+live-control/TUI semantic partition; full `make check`; exact external 33/33
+wheel parity; and a clean two-commit implementation ancestry containing only
+the five mutable paths. Independent Luna XHigh correctness and Sol Medium
+architecture causal re-reviews must bind the final evidence-only tip, fresh
+wheel identity, external evidence identity and every commit in
+`ba05399d57da5ca65250f64727e36270f786c213..FINAL_TIP`, with P0=0/P1=0.
+Finding severity remains distinct from `promotion_blocking`; every deferred
+finding names its owner and `defer_to`.
+
+These are provider-free closure gates. Installation, service refresh,
+activation step 5, protected-service verification, provider execution and App
+actions remain outside this capsule. A hard deadline or artifact budget cannot
+weaken a safety/observable gate: use an in-scope proof-preserving repair or
+return a bounded replan; do not restore on uncertainty or add an artifact.
+
+## Next execution — refresh-replacement-state-and-disconnected-control-proof
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Close CI-003-001/002 with exhaustive post-start replacement classification and bounded positive absence proof, and close CI-004-001/TEST with one truthful disconnected-control projection proven through authenticated production clients."
+    ),
+    decomposition=(
+        "Treat a matching higher-epoch shutdown-1 replacement as already fenced: skip refence, stop its exact unit, prove inactivity and birth-bound death, revalidate the same row and only then restore.",
+        "Recognize positive replacement absence only after three deadline-bound consecutive unchanged-predecessor/inactive/dead/no-current-socket observations plus immediate final revalidation.",
+        "Centralize every refresh, load-more and offline disconnected-control snapshot so rows, maps, tokens and snapshot ids are empty and both completeness flags are explicitly false.",
+        "Drive the exhaustive service matrix through refresh_with_credential and stale/error/reconnect TUI tests through for_state_root and the authenticated disposable harness.sock.",
+        "Create the source/test commit, build and independently prove a fresh external wheel at 33/33, then create the evidence-only commit and obtain two causal independent reviews."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The public refresh_with_credential state table covers malformed, missing and ambiguous authority, identity drift, shutdown-0 and shutdown-1 replacements, exact predecessor absence, delayed acquisition, uncertain/live or failed start, and fence/stop/death/revalidation failures with exact calls, bytes and liveness outcomes.",
+        "A matching epoch+1 replacement with requested_shutdown=1 never calls arm_harness_refresh_fence; it stops the exact unit, proves inactivity and PID/birth death, revalidates the unchanged fenced row and restores legacy bytes only after that proof.",
+        "A successful start with only the exact fenced predecessor restores only after three complete observations separated by at least 50ms within the existing deadline and an immediate final revalidation; delayed/uncertain replacement acquisition or deadline exhaustion leaves current harness bytes installed.",
+        "Malformed/missing/ambiguous authority, identity drift and uncertain/live start never restore; shutdown-0 is fenced once; fence/stop/death/revalidation failure leaves current bytes; the accepted higher-epoch retry remains green.",
+        "Every disconnected exit from refresh, load_more_sessions or offline transition uses one private construction and exposes empty worker/decision rows, cleared internal maps/tokens/snapshot ids and workers_complete=False plus decisions_complete=False.",
+        "Production-boundary tests use TerminalUiClient.for_state_root and authenticated disposable harness.sock, force stale by changing the source fingerprint and force client error by closing/faulting the endpoint, then reacquire/reconnect and prove tokenless fresh first-page recovery.",
+        "Conversation history and accepted IPC/bootstrap/token/120-worker/120-decision/M/F paging behavior remain unchanged and green; no protected boundary or new artifact is introduced.",
+        "The four source/test paths form one commit; a fresh later external wheel matches all 33 packaged Python paths; the existing JSON alone forms the evidence commit and contains exact wheel facts but no self-hash.",
+        "Focused matrices, affected partitions, full make check, staged-diff hygiene, clean two-commit ancestry and independent Luna XHigh correctness plus Sol Medium architecture reviews over ba05399d57da5ca65250f64727e36270f786c213..FINAL_TIP close at P0=0/P1=0."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/service.py",
+        "src/codex_flow/tui_client.py",
+        "tests/test_service_lifecycle.py",
+        "tests/test_live_worker_control.py",
+        "docs/reviews/evidence/safe-refresh-and-control-list-paging.json"
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md after this planning commit",
+        "src/codex_flow/ledger.py, src/codex_flow/harness.py, src/codex_flow/control_client.py, TUI models/UI/CLI, installer and all other production/test/evidence paths",
+        "schemas, migrations, contracts, entrypoints, tables, services, sockets, test partitions, prior evidence and retained input wheel bytes",
+        "real service/provider/App/network/global Codex state, remotes, push, rebase, history rewrite, discard, cleanup and unrelated worktree bytes"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt=(
+        "Use execute-milestone as the single Luna XHigh mutable owner for only refresh-replacement-state-and-disconnected-control-proof in the existing integration worktree. Modify exactly service.py, tui_client.py, the two named tests and the existing evidence JSON; create no path. Implement the frozen table: shutdown-0 replacement fences once; shutdown-1 replacement skips refence but stops, proves inactivity/death, revalidates and only then restores; exact predecessor absence requires three complete observations at least 50ms apart within the existing deadline plus final revalidation; all malformed, ambiguous, drift, delayed/uncertain/live and failed proof states retain harness bytes. Centralize disconnected snapshots for refresh, load-more and offline with empty state and explicit false completeness. Test the public service entrypoint exhaustively and for_state_root through authenticated disposable harness.sock, including source-fingerprint stale, endpoint failure and fresh reconnect. Keep protected regressions green. Commit source/tests first, build a fresh external wheel afterward and independently compare 33/33, then update and commit only the existing evidence JSON without self-hash. Run focused, affected, make check, diff, ancestry and parity gates. Touch no real service, provider, App, network or global state. Return one typed terminal result with exact two-commit lineage, wheel/evidence identities and both causal reviews pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
 ## Recovery design — supervisor-refresh-and-runtime-compatibility-recovery
 
 This bounded recovery supersedes the inactive `local-image-worker-input`
