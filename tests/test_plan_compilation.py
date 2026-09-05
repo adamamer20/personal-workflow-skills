@@ -139,7 +139,7 @@ def test_acceptance_candidate_authority_recovery_compiles_the_exact_frozen_capsu
         Path("docs/reviews/peer-thread-workflow.md"), "single-milestone-acceptance-lifecycle"
     )
 
-    assert compiled.source_block_sha256 == "3a41578aa7d73dd042b901238b19bbd8e62ad3b14fae7bb96267a9d92dd80e4e"
+    assert compiled.source_block_sha256 == "8667d359232e40e7fc9a8565bd071a91342e185cf0c2affaedb4ce91e190e900"
     assert compiled.capsule.objective == (
         "Close the remaining exact-candidate terminal-authority defect so one production-shaped repair can "
         "create, validate and re-review a distinct successor without weakening restart adoption."
