@@ -121,7 +121,7 @@ Its existing positive recursive projection must, for every closed object with
 declared `properties`, emit `required` equal to the complete ordered property
 set.  Existing canonical required properties remain unchanged.  Each canonical
 optional property must already admit JSON null through its type, enum, const,
-`oneOf` or `anyOf`; otherwise projection raises
+or canonical `oneOf`; otherwise projection raises
 `TerminalFailureAfterIdentity` before `Thread.turn`.  The projector does not
 mutate its input, invent defaults, relax `additionalProperties`, change the
 canonical schema/digest/parser, or turn local optional values into nullable
