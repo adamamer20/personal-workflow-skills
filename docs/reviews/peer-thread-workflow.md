@@ -10147,9 +10147,12 @@ the policy owner later changes that same repository instruction authority. The
 future policy node and any blocker local to it do not block lifecycle review or
 promotion. After lifecycle acceptance, the policy owner works in the same
 program worktree from the promoted tip. Once both follow-ups are promoted, the
-current branch is installed and receives one self-hosted closure smoke before
-the separate final TUI successor starts. The lifecycle milestone itself retains
-real acceptance-dependency edges:
+current branch is installed and receives one self-hosted closure smoke. A
+separate SDK-fork recovery successor then starts from that exact production
+baseline; it does not reopen or block either active follow-up. The final TUI
+successor remains last and starts only after the recovery successor is accepted
+and installed. The lifecycle milestone itself retains real
+acceptance-dependency edges:
 
     exact candidate adoption
       -> every declared independent review
@@ -10334,12 +10337,120 @@ validators, fixture/schema checks, affected partitions and full `make check`;
 commit only owned surfaces and obtain independent objective and architecture
 acceptance at P0=0/P1=0.
 
+### Deferred recovery successor — SDK fork continuity
+
+This recovery milestone begins only after both active follow-ups close and the
+current branch is installed and proven by its self-hosted smoke. It uses a new
+managed sibling worktree
+`/home/adam/personal-workflow-skills.worktrees/codex-flow-thread-fork-recovery`
+on branch `agent/codex-flow-thread-fork-recovery`, created from that exact
+installed production tip. It is new scope and does not invalidate candidate
+`cca8ab207285bd11bd5b3327b73d67b7f6221d69` or its pending reviews.
+
+The pinned official `openai-codex==0.147.0` transport exposes
+`Codex.thread_fork(thread_id, ...)` and the typed low-level
+`CodexClient.thread_fork(thread_id, ThreadForkParams(...))`. The latter supports
+`last_turn_id`, so the harness can fork a persisted source thread through one
+exact completed turn without depending on a Codex App task API. Codex Flow does
+not expose that capability yet. The currently active virtual environment also
+contains a locally replaced `openai_codex/__init__.py` whose bytes do not match
+the pinned wheel RECORD; `api.py` and `client.py` do match. Before any runtime or
+provider proof, the ordinary reproducible setup must restore the exact pinned
+SDK and verify package integrity. This environment drift is a prerequisite,
+not evidence against the SDK capability.
+
+Forking is a recovery strategy of last useful continuity, not another generic
+retry. Typed 429/500/502/503/504 failures continue to use the existing bounded
+same-thread continuation budget and durable backoff. A fork is eligible only
+after read-only `thread/read(includeTurns=true)` proves that no source writer is
+active, the current thread cannot safely continue, and an exact prior completed
+turn can be named. It forks through that completed turn, thereby excluding a
+failed or interrupted later turn while retaining the earlier persisted
+conversation. Active, ambiguous, malformed, missing-turn and permission/profile
+drift cases fail closed. A source with no completed turn uses the existing fresh
+thread recovery capsule instead of pretending that continuity was preserved.
+
+The fork RPC is a single externally visible effect. The ledger records one
+prepared replacement intent before the call, then either the exact returned
+child identity or an ambiguous/failed terminal fact. A crash or lost response
+after the RPC is never authorization to issue a second fork. Only the bound
+child may receive the next turn; the source remains persisted and readable but
+cannot retain an active worker lease or receive concurrent continuation. The
+new identity inherits and revalidates the exact workspace, model, service tier,
+effective sandbox/approval authority, plugin compatibility and candidate facts.
+No prompt, transcript, tool output, image bytes or secret is copied into SQLite;
+the official SDK owns stored-history copying and the ledger retains only typed
+identities, turn boundary, strategy and effect state.
+
+#### Frozen implementation architecture map
+
+One Luna XHigh mutable owner may modify only these existing production paths:
+
+- **Modify `src/codex_flow/backends/codex_sdk.py`:** add one typed
+  `fork_thread(source, through_turn_id)` adapter operation over the official
+  low-level `thread/fork` boundary, return only the exact child
+  `ThreadIdentity`, and apply the same leaf-worker permission/profile checks as
+  start/resume. The raw SDK client remains private to the adapter.
+- **Modify `src/codex_flow/domain.py`:** extend the existing closed recovery
+  vocabulary with a semantic fork strategy and bounded prepared, starting,
+  bound, failed and ambiguous effect states. Add no general task or transcript
+  model.
+- **Modify `src/codex_flow/ledger.py`:** extend the existing `recovery_state`
+  authority in one forward migration with the minimal source thread, source
+  completed-turn, replacement state and child-thread facts needed for one
+  crash-safe fork attempt. Do not add a second table, scheduler, queue or result
+  authority.
+- **Modify `src/codex_flow/worker.py`:** accept one capability-bound fork source
+  and completed-turn identity, invoke the adapter before `bind_worker`, and
+  bind only the returned child identity. Existing start/resume behavior remains
+  unchanged.
+- **Modify `src/codex_flow/harness.py`:** select fork only from the frozen
+  eligibility facts, persist the intent before process/RPC execution, reject a
+  concurrent or stale source, and reconcile bound, failed or ambiguous outcomes
+  without reissuing an uncertain fork.
+
+Focused tests may modify only `tests/test_codex_sdk_adapter.py`,
+`tests/test_ledger_integrity.py`, `tests/test_supervisor_recovery.py`,
+`tests/test_harness_recovery.py`, `tests/test_live_worker_control.py` and
+`tests/test_production_pilots.py`; `config/test-partitions.toml` may change only
+if the new tests otherwise escape their affected semantic partitions. A single
+new forward schema migration is allowed inside `ledger.py`; new modules,
+tables, services, sockets, CLIs, public commands, result families, App APIs and
+alternate transports are not. The semantic delta is one recovery relationship:
+an exact source thread and completed turn may produce at most one exact child
+thread, while all lifecycle authority remains in SQLite and `WorkflowHarness`.
+
+Acceptance modes are `objective` and `architecture`. Promotion requires:
+
+- provider-free adapter fixtures prove exact `thread/fork` parameters,
+  child-identity validation, permission/profile parity and fail-closed SDK
+  capability absence;
+- public recovery tests prove source-active/ambiguous/malformed rejection,
+  same-thread retry precedence, exact completed-turn selection, one child bind,
+  no concurrent source continuation and no second fork after crash/lost reply;
+- restart and migration tests preserve every existing dispatch, retry,
+  candidate, result, review and controller fact while reconstructing the fork
+  intent/result exactly once;
+- a disposable read-only real SDK sentinel, separately authorized after all
+  deterministic gates pass, forks one sentinel thread through a known completed
+  turn, observes the new thread identity and persisted history, archives only
+  the sentinel identities it created, and proves no repository-byte change;
+- focused and affected partitions, SDK/package integrity, full `make check`,
+  exact candidate review and independent Luna XHigh objective plus Sol Medium
+  architecture acceptance close with P0=0/P1=0.
+
+This milestone is fail-closed if the pinned SDK or real sentinel cannot prove
+the documented behavior. It never calls `mcp__codex_app__fork_thread`, never
+makes the ChatGPT/Codex App the lifecycle authority, and never labels a fresh
+thread plus recovery prompt as a true fork.
+
 ### Deferred final successor — coding-agent terminal experience
 
-This is the final milestone after the two active follow-ups close, the current
-branch is promoted and the resulting runtime/plugin are installed and verified.
-It starts from that exact installed production tip in a new managed sibling
-worktree `/home/adam/personal-workflow-skills.worktrees/codex-flow-terminal-experience`
+This is the final milestone after the two active follow-ups and the SDK-fork
+recovery successor close and their resulting runtime/plugin are installed and
+verified. It starts from that exact latest installed production tip in a new
+managed sibling worktree
+`/home/adam/personal-workflow-skills.worktrees/codex-flow-terminal-experience`
 on branch `agent/codex-flow-terminal-experience`. The branch/worktree is not
 created before those prerequisites close and is never named from a task or
 model identity.
