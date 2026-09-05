@@ -794,6 +794,142 @@ def test_refresh_positive_predecessor_absence_proof_restores_only_after_three_sp
     assert all(delay >= 0.05 for delay in sleeps)
 
 
+def test_refresh_accepts_legitimate_replacement_after_predecessor_wait_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delayed greater epoch is not drift from the fenced predecessor row."""
+
+    _repository, unit, ledger_path, config_home, _installed_path = _interrupted_refresh_fixture(tmp_path)
+    ledger = Ledger(ledger_path)
+    predecessor = ledger.harness_authority()
+    assert predecessor is not None
+    replacement = {
+        **predecessor,
+        "pid": 501,
+        "process_birth_identity": "replacement-birth",
+        "epoch": int(predecessor["epoch"]) + 1,
+        "requested_shutdown": 0,
+    }
+    # The first read is the interrupted-recovery preflight.  The next three
+    # predecessor reads exercise repeated post-start wait-loop observations
+    # before acquisition.
+    observations = iter((predecessor, predecessor, predecessor, predecessor, replacement))
+    observed: list[object] = []
+
+    def observed_authority() -> object:
+        value = next(observations, replacement)
+        observed.append(value)
+        return value
+
+    monkeypatch.setattr(ledger, "harness_authority", observed_authority)
+    service_active = {"value": False}
+    sleeps: list[float] = []
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        operation = argv[2]
+        if operation == "is-active":
+            return _SystemctlResult(0 if service_active["value"] else 3)
+        if operation == "start":
+            service_active["value"] = True
+        return _SystemctlResult(0)
+
+    try:
+        result = refresh_with_credential(
+            unit,
+            config_home=config_home,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            ledger=ledger,
+            process_is_live=lambda pid, birth: (pid, birth) == (501, "replacement-birth"),
+            clock=lambda: 0.0,
+            sleeper=lambda delay: sleeps.append(delay),
+            shutdown_sender=lambda *_args: pytest.fail("interrupted predecessor must not be shut down again"),
+        )
+    finally:
+        ledger.close()
+
+    assert result["refreshed"] is True
+    assert result["old_epoch"] == int(predecessor["epoch"])
+    assert result["new_epoch"] == int(replacement["epoch"])
+    assert observed[:5] == [predecessor, predecessor, predecessor, predecessor, replacement]
+    assert sleeps == [0.05, 0.05]
+
+
+def test_refresh_rejects_replacement_to_different_replacement_identity_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once a replacement is acquired, a different replacement cannot win rollback."""
+
+    repository, unit, ledger_path, config_home, installed_path = _interrupted_refresh_fixture(tmp_path)
+    ledger = Ledger(ledger_path)
+    predecessor = ledger.harness_authority()
+    assert predecessor is not None
+    replacement_a = {
+        **predecessor,
+        "pid": 501,
+        "process_birth_identity": "replacement-a",
+        "epoch": int(predecessor["epoch"]) + 1,
+        "requested_shutdown": 0,
+    }
+    replacement_b = {
+        **predecessor,
+        "pid": 502,
+        "process_birth_identity": "replacement-b",
+        "epoch": int(predecessor["epoch"]) + 2,
+        "requested_shutdown": 1,
+    }
+    # The interrupted-recovery preflight must still see the fenced
+    # predecessor before the acquired replacement and its drifted successor.
+    observations = iter((predecessor, replacement_a, replacement_b))
+
+    def observed_authority() -> object:
+        return next(observations, replacement_b)
+
+    monkeypatch.setattr(ledger, "harness_authority", observed_authority)
+    service_active = {"value": False}
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        operation = argv[2]
+        if operation == "is-active":
+            return _SystemctlResult(0 if service_active["value"] else 3)
+        if operation == "start":
+            service_active["value"] = True
+            acquired = Ledger(ledger_path)
+            try:
+                acquired.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=501,
+                    process_birth_identity="replacement-a",
+                    executable_digest="c" * 64,
+                    version=unit.version,
+                    owner_nonce_sha256="d" * 64,
+                )
+            finally:
+                acquired.close()
+        elif operation == "stop":
+            service_active["value"] = False
+        return _SystemctlResult(0)
+
+    try:
+        with pytest.raises(ServiceRefreshFailed, match="replacement harness authority changed after stop"):
+            refresh_with_credential(
+                unit,
+                config_home=config_home,
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=runner,
+                ledger=ledger,
+                process_is_live=lambda _pid, _birth: False,
+                clock=lambda: 0.0,
+                sleeper=lambda _delay: pytest.fail("replacement rollback should not wait"),
+                shutdown_sender=lambda *_args: pytest.fail("interrupted predecessor must not be shut down again"),
+            )
+    finally:
+        ledger.close()
+
+    assert installed_path.read_text(encoding="utf-8") == unit.text
+
+
 def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(tmp_path: Path) -> None:
     _repository, unit, ledger, processes, service_state = _refresh_fixture(tmp_path)
     calls: list[tuple[str, ...]] = []

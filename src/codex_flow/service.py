@@ -1040,10 +1040,6 @@ def refresh_with_credential(
 
             replacement_authority_seen = True
             identity = (replacement_pid, replacement_birth, replacement_epoch)
-            if replacement_identity is None:
-                replacement_identity = identity
-            elif replacement_identity != identity:
-                raise ServiceRefreshFailed("replacement harness authority identity drifted")
             # The shutdown fence is untrusted input.  Keep the guard set
             # before parsing it so malformed values cannot re-enable legacy
             # restore.  The exact unchanged fenced predecessor is handled by
@@ -1071,6 +1067,18 @@ def refresh_with_credential(
                 remaining()
                 sleeper(min(0.05, remaining()))
                 continue
+
+            # Only a row that has crossed the predecessor epoch is a
+            # replacement identity.  The exact fenced predecessor may remain
+            # observable while a legitimate replacement is still acquiring;
+            # recording it here would falsely classify that later replacement
+            # as identity drift.  Once acquisition begins, every subsequent
+            # replacement observation must retain the same process/birth/epoch
+            # tuple.
+            if replacement_identity is None:
+                replacement_identity = identity
+            elif replacement_identity != identity:
+                raise ServiceRefreshFailed("replacement harness authority identity drifted")
 
             healthy = (
                 shutdown_bit == 0
