@@ -127,6 +127,13 @@ mutate its input, invent defaults, relax `additionalProperties`, change the
 canonical schema/digest/parser, or turn local optional values into nullable
 values.
 
+Null admission is effective-schema evaluation, not an independent-key
+shortcut. A declared type must admit null; a present `const` must be null; a
+present `enum` must contain null; and canonical `oneOf` admits null only when
+exactly one branch admits it. Thus nullable type plus a non-null const or an
+enum excluding null is not nullable, and overlapping null branches are not a
+truthful optional-value representation.
+
 Focused tests in `tests/test_codex_sdk_adapter.py` must prove:
 
 - the real `model_facing_result_schema()` projects root `required` exactly equal
@@ -134,8 +141,9 @@ Focused tests in `tests/test_codex_sdk_adapter.py` must prove:
 - the projected nullable `blocker` remains object-or-null and the complete
   canonical local validator accepts both serialized states;
 - the rule applies recursively to a nested optional nullable property;
-- an optional non-nullable property fails before the fake SDK thread receives
-  a turn call; and
+- an optional non-nullable property, including nullable type contradicted by a
+  non-null const, enum exclusion or overlapping `oneOf`, fails before the fake
+  SDK thread receives a turn call; and
 - projection is deterministic and leaves the canonical input byte-for-byte
   equivalent.
 
@@ -170,14 +178,14 @@ ModelFacingCapsule(
     ),
     decomposition=(
         "Complete the existing recursive positive projector so each closed object emits required equal to its complete ordered properties.",
-        "Recognize canonical null admission structurally and fail closed before Thread.turn for an optional property that cannot be represented truthfully.",
+        "Evaluate canonical null admission conjunctively across type, const and enum and exclusively across oneOf, then fail before Thread.turn for an optional property that cannot be represented truthfully.",
         "Prove the real nullable blocker, recursive nullable fields, non-nullable rejection, input immutability and fake-SDK no-call boundary.",
         "Commit the two owned paths, run focused and full gates, build a fresh external wheel with complete source parity, then obtain independent correctness and architecture reviews before activation."
     ),
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
         "The provider projection of model_facing_result_schema has root required exactly equal to root properties and includes blocker while preserving blocker as object-or-null.",
-        "Every nested closed object follows the same complete-required rule; canonical optional properties project only when their existing schema admits null.",
+        "Every nested closed object follows the same complete-required rule; canonical optional properties project only when their effective existing schema admits null after type, const, enum and exclusive oneOf constraints.",
         "An optional non-nullable property raises TerminalFailureAfterIdentity before any SDK turn call, and projection never mutates or widens the canonical schema.",
         "Canonical ModelFacingResult schema, digest, parser and local validation behavior remain unchanged.",
         "Focused adapter and affected worker/recovery partitions plus make check pass; a fresh external wheel matches every packaged Python source path.",
@@ -198,7 +206,7 @@ ModelFacingCapsule(
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
     ),
     prompt=(
-        "Use execute-milestone as the single bounded recovery owner for provider-object-required-closure in the existing integration checkout. Modify only codex_sdk.py and test_codex_sdk_adapter.py. Make the positive recursive provider projection require every declared property at every closed object; permit a canonical optional property only when its existing schema admits null and otherwise fail before Thread.turn. Preserve the canonical ModelFacingResult schema/digest/parser and every other surface. Add real-result, recursive, input-immutability and fake-SDK no-call regressions. Commit the two paths once, run focused and affected gates plus make check, build a fresh external wheel with complete source parity, and return exact identities with independent correctness and architecture reviews pending. Do not install, refresh services, retry the blocked dispatch, invoke a provider/App/network action, create another task or add artifacts/modules/schemas/commands."
+        "Use execute-milestone as the single bounded recovery owner for provider-object-required-closure in the existing integration checkout. Modify only codex_sdk.py and test_codex_sdk_adapter.py. Make the positive recursive provider projection require every declared property at every closed object; permit a canonical optional property only when its effective schema admits null after conjunctive type/const/enum and exclusive oneOf evaluation, otherwise fail before Thread.turn. Preserve the canonical ModelFacingResult schema/digest/parser and every other surface. Add real-result, recursive, constraint-conflict, input-immutability and fake-SDK no-call regressions. Commit a successor repair, run focused and affected gates plus make check, build a fresh external wheel with complete source parity, and return exact identities with independent correctness and architecture re-reviews pending. Do not install, refresh services, retry the blocked dispatch, invoke a provider/App/network action, create another task or add artifacts/modules/schemas/commands."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=8_000
@@ -228,7 +236,7 @@ promotion-blocking P1 findings. The disconnected TUI behavior, authenticated
 
 The remaining serial DAG is:
 
-    refresh-replacement-policy-matrix-closure [ready; one mutable owner]
+    refresh-replacement-policy-matrix-closure [blocked by provider-object install/refresh/CAS recovery]
       -> independent Luna XHigh correctness causal review
       -> independent Sol Medium architecture causal review
       -> integration-owner promotion/install/refresh/provider-free activation step 5
