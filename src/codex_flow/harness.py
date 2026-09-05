@@ -1632,17 +1632,10 @@ class WorkflowHarness:
             if status.stdout.strip():
                 raise WorktreeError("control workspace contains dirty bytes after terminalization")
             current_head_value = current_head.stdout.strip()
-            if current_head_value != terminal_head and self._is_retained_historical_candidate(
+            historical_candidate = current_head_value != terminal_head and self._is_retained_historical_candidate(
                 capsule, candidate_sha, current_head_value
-            ):
-                # The retained migration candidate predates the acceptance
-                # lifecycle commits in this checkout.  Those later commits
-                # are outside the migration capsule's mutable/protected
-                # surfaces, so the exact 47a8fa3d -> 977d8f5c lineage remains
-                # adoptable while a fresh candidate still requires exact
-                # terminal authorities below.
-                return
-            if current_head_value != terminal_head:
+            )
+            if current_head_value != terminal_head and not historical_candidate:
                 raise WorktreeError("control workspace HEAD advanced after terminalization")
             snapshot_controller = Controller(self.state_root, worktrees=self._worktrees)
             try:
@@ -4113,9 +4106,9 @@ class WorkflowHarness:
                             ),
                             None,
                         )
-                        if not isinstance(expected_repair, list) or tuple(expected_repair) != repair_findings:
+                        if not isinstance(expected_repair, list | tuple) or tuple(expected_repair) != repair_findings:
                             raise WorktreeError("control executor queue findings conflict with its repair authority")
-                if terminal_status == "completed":
+                if terminal_status == "completed" and generation == 1:
                     # A completed direct controller execution already owns a
                     # terminal HEAD/workspace/Git/protected snapshot.  Queue
                     # result replay must bind to that immutable snapshot
@@ -4137,9 +4130,45 @@ class WorkflowHarness:
                             candidate_sha=retained_sha,
                             require_terminal_facts=True,
                         )
-                        if predecessor_sha is not None and predecessor_sha != retained_sha:
-                            raise WorktreeError("control queue predecessor conflicts with terminal candidate")
+                        if predecessor_sha is not None:
+                            raise WorktreeError("initial control queue result cannot carry repair authority")
+                elif terminal_status == "completed":
+                    try:
+                        retained = self.ledger.get_execution_integrity(run_id, milestone_id)
+                    except KeyError:
+                        retained = None
+                    retained_sha = retained.workspace_terminal_head_sha if retained is not None else None
+                    if retained_sha is None or predecessor_sha != retained_sha:
+                        raise WorktreeError("control repair predecessor conflicts with terminal candidate")
                 candidate = self._worktrees.inspect_terminal_workspace(capsule, predecessor_sha=predecessor_sha)
+                if terminal_status == "completed" and generation > 1:
+                    if (
+                        candidate.disposition.value != "verified_commit"
+                        or candidate.commit_sha != candidate.workspace_head
+                        or candidate.dirty
+                    ):
+                        raise WorktreeError("control repair did not produce one direct clean terminal successor")
+                    try:
+                        from .controller import protected_paths_digest
+
+                        parent = subprocess.run(
+                            ("git", "show", "-s", "--format=%P", candidate.commit_sha or ""),
+                            cwd=capsule.workspace_path,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        if parent.returncode != 0 or parent.stdout.strip() != predecessor_sha:
+                            raise WorktreeError("control repair did not produce one direct clean terminal successor")
+                        execution = self.ledger.get_execution(run_id, milestone_id)
+                        retained_protected = execution.protected_after_sha256
+                        current_protected = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+                    except WorktreeError:
+                        raise
+                    except (RecordNotFound, OSError, RuntimeError, ValueError) as exc:
+                        raise WorktreeError("control repair terminal authority could not be revalidated") from exc
+                    if retained_protected is None or current_protected != retained_protected:
+                        raise WorktreeError("control repair changed protected terminal authority")
                 result = None
                 try:
                     result = ModelFacingResult.from_agent_message(raw)

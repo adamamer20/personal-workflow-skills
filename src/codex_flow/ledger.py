@@ -4560,9 +4560,14 @@ class Ledger:
                     ):
                         raise CorruptSchemaError("completed execution is missing terminal evidence")
                     if milestone_state not in {
+                        WorkflowState.STARTING,
+                        WorkflowState.RUNNING,
                         WorkflowState.COMPLETED,
                         WorkflowState.REVIEWING,
+                        WorkflowState.REPAIR_REQUIRED,
                         WorkflowState.ACCEPTED,
+                        WorkflowState.BLOCKED,
+                        WorkflowState.NEEDS_DECISION,
                         WorkflowState.FAILED,
                     }:
                         raise CorruptSchemaError(
@@ -11401,7 +11406,7 @@ class Ledger:
             if execution_row is not None and candidate is not None:
                 if Path(str(execution_row["workspace_path"])).resolve() != candidate.workspace_path.resolve():
                     raise StaleWriter("control candidate workspace conflicts with its durable execution")
-                if str(execution_row["status"]) == ExecutionStatus.COMPLETED.value:
+                if dispatch.parts[3] == 1 and str(execution_row["status"]) == ExecutionStatus.COMPLETED.value:
                     try:
                         terminal_integrity = self.get_execution_integrity(run, milestone)
                     except KeyError as exc:
@@ -11424,8 +11429,15 @@ class Ledger:
             predecessor_sha: str | None = None
             if existing is not None and dispatch.parts[3] > self._candidate_dispatch_generation(facts, existing):
                 prior_generation = self._candidate_dispatch_generation(facts, existing)
-                if dispatch.parts[3] != prior_generation + 1 or not any(
-                    fact.kind == "repair_requested" and fact.data.get("candidate_sha") == existing for fact in facts
+                if (
+                    prior_generation != 1
+                    or dispatch.parts[3] != 2
+                    or not any(
+                        fact.kind == "repair_requested"
+                        and fact.data.get("candidate_sha") == existing
+                        and fact.data.get("repair_generation") == 2
+                        for fact in facts
+                    )
                 ):
                     raise StaleWriter("control candidate successor is outside the one-repair lifecycle")
                 if candidate_sha == existing or (candidate_sha is None and terminal_status == "completed"):

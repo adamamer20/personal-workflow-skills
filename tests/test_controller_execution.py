@@ -65,6 +65,7 @@ from codex_flow.domain import (
     WorkspaceMode,
     validate_output_schema,
 )
+from codex_flow.harness import WorkflowHarness
 from codex_flow.ledger import (
     _EXECUTION_INTEGRITY_V7_DDL,
     _V2_TABLE_DDL,
@@ -535,6 +536,144 @@ def test_completed_execution_reopens_through_integrated_review_and_acceptance() 
         assert accepted.status("run", "m1").status is ExecutionStatus.COMPLETED
         assert accepted.ledger.current_state("run", "m1") is WorkflowState.ACCEPTED
         accepted.close()
+
+
+def test_completed_controller_execution_accepts_one_exact_repair_successor_idempotently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repo"
+    base, branch = _repository(repository)
+    (repository / ".gitignore").write_text(".codex-flow/\n")
+    _git(repository, "add", ".gitignore")
+    _git(repository, "commit", "-qm", "ignore controller state")
+    base = _git(repository, "rev-parse", "HEAD")
+    capsule = replace(
+        _capsule(repository, repository, base, branch),
+        acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    )
+    controller = Controller(
+        repository,
+        _trusted_test_adapter_factory=_factory(_service()),
+    )
+    controller.plan(capsule)
+    terminal = controller.start("run", "m1")
+    assert terminal.status is ExecutionStatus.COMPLETED, terminal.result
+    _git(repository, "add", "result.txt")
+    _git(repository, "commit", "-qm", "initial candidate")
+    predecessor = _git(repository, "rev-parse", "HEAD")
+    terminal_workspace = controller._owned_workspace_snapshot(capsule)
+    terminal_workspace_json = json.dumps(terminal_workspace, separators=(",", ":"))
+    with controller.ledger._transaction():
+        controller.ledger._db().execute(
+            "UPDATE execution_integrity SET workspace_terminal_head_sha = ?, workspace_terminal_json = ?, "
+            "workspace_terminal_sha256 = ?, git_authority_after_sha256 = ? "
+            "WHERE run_id = 'run' AND milestone_id = 'm1'",
+            (
+                predecessor,
+                terminal_workspace_json,
+                hashlib.sha256(terminal_workspace_json.encode()).hexdigest(),
+                controller_module.git_authority_snapshot(repository).sha256,
+            ),
+        )
+    controller.close()
+
+    harness = WorkflowHarness(repository)
+    monkeypatch.setattr(harness, "_queue_control_reviews", lambda *_args, **_kwargs: None)
+    assert harness.reconcile_control_execution("run", "m1").commit_sha == predecessor
+    harness.ledger.record_review_transition(
+        "run",
+        "m1",
+        WorkflowState.REPAIR_REQUIRED,
+        expected_state=WorkflowState.REVIEWING,
+        phase=LifecyclePhase.REPAIR,
+        kind="repair_requested",
+        data={
+            "candidate_sha": predecessor,
+            "finding_ids": ["CONTROL-CANDIDATE-IDENTITY-001"],
+            "same_owner": True,
+            "repair_generation": 2,
+        },
+    )
+    harness.ledger.claim_program_repair_dispatch("run", "m1", generation=2)
+    (repository / "result.txt").write_text("repaired\n")
+    _git(repository, "add", "result.txt")
+    _git(repository, "commit", "-qm", "repair candidate")
+    successor = _git(repository, "rev-parse", "HEAD")
+    raw_result = json.dumps(
+        {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "repaired candidate identity",
+            "changed_surfaces": ["result.txt"],
+            "validations": [],
+            "durable_status": "completed",
+            "next_action": None,
+            "blocker": None,
+        },
+        separators=(",", ":"),
+    )
+    row = {
+        "dispatch_id": "run/m1/executor/2",
+        "run_id": "run",
+        "milestone_id": "m1",
+        "role": "executor",
+        "generation": 2,
+        "terminal_status": "completed",
+        "raw_result_sha256": hashlib.sha256(raw_result.encode()).hexdigest(),
+        "raw_result_json": raw_result,
+        "action_json": json.dumps(
+            {
+                "candidate_sha": predecessor,
+                "finding_ids": ["CONTROL-CANDIDATE-IDENTITY-001"],
+                "repair_generation": 2,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    }
+
+    def fail_on_rejection(_row: Mapping[str, object], error: Exception) -> None:
+        raise error
+
+    monkeypatch.setattr(harness, "_control_result_issue", fail_on_rejection)
+
+    harness._record_control_queue_result(row)
+    harness._record_control_queue_result(row)
+
+    facts = harness.ledger.review_lifecycle("run", "m1")
+    successor_facts = [
+        fact
+        for fact in facts
+        if fact.kind == "candidate_recorded" and fact.data.get("dispatch_id") == "run/m1/executor/2"
+    ]
+    assert len(successor_facts) == 1, [(fact.kind, fact.data) for fact in facts]
+    assert successor_facts[0].data["candidate_sha"] == successor
+    assert harness.ledger.current_state("run", "m1") is WorkflowState.REVIEWING
+    assert any(
+        fact.kind == "candidate_superseded"
+        and fact.data
+        == {
+            "predecessor_sha": predecessor,
+            "candidate_sha": successor,
+            "dispatch_id": "run/m1/executor/2",
+        }
+        for fact in facts
+    )
+    with pytest.raises(StaleWriter, match="one-repair lifecycle"):
+        harness.ledger.record_control_executor_result(
+            "run",
+            "m1",
+            candidate=CandidateRecord(
+                CandidateDisposition.VERIFIED_COMMIT,
+                repository,
+                commit_sha="d" * 40,
+                workspace_head="d" * 40,
+            ),
+            terminal_status="completed",
+            dispatch_id="run/m1/executor/3",
+            result_sha256="e" * 64,
+        )
+    harness.close()
 
 
 def test_ordinary_control_candidate_acceptance_is_exact_and_not_a_program_graph() -> None:

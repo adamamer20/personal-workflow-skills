@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import codex_flow.controller as controller_module
 import codex_flow.harness as harness_module
 from codex_flow import worker as worker_module
 from codex_flow.backends.codex_sdk import ResponseChainInvalid, ThreadInspection, ThreadInspectionKind
@@ -26,7 +27,7 @@ from codex_flow.contracts import (
     PluginRequirement,
     model_facing_result_schema_sha256,
 )
-from codex_flow.controller import Controller
+from codex_flow.controller import Controller, git_authority_snapshot, protected_paths_digest
 from codex_flow.domain import (
     AcceptanceMode,
     CandidateDisposition,
@@ -612,6 +613,65 @@ def test_control_rejects_dirty_workspace_bytes_after_terminalization(
         harness._assert_control_terminal_authority(capsule, candidate_sha="a" * 40, require_terminal_facts=True)
 
 
+@pytest.mark.parametrize(
+    ("drift", "message"),
+    (
+        ("candidate", "durable terminal HEAD"),
+        ("workspace", "workspace bytes changed"),
+        ("git", "Git authority changed"),
+        ("protected", "protected paths changed"),
+    ),
+)
+def test_control_terminal_authority_rejects_each_named_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+    message: str,
+) -> None:
+    harness, capsule = _terminal_authority_harness(tmp_path)
+    if drift == "candidate":
+        with pytest.raises(WorktreeError, match=message):
+            harness._assert_control_terminal_authority(
+                capsule,
+                candidate_sha="d" * 40,
+                require_terminal_facts=True,
+            )
+        return
+
+    calls = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="a" * 40 + "\n"),
+            SimpleNamespace(returncode=0, stdout=""),
+        )
+    )
+    monkeypatch.setattr(harness_module.subprocess, "run", lambda *args, **kwargs: next(calls))
+
+    class SnapshotController:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def _owned_workspace_snapshot(self, _capsule: ExecutionCapsule) -> tuple[tuple[str, str], ...]:
+            return (("owned.txt", "drift" if drift == "workspace" else "signature"),)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(controller_module, "Controller", SnapshotController)
+    monkeypatch.setattr(
+        controller_module,
+        "git_authority_snapshot",
+        lambda _path: SimpleNamespace(sha256="d" * 64 if drift == "git" else "b" * 64),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "protected_paths_digest",
+        lambda _path, _paths: "d" * 64 if drift == "protected" else "c" * 64,
+    )
+
+    with pytest.raises(WorktreeError, match=message):
+        harness._assert_control_terminal_authority(capsule, candidate_sha="a" * 40, require_terminal_facts=True)
+
+
 def test_control_dispatch_reuse_accepts_matching_candidate_role_and_generation(tmp_path: Path) -> None:
     capsule = _control_capsule(tmp_path)
     dispatch_id = "control-run/control-milestone/code-reviewer/1"
@@ -746,8 +806,13 @@ def test_control_restart_adopts_exact_retained_lineage_without_executor_replay(
     )
     harness.ledger.claim_dispatch(capsule.run_id, capsule.milestone_id, "executor", 1)
     now = utc_now()
-    empty_workspace = "[]"
-    empty_workspace_sha = hashlib.sha256(empty_workspace.encode("utf-8")).hexdigest()
+    snapshot_controller = Controller(repository)
+    terminal_workspace = snapshot_controller._owned_workspace_snapshot(capsule)
+    snapshot_controller.close()
+    terminal_workspace_json = json.dumps(terminal_workspace, separators=(",", ":"))
+    terminal_workspace_sha = hashlib.sha256(terminal_workspace_json.encode("utf-8")).hexdigest()
+    terminal_git_sha = git_authority_snapshot(repository).sha256
+    terminal_protected_sha = protected_paths_digest(repository, capsule.protected_paths)
     result_json = json.dumps({"status": "completed"}, separators=(",", ":"))
     with harness.ledger._transaction():
         harness.ledger._db().execute(
@@ -762,7 +827,7 @@ def test_control_restart_adopts_exact_retained_lineage_without_executor_replay(
                 json.dumps(["true"], separators=(",", ":")),
                 "5" * 64,
                 "6" * 64,
-                "7" * 64,
+                terminal_protected_sha,
                 now,
                 str(capsule.run_id),
                 str(capsule.milestone_id),
@@ -774,10 +839,10 @@ def test_control_restart_adopts_exact_retained_lineage_without_executor_replay(
             "WHERE run_id = ? AND milestone_id = ?",
             (
                 "977d8f5c8c55459625dbff8133c262e12f91bba0",
-                empty_workspace,
-                empty_workspace_sha,
+                terminal_workspace_json,
+                terminal_workspace_sha,
                 now,
-                "4" * 64,
+                terminal_git_sha,
                 now,
                 str(capsule.run_id),
                 str(capsule.milestone_id),
@@ -831,6 +896,16 @@ def test_control_restart_adopts_exact_retained_lineage_without_executor_replay(
     with pytest.raises(CorruptSchemaError):
         restarted.ledger.program_status(str(capsule.run_id))
     restarted.close()
+
+    corrupted = WorkflowHarness(repository)
+    with corrupted.ledger._transaction():
+        corrupted.ledger._db().execute(
+            "UPDATE execution_integrity SET git_authority_after_sha256 = ? WHERE run_id = ? AND milestone_id = ?",
+            ("4" * 64, str(capsule.run_id), str(capsule.milestone_id)),
+        )
+    with pytest.raises(WorktreeError, match="Git authority changed"):
+        corrupted.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
+    corrupted.close()
 
 
 def test_harness_start_rejects_dangling_legacy_socket_entry_before_claim(tmp_path: Path) -> None:
