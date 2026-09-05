@@ -74,7 +74,138 @@ tests/
 workflow.toml            # one routing and limit table
 ```
 
-## Active selection after exhaustive refresh-policy causal reviews
+## Immediate recovery selection after provider schema preflight failure
+
+The first real execution of the planned refresh-policy successor reached the
+official SDK and created a durable worker thread, but the provider rejected the
+controller-owned output schema before model work began.  Both attempt 1 and the
+single authorized recovery attempt returned `400 invalid_json_schema`: the
+root object declared `blocker` in `properties` without including it in
+`required`.  The durable dispatch
+`model-89956fe146023c2e937d3dfcfb2c4a6d/milestone-57b78291c4f14ac0433031b2706ea0c9/executor/1`
+is `human_attention_required` with no result and no active turn.  It remains
+frozen: another retry before runtime repair is forbidden.
+
+This is a bounded provider-boundary prerequisite, not evidence against the
+refresh policy.  The canonical `ModelFacingResult` contract intentionally
+accepts absent `blocker` for local compatibility and serializes it as nullable;
+that public/persisted acceptance contract remains unchanged.  Only the
+provider projection must obey the documented Structured Outputs object rule:
+every declared property is required, and semantic optionality is represented
+by an already-nullable child schema.  A canonical optional property that is not
+nullable cannot be represented truthfully and must fail closed before an SDK
+call rather than being silently forced or widened.
+
+The immediate serial DAG is:
+
+    provider-object-required-closure [ready; one recovery owner]
+      -> install verified wheel and safely refresh only the target harness
+      -> one CAS recovery of the existing human-attention dispatch
+      -> refresh-replacement-policy-matrix-closure
+      -> independent Luna XHigh correctness causal review
+      -> independent Sol Medium architecture causal review
+      -> integration-owner promotion/install/refresh/provider-free activation step 5
+      -> one already-authorized real streaming sentinel
+      -> live-plan-dag-revision
+      -> module-responsibility-decomposition
+
+Every edge is an acceptance dependency.  The blocked worker is never replaced
+or retried through another transport.  The recovery reuses the same durable
+dispatch only after source, package and installed-runtime parity prove the
+provider schema fix is active.
+
+### Provider object projection invariant
+
+`src/codex_flow/backends/codex_sdk.py` remains the sole official SDK boundary.
+Its existing positive recursive projection must, for every closed object with
+declared `properties`, emit `required` equal to the complete ordered property
+set.  Existing canonical required properties remain unchanged.  Each canonical
+optional property must already admit JSON null through its type, enum, const,
+`oneOf` or `anyOf`; otherwise projection raises
+`TerminalFailureAfterIdentity` before `Thread.turn`.  The projector does not
+mutate its input, invent defaults, relax `additionalProperties`, change the
+canonical schema/digest/parser, or turn local optional values into nullable
+values.
+
+Focused tests in `tests/test_codex_sdk_adapter.py` must prove:
+
+- the real `model_facing_result_schema()` projects root `required` exactly equal
+  to root `properties`, including nullable `blocker`;
+- the projected nullable `blocker` remains object-or-null and the complete
+  canonical local validator accepts both serialized states;
+- the rule applies recursively to a nested optional nullable property;
+- an optional non-nullable property fails before the fake SDK thread receives
+  a turn call; and
+- projection is deterministic and leaves the canonical input byte-for-byte
+  equivalent.
+
+No provider call is part of this implementation gate.  After the focused
+adapter and worker/recovery partitions, the owner stages only the two source
+paths, inspects the staged diff, runs `git diff --cached --check`, commits once,
+runs full `make check`, and builds a fresh external wheel with complete packaged
+Python source parity.  Independent Luna XHigh correctness and Sol Medium
+architecture reviews must return P0=0/P1=0 before installation.  The
+integration owner then uses the single canonical installer, proves installed
+adapter byte parity, safely refreshes only
+`codex-flow-937220b34ee45f7f.service` while proving
+`codex-flow-71308abd5aeed226.service` unchanged, and authorizes exactly one CAS
+recovery of the existing dispatch.  No new evidence file, module, schema,
+migration, command, service, transport or compatibility alias is allowed.
+
+The semantic delta is one completed boundary invariant, not new vocabulary.
+Mutable implementation surfaces are exactly
+`src/codex_flow/backends/codex_sdk.py` and
+`tests/test_codex_sdk_adapter.py`.  Protect the canonical result schema and
+digest in `src/codex_flow/contracts.py`, all ledger/worker/harness/service/TUI
+code and tests, current refresh evidence, retained wheels, AGENTS.md, services,
+provider/App/network/global state, remotes and unrelated bytes.
+
+## Next execution — provider-object-required-closure
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make every closed object in the official SDK Structured Outputs projection provider-valid without changing the canonical local result contract: all provider properties are required, and canonical optionality is representable only through an already-nullable child."
+    ),
+    decomposition=(
+        "Complete the existing recursive positive projector so each closed object emits required equal to its complete ordered properties.",
+        "Recognize canonical null admission structurally and fail closed before Thread.turn for an optional property that cannot be represented truthfully.",
+        "Prove the real nullable blocker, recursive nullable fields, non-nullable rejection, input immutability and fake-SDK no-call boundary.",
+        "Commit the two owned paths, run focused and full gates, build a fresh external wheel with complete source parity, then obtain independent correctness and architecture reviews before activation."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The provider projection of model_facing_result_schema has root required exactly equal to root properties and includes blocker while preserving blocker as object-or-null.",
+        "Every nested closed object follows the same complete-required rule; canonical optional properties project only when their existing schema admits null.",
+        "An optional non-nullable property raises TerminalFailureAfterIdentity before any SDK turn call, and projection never mutates or widens the canonical schema.",
+        "Canonical ModelFacingResult schema, digest, parser and local validation behavior remain unchanged.",
+        "Focused adapter and affected worker/recovery partitions plus make check pass; a fresh external wheel matches every packaged Python source path.",
+        "Only the two owned paths form one clean implementation commit and independent Luna XHigh correctness plus Sol Medium architecture reviews return P0=0/P1=0 before install or dispatch recovery."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/backends/codex_sdk.py",
+        "tests/test_codex_sdk_adapter.py"
+    ),
+    protected_surfaces=(
+        "src/codex_flow/contracts.py and every canonical/public/persisted schema, digest and parser",
+        "ledger, worker, harness, service, TUI and all other production/test/evidence paths",
+        "docs/reviews/peer-thread-workflow.md after this recovery plan commit, AGENTS.md, retained wheels and current refresh evidence",
+        "both named services, provider/App/network/global state, remotes, push, rebase, history rewrite, discard, cleanup and unrelated bytes"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt=(
+        "Use execute-milestone as the single bounded recovery owner for provider-object-required-closure in the existing integration checkout. Modify only codex_sdk.py and test_codex_sdk_adapter.py. Make the positive recursive provider projection require every declared property at every closed object; permit a canonical optional property only when its existing schema admits null and otherwise fail before Thread.turn. Preserve the canonical ModelFacingResult schema/digest/parser and every other surface. Add real-result, recursive, input-immutability and fake-SDK no-call regressions. Commit the two paths once, run focused and affected gates plus make check, build a fresh external wheel with complete source parity, and return exact identities with independent correctness and architecture reviews pending. Do not install, refresh services, retry the blocked dispatch, invoke a provider/App/network action, create another task or add artifacts/modules/schemas/commands."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=8_000
+)
+```
+
+## Paused successor after exhaustive refresh-policy causal reviews
 
 The fixed clean integration parent is
 `70a1065d188ec94ac3b734743177206a1e2e7249` on
@@ -263,7 +394,7 @@ No visual review is requested. Finding severity remains distinct from
 are provider-free gates only; installation, service refresh, activation,
 protected-service checks and the real streaming sentinel remain outside.
 
-## Next execution — refresh-replacement-policy-matrix-closure
+## Paused successor capsule — refresh-replacement-policy-matrix-closure
 
 ```python
 ModelFacingCapsule(
