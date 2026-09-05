@@ -10141,13 +10141,15 @@ Two independently closable follow-ups have disjoint mutable surfaces:
    deferred until the selected lifecycle milestone closes.
 
 Their production/test mutable paths are disjoint, but one concrete `shared
-contract` edge keeps execution serial: the lifecycle owner must work under the
-currently frozen root instructions, while the policy owner later changes that
-same repository instruction authority. The future policy node and any blocker
-local to it do not block lifecycle review or promotion. After lifecycle
-acceptance, the policy owner works in the same program worktree from the
-promoted tip. The lifecycle milestone itself retains real
-acceptance-dependency edges:
+contract` edge keeps execution serial: the
+lifecycle owner must work under the currently frozen root instructions, while
+the policy owner later changes that same repository instruction authority. The
+future policy node and any blocker local to it do not block lifecycle review or
+promotion. After lifecycle acceptance, the policy owner works in the same
+program worktree from the promoted tip. Once both follow-ups are promoted, the
+current branch is installed and receives one self-hosted closure smoke before
+the separate final TUI successor starts. The lifecycle milestone itself retains
+real acceptance-dependency edges:
 
     exact candidate adoption
       -> every declared independent review
@@ -10331,6 +10333,92 @@ or whole-program blocker as future-only. Run focused workflow-asset tests,
 validators, fixture/schema checks, affected partitions and full `make check`;
 commit only owned surfaces and obtain independent objective and architecture
 acceptance at P0=0/P1=0.
+
+### Deferred final successor — coding-agent terminal experience
+
+This is the final milestone after the two active follow-ups close, the current
+branch is promoted and the resulting runtime/plugin are installed and verified.
+It starts from that exact installed production tip in a new managed sibling
+worktree `/home/adam/personal-workflow-skills.worktrees/codex-flow-terminal-experience`
+on branch `agent/codex-flow-terminal-experience`. The branch/worktree is not
+created before those prerequisites close and is never named from a task or
+model identity.
+
+The presentation milestone replaces the current controller summary
+label with a first-class selectable controller row and makes the Textual
+application look and behave more like a modern coding-agent CLI. Codex CLI is
+only a visual and interaction reference. Codex-flow keeps its existing official
+Python SDK transport, authenticated local IPC, SQLite state authority, detached
+`WorkflowHarness`, lifecycle rules and Textual implementation.
+
+The observable target is one coherent terminal shell with a session rail for
+controller and worker conversations, a dominant transcript, inline mutable tool
+activity, compact lifecycle/status context, a bounded input composer and a
+command palette. Controller, implementer, reviewer and recovery sessions remain
+visibly related but independently selectable. `Active/all` hides or reveals
+inactive and completed sessions without deleting their durable identity.
+Human-attention decisions remain a distinct action surface rather than being
+the only way a controller conversation becomes visible.
+
+The final milestone is not ready for mutable execution until these prerequisites
+exist:
+
+- `single-milestone-acceptance-lifecycle` is independently accepted, installed
+  and proven to create controller, review and repair sessions through the
+  production harness;
+- representative existing controller, worker, reviewer, tool-call, completed
+  and attention states are available for deterministic UI fixtures; and
+- the implementation owner confirms whether the existing read-only control
+  projection already exposes completed controller sessions. If it does not,
+  one bounded Sol Medium replan may add only the smallest read-only projection;
+  no lifecycle, persistence or scheduling change is allowed.
+
+The implementation remains presentation-focused:
+
+- SQLite and `WorkflowHarness` remain the sole durable authorities; the TUI is
+  an event-driven typed consumer and never schedules, retries, promotes or
+  invents controller state;
+- controller history comes from official persisted SDK thread items through
+  the existing privacy/redaction boundary; App task lists, rollout files and
+  diagnostic prose never substitute for a transcript;
+- live assistant/tool projections remain bounded, lossy and ephemeral, while
+  terminal results and persisted conversations remain authoritative;
+- the composer is a visual wrapper around existing typed steer, interrupt and
+  decision actions with their current identity/CAS checks; it is not an
+  arbitrary shell or alternate SDK prompt transport;
+- paths, URLs, secrets and image bytes retain typed presence markers and safe
+  open actions. Portable bitmap rendering, an embedded browser, another UI
+  framework, terminal-emulator ownership and native Codex App embedding are
+  non-goals.
+
+Acceptance modes are `objective` and `visual`. Architecture review is added
+only if the bounded replan actually changes a public/control boundary.
+Promotion requires all of the following observable evidence:
+
+- an inactive or completed controller is visible and selectable in `all` mode,
+  an active controller is visible in `active` mode, and loading its persisted
+  conversation does not require a pending human decision;
+- controller -> worker -> reviewer/repair relationships are readable without
+  opaque IDs in the primary surface, while exact identities remain available
+  in diagnostics;
+- assistant text grows in place, tool calls update one inline card through
+  typed states, and the composer/control acknowledgements remain responsive
+  without polling or blocking result ingress;
+- wide and exact 80x24 keyboard flows retain the session rail, readable
+  transcript, input/status area, load-older/scroll controls and complete
+  controller/worker actions; active/all filtering is reversible and does not
+  discard cached identity-bound history incorrectly;
+- provider-free state, reconnect, slow-consumer, paging, privacy and fail-closed
+  adversaries pass, followed by an installed-runtime smoke against retained
+  local controller and worker sessions without a new provider call; and
+- affected semantic partitions, packaging parity, full `make check`, exact
+  candidate review and independent objective and visual acceptance close with
+  P0=0/P1=0.
+
+This future-only visual/product work does not reopen the accepted historical
+TUI milestone or reinstate its cancelled visual review. It is a new observable
+scope and therefore receives its own fixed visual contract and qualitative
+promotion authority when it becomes ready.
 
 ## Next execution — single-milestone-acceptance-lifecycle
 
