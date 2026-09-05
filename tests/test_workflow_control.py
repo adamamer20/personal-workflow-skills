@@ -66,6 +66,29 @@ def test_model_facing_capsule_and_result_are_typed_round_trips() -> None:
     assert ModelFacingResult.from_json(result.to_json()) == result
 
 
+def test_model_facing_result_preserves_the_128_character_durable_status_bound() -> None:
+    durable_status = "d" * 128
+    result = ModelFacingResult(
+        1,
+        ModelResultStatus.COMPLETED,
+        "controller path reached",
+        (),
+        (),
+        durable_status,
+    )
+
+    assert ModelFacingResult.from_json(result.to_json()).durable_status == durable_status
+    with pytest.raises(ValueError, match="durable status"):
+        ModelFacingResult(
+            1,
+            ModelResultStatus.COMPLETED,
+            "controller path reached",
+            (),
+            (),
+            durable_status + "d",
+        )
+
+
 def test_model_facing_capsule_rejects_non_completion_recovery() -> None:
     try:
         ModelFacingCapsule(

@@ -39,6 +39,9 @@ from codex_flow.controller import (
     load_capsule,
 )
 from codex_flow.domain import (
+    AcceptanceMode,
+    CandidateDisposition,
+    CandidateRecord,
     ControllerCheckpoint,
     ExecutionCapsule,
     ExecutionRecord,
@@ -49,6 +52,8 @@ from codex_flow.domain import (
     NativePermissionAuthority,
     NativePermissionMode,
     ReasoningEffort,
+    ReviewResult,
+    RoleId,
     RunId,
     SkillInput,
     ThreadIdentity,
@@ -530,6 +535,99 @@ def test_completed_execution_reopens_through_integrated_review_and_acceptance() 
         assert accepted.status("run", "m1").status is ExecutionStatus.COMPLETED
         assert accepted.ledger.current_state("run", "m1") is WorkflowState.ACCEPTED
         accepted.close()
+
+
+def test_ordinary_control_candidate_acceptance_is_exact_and_not_a_program_graph() -> None:
+    with TemporaryDirectory() as directory:
+        repository = Path(directory) / "repo"
+        base, branch = _repository(repository)
+        capsule = replace(
+            _capsule(repository, repository, base, branch),
+            acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+        )
+        controller = Controller(repository, _trusted_test_adapter_factory=_factory(_service()))
+        controller.plan(capsule)
+        controller.ledger.claim_dispatch("run", "m1", "executor", 1)
+        candidate_sha = "a" * 40
+        candidate = CandidateRecord(
+            CandidateDisposition.VERIFIED_COMMIT,
+            repository,
+            commit_sha=candidate_sha,
+            workspace_head=candidate_sha,
+        )
+        controller.ledger.record_control_executor_result(
+            "run",
+            "m1",
+            candidate=candidate,
+            terminal_status="completed",
+            dispatch_id="run/m1/executor/1",
+            result_sha256="b" * 64,
+        )
+        assert controller.ledger.current_state("run", "m1") is WorkflowState.REVIEWING
+
+        with pytest.raises(StaleWriter, match="acceptance mode"):
+            controller.ledger.record_control_review(
+                "run",
+                "m1",
+                candidate_sha=candidate_sha,
+                dispatch_id="run/m1/code-reviewer/1",
+                generation=1,
+                result=ReviewResult(
+                    "wrong-mode",
+                    RoleId("code-reviewer"),
+                    True,
+                    (),
+                    candidate_sha,
+                    acceptance_mode=AcceptanceMode.ARCHITECTURE,
+                ),
+            )
+        controller.ledger.record_control_review(
+            "run",
+            "m1",
+            candidate_sha=candidate_sha,
+            dispatch_id="run/m1/code-reviewer/1",
+            generation=1,
+            result=ReviewResult(
+                "objective-clean",
+                RoleId("code-reviewer"),
+                True,
+                (),
+                candidate_sha,
+                acceptance_mode=AcceptanceMode.OBJECTIVE,
+            ),
+        )
+        assert controller.ledger.current_state("run", "m1") is WorkflowState.REVIEWING
+        controller.ledger.record_control_review(
+            "run",
+            "m1",
+            candidate_sha=candidate_sha,
+            dispatch_id="run/m1/architecture-reviewer/1",
+            generation=1,
+            result=ReviewResult(
+                "architecture-clean",
+                RoleId("architecture-reviewer"),
+                True,
+                (),
+                candidate_sha,
+                acceptance_mode=AcceptanceMode.ARCHITECTURE,
+            ),
+        )
+        assert controller.ledger.current_state("run", "m1") is WorkflowState.REVIEWING
+        facts = controller.ledger.review_lifecycle("run", "m1")
+        assert not any(fact.kind == "promotion_accepted" for fact in facts)
+        assert not any(fact.kind == "all_authorities_accepted" for fact in facts)
+        with pytest.raises(CorruptSchemaError):
+            controller.ledger.program_status("run")
+        controller.close()
+        status = CliRunner().invoke(
+            app,
+            ["status", "--run-id", "run", "--milestone-id", "m1", "--state-root", str(repository), "--json"],
+        )
+        assert status.exit_code == 0, status.output
+        status_payload = json.loads(status.stdout)
+        assert status_payload["lifecycle_state"] == "REVIEWING"
+        assert status_payload["candidate_sha"] == candidate_sha
+        assert status_payload["pending_authorities"] == []
 
 
 def test_post_identity_crash_requires_fresh_process_resume_without_duplicates() -> None:

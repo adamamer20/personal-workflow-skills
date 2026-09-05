@@ -39,6 +39,7 @@ from .contracts import (
     model_facing_result_schema_sha256,
     model_facing_review_result_schema_sha256,
     review_result_from_agent_message,
+    review_result_to_json,
 )
 from .domain import (
     CONTROL_ACKNOWLEDGEMENT_TERMINAL_STATUSES,
@@ -11319,6 +11320,286 @@ class Ledger:
                 token,
             )
 
+    def record_control_executor_result(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        candidate: CandidateRecord | None,
+        terminal_status: str,
+        dispatch_id: DispatchId | str,
+        result_sha256: str | None = None,
+        blocker: TypedBlocker | None = None,
+    ) -> LifecycleRecord:
+        """Retain one ordinary-control candidate without closing acceptance.
+
+        The queue is the execution transport, while ``h4.lifecycle`` remains
+        the acceptance authority.  This transaction binds the terminal queue
+        fact, candidate lineage, and the nonterminal REVIEWING state together;
+        replay therefore cannot expose a completed milestone with no
+        acceptance owner.
+        """
+
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        dispatch = DispatchId(str(dispatch_id))
+        if dispatch.parts[0] != run or dispatch.parts[1] != milestone or dispatch.parts[2] != RoleId("executor"):
+            raise StaleWriter("control executor result dispatch does not match its milestone")
+        if terminal_status not in {"completed", "failed", "external_blocked", "needs_decision"}:
+            raise ValueError("control executor terminal status is unsupported")
+        if result_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", result_sha256) is None:
+            raise ValueError("control executor result digest is invalid")
+        if candidate is not None and not isinstance(candidate, CandidateRecord):
+            raise TypeError("control candidate must be typed")
+        if blocker is not None and not isinstance(blocker, TypedBlocker):
+            raise TypeError("control blocker must be typed")
+        candidate_sha = candidate.commit_sha if candidate is not None else None
+        disposition = candidate.disposition if candidate is not None else CandidateDisposition.NO_CANDIDATE
+        if (
+            terminal_status == "completed"
+            and candidate is not None
+            and candidate.disposition is CandidateDisposition.VERIFIED_COMMIT
+        ):
+            normalized_blocker = blocker
+        else:
+            normalized_blocker = _normalize_terminal_blocker(terminal_status, blocker)
+        terminal_fact: JsonObject = {
+            "dispatch_id": str(dispatch),
+            "terminal_status": terminal_status,
+            "candidate_sha": candidate_sha,
+            "candidate_disposition": disposition.value,
+            "candidate_workspace_path": str(candidate.workspace_path) if candidate is not None else None,
+            "candidate_workspace_head": candidate.workspace_head if candidate is not None else None,
+            "candidate_workspace_digest": candidate.workspace_digest if candidate is not None else None,
+            "candidate_dirty": candidate.dirty if candidate is not None else False,
+            "candidate_reason": candidate.reason if candidate is not None else None,
+            "result_sha256": result_sha256,
+            "blocker": normalized_blocker.to_json() if normalized_blocker is not None else None,
+        }
+        with self._transaction():
+            run_row = self._db().execute("SELECT program_digest FROM runs WHERE run_id = ?", (str(run),)).fetchone()
+            milestone_row = (
+                self._db()
+                .execute(
+                    "SELECT current_state FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                    (str(run), str(milestone)),
+                )
+                .fetchone()
+            )
+            if run_row is None or milestone_row is None:
+                raise RecordNotFound(f"control execution does not exist: {run}/{milestone}")
+            if run_row["program_digest"] is not None:
+                raise StaleWriter("program executor results use the program lifecycle authority")
+            facts = self.review_lifecycle(run, milestone)
+            for fact in reversed(facts):
+                if fact.kind != "candidate_recorded" or fact.data.get("dispatch_id") != str(dispatch):
+                    continue
+                if fact.data != terminal_fact:
+                    raise StaleWriter("control executor terminal replay conflicts with its durable candidate")
+                return fact
+
+            existing = self._program_candidate_sha(run, milestone)
+            predecessor_sha: str | None = None
+            if existing is not None and dispatch.parts[3] > self._candidate_dispatch_generation(facts, existing):
+                prior_generation = self._candidate_dispatch_generation(facts, existing)
+                if dispatch.parts[3] != prior_generation + 1 or not any(
+                    fact.kind == "repair_requested" and fact.data.get("candidate_sha") == existing for fact in facts
+                ):
+                    raise StaleWriter("control candidate successor is outside the one-repair lifecycle")
+                if candidate_sha == existing or (candidate_sha is None and terminal_status == "completed"):
+                    raise StaleWriter("control repair must create a distinct successor candidate")
+                if candidate_sha is not None:
+                    predecessor_sha = existing
+            elif existing is not None and existing != candidate_sha:
+                raise StaleWriter("control candidate successor is not a newer executor generation")
+            current = WorkflowState(str(milestone_row["current_state"]))
+            verified_candidate = candidate is not None and candidate.disposition is CandidateDisposition.VERIFIED_COMMIT
+            if terminal_status == "completed" and verified_candidate:
+                if current is WorkflowState.STARTING:
+                    self._transition_program_state_in_transaction(
+                        run,
+                        milestone,
+                        WorkflowState.RUNNING,
+                        expected_state=WorkflowState.STARTING,
+                        reason=ReasonCode.EXECUTION_FAILURE,
+                    )
+                    current = WorkflowState.RUNNING
+                if current is WorkflowState.RUNNING:
+                    self._transition_program_state_in_transaction(
+                        run,
+                        milestone,
+                        WorkflowState.COMPLETED,
+                        expected_state=WorkflowState.RUNNING,
+                        reason=ReasonCode.TERMINAL_OUTCOME,
+                    )
+                    current = WorkflowState.COMPLETED
+                if current is WorkflowState.COMPLETED:
+                    self._transition_program_state_in_transaction(
+                        run,
+                        milestone,
+                        WorkflowState.REVIEWING,
+                        expected_state=WorkflowState.COMPLETED,
+                        reason=ReasonCode.TERMINAL_OUTCOME,
+                    )
+                elif current is WorkflowState.REPAIR_REQUIRED:
+                    self._transition_program_state_in_transaction(
+                        run,
+                        milestone,
+                        WorkflowState.REVIEWING,
+                        expected_state=WorkflowState.REPAIR_REQUIRED,
+                        reason=ReasonCode.TERMINAL_OUTCOME,
+                    )
+                elif current is not WorkflowState.REVIEWING:
+                    raise StaleWriter(f"control candidate requires a reviewing milestone, found {current.value}")
+            else:
+                target = (
+                    WorkflowState.BLOCKED
+                    if terminal_status == "external_blocked"
+                    else WorkflowState.NEEDS_DECISION
+                    if terminal_status == "needs_decision"
+                    else WorkflowState.FAILED
+                )
+                if current is WorkflowState.STARTING:
+                    self._transition_program_state_in_transaction(
+                        run,
+                        milestone,
+                        WorkflowState.RUNNING,
+                        expected_state=WorkflowState.STARTING,
+                        reason=ReasonCode.EXECUTION_FAILURE,
+                    )
+                    current = WorkflowState.RUNNING
+                if current is WorkflowState.RUNNING:
+                    self._transition_program_state_in_transaction(
+                        run,
+                        milestone,
+                        target,
+                        expected_state=WorkflowState.RUNNING,
+                        reason=(
+                            ReasonCode.ENVIRONMENT_BLOCKED
+                            if target is WorkflowState.BLOCKED
+                            else ReasonCode.DECISION_REQUIRED
+                            if target is WorkflowState.NEEDS_DECISION
+                            else ReasonCode.EXECUTION_FAILURE
+                        ),
+                    )
+                elif current is WorkflowState.REPAIR_REQUIRED:
+                    self._transition_program_state_in_transaction(
+                        run,
+                        milestone,
+                        target,
+                        expected_state=WorkflowState.REPAIR_REQUIRED,
+                        reason=(
+                            ReasonCode.ENVIRONMENT_BLOCKED
+                            if target is WorkflowState.BLOCKED
+                            else ReasonCode.DECISION_REQUIRED
+                            if target is WorkflowState.NEEDS_DECISION
+                            else ReasonCode.EXECUTION_FAILURE
+                        ),
+                    )
+                elif current is not target:
+                    raise StaleWriter(f"control executor result conflicts with milestone state {current.value}")
+
+            fact = self._record_lifecycle_fact_in_transaction(
+                run,
+                milestone,
+                phase=LifecyclePhase.EXECUTION,
+                kind="candidate_recorded",
+                data=terminal_fact,
+            )
+            if predecessor_sha is not None:
+                self._record_lifecycle_fact_in_transaction(
+                    run,
+                    milestone,
+                    phase=LifecyclePhase.REPAIR,
+                    kind="candidate_superseded",
+                    data={
+                        "predecessor_sha": predecessor_sha,
+                        "candidate_sha": candidate_sha,
+                        "dispatch_id": str(dispatch),
+                    },
+                )
+                self._record_lifecycle_fact_in_transaction(
+                    run,
+                    milestone,
+                    phase=LifecyclePhase.REVIEW,
+                    kind="reviews_invalidated",
+                    data={"predecessor_sha": predecessor_sha, "candidate_sha": candidate_sha},
+                )
+            return fact
+
+    def record_control_review(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        candidate_sha: str,
+        dispatch_id: DispatchId | str,
+        generation: int,
+        result: object,
+    ) -> LifecycleRecord:
+        """Retain one exact ordinary-control authority review idempotently."""
+
+        from .domain import ReviewResult
+
+        if not isinstance(result, ReviewResult):
+            raise TypeError("control review must be a typed ReviewResult")
+        run = _run_id(run_id)
+        milestone = _milestone_id(milestone_id)
+        dispatch = DispatchId(str(dispatch_id))
+        if dispatch.parts[0] != run or dispatch.parts[1] != milestone or dispatch.parts[2] != result.reviewer_role:
+            raise StaleWriter("control review dispatch does not match its reviewer authority")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise ValueError("control review generation is invalid")
+        if int(dispatch.parts[3]) != generation:
+            raise StaleWriter("control review generation does not match its dispatch identity")
+        if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+            raise ValueError("control review candidate is invalid")
+        if result.reviewed_revision != candidate_sha or not result.fresh or not result.read_only:
+            raise StaleWriter("control review does not cover the exact current candidate")
+        expected_mode = {
+            RoleId("code-reviewer"): AcceptanceMode.OBJECTIVE,
+            RoleId("visual-reviewer"): AcceptanceMode.VISUAL,
+            RoleId("architecture-reviewer"): AcceptanceMode.ARCHITECTURE,
+        }.get(result.reviewer_role)
+        if expected_mode is None or result.acceptance_mode is not expected_mode:
+            raise StaleWriter("control review acceptance mode does not match its reviewer authority")
+        data: JsonObject = {
+            "review_id": result.review_id,
+            "reviewer_role": str(result.reviewer_role),
+            "acceptance_mode": result.acceptance_mode.value,
+            "accepted": result.accepted,
+            "candidate_sha": candidate_sha,
+            "dispatch_id": str(dispatch),
+            "generation": generation,
+            "prior_review_id": result.prior_review_id,
+            "finding_ids": [item.finding_id for item in result.findings],
+            "finding_severities": {item.finding_id: item.severity.value for item in result.findings},
+            "promotion_blocking": (not result.accepted) or any(item.promotion_blocking for item in result.findings),
+            "review": review_result_to_json(result),
+        }
+        with self._transaction():
+            if self._program_candidate_sha(run, milestone) != candidate_sha:
+                raise StaleWriter("control review candidate is not the current candidate")
+            for fact in reversed(self.review_lifecycle(run, milestone)):
+                if fact.kind == "review_completed" and fact.data.get("review_id") == result.review_id:
+                    if fact.data != data:
+                        raise StaleWriter("control review replay conflicts with its durable result")
+                    return fact
+                if (
+                    fact.kind == "review_completed"
+                    and fact.data.get("candidate_sha") == candidate_sha
+                    and fact.data.get("generation") == generation
+                    and fact.data.get("reviewer_role") == str(result.reviewer_role)
+                ):
+                    raise StaleWriter("control authority already reviewed this exact candidate generation")
+            return self._record_lifecycle_fact_in_transaction(
+                run,
+                milestone,
+                phase=LifecyclePhase.REVIEW,
+                kind="review_completed",
+                data=data,
+            )
+
     def record_program_candidate(
         self, program_id: ProgramId | str, milestone_id: MilestoneId | str, candidate_sha: str
     ) -> LifecycleRecord:
@@ -12358,8 +12639,28 @@ class Ledger:
     ) -> LifecycleRecord:
         """Append one idempotent H4 fact while a program action is open."""
 
+        return self._record_lifecycle_fact_in_transaction(
+            program_id,
+            milestone_id,
+            phase=phase,
+            kind=kind,
+            data=data,
+        )
+
+    def _record_lifecycle_fact_in_transaction(
+        self,
+        run_id: RunId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        phase: LifecyclePhase,
+        kind: str,
+        data: Mapping[str, object],
+    ) -> LifecycleRecord:
+        """Append one idempotent H4 fact for either lifecycle authority."""
+
+        run = _run_id(run_id)
         milestone = _milestone_id(milestone_id)
-        for fact in self.review_lifecycle(program_id, milestone):
+        for fact in self.review_lifecycle(run, milestone):
             if fact.kind == kind and fact.data == dict(data):
                 return fact
         payload = {"schema": "codex-flow/h4/v1", "phase": phase.value, "kind": kind, "payload": dict(data)}
@@ -12369,7 +12670,7 @@ class Ledger:
                 self._db()
                 .execute(
                     "SELECT COALESCE(MAX(sequence), 0) FROM h4.lifecycle WHERE run_id = ? AND milestone_id = ?",
-                    (str(program_id), str(milestone)),
+                    (str(run), str(milestone)),
                 )
                 .fetchone()[0]
             )
@@ -12378,7 +12679,7 @@ class Ledger:
         self._db().execute(
             "INSERT INTO h4.lifecycle(run_id, milestone_id, sequence, phase, kind, data_json, occurred_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (str(program_id), str(milestone), sequence, phase.value, kind, encoded, utc_now()),
+            (str(run), str(milestone), sequence, phase.value, kind, encoded, utc_now()),
         )
         return LifecycleRecord(phase, kind, sequence, dict(data))
 

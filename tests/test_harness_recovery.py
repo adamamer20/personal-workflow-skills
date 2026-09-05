@@ -6,10 +6,12 @@ import json
 import os
 import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,7 +26,11 @@ from codex_flow.contracts import (
     PluginRequirement,
     model_facing_result_schema_sha256,
 )
+from codex_flow.controller import Controller
 from codex_flow.domain import (
+    AcceptanceMode,
+    CandidateDisposition,
+    CandidateRecord,
     CompatibilityRebind,
     ControllerActionKind,
     ControllerClaimantKind,
@@ -32,16 +38,30 @@ from codex_flow.domain import (
     ControllerDecisionState,
     ControllerGenerationState,
     ControllerGenerationStatus,
+    ExecutionCapsule,
+    FindingCausalClass,
     Generation,
     LiveTurnKeyframe,
+    MilestoneId,
     NativePermissionAuthority,
     NativePermissionMode,
+    ReasonCode,
+    ReasoningEffort,
     RecoveryActionKind,
     RetryBudgetChange,
     RetryFailureClass,
+    ReviewFinding,
+    ReviewResult,
+    RoleId,
+    RunId,
+    Severity,
     TerminalFailureAfterIdentity,
     ThreadIdentity,
+    ValidationSpec,
     WorkerResultRejectionCode,
+    WorkflowReason,
+    WorkflowState,
+    WorkspaceMode,
 )
 from codex_flow.harness import (
     QUEUE_TRIGGERING_OPERATIONS,
@@ -261,6 +281,438 @@ def _configured_harness(ledger: Ledger, root: Path, epoch: int) -> WorkflowHarne
     harness.controller_command = ("codex-flow-controller",)
     harness._controller_children = {}
     return harness
+
+
+def _control_capsule(root: Path) -> ExecutionCapsule:
+    return ExecutionCapsule(
+        2,
+        RunId("control-run"),
+        MilestoneId("control-milestone"),
+        root,
+        WorkspaceMode.CURRENT_CHECKOUT,
+        root,
+        "main",
+        "a" * 40,
+        "control-lifecycle",
+        ("owned.txt",),
+        (),
+        ValidationSpec(("true",), 5),
+        "gpt-test",
+        ReasoningEffort.MEDIUM,
+        "complete the bounded control milestone",
+        {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+            "additionalProperties": False,
+        },
+        permission_mode=NativePermissionMode.READ_ONLY,
+        acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    )
+
+
+def _control_candidate(root: Path, commit_sha: str) -> CandidateRecord:
+    return CandidateRecord(
+        CandidateDisposition.VERIFIED_COMMIT,
+        root,
+        commit_sha=commit_sha,
+        workspace_head=commit_sha,
+    )
+
+
+def _control_review(
+    review_id: str,
+    role: str,
+    candidate_sha: str,
+    mode: AcceptanceMode,
+    *,
+    accepted: bool = True,
+    findings: tuple[ReviewFinding, ...] = (),
+) -> ReviewResult:
+    return ReviewResult(
+        review_id,
+        RoleId(role),
+        accepted,
+        findings,
+        candidate_sha,
+        acceptance_mode=mode,
+    )
+
+
+def _write_test_native_profile(home: Path, catalog: Path) -> None:
+    home.mkdir(mode=0o700)
+    home.chmod(0o700)
+    for name in ("memories", "plugins", "skills"):
+        (home / name).mkdir(mode=0o700)
+    catalog.write_text('{"fetched_at":"2026-08-24T00:00:00Z","client_version":"0.147.0","models":[]}\n')
+    catalog.chmod(0o600)
+    (home / "config.toml").write_text(
+        f'''model_provider = "codex-lb"
+model_catalog_json = "{catalog}"
+personality = "pragmatic"
+approval_policy = "never"
+approvals_reviewer = "user"
+sandbox_mode = "danger-full-access"
+
+[model_providers.codex-lb]
+name = "openai"
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+env_key = "CODEX_LB_API_KEY"
+requires_openai_auth = true
+supports_websockets = true
+
+[agents]
+enabled = true
+
+[features]
+memories = true
+
+[hooks]
+
+[marketplaces]
+
+[mcp_servers]
+
+[plugins]
+
+[profiles]
+
+[projects]
+
+[shell_environment_policy]
+
+[skills]
+'''
+    )
+    (home / "config.toml").chmod(0o600)
+    (home / "auth.json").write_text("{}\n")
+    (home / "auth.json").chmod(0o600)
+
+
+def test_control_acceptance_waits_for_all_authorities_and_repairs_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = WorkflowHarness(tmp_path)
+    capsule = _control_capsule(tmp_path)
+    first_sha = "b" * 40
+    second_sha = "c" * 40
+    harness.ledger.create_run(capsule.run_id)
+    harness.ledger.create_milestone(capsule.run_id, capsule.milestone_id)
+    harness.ledger.claim_dispatch(capsule.run_id, capsule.milestone_id, "executor", 1)
+    harness.ledger.record_control_executor_result(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate=_control_candidate(tmp_path, first_sha),
+        terminal_status="completed",
+        dispatch_id="control-run/control-milestone/executor/1",
+        result_sha256="d" * 64,
+    )
+    queued: list[tuple[str, int, str | None]] = []
+
+    def queue(_capsule: ExecutionCapsule, **values: object) -> None:
+        queued.append((str(values["role"]), int(values["generation"]), values.get("candidate_sha")))
+
+    monkeypatch.setattr(harness, "_enqueue_control_dispatch", queue)
+    harness.ledger.record_control_review(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate_sha=first_sha,
+        dispatch_id="control-run/control-milestone/code-reviewer/1",
+        generation=1,
+        result=_control_review(
+            "objective-rejected",
+            "code-reviewer",
+            first_sha,
+            AcceptanceMode.OBJECTIVE,
+            accepted=False,
+            findings=(
+                ReviewFinding(
+                    "control-p1",
+                    FindingCausalClass.IMPLEMENTATION,
+                    Severity.P1,
+                    True,
+                    "repair the rejected implementation",
+                    {"candidate": first_sha},
+                    "objective acceptance",
+                ),
+            ),
+        ),
+    )
+    harness._advance_control_acceptance(capsule, first_sha, 1)
+    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REVIEWING
+    harness.ledger.record_control_review(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate_sha=first_sha,
+        dispatch_id="control-run/control-milestone/architecture-reviewer/1",
+        generation=1,
+        result=_control_review(
+            "architecture-accepted", "architecture-reviewer", first_sha, AcceptanceMode.ARCHITECTURE
+        ),
+    )
+    harness._advance_control_acceptance(capsule, first_sha, 1)
+    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REPAIR_REQUIRED
+    assert queued == [("executor", 2, first_sha)]
+
+    harness.ledger.record_control_executor_result(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate=_control_candidate(tmp_path, second_sha),
+        terminal_status="completed",
+        dispatch_id="control-run/control-milestone/executor/2",
+        result_sha256="e" * 64,
+    )
+    facts = harness.ledger.review_lifecycle(capsule.run_id, capsule.milestone_id)
+    assert any(fact.kind == "candidate_superseded" for fact in facts)
+    assert any(fact.kind == "reviews_invalidated" for fact in facts)
+    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REVIEWING
+    monkeypatch.setattr(
+        harness_module,
+        "load_workflow_config",
+        lambda _path: SimpleNamespace(derive_authorities=lambda _modes: None),
+    )
+    harness._queue_control_reviews(capsule, second_sha, generation=2)
+    assert queued[-2:] == [
+        ("code-reviewer", 2, second_sha),
+        ("architecture-reviewer", 2, second_sha),
+    ]
+
+    harness.ledger.record_control_review(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate_sha=second_sha,
+        dispatch_id="control-run/control-milestone/code-reviewer/2",
+        generation=2,
+        result=_control_review(
+            "objective-rejected-again", "code-reviewer", second_sha, AcceptanceMode.OBJECTIVE, accepted=False
+        ),
+    )
+    harness.ledger.record_control_review(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate_sha=second_sha,
+        dispatch_id="control-run/control-milestone/architecture-reviewer/2",
+        generation=2,
+        result=_control_review(
+            "architecture-accepted-again", "architecture-reviewer", second_sha, AcceptanceMode.ARCHITECTURE
+        ),
+    )
+    harness._advance_control_acceptance(capsule, second_sha, 2)
+    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.FAILED
+    assert not any(role == "executor" and generation == 3 for role, generation, _ in queued)
+    assert any(
+        fact.kind == "re_review_rejected"
+        for fact in harness.ledger.review_lifecycle(capsule.run_id, capsule.milestone_id)
+    )
+    harness.close()
+
+
+def test_control_acceptance_promotes_only_after_every_fresh_authority_accepts(tmp_path: Path) -> None:
+    harness = WorkflowHarness(tmp_path)
+    capsule = _control_capsule(tmp_path)
+    candidate_sha = "d" * 40
+    harness.ledger.create_run(capsule.run_id)
+    harness.ledger.create_milestone(capsule.run_id, capsule.milestone_id)
+    harness.ledger.claim_dispatch(capsule.run_id, capsule.milestone_id, "executor", 1)
+    harness.ledger.record_control_executor_result(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate=_control_candidate(tmp_path, candidate_sha),
+        terminal_status="completed",
+        dispatch_id="control-run/control-milestone/executor/1",
+        result_sha256="e" * 64,
+    )
+    harness.ledger.record_control_review(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate_sha=candidate_sha,
+        dispatch_id="control-run/control-milestone/code-reviewer/1",
+        generation=1,
+        result=_control_review("objective-accepted", "code-reviewer", candidate_sha, AcceptanceMode.OBJECTIVE),
+    )
+    harness._advance_control_acceptance(capsule, candidate_sha, 1)
+    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REVIEWING
+    harness.ledger.record_control_review(
+        capsule.run_id,
+        capsule.milestone_id,
+        candidate_sha=candidate_sha,
+        dispatch_id="control-run/control-milestone/architecture-reviewer/1",
+        generation=1,
+        result=_control_review(
+            "architecture-accepted", "architecture-reviewer", candidate_sha, AcceptanceMode.ARCHITECTURE
+        ),
+    )
+    harness._advance_control_acceptance(capsule, candidate_sha, 1)
+    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.ACCEPTED
+    assert any(
+        fact.kind == "promotion_accepted" and fact.data["candidate_sha"] == candidate_sha
+        for fact in harness.ledger.review_lifecycle(capsule.run_id, capsule.milestone_id)
+    )
+    harness.close()
+
+
+def test_control_restart_adopts_exact_retained_lineage_without_executor_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_repository = Path(__file__).parents[1]
+    repository = tmp_path / "repo"
+    subprocess.run(("git", "clone", "--quiet", os.fspath(source_repository), os.fspath(repository)), check=True)
+    assert (
+        subprocess.run(
+            ("git", "show", "-s", "--format=%P", "47a8fa3d67575ef00662f1b5693efaf45c7b52bd"),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "507645ea5e788eaa4ec803b142419655e1c6dd69"
+    )
+    assert (
+        subprocess.run(
+            ("git", "show", "-s", "--format=%P", "977d8f5c8c55459625dbff8133c262e12f91bba0"),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "47a8fa3d67575ef00662f1b5693efaf45c7b52bd"
+    )
+    branch = subprocess.run(
+        ("git", "branch", "--show-current"), cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    capsule = ExecutionCapsule(
+        2,
+        RunId("safe-refresh-control"),
+        MilestoneId("safe-refresh-final-closure"),
+        repository,
+        WorkspaceMode.CURRENT_CHECKOUT,
+        repository,
+        branch,
+        "507645ea5e788eaa4ec803b142419655e1c6dd69",
+        "control-migration",
+        (
+            "src/codex_flow/service.py",
+            "tests/test_service_lifecycle.py",
+            "docs/reviews/evidence",
+        ),
+        (),
+        ValidationSpec(("true",), 5),
+        "gpt-test",
+        ReasoningEffort.MEDIUM,
+        "adopt the retained candidate and return one typed result",
+        {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+            "additionalProperties": False,
+        },
+        permission_mode=NativePermissionMode.READ_ONLY,
+        acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    )
+    planner = Controller(repository)
+    planner.plan(capsule)
+    planner.close()
+
+    harness = WorkflowHarness(repository)
+    harness.ledger.acquire_workspace_lease(capsule)
+    harness.ledger.record_native_profile(
+        capsule.run_id,
+        capsule.milestone_id,
+        str("1" * 64),
+        str("2" * 64),
+        NativePermissionAuthority(NativePermissionMode.READ_ONLY, "read-only", "never"),
+        capsule.base_sha,
+        (),
+        str("3" * 64),
+    )
+    harness.ledger.claim_dispatch(capsule.run_id, capsule.milestone_id, "executor", 1)
+    now = utc_now()
+    empty_workspace = "[]"
+    empty_workspace_sha = hashlib.sha256(empty_workspace.encode("utf-8")).hexdigest()
+    result_json = json.dumps({"status": "completed"}, separators=(",", ":"))
+    with harness.ledger._transaction():
+        harness.ledger._db().execute(
+            "UPDATE executions SET status = 'completed', checkpoint = 'result_durable', thread_id = ?, turn_id = ?, "
+            "result_json = ?, validation_argv_json = ?, validation_exit_code = 0, validation_stdout_sha256 = ?, "
+            "validation_stderr_sha256 = ?, validation_timed_out = 0, validation_duration_seconds = 0.01, "
+            "protected_after_sha256 = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+            (
+                "historical-thread",
+                "historical-turn",
+                result_json,
+                json.dumps(["true"], separators=(",", ":")),
+                "5" * 64,
+                "6" * 64,
+                "7" * 64,
+                now,
+                str(capsule.run_id),
+                str(capsule.milestone_id),
+            ),
+        )
+        harness.ledger._db().execute(
+            "UPDATE execution_integrity SET workspace_terminal_head_sha = ?, workspace_terminal_json = ?, "
+            "workspace_terminal_sha256 = ?, turn_started_at = ?, git_authority_after_sha256 = ?, updated_at = ? "
+            "WHERE run_id = ? AND milestone_id = ?",
+            (
+                "977d8f5c8c55459625dbff8133c262e12f91bba0",
+                empty_workspace,
+                empty_workspace_sha,
+                now,
+                "4" * 64,
+                now,
+                str(capsule.run_id),
+                str(capsule.milestone_id),
+            ),
+        )
+        harness.ledger._db().execute(
+            "UPDATE milestones SET current_state = 'RUNNING', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+            (now, str(capsule.run_id), str(capsule.milestone_id)),
+        )
+        harness.ledger._append_event_in_transaction(
+            capsule.run_id,
+            capsule.milestone_id,
+            from_state=WorkflowState.STARTING,
+            to_state=WorkflowState.RUNNING,
+            event_type="state_transition",
+            reason=None,
+            dispatch_id=None,
+            data=None,
+        )
+        harness.ledger._db().execute(
+            "UPDATE milestones SET current_state = 'COMPLETED', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+            (now, str(capsule.run_id), str(capsule.milestone_id)),
+        )
+        harness.ledger._append_event_in_transaction(
+            capsule.run_id,
+            capsule.milestone_id,
+            from_state=WorkflowState.RUNNING,
+            to_state=WorkflowState.COMPLETED,
+            event_type="state_transition",
+            reason=WorkflowReason(ReasonCode.TERMINAL_OUTCOME),
+            dispatch_id=None,
+            data=None,
+        )
+    monkeypatch.setenv("CODEX_HOME", os.fspath(tmp_path / "native-home"))
+    monkeypatch.setenv("CODEX_LB_API_KEY", "test-only")
+    _write_test_native_profile(tmp_path / "native-home", tmp_path / "native-home" / "models.json")
+
+    adopted = harness.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
+    assert adopted.commit_sha == "977d8f5c8c55459625dbff8133c262e12f91bba0"
+    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REVIEWING
+    assert {str(row["dispatch_id"]) for row in harness.ledger.queue_dispatches()} == {
+        "safe-refresh-control/safe-refresh-final-closure/code-reviewer/1",
+        "safe-refresh-control/safe-refresh-final-closure/architecture-reviewer/1",
+    }
+    harness.close()
+
+    restarted = WorkflowHarness(repository)
+    replayed = restarted.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
+    assert replayed.commit_sha == adopted.commit_sha
+    assert len(restarted.ledger.queue_dispatches()) == 2
+    with pytest.raises(CorruptSchemaError):
+        restarted.ledger.program_status(str(capsule.run_id))
+    restarted.close()
 
 
 def test_harness_start_rejects_dangling_legacy_socket_entry_before_claim(tmp_path: Path) -> None:

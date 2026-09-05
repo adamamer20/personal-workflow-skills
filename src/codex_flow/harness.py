@@ -32,6 +32,7 @@ from .backends.codex_sdk import (
     WakeDeliveryAmbiguous,
     WakeDeliveryUnavailable,
 )
+from .config import AuthorityUnavailable, WorkflowConfigError, load_workflow_config
 from .contracts import (
     ModelFacingControllerActionBundle,
     ModelFacingProgramControllerAction,
@@ -47,6 +48,7 @@ from .domain import (
     CONVERSATION_READ_DEADLINE_SECONDS,
     LIVE_MAX_SUBSCRIBERS,
     LIVE_SUBSCRIBER_QUEUE_MAX_ENTRIES,
+    AcceptanceMode,
     BlockerKind,
     BlockerScope,
     CandidateRecord,
@@ -68,11 +70,15 @@ from .domain import (
     ConversationHistoryStatus,
     ConversationSubjectKind,
     DispatchId,
+    ExecutionCapsule,
+    ExecutionStatus,
+    LifecyclePhase,
     LiveTurnKeyframe,
     NativePermissionMode,
     ProgramControllerActionKind,
     ProgramControllerDecisionStatus,
     ProgramGraph,
+    ReasonCode,
     ReasoningEffort,
     RecoveryActionKind,
     RetryBudgetChange,
@@ -80,6 +86,7 @@ from .domain import (
     ThreadIdentity,
     TypedBlocker,
     WorkerResultRejectionCode,
+    WorkflowState,
     conversation_history_page_from_json,
     is_lossy_worker_diagnostic_method,
     redact_diagnostic_text,
@@ -1532,6 +1539,31 @@ class WorkflowHarness:
             candidate,
             dispatch_id=dispatch_id,
         )
+
+    def reconcile_control_execution(self, run_id: str, milestone_id: str) -> CandidateRecord:
+        """Adopt one already-completed ordinary execution without a provider call."""
+
+        execution = self.ledger.get_execution(run_id, milestone_id)
+        if execution.status is not ExecutionStatus.COMPLETED:
+            raise HarnessError("ordinary control reconciliation requires a completed execution")
+        capsule = self._control_capsule(run_id, milestone_id)
+        integrity = self.ledger.get_execution_integrity(run_id, milestone_id)
+        retained_sha = integrity.workspace_terminal_head_sha
+        if retained_sha is None:
+            raise WorktreeError("completed control execution has no durable terminal candidate identity")
+        candidate = self._worktrees.inspect_terminal_workspace(capsule, candidate_sha=retained_sha)
+        if candidate.commit_sha is None or candidate.disposition.value != "verified_commit":
+            raise WorktreeError("completed control execution has no verified candidate")
+        dispatch_id = DispatchId.from_parts(run_id, milestone_id, "executor", 1)
+        self.ledger.record_control_executor_result(
+            run_id,
+            milestone_id,
+            candidate=candidate,
+            terminal_status="completed",
+            dispatch_id=dispatch_id,
+        )
+        self._queue_control_reviews(capsule, candidate.commit_sha)
+        return candidate
 
     @staticmethod
     def _controller_status_payload(status: object) -> dict[str, object]:
@@ -3537,6 +3569,358 @@ class WorkflowHarness:
             # retention loses a race with terminalization or cancellation.
             pass
 
+    def _control_capsule(self, run_id: str, milestone_id: str) -> ExecutionCapsule:
+        """Load the already durable ordinary-control capsule."""
+
+        from .controller import Controller
+
+        controller = Controller(self.state_root)
+        try:
+            return controller._load_durable_capsule(controller.status(run_id, milestone_id))
+        finally:
+            controller.close()
+
+    def _enqueue_control_dispatch(
+        self,
+        capsule: ExecutionCapsule,
+        *,
+        role: str,
+        generation: int,
+        candidate_sha: str | None = None,
+        finding_ids: Sequence[str] = (),
+    ) -> None:
+        """Use the existing authenticated Controller queue boundary once."""
+
+        from .controller import Controller
+
+        dispatch_id = str(DispatchId.from_parts(capsule.run_id, capsule.milestone_id, role, generation))
+        try:
+            self.ledger.queue_dispatch(dispatch_id)
+        except RecordNotFound:
+            pass
+        else:
+            return
+        if role == "executor":
+            action_context = {
+                "candidate_sha": candidate_sha,
+                "finding_ids": list(finding_ids),
+                "repair_generation": generation,
+            }
+        else:
+            action_context = {
+                "candidate_sha": candidate_sha,
+                "review_role": role,
+                "generation": generation,
+            }
+        controller = Controller(self.state_root, worktrees=self._worktrees)
+        try:
+            controller.enqueue(
+                capsule,
+                role=role,
+                generation=generation,
+                backend="sdk_headless",
+                action_json=json.dumps(action_context, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                plan_path="internal",
+            )
+        finally:
+            controller.close()
+
+    @staticmethod
+    def _control_authority_roles(capsule: ExecutionCapsule) -> tuple[str, ...]:
+        """Return the declared review roles in deterministic mode order."""
+
+        role_by_mode = {
+            AcceptanceMode.OBJECTIVE: "code-reviewer",
+            AcceptanceMode.VISUAL: "visual-reviewer",
+            AcceptanceMode.ARCHITECTURE: "architecture-reviewer",
+        }
+        return tuple(role_by_mode[mode] for mode in capsule.acceptance_modes)
+
+    def _queue_control_reviews(self, capsule: ExecutionCapsule, candidate_sha: str, *, generation: int = 1) -> None:
+        """Queue each declared exact-candidate authority exactly once."""
+
+        config = load_workflow_config(self.state_root / "workflow.toml")
+        config.derive_authorities(capsule.acceptance_modes)
+        for role in self._control_authority_roles(capsule):
+            self._enqueue_control_dispatch(
+                capsule,
+                role=role,
+                generation=generation,
+                candidate_sha=candidate_sha,
+            )
+
+    @staticmethod
+    def _control_candidate_blocker(facts: Sequence[object], candidate_sha: str) -> TypedBlocker | None:
+        for item in reversed(facts):
+            if getattr(item, "kind", None) != "candidate_recorded":
+                continue
+            data = getattr(item, "data", {})
+            if not isinstance(data, Mapping) or data.get("candidate_sha") != candidate_sha:
+                continue
+            raw = data.get("blocker")
+            if raw is None:
+                return None
+            if not isinstance(raw, Mapping):
+                raise WorktreeError("control candidate blocker is not an object")
+            try:
+                return TypedBlocker.from_json(raw)
+            except (TypeError, ValueError) as exc:
+                raise WorktreeError("control candidate blocker is malformed") from exc
+        return None
+
+    @staticmethod
+    def _control_blocking_findings(facts: Sequence[object], candidate_sha: str, generation: int) -> tuple[str, ...]:
+        finding_ids: list[str] = []
+        for item in facts:
+            if getattr(item, "kind", None) != "review_completed":
+                continue
+            data = getattr(item, "data", {})
+            if not isinstance(data, Mapping) or data.get("candidate_sha") != candidate_sha:
+                continue
+            if data.get("generation") != generation or data.get("promotion_blocking") is not True:
+                continue
+            review = data.get("review")
+            raw_findings = review.get("findings", []) if isinstance(review, Mapping) else []
+            if not isinstance(raw_findings, list | tuple):
+                continue
+            for finding in raw_findings:
+                if not isinstance(finding, Mapping):
+                    continue
+                if finding.get("promotion_blocking") is True and finding.get("severity") in {"P0", "P1"}:
+                    finding_id = finding.get("finding_id")
+                    if isinstance(finding_id, str) and finding_id not in finding_ids:
+                        finding_ids.append(finding_id)
+        return tuple(finding_ids)
+
+    def _control_result_issue(self, row: Mapping[str, object], exc: BaseException) -> None:
+        """Close an unprocessable control result with an accurate blocker."""
+
+        run_id = row.get("run_id")
+        milestone_id = row.get("milestone_id")
+        if not isinstance(run_id, str) or not isinstance(milestone_id, str):
+            return
+        try:
+            state = self.ledger.current_state(run_id, milestone_id)
+            if state in {WorkflowState.ACCEPTED, WorkflowState.FAILED, WorkflowState.BLOCKED, WorkflowState.CANCELLED}:
+                return
+            self.ledger.record_review_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.BLOCKED,
+                expected_state=state,
+                phase=LifecyclePhase.RECOVERY,
+                kind="control_result_rejected",
+                data={
+                    "dispatch_id": str(row.get("dispatch_id")),
+                    "role": str(row.get("role")),
+                    "reason": type(exc).__name__,
+                },
+                reason=ReasonCode.ENVIRONMENT_BLOCKED,
+            )
+        except (LedgerError, ValueError):
+            pass
+
+    def _advance_control_acceptance(self, capsule: ExecutionCapsule, candidate_sha: str, generation: int) -> None:
+        """Advance only from complete exact-candidate authority evidence."""
+
+        run_id = str(capsule.run_id)
+        milestone_id = str(capsule.milestone_id)
+        facts = self.ledger.review_lifecycle(run_id, milestone_id)
+        promotion = next(
+            (
+                item
+                for item in facts
+                if item.kind == "promotion_accepted" and item.data.get("candidate_sha") == candidate_sha
+            ),
+            None,
+        )
+        if promotion is not None:
+            if self.ledger.current_state(run_id, milestone_id) is WorkflowState.REVIEWING:
+                self.ledger.record_review_transition(
+                    run_id,
+                    milestone_id,
+                    WorkflowState.ACCEPTED,
+                    expected_state=WorkflowState.REVIEWING,
+                    phase=LifecyclePhase.ACCEPTANCE,
+                    kind="promotion_recovered",
+                    data=dict(promotion.data),
+                    reason=ReasonCode.TERMINAL_OUTCOME,
+                )
+            return
+        if any(
+            item.kind in {"re_review_rejected", "control_result_rejected"}
+            and item.data.get("candidate_sha") == candidate_sha
+            for item in facts
+        ):
+            return
+        roles = set(self._control_authority_roles(capsule))
+        completed_roles = {
+            str(item.data.get("reviewer_role"))
+            for item in facts
+            if item.kind == "review_completed"
+            and item.data.get("candidate_sha") == candidate_sha
+            and item.data.get("generation") == generation
+        }
+        if not roles.issubset(completed_roles):
+            return
+        reviews = [
+            item
+            for item in facts
+            if item.kind == "review_completed"
+            and item.data.get("candidate_sha") == candidate_sha
+            and item.data.get("generation") == generation
+            and item.data.get("reviewer_role") in roles
+        ]
+        blocking = any(item.data.get("promotion_blocking") is True for item in reviews)
+        blocker = self._control_candidate_blocker(facts, candidate_sha)
+        if not blocking and blocker is None:
+            review_ids = sorted(str(item.data["review_id"]) for item in reviews)
+            self.ledger.record_review_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.ACCEPTED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.ACCEPTANCE,
+                kind="promotion_accepted",
+                data={"candidate_sha": candidate_sha, "generation": generation, "review_ids": review_ids},
+                reason=ReasonCode.TERMINAL_OUTCOME,
+            )
+            return
+
+        eligible_findings = self._control_blocking_findings(facts, candidate_sha, generation)
+        repair = next(
+            (
+                item
+                for item in facts
+                if item.kind == "repair_requested" and item.data.get("candidate_sha") == candidate_sha
+            ),
+            None,
+        )
+        if generation == 1 and eligible_findings:
+            if repair is None:
+                self.ledger.record_review_transition(
+                    run_id,
+                    milestone_id,
+                    WorkflowState.REPAIR_REQUIRED,
+                    expected_state=WorkflowState.REVIEWING,
+                    phase=LifecyclePhase.REPAIR,
+                    kind="repair_requested",
+                    data={
+                        "candidate_sha": candidate_sha,
+                        "finding_ids": list(eligible_findings),
+                        "same_owner": True,
+                        "repair_generation": 2,
+                    },
+                    reason=ReasonCode.REVIEW_REJECTED,
+                )
+            self._enqueue_control_dispatch(
+                capsule,
+                role="executor",
+                generation=2,
+                candidate_sha=candidate_sha,
+                finding_ids=eligible_findings,
+            )
+            return
+
+        target = (
+            WorkflowState.BLOCKED
+            if blocker is not None and blocker.kind is BlockerKind.EXTERNAL
+            else WorkflowState.NEEDS_DECISION
+            if blocker is not None and blocker.kind is BlockerKind.DECISION
+            else WorkflowState.FAILED
+        )
+        self.ledger.record_review_transition(
+            run_id,
+            milestone_id,
+            target,
+            expected_state=WorkflowState.REVIEWING,
+            phase=LifecyclePhase.RECOVERY,
+            kind="re_review_rejected" if generation > 1 else "candidate_blocked",
+            data={
+                "candidate_sha": candidate_sha,
+                "generation": generation,
+                "review_ids": sorted(str(item.data["review_id"]) for item in reviews),
+                "finding_ids": list(eligible_findings),
+                "blocker": blocker.to_json() if blocker is not None else None,
+            },
+            reason=(
+                ReasonCode.ENVIRONMENT_BLOCKED
+                if target is WorkflowState.BLOCKED
+                else ReasonCode.DECISION_REQUIRED
+                if target is WorkflowState.NEEDS_DECISION
+                else ReasonCode.REVIEW_REJECTED
+            ),
+        )
+
+    def _record_control_queue_result(self, row: Mapping[str, object]) -> None:
+        """Translate one terminal ordinary-control queue row into acceptance facts."""
+
+        run_id = row.get("run_id")
+        milestone_id = row.get("milestone_id")
+        raw = row.get("raw_result_json")
+        if not isinstance(run_id, str) or not isinstance(milestone_id, str) or not isinstance(raw, str):
+            return
+        dispatch_id = str(row.get("dispatch_id"))
+        role = str(row.get("role"))
+        try:
+            capsule = self._control_capsule(run_id, milestone_id)
+            generation = int(row.get("generation", 0))
+            if role == "executor":
+                terminal_status = str(row.get("terminal_status"))
+                result_sha256 = row.get("raw_result_sha256")
+                if not isinstance(result_sha256, str):
+                    raise WorktreeError("control executor queue lacks a result digest")
+                predecessor_sha: str | None = None
+                context = row.get("action_json")
+                if isinstance(context, str):
+                    try:
+                        context_value = strict_json_loads(context, max_bytes=16_384)
+                    except ValueError:
+                        context_value = None
+                    if isinstance(context_value, dict) and isinstance(context_value.get("candidate_sha"), str):
+                        predecessor_sha = context_value["candidate_sha"]
+                candidate = self._worktrees.inspect_terminal_workspace(capsule, predecessor_sha=predecessor_sha)
+                result = None
+                try:
+                    result = ModelFacingResult.from_agent_message(raw)
+                except (TypeError, ValueError):
+                    pass
+                self.ledger.record_control_executor_result(
+                    run_id,
+                    milestone_id,
+                    candidate=candidate,
+                    terminal_status=terminal_status,
+                    dispatch_id=dispatch_id,
+                    result_sha256=result_sha256,
+                    blocker=result.blocker if result is not None else None,
+                )
+                if terminal_status == "completed" and candidate.disposition.value == "verified_commit":
+                    self._queue_control_reviews(capsule, candidate.commit_sha or "", generation=generation)
+            else:
+                result = review_result_from_agent_message(raw)
+                context_raw = row.get("action_json")
+                if not isinstance(context_raw, str):
+                    raise WorktreeError("control review queue lacks candidate context")
+                context = strict_json_loads(context_raw, max_bytes=16_384)
+                if (
+                    not isinstance(context, dict)
+                    or context.get("candidate_sha") != result.reviewed_revision
+                    or context.get("review_role") != str(result.reviewer_role)
+                    or context.get("generation") != generation
+                ):
+                    raise WorktreeError("control review result is not bound to its queue context")
+                self.ledger.record_control_review(
+                    run_id,
+                    milestone_id,
+                    candidate_sha=result.reviewed_revision,
+                    dispatch_id=dispatch_id,
+                    generation=generation,
+                    result=result,
+                )
+                self._advance_control_acceptance(capsule, result.reviewed_revision, generation)
+        except (AuthorityUnavailable, WorkflowConfigError, LedgerError, TypeError, ValueError, WorktreeError) as exc:
+            self._control_result_issue(row, exc)
+
     def _record_program_queue_result(self, row: Mapping[str, object]) -> None:
         """Translate one already-terminal queue row into one program event."""
 
@@ -3546,8 +3930,17 @@ class WorkflowHarness:
         if not isinstance(program_id, str) or not isinstance(milestone_id, str) or not isinstance(raw, str):
             return
         try:
-            self.ledger.program_status(program_id)
+            self.ledger.program_graph(program_id)
         except RecordNotFound:
+            # Legacy queue fixtures and pre-controller dispatches can share
+            # the queue table without owning a durable execution capsule.
+            # They are not ordinary-control results; do not construct a
+            # Controller or turn a malformed queue row into a lifecycle fact.
+            try:
+                self.ledger.get_execution(program_id, milestone_id)
+            except (RecordNotFound, LedgerError):
+                return
+            self._record_control_queue_result(row)
             return
         except LedgerError:
             return

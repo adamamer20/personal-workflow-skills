@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
@@ -38,6 +39,7 @@ from .controller_recovery_sentinel import (
     write_controller_recovery_evidence,
 )
 from .domain import (
+    AcceptanceMode,
     CodexFlowError,
     ControlAcknowledgement,
     ControlCommand,
@@ -254,6 +256,71 @@ def _program_status_payload(status: object) -> dict[str, object]:
         ],
         "ready_milestones": [str(item) for item in status.ready_milestones],
     }
+
+
+def _control_status_payload(
+    controller: Controller,
+    record: ExecutionRecord,
+    *,
+    queued: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Project ordinary-control execution and acceptance without starting work."""
+
+    try:
+        capsule, _digest = load_capsule(record.capsule_path)
+        lifecycle = controller.ledger.review_lifecycle(record.run_id, record.milestone_id)
+    except (ControllerError, LedgerError, OSError, ValueError):
+        capsule = None
+        lifecycle = ()
+    candidate: Mapping[str, object] | None = None
+    for fact in reversed(lifecycle):
+        if fact.kind == "candidate_recorded":
+            candidate = fact.data
+            break
+    roles = {
+        AcceptanceMode.OBJECTIVE.value: "code-reviewer",
+        AcceptanceMode.VISUAL.value: "visual-reviewer",
+        AcceptanceMode.ARCHITECTURE.value: "architecture-reviewer",
+    }
+    declared_roles = tuple(
+        roles[mode.value] for mode in (capsule.acceptance_modes if capsule is not None else ()) if mode.value in roles
+    )
+    candidate_sha = candidate.get("candidate_sha") if candidate is not None else None
+    generation = 0
+    if candidate is not None and isinstance(candidate.get("dispatch_id"), str):
+        try:
+            generation = int(DispatchId(candidate["dispatch_id"]).parts[3])
+        except ValueError:
+            generation = 0
+    completed_roles = {
+        str(fact.data.get("reviewer_role"))
+        for fact in lifecycle
+        if fact.kind == "review_completed"
+        and fact.data.get("candidate_sha") == candidate_sha
+        and fact.data.get("generation") == generation
+    }
+    payload: dict[str, object] = dict(queued) if queued is not None else dict(execution_json(record))
+    payload.update(
+        {
+            "run_id": str(record.run_id),
+            "milestone_id": str(record.milestone_id),
+            "execution_status": payload.get("status", record.status.value),
+            "lifecycle_state": controller.ledger.current_state(record.run_id, record.milestone_id).value,
+            "candidate_sha": candidate_sha,
+            "candidate_disposition": candidate.get("candidate_disposition") if candidate is not None else None,
+            "candidate_workspace_path": candidate.get("candidate_workspace_path") if candidate is not None else None,
+            "review_ids": [
+                str(fact.data.get("review_id"))
+                for fact in lifecycle
+                if fact.kind == "review_completed"
+                and fact.data.get("candidate_sha") == candidate_sha
+                and fact.data.get("generation") == generation
+            ],
+            "pending_authorities": [role for role in declared_roles if role not in completed_roles],
+            "candidate_generation": generation or None,
+        }
+    )
+    return payload
 
 
 def _program_decision_payload(status: object) -> dict[str, object]:
@@ -541,7 +608,14 @@ def _execution_action(
         }[action]
         record = method(run_id, milestone_id)
         if action == "status":
-            _emit_execution_payload(_detached_status_payload(controller, record), as_json=as_json)
+            payload = _detached_status_payload(controller, record)
+            try:
+                lifecycle = controller.ledger.review_lifecycle(run_id, milestone_id)
+            except LedgerError:
+                lifecycle = ()
+            if any(fact.kind == "candidate_recorded" for fact in lifecycle):
+                payload = _control_status_payload(controller, record, queued=payload)
+            _emit_execution_payload(payload, as_json=as_json)
         else:
             _emit(record, as_json=as_json)
     except (ControllerError, ValueError, RuntimeError) as exc:

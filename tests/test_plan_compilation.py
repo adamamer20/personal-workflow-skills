@@ -134,6 +134,38 @@ def test_event_driven_program_controller_capsule_is_the_frozen_pre_tui_owner() -
     assert compiled.capsule.plugin_requirements == ()
 
 
+def test_single_milestone_acceptance_lifecycle_compiles_the_exact_frozen_capsule() -> None:
+    compiled = compile_canonical_plan(
+        Path("docs/reviews/peer-thread-workflow.md"), "single-milestone-acceptance-lifecycle"
+    )
+
+    assert compiled.source_block_sha256 == "9f9dccd9ba19698f737e4f609d7cf5defbb7557456ab591f8cbc2bc692fa72bd"
+    assert compiled.capsule.objective == (
+        "Make codex-flow control own one complete candidate/review/repair/promotion lifecycle so executor "
+        "completion cannot close a milestone while declared acceptance remains pending."
+    )
+    assert compiled.capsule.acceptance_modes == (AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE)
+    assert tuple(str(authority.role) for authority in compiled.capsule.authorities) == (
+        "code-reviewer",
+        "architecture-reviewer",
+    )
+    assert compiled.capsule.mutable_surfaces == (
+        "src/codex_flow/cli.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/harness.py",
+        "tests/test_workflow_control.py",
+        "tests/test_controller_execution.py",
+        "tests/test_harness_recovery.py",
+        "tests/test_plan_compilation.py",
+        "config/test-partitions.toml only if current test membership requires it",
+    )
+    assert any(
+        "the 128-character durable_status contract" in surface for surface in compiled.capsule.protected_surfaces
+    )
+    assert compiled.capsule.recovery_policy == "completion_biased"
+
+
 def test_remaining_program_graph_is_serial_and_visual_review_stays_cancelled() -> None:
     plan = Path("docs/reviews/peer-thread-workflow.md")
     milestones = (
