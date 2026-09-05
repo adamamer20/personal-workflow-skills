@@ -139,7 +139,7 @@ def test_acceptance_candidate_authority_recovery_compiles_the_exact_frozen_capsu
         Path("docs/reviews/peer-thread-workflow.md"), "single-milestone-acceptance-lifecycle"
     )
 
-    assert compiled.source_block_sha256 == "824ba1c561fa1768b0a4e32470bb2d5a1e18364d31ede93ce75670c109d3f516"
+    assert compiled.source_block_sha256 == "5e4e7810ce37c470741d7dab26a28a96d0c8d321bb010b8c8070b32565f4426d"
     assert compiled.capsule.objective == (
         "Close the remaining exact-candidate terminal-authority defect so one production-shaped repair can "
         "create, validate and re-review a distinct successor without weakening restart adoption."
@@ -154,9 +154,12 @@ def test_acceptance_candidate_authority_recovery_compiles_the_exact_frozen_capsu
         "src/codex_flow/ledger.py",
         "tests/test_controller_execution.py",
         "tests/test_harness_recovery.py",
+        "tests/test_ledger_integrity.py",
+        "tests/test_service_lifecycle.py",
         "tests/test_plan_compilation.py",
         "config/test-partitions.toml only if current test membership requires it",
     )
+    assert any("dispatch_terminal_integrity" in criterion for criterion in compiled.capsule.acceptance_criteria)
     assert any("128-character durable_status contract" in surface for surface in compiled.capsule.protected_surfaces)
     assert compiled.capsule.recovery_policy == "completion_biased"
 

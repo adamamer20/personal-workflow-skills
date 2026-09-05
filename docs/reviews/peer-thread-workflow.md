@@ -10543,6 +10543,7 @@ ModelFacingCapsule(
     decomposition=(
         "Remove the historical-adoption bypass and compare the exact retained candidate, terminal workspace, Git authority and protected identity facts.",
         "Separate generation-1 executor terminal authority from generation-2 repair terminal authority while binding the repair to its immutable predecessor and finding context.",
+        "Capture the generation-2 terminal result and workspace, Git-authority and protected-path identities in one dispatch-owned integrity record and revalidate them across restart, review and promotion.",
         "Allow the accepted completed-execution review and one-repair states without permitting arbitrary candidate replacement or a second repair.",
         "Prove the real Controller execution path accepts one direct clean repair successor and rejects candidate, workspace, Git-authority or protected-path drift.",
         "Retain the already-closed exact dispatch-context validation and every existing review, promotion, program-controller and persistence boundary."
@@ -10551,9 +10552,10 @@ ModelFacingCapsule(
     acceptance_criteria=(
         "Historical 47a8fa3d -> 977d8f5c adoption succeeds only with exact retained workspace, Git-authority and protected-path identities; placeholder or conflicting digests fail closed.",
         "A production-shaped completed execution reaches REVIEWING, records one repair request, accepts one direct clean successor with its own exact terminal facts, invalidates prior reviews and queues every fresh authority.",
+        "The repair result and its HEAD, workspace snapshot, Git authority and protected digest are recorded atomically in one dispatch_terminal_integrity row and remain exact before candidate recording, each fresh review and promotion.",
         "The successor is not compared to the generation-1 terminal HEAD, but its predecessor, findings, workspace, Git authority, protected identity and direct ancestry are all exact and immutable.",
         "Candidate drift, dirty workspace bytes, wrong predecessor/findings, stale generation, duplicate repair or mismatched durable authority never produces a reviewable successor.",
-        "No second ordinary repair, new table, schema version, public type, transport, lifecycle owner or program-controller responsibility is introduced.",
+        "Exactly one forward schema-v20 migration and one dispatch_terminal_integrity child table are introduced; no second repair, public type, transport, lifecycle owner or program-controller responsibility is introduced.",
         "Focused production-shaped regressions, affected partitions, plan compilation, full make check, diff hygiene and fresh independent correctness plus architecture reviews close with P0=0/P1=0."
     ),
     mutable_surfaces=(
@@ -10561,12 +10563,14 @@ ModelFacingCapsule(
         "src/codex_flow/ledger.py",
         "tests/test_controller_execution.py",
         "tests/test_harness_recovery.py",
+        "tests/test_ledger_integrity.py",
+        "tests/test_service_lifecycle.py",
         "tests/test_plan_compilation.py",
         "config/test-partitions.toml only if current test membership requires it"
     ),
     protected_surfaces=(
         "docs/reviews/peer-thread-workflow.md and AGENTS.md after this planning commit",
-        "CLI, Controller implementation, domain, contracts, plan compiler, worktree manager, program controller, workflow configuration, schemas and migrations",
+        "CLI, Controller implementation, domain, contracts, plan compiler, worktree manager, program controller, workflow configuration and every schema/migration except the one ledger.py v19-to-v20 migration",
         "SDK adapter, profile/authentication, service/IPC framing, TUI/live-keyframe behavior and reusable workflow policy surfaces",
         "all evidence including docs/reviews/evidence/safe-refresh-and-control-list-paging.json",
         "real services, providers, App/global Codex state, remotes, history rewrite, discard, implicit cleanup and unrelated worktree bytes",
@@ -10577,7 +10581,7 @@ ModelFacingCapsule(
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
     ),
     prompt=(
-        "Use recover-milestone as one Sol Medium mutable recovery owner for only CONTROL-CANDIDATE-IDENTITY-001 at exact predecessor b74c12929012404a3c614836982651ddd413cd4a in the existing clean python-sdk-controller integration worktree. Both independent reviews agree that dispatch-context reuse is closed and that historical adoption skips retained identity comparisons while the production completed-execution guard makes a distinct generation-2 repair successor unreachable. Modify only harness.py, ledger.py and the three named tests. Remove the historical early bypass; validate exact retained candidate/workspace/Git/protected facts. Make terminal authority generation-aware so a production-shaped repair binds its predecessor and findings, validates its own direct clean successor and may enter the accepted review/repair states without comparing the successor to generation-1 terminal HEAD. Preserve one repair only, exact review invalidation/requeue, SQLite and WorkflowHarness authority, program-controller separation and the closed queue-context checks. Add production-shaped Controller regressions for exact successor success and each named drift, plus make the historical placeholder-digest fixture fail. Do not add a type, table, migration, module, public option, transport or lifecycle owner; do not call providers, App connectors, services or installers. Run focused tests, affected partitions, plan compilation and full make check; stage only owned paths, inspect the staged diff, run git diff --cached --check, create one coherent recovery commit and return one terminal result with fresh objective and architecture re-reviews pending."
+        "Use recover-milestone as one Sol Medium mutable recovery owner for only CONTROL-GENERATION2-TERMINAL-AUTHORITY-003 at exact predecessor 7e22ddff0f3927a4ddf67016185735f3e61eb867 in the existing clean python-sdk-controller integration worktree. Both independent reviews agree the earlier historical-adoption, repair-reachability and dispatch-context defects are closed, but a generation-2 repair result lacks its own durable terminal authority and can be reviewed after Git or protected-path drift. Modify only harness.py, ledger.py and the five named tests. Add exactly one dispatch_terminal_integrity table in one forward v19-to-v20 ledger migration, keyed by the existing repair dispatch and binding result digest, terminal HEAD/workspace snapshot, Git-authority digest, protected-path digest and capture time. Capture it atomically with result terminalization at the harness/ledger boundary; revalidate it before candidate recording, restart reuse, every generation-2 review result and final promotion. Fail closed on missing, stale, dirty, cross-dispatch or drifted facts and never recapture after terminalization. Preserve one repair only, exact historical adoption, dispatch-context checks, review invalidation/requeue, SQLite and WorkflowHarness authority and program-controller separation. Add production-shaped regressions for post-terminal/pre-ingestion and post-ingestion/pre-review Git, workspace and protected drift plus restart idempotency and exact success. Add no other table, type, module, public option, transport or lifecycle owner; do not call providers, App connectors, services or installers. Run focused tests, ledger/service migration and affected partitions, plan compilation and full make check; stage only owned paths, inspect the staged diff, run git diff --cached --check, create one coherent recovery commit and return one terminal result with fresh objective and architecture re-reviews pending."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000
