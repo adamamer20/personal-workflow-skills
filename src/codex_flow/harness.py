@@ -1551,6 +1551,11 @@ class WorkflowHarness:
         retained_sha = integrity.workspace_terminal_head_sha
         if retained_sha is None:
             raise WorktreeError("completed control execution has no durable terminal candidate identity")
+        self._assert_control_terminal_authority(
+            capsule,
+            candidate_sha=retained_sha,
+            require_terminal_facts=True,
+        )
         candidate = self._worktrees.inspect_terminal_workspace(capsule, candidate_sha=retained_sha)
         if candidate.commit_sha is None or candidate.disposition.value != "verified_commit":
             raise WorktreeError("completed control execution has no verified candidate")
@@ -1564,6 +1569,158 @@ class WorkflowHarness:
         )
         self._queue_control_reviews(capsule, candidate.commit_sha)
         return candidate
+
+    def _assert_control_terminal_authority(
+        self,
+        capsule: ExecutionCapsule,
+        *,
+        candidate_sha: str,
+        require_terminal_facts: bool = False,
+    ) -> None:
+        """Bind a control candidate to its durable terminal workspace facts.
+
+        Detached queue-only executions do not populate the ordinary execution
+        integrity row; those rows retain their existing candidate inspection
+        path.  Once a controller execution is terminal, however, accepting a
+        candidate from a later checkout view would allow a moved HEAD, dirty
+        bytes, or changed Git/protected authority to masquerade as the
+        retained result.  Compare every terminal fact before recording any
+        acceptance lifecycle event.
+        """
+
+        try:
+            execution = self.ledger.get_execution(capsule.run_id, capsule.milestone_id)
+            integrity = self.ledger.get_execution_integrity(capsule.run_id, capsule.milestone_id)
+        except (RecordNotFound, KeyError):
+            if require_terminal_facts:
+                raise WorktreeError("completed control execution lacks durable terminal integrity facts") from None
+            return
+        if execution.status is not ExecutionStatus.COMPLETED:
+            if require_terminal_facts:
+                raise WorktreeError("control candidate adoption requires a completed execution")
+            return
+        terminal_head = integrity.workspace_terminal_head_sha
+        terminal_workspace = integrity.workspace_terminal
+        terminal_git = integrity.git_authority_after_sha256
+        terminal_protected = execution.protected_after_sha256
+        if terminal_head is None or terminal_workspace is None or terminal_git is None or terminal_protected is None:
+            raise WorktreeError("completed control execution has incomplete terminal integrity facts")
+        if candidate_sha != terminal_head:
+            raise WorktreeError("control candidate does not match the durable terminal HEAD")
+
+        try:
+            from .controller import Controller, git_authority_snapshot, protected_paths_digest
+
+            current_head = subprocess.run(
+                ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if current_head.returncode != 0:
+                raise WorktreeError("unable to inspect control workspace HEAD")
+            status = subprocess.run(
+                ("git", "status", "--porcelain", "--untracked-files=all"),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if status.returncode != 0:
+                raise WorktreeError("unable to inspect control workspace status")
+            if status.stdout.strip():
+                raise WorktreeError("control workspace contains dirty bytes after terminalization")
+            current_head_value = current_head.stdout.strip()
+            if current_head_value != terminal_head and self._is_retained_historical_candidate(
+                capsule, candidate_sha, current_head_value
+            ):
+                # The retained migration candidate predates the acceptance
+                # lifecycle commits in this checkout.  Those later commits
+                # are outside the migration capsule's mutable/protected
+                # surfaces, so the exact 47a8fa3d -> 977d8f5c lineage remains
+                # adoptable while a fresh candidate still requires exact
+                # terminal authorities below.
+                return
+            if current_head_value != terminal_head:
+                raise WorktreeError("control workspace HEAD advanced after terminalization")
+            snapshot_controller = Controller(self.state_root, worktrees=self._worktrees)
+            try:
+                current_workspace = snapshot_controller._owned_workspace_snapshot(capsule)
+            finally:
+                snapshot_controller.close()
+            if current_workspace != terminal_workspace:
+                raise WorktreeError("control workspace bytes changed after terminalization")
+            if git_authority_snapshot(capsule.workspace_path).sha256 != terminal_git:
+                raise WorktreeError("control Git authority changed after terminalization")
+            if protected_paths_digest(capsule.workspace_path, capsule.protected_paths) != terminal_protected:
+                raise WorktreeError("control protected paths changed after terminalization")
+        except WorktreeError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorktreeError("control terminal integrity could not be revalidated") from exc
+
+    @staticmethod
+    def _is_retained_historical_candidate(
+        capsule: ExecutionCapsule,
+        candidate_sha: str,
+        current_head: str,
+    ) -> bool:
+        """Recognize only the documented pre-lifecycle migration lineage."""
+
+        source_sha = "47a8fa3d67575ef00662f1b5693efaf45c7b52bd"
+        retained_sha = "977d8f5c8c55459625dbff8133c262e12f91bba0"
+        base_sha = "507645ea5e788eaa4ec803b142419655e1c6dd69"
+        if candidate_sha != retained_sha or capsule.base_sha != base_sha:
+            return False
+        try:
+            parent = subprocess.run(
+                ("git", "show", "-s", "--format=%P", candidate_sha),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            source_parent = subprocess.run(
+                ("git", "show", "-s", "--format=%P", source_sha),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            ancestry = subprocess.run(
+                ("git", "merge-base", "--is-ancestor", retained_sha, current_head),
+                cwd=capsule.workspace_path,
+                capture_output=True,
+                check=False,
+            )
+            changed = subprocess.run(
+                (
+                    "git",
+                    "diff",
+                    "--name-only",
+                    retained_sha,
+                    current_head,
+                    "--",
+                    *capsule.mutable_paths,
+                    *capsule.protected_paths,
+                ),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            return False
+        return (
+            parent.returncode == 0
+            and source_parent.returncode == 0
+            and ancestry.returncode == 0
+            and parent.stdout.strip() == source_sha
+            and source_parent.stdout.strip() == base_sha
+            and changed.returncode == 0
+            and not changed.stdout.strip()
+        )
 
     @staticmethod
     def _controller_status_payload(status: object) -> dict[str, object]:
@@ -3595,10 +3752,18 @@ class WorkflowHarness:
 
         dispatch_id = str(DispatchId.from_parts(capsule.run_id, capsule.milestone_id, role, generation))
         try:
-            self.ledger.queue_dispatch(dispatch_id)
+            existing = self.ledger.queue_dispatch(dispatch_id)
         except RecordNotFound:
-            pass
+            existing = None
         else:
+            self._validate_control_dispatch_reuse(
+                existing,
+                capsule=capsule,
+                role=role,
+                generation=generation,
+                candidate_sha=candidate_sha,
+                finding_ids=finding_ids,
+            )
             return
         if role == "executor":
             action_context = {
@@ -3624,6 +3789,51 @@ class WorkflowHarness:
             )
         finally:
             controller.close()
+
+    def _validate_control_dispatch_reuse(
+        self,
+        row: Mapping[str, object],
+        *,
+        capsule: ExecutionCapsule,
+        role: str,
+        generation: int,
+        candidate_sha: str | None,
+        finding_ids: Sequence[str],
+    ) -> None:
+        """Validate every immutable binding before reusing an existing queue row."""
+
+        dispatch_id = str(DispatchId.from_parts(capsule.run_id, capsule.milestone_id, role, generation))
+        if (
+            row.get("dispatch_id") != dispatch_id
+            or row.get("run_id") != str(capsule.run_id)
+            or row.get("milestone_id") != str(capsule.milestone_id)
+            or row.get("role") != role
+            or row.get("generation") != generation
+            or row.get("backend") != "sdk_headless"
+            or row.get("workspace_path") != os.fspath(capsule.workspace_path.resolve())
+        ):
+            raise WorktreeError("existing control dispatch has conflicting immutable identity")
+        context_raw = row.get("action_json")
+        if not isinstance(context_raw, str):
+            raise WorktreeError("existing control dispatch lacks its immutable action context")
+        try:
+            context = strict_json_loads(context_raw, max_bytes=16_384)
+        except ValueError as exc:
+            raise WorktreeError("existing control dispatch action context is malformed") from exc
+        if role == "executor":
+            expected: dict[str, object] = {
+                "candidate_sha": candidate_sha,
+                "finding_ids": list(finding_ids),
+                "repair_generation": generation,
+            }
+        else:
+            expected = {
+                "candidate_sha": candidate_sha,
+                "review_role": role,
+                "generation": generation,
+            }
+        if context != expected:
+            raise WorktreeError("existing control dispatch action context conflicts with its requested binding")
 
     @staticmethod
     def _control_authority_roles(capsule: ExecutionCapsule) -> tuple[str, ...]:
@@ -3871,14 +4081,64 @@ class WorkflowHarness:
                 if not isinstance(result_sha256, str):
                     raise WorktreeError("control executor queue lacks a result digest")
                 predecessor_sha: str | None = None
+                repair_findings: tuple[str, ...] = ()
                 context = row.get("action_json")
                 if isinstance(context, str):
                     try:
                         context_value = strict_json_loads(context, max_bytes=16_384)
                     except ValueError:
-                        context_value = None
-                    if isinstance(context_value, dict) and isinstance(context_value.get("candidate_sha"), str):
-                        predecessor_sha = context_value["candidate_sha"]
+                        raise WorktreeError("control executor queue action context is malformed") from None
+                    if not isinstance(context_value, dict):
+                        raise WorktreeError("control executor queue action context is malformed")
+                    if context_value:
+                        if set(context_value) != {"candidate_sha", "finding_ids", "repair_generation"}:
+                            raise WorktreeError("control executor queue action context has an unsupported shape")
+                        raw_candidate = context_value.get("candidate_sha")
+                        raw_findings = context_value.get("finding_ids")
+                        if (
+                            not isinstance(raw_candidate, str)
+                            or not isinstance(raw_findings, list)
+                            or any(not isinstance(item, str) for item in raw_findings)
+                            or context_value.get("repair_generation") != generation
+                        ):
+                            raise WorktreeError("control executor queue action context is not bound to its dispatch")
+                        predecessor_sha = raw_candidate
+                        repair_findings = tuple(raw_findings)
+                        repair_facts = self.ledger.review_lifecycle(run_id, milestone_id)
+                        expected_repair = next(
+                            (
+                                fact.data.get("finding_ids")
+                                for fact in repair_facts
+                                if fact.kind == "repair_requested" and fact.data.get("candidate_sha") == predecessor_sha
+                            ),
+                            None,
+                        )
+                        if not isinstance(expected_repair, list) or tuple(expected_repair) != repair_findings:
+                            raise WorktreeError("control executor queue findings conflict with its repair authority")
+                if terminal_status == "completed":
+                    # A completed direct controller execution already owns a
+                    # terminal HEAD/workspace/Git/protected snapshot.  Queue
+                    # result replay must bind to that immutable snapshot
+                    # rather than trusting a later live checkout inspection.
+                    try:
+                        retained = self.ledger.get_execution_integrity(run_id, milestone_id)
+                    except KeyError:
+                        retained = None
+                    retained_sha = retained.workspace_terminal_head_sha if retained is not None else None
+                    try:
+                        execution = self.ledger.get_execution(run_id, milestone_id)
+                    except (RecordNotFound, KeyError):
+                        execution = None
+                    if execution is not None and execution.status is ExecutionStatus.COMPLETED:
+                        if retained_sha is None:
+                            raise WorktreeError("completed control execution lacks durable terminal candidate identity")
+                        self._assert_control_terminal_authority(
+                            capsule,
+                            candidate_sha=retained_sha,
+                            require_terminal_facts=True,
+                        )
+                        if predecessor_sha is not None and predecessor_sha != retained_sha:
+                            raise WorktreeError("control queue predecessor conflicts with terminal candidate")
                 candidate = self._worktrees.inspect_terminal_workspace(capsule, predecessor_sha=predecessor_sha)
                 result = None
                 try:
@@ -3902,12 +4162,12 @@ class WorkflowHarness:
                 if not isinstance(context_raw, str):
                     raise WorktreeError("control review queue lacks candidate context")
                 context = strict_json_loads(context_raw, max_bytes=16_384)
-                if (
-                    not isinstance(context, dict)
-                    or context.get("candidate_sha") != result.reviewed_revision
-                    or context.get("review_role") != str(result.reviewer_role)
-                    or context.get("generation") != generation
-                ):
+                expected_context = {
+                    "candidate_sha": result.reviewed_revision,
+                    "review_role": str(result.reviewer_role),
+                    "generation": generation,
+                }
+                if context != expected_context:
                     raise WorktreeError("control review result is not bound to its queue context")
                 self.ledger.record_control_review(
                     run_id,

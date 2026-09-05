@@ -11390,6 +11390,28 @@ class Ledger:
                 raise RecordNotFound(f"control execution does not exist: {run}/{milestone}")
             if run_row["program_digest"] is not None:
                 raise StaleWriter("program executor results use the program lifecycle authority")
+            execution_row = (
+                self._db()
+                .execute(
+                    "SELECT workspace_path, status FROM executions WHERE run_id = ? AND milestone_id = ?",
+                    (str(run), str(milestone)),
+                )
+                .fetchone()
+            )
+            if execution_row is not None and candidate is not None:
+                if Path(str(execution_row["workspace_path"])).resolve() != candidate.workspace_path.resolve():
+                    raise StaleWriter("control candidate workspace conflicts with its durable execution")
+                if str(execution_row["status"]) == ExecutionStatus.COMPLETED.value:
+                    try:
+                        terminal_integrity = self.get_execution_integrity(run, milestone)
+                    except KeyError as exc:
+                        raise StaleWriter("completed control execution lacks terminal integrity authority") from exc
+                    if (
+                        terminal_integrity.workspace_terminal_head_sha is None
+                        or candidate.commit_sha != terminal_integrity.workspace_terminal_head_sha
+                        or candidate.dirty
+                    ):
+                        raise StaleWriter("control candidate conflicts with its durable terminal authority")
             facts = self.review_lifecycle(run, milestone)
             for fact in reversed(facts):
                 if fact.kind != "candidate_recorded" or fact.data.get("dispatch_id") != str(dispatch):

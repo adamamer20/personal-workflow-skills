@@ -39,6 +39,7 @@ from codex_flow.domain import (
     ControllerGenerationState,
     ControllerGenerationStatus,
     ExecutionCapsule,
+    ExecutionStatus,
     FindingCausalClass,
     Generation,
     LiveTurnKeyframe,
@@ -92,6 +93,7 @@ from codex_flow.worker import (
     _resolve_shared_native_home,
     recovery_continuation_prompt,
 )
+from codex_flow.worktrees import WorktreeError
 
 DISPATCH = "run/milestone/executor/1"
 
@@ -550,6 +552,122 @@ def test_control_acceptance_promotes_only_after_every_fresh_authority_accepts(tm
         for fact in harness.ledger.review_lifecycle(capsule.run_id, capsule.milestone_id)
     )
     harness.close()
+
+
+def _terminal_authority_harness(
+    root: Path,
+    *,
+    terminal_head: str = "a" * 40,
+    terminal_git: str = "b" * 64,
+    terminal_protected: str = "c" * 64,
+) -> tuple[WorkflowHarness, ExecutionCapsule]:
+    """Build a narrow harness seam for terminal-authority adversaries."""
+
+    integrity = SimpleNamespace(
+        workspace_terminal_head_sha=terminal_head,
+        workspace_terminal=(("owned.txt", "signature"),),
+        git_authority_after_sha256=terminal_git,
+    )
+    ledger = SimpleNamespace(
+        get_execution=lambda _run, _milestone: SimpleNamespace(
+            status=ExecutionStatus.COMPLETED,
+            protected_after_sha256=terminal_protected,
+        ),
+        get_execution_integrity=lambda _run, _milestone: integrity,
+    )
+    harness = object.__new__(WorkflowHarness)
+    harness.state_root = root
+    harness.ledger = ledger
+    harness._worktrees = SimpleNamespace()
+    return harness, _control_capsule(root)
+
+
+def test_control_rejects_head_advancing_after_terminalization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    harness, capsule = _terminal_authority_harness(tmp_path)
+    calls = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="d" * 40 + "\n"),
+            SimpleNamespace(returncode=0, stdout=""),
+        )
+    )
+    monkeypatch.setattr(harness_module.subprocess, "run", lambda *args, **kwargs: next(calls))
+
+    with pytest.raises(WorktreeError, match="HEAD advanced"):
+        harness._assert_control_terminal_authority(capsule, candidate_sha="a" * 40, require_terminal_facts=True)
+
+
+def test_control_rejects_dirty_workspace_bytes_after_terminalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness, capsule = _terminal_authority_harness(tmp_path)
+    calls = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="a" * 40 + "\n"),
+            SimpleNamespace(returncode=0, stdout=" M owned.txt\n"),
+        )
+    )
+    monkeypatch.setattr(harness_module.subprocess, "run", lambda *args, **kwargs: next(calls))
+
+    with pytest.raises(WorktreeError, match="dirty bytes"):
+        harness._assert_control_terminal_authority(capsule, candidate_sha="a" * 40, require_terminal_facts=True)
+
+
+def test_control_dispatch_reuse_accepts_matching_candidate_role_and_generation(tmp_path: Path) -> None:
+    capsule = _control_capsule(tmp_path)
+    dispatch_id = "control-run/control-milestone/code-reviewer/1"
+    row = {
+        "dispatch_id": dispatch_id,
+        "run_id": str(capsule.run_id),
+        "milestone_id": str(capsule.milestone_id),
+        "role": "code-reviewer",
+        "generation": 1,
+        "backend": "sdk_headless",
+        "workspace_path": os.fspath(capsule.workspace_path.resolve()),
+        "action_json": json.dumps(
+            {"candidate_sha": "a" * 40, "review_role": "code-reviewer", "generation": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    harness = object.__new__(WorkflowHarness)
+    harness.ledger = SimpleNamespace(queue_dispatch=lambda _dispatch: row)
+
+    harness._enqueue_control_dispatch(
+        capsule,
+        role="code-reviewer",
+        generation=1,
+        candidate_sha="a" * 40,
+    )
+
+
+def test_control_dispatch_reuse_rejects_conflicting_repair_findings(tmp_path: Path) -> None:
+    capsule = _control_capsule(tmp_path)
+    dispatch_id = "control-run/control-milestone/executor/2"
+    row = {
+        "dispatch_id": dispatch_id,
+        "run_id": str(capsule.run_id),
+        "milestone_id": str(capsule.milestone_id),
+        "role": "executor",
+        "generation": 2,
+        "backend": "sdk_headless",
+        "workspace_path": os.fspath(capsule.workspace_path.resolve()),
+        "action_json": json.dumps(
+            {"candidate_sha": "a" * 40, "finding_ids": ["finding-old"], "repair_generation": 2},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    harness = object.__new__(WorkflowHarness)
+    harness.ledger = SimpleNamespace(queue_dispatch=lambda _dispatch: row)
+
+    with pytest.raises(WorktreeError, match="action context conflicts"):
+        harness._enqueue_control_dispatch(
+            capsule,
+            role="executor",
+            generation=2,
+            candidate_sha="a" * 40,
+            finding_ids=("finding-new",),
+        )
 
 
 def test_control_restart_adopts_exact_retained_lineage_without_executor_replay(
