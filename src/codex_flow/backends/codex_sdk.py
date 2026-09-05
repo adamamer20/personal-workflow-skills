@@ -1458,7 +1458,6 @@ def _provider_output_schema(schema: Schema | None) -> JsonObject | None:
     validate_output_schema(schema)
 
     common_keys = frozenset({"type", "description", "enum"})
-    object_keys = frozenset({"properties", "required", "additionalProperties"})
     array_keys = frozenset({"items", "minItems", "maxItems"})
     number_keys = frozenset({"multipleOf", "maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum"})
 
@@ -1481,6 +1480,20 @@ def _provider_output_schema(schema: Schema | None) -> JsonObject | None:
             if character == "(" and index + 1 < len(pattern) and pattern[index + 1] == "?":
                 return None
         return None if escaped else pattern
+
+    def admits_null(node: object) -> bool:
+        if not isinstance(node, Mapping):
+            return False
+        schema_type = node.get("type")
+        if schema_type == "null" or (isinstance(schema_type, list | tuple) and "null" in schema_type):
+            return True
+        if "const" in node and node["const"] is None:
+            return True
+        enum = node.get("enum")
+        if isinstance(enum, list | tuple) and any(value is None for value in enum):
+            return True
+        branches = node.get("oneOf")
+        return isinstance(branches, list | tuple) and any(admits_null(branch) for branch in branches)
 
     def project(node: object, *, root: bool = False) -> object:
         if not isinstance(node, Mapping):
@@ -1515,9 +1528,16 @@ def _provider_output_schema(schema: Schema | None) -> JsonObject | None:
         properties = node.get("properties")
         if isinstance(properties, Mapping):
             projected["properties"] = {str(name): project(child) for name, child in properties.items()}
-            for key in object_keys - {"properties"}:
-                if key in node:
-                    projected[key] = thaw_json(node[key])
+            required = node.get("required", ())
+            required_names = set(required) if isinstance(required, list | tuple) else set()
+            for name, child in properties.items():
+                if name not in required_names and not admits_null(child):
+                    raise TerminalFailureAfterIdentity(
+                        f"provider output schema optional property is not nullable: {name!r}"
+                    )
+            projected["required"] = [str(name) for name in properties]
+            if "additionalProperties" in node:
+                projected["additionalProperties"] = thaw_json(node["additionalProperties"])
         elif node.get("type") == "object":
             raise TerminalFailureAfterIdentity("provider output schema cannot project dynamic object keys")
         items = node.get("items")

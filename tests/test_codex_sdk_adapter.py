@@ -464,11 +464,57 @@ class CodexSdkAdapterTests(unittest.TestCase):
         properties = projected["properties"]
         self.assertIsInstance(properties, dict)
         assert isinstance(properties, dict)
+        self.assertEqual(projected["required"], list(properties))
+        self.assertIn("blocker", projected["required"])
+        self.assertEqual(properties["blocker"]["anyOf"][-1], {"type": "null"})
         changed_items = properties["changed_surfaces"]["items"]
         self.assertEqual(changed_items, {"type": "string"})
         self.assertNotIn("uniqueItems", properties["changed_surfaces"])
         self.assertEqual(properties["schema_version"], {"type": "integer", "enum": [1]})
         self.assertEqual(schema, original)
+
+    def test_provider_schema_requires_nested_nullable_optional_property(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "blocker": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+                    },
+                    "required": ["value"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["payload"],
+            "additionalProperties": False,
+        }
+        original = deepcopy(schema)
+
+        projected = _provider_output_schema(schema)
+
+        assert projected is not None
+        payload = projected["properties"]["payload"]
+        self.assertEqual(payload["required"], ["value", "blocker"])
+        self.assertEqual(payload["properties"]["blocker"]["anyOf"][-1], {"type": "null"})
+        self.assertEqual(schema, original)
+
+    def test_provider_schema_rejects_non_nullable_optional_property_before_turn(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"blocker": {"type": "string"}},
+            "required": [],
+            "additionalProperties": False,
+        }
+        client = FakeClient()
+        adapter = CodexSdkAdapter(self.config(), client_factory=lambda: client, sdk=_sdk())
+        identity = adapter.start_thread()
+
+        with self.assertRaises(TerminalFailureAfterIdentity, msg="optional provider fields must admit null"):
+            adapter.start_turn(identity, "hello", output_schema=schema)
+
+        self.assertEqual(client.thread.turn_calls, [])
 
     def test_controller_action_schema_retains_supported_numeric_bounds(self) -> None:
         schema = model_facing_controller_action_schema()
@@ -1443,11 +1489,23 @@ class CodexSdkAdapterTests(unittest.TestCase):
             "changed_surfaces": [],
             "validations": [],
             "durable_status": "completed",
+            "blocker": None,
         }
+        blockers = (
+            None,
+            {
+                "gate_id": "provider-schema",
+                "kind": "execution",
+                "scope": "current_repair",
+                "promotion_blocking": True,
+                "required_action": "repair projection",
+            },
+        )
         for next_action in (None, "inspect status"):
-            with self.subTest(next_action=next_action):
-                payload = {**base, "next_action": next_action}
-                self.assertEqual(_decode_schema_output(json.dumps(payload), schema), payload)
+            for blocker in blockers:
+                with self.subTest(next_action=next_action, blocker=blocker):
+                    payload = {**base, "next_action": next_action, "blocker": blocker}
+                    self.assertEqual(_decode_schema_output(json.dumps(payload), schema), payload)
 
     def test_canonical_constraints_and_semantic_maps_are_enforced_by_sdk_boundary(self) -> None:
         schema = {
