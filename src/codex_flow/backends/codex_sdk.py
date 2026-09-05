@@ -1484,16 +1484,17 @@ def _provider_output_schema(schema: Schema | None) -> JsonObject | None:
     def admits_null(node: object) -> bool:
         if not isinstance(node, Mapping):
             return False
-        schema_type = node.get("type")
-        if schema_type == "null" or (isinstance(schema_type, list | tuple) and "null" in schema_type):
-            return True
-        if "const" in node and node["const"] is None:
-            return True
-        enum = node.get("enum")
-        if isinstance(enum, list | tuple) and any(value is None for value in enum):
-            return True
         branches = node.get("oneOf")
-        return isinstance(branches, list | tuple) and any(admits_null(branch) for branch in branches)
+        if isinstance(branches, list | tuple):
+            return sum(admits_null(branch) for branch in branches) == 1
+        schema_type = node.get("type")
+        type_admits_null = schema_type == "null" or (isinstance(schema_type, list | tuple) and "null" in schema_type)
+        if not type_admits_null and not ("const" in node and node["const"] is None):
+            return False
+        if "const" in node and node["const"] is not None:
+            return False
+        enum = node.get("enum")
+        return not isinstance(enum, list | tuple) or any(value is None for value in enum)
 
     def project(node: object, *, root: bool = False) -> object:
         if not isinstance(node, Mapping):

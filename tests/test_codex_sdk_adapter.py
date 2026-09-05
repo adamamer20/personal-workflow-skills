@@ -500,21 +500,30 @@ class CodexSdkAdapterTests(unittest.TestCase):
         self.assertEqual(payload["properties"]["blocker"]["anyOf"][-1], {"type": "null"})
         self.assertEqual(schema, original)
 
-    def test_provider_schema_rejects_non_nullable_optional_property_before_turn(self) -> None:
-        schema = {
-            "type": "object",
-            "properties": {"blocker": {"type": "string"}},
-            "required": [],
-            "additionalProperties": False,
-        }
-        client = FakeClient()
-        adapter = CodexSdkAdapter(self.config(), client_factory=lambda: client, sdk=_sdk())
-        identity = adapter.start_thread()
+    def test_provider_schema_rejects_effectively_non_nullable_optional_property_before_turn(self) -> None:
+        children = (
+            {"type": "string"},
+            {"type": ["string", "null"], "enum": ["value"]},
+            {"type": ["string", "null"], "const": "value"},
+            {"type": ["string", "null"], "enum": [None, "value"], "const": "value"},
+            {"oneOf": [{"type": "null"}, {"type": ["string", "null"]}]},
+        )
+        for child in children:
+            with self.subTest(child=child):
+                schema = {
+                    "type": "object",
+                    "properties": {"blocker": child},
+                    "required": [],
+                    "additionalProperties": False,
+                }
+                client = FakeClient()
+                adapter = CodexSdkAdapter(self.config(), client_factory=lambda client=client: client, sdk=_sdk())
+                identity = adapter.start_thread()
 
-        with self.assertRaises(TerminalFailureAfterIdentity, msg="optional provider fields must admit null"):
-            adapter.start_turn(identity, "hello", output_schema=schema)
+                with self.assertRaisesRegex(TerminalFailureAfterIdentity, "optional property is not nullable"):
+                    adapter.start_turn(identity, "hello", output_schema=schema)
 
-        self.assertEqual(client.thread.turn_calls, [])
+                self.assertEqual(client.thread.turn_calls, [])
 
     def test_controller_action_schema_retains_supported_numeric_bounds(self) -> None:
         schema = model_facing_controller_action_schema()
