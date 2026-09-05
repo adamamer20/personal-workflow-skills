@@ -316,18 +316,16 @@ class TerminalUiClient:
             await self.close_live_stream()
             self._history_pages.clear()
             self._history_bindings.clear()
-            previous_workers = self._last_snapshot.workers
-            previous_decisions = self._last_snapshot.decisions
             self._clear_control_accumulation()
             self._last_snapshot = TerminalUiSnapshot(
                 False,
                 observed.isoformat(),
-                previous_workers,
-                previous_decisions,
+                (),
+                (),
                 str(exc),
                 self._visibility.value,
-                True,
-                True,
+                False,
+                False,
             )
             return self._last_snapshot
         if worker_page is not None and decision_page is not None:

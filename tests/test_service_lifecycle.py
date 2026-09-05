@@ -322,7 +322,7 @@ def _interrupted_refresh_fixture(tmp_path: Path) -> tuple[Path, object, Path, Pa
 
 
 @pytest.mark.parametrize("failure_stage", ["daemon-reload", "import-environment", "start", "health"])
-def test_interrupted_v19_refresh_restores_v18_unit_and_fence_for_each_post_staging_failure(
+def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hiding_replacement(
     tmp_path: Path, failure_stage: str
 ) -> None:
     _repository, unit, ledger_path, config_home, installed_path = _interrupted_refresh_fixture(tmp_path)
@@ -357,7 +357,13 @@ def test_interrupted_v19_refresh_restores_v18_unit_and_fence_for_each_post_stagi
             shutdown_sender=lambda *_args: pytest.fail("stopped predecessor must not be shut down"),
         )
 
-    assert installed_path.read_bytes() == before_bytes
+    if failure_stage in {"start", "health"}:
+        # Once start was invoked, or its outcome became possible, the current
+        # harness bytes remain installed even when no replacement authority is
+        # observable.  Direct restoration would hide an uncertain process.
+        assert installed_path.read_text(encoding="utf-8") == unit.text
+    else:
+        assert installed_path.read_bytes() == before_bytes
     assert stat.S_IMODE(installed_path.stat().st_mode) == before_mode == 0o600
     metadata = installed_path.lstat()
     assert stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
@@ -435,6 +441,79 @@ def test_interrupted_v19_refresh_rejects_arbitrary_legacy_unit_drift_before_mana
         assert authority is not None and authority[0] == 1
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize(
+    "classification",
+    ["malformed_shutdown", "missing_authority", "ambiguous_authority", "identity_drift", "uncertain_start"],
+)
+def test_interrupted_v19_refresh_keeps_harness_bytes_for_post_start_uncertainty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, classification: str
+) -> None:
+    _repository, unit, ledger_path, config_home, installed_path = _interrupted_refresh_fixture(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    started = False
+    service_active = False
+    current_ledger = Ledger(ledger_path)
+    original_authority = current_ledger.harness_authority
+
+    def observed_authority() -> object:
+        if not started:
+            return original_authority()
+        if classification == "missing_authority":
+            return None
+        if classification == "ambiguous_authority":
+            return []
+        authority = original_authority()
+        assert isinstance(authority, dict)
+        if classification == "malformed_shutdown":
+            return {
+                **authority,
+                "pid": 501,
+                "process_birth_identity": "replacement-birth",
+                "epoch": int(authority["epoch"]) + 1,
+                "requested_shutdown": 2,
+            }
+        if classification == "identity_drift":
+            return {**authority, "repository_root": "/different-repository", "epoch": int(authority["epoch"]) + 1}
+        return authority
+
+    monkeypatch.setattr(current_ledger, "harness_authority", observed_authority)
+
+    class Result:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def runner(argv: tuple[str, ...], **_: object) -> Result:
+        nonlocal started, service_active
+        calls.append(argv)
+        operation = argv[2]
+        if operation == "is-active":
+            return Result(0 if service_active else 3)
+        if operation == "start":
+            started = True
+            service_active = True
+            return Result(1 if classification == "uncertain_start" else 0)
+        return Result(0)
+
+    try:
+        with pytest.raises(ServiceRefreshFailed):
+            refresh_with_credential(
+                unit,
+                config_home=config_home,
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=runner,
+                ledger=current_ledger,
+                process_is_live=lambda pid, birth: started and pid == 501 and birth == "replacement-birth",
+                clock=lambda: 0.0,
+                sleeper=lambda _delay: pytest.fail("uncertain refresh must fail without polling"),
+                shutdown_sender=lambda *_args: pytest.fail("interrupted predecessor must not be shut down again"),
+            )
+    finally:
+        current_ledger.close()
+
+    assert installed_path.read_text(encoding="utf-8") == unit.text
+    assert "stop" not in [call[2] for call in calls]
 
 
 def test_started_replacement_health_failure_is_refenced_stopped_and_restored_before_retry(

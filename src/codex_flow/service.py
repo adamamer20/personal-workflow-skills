@@ -691,9 +691,11 @@ def refresh_with_credential(
         # being staged or health-checked.
         legacy_unit_raw, _legacy_unit_text, legacy_unit_mode = _read_installed_unit(unit_path_value)
 
-    def restore_legacy_unit() -> None:
+    def restore_legacy_unit(*, replacement_death_proven: bool = False) -> None:
         if legacy_unit_raw is None or legacy_unit_mode is None:
             return
+        if post_start_or_possible_replacement and not replacement_death_proven:
+            raise ServiceRefreshFailed("legacy service unit rollback is unsafe after replacement start")
         try:
             _assert_no_symlink_ancestors(unit_path_value)
             metadata = unit_path_value.lstat()
@@ -726,6 +728,16 @@ def refresh_with_credential(
         return value
 
     imported = False
+    # Once the replacement manager has been asked to start, the installed unit
+    # may already be executing even when systemctl returns an error.  This
+    # guard is intentionally monotonic: no later authority parsing or health
+    # failure can make direct restoration of the legacy unit safe again.
+    post_start_or_possible_replacement = False
+
+    def mark_possible_replacement() -> None:
+        nonlocal post_start_or_possible_replacement
+        post_start_or_possible_replacement = True
+
     replacement_authority_seen = False
     replacement_identity: tuple[int, str, int] | None = None
 
@@ -802,7 +814,10 @@ def refresh_with_credential(
             credential_value=value,
         )
 
-        restore_legacy_unit()
+        # This is the only post-start restoration path.  The exact replacement
+        # authority was fenced, the exact unit was stopped, and its
+        # birth-bound process was proven dead above.
+        restore_legacy_unit(replacement_death_proven=True)
         restored_raw, _restored_text, restored_mode = _read_installed_unit(unit_path_value)
         if restored_raw != legacy_unit_raw or restored_mode != legacy_unit_mode:
             raise ServiceRefreshFailed("legacy service unit rollback was not exact")
@@ -907,6 +922,10 @@ def refresh_with_credential(
         if _run_manager(("import-environment", key), runner=runner) != 0:
             raise ServiceRefreshFailed("user-manager credential import failed")
         imported = True
+        # Mark before invoking systemctl start.  A failed/timeout start is
+        # still an uncertain replacement and must not trigger direct legacy
+        # restoration.
+        mark_possible_replacement()
         if _run_manager(("start", unit.unit_name), runner=runner) != 0:
             raise ServiceRefreshFailed("user service replacement start failed")
 
@@ -929,6 +948,9 @@ def refresh_with_credential(
             # The original fenced row remains in place until a replacement
             # atomically acquires a greater epoch.  It is not an acquired
             # replacement and retains the pre-staging rollback behavior.
+            # Parse the durable shutdown fence only after the monotonic
+            # post-start guard has been set.
+            mark_possible_replacement()
             if (
                 replacement_epoch == old_epoch
                 and replacement_pid == old_pid
@@ -944,6 +966,8 @@ def refresh_with_credential(
                 replacement_identity = identity
             elif replacement_identity != identity:
                 raise ServiceRefreshFailed("replacement harness authority identity drifted")
+            # The shutdown fence is untrusted input.  Keep the guard set before
+            # parsing it so malformed values cannot re-enable legacy restore.
             healthy = _unit_is_active(unit, runner=runner) and _replacement_is_healthy(
                 replacement,
                 unit=unit,
@@ -970,7 +994,12 @@ def refresh_with_credential(
             )
             raise ServiceRefreshFailed("replacement harness health check failed")
     except BaseException as exc:
-        if interrupted_recovery and interrupted_unit_staged and not replacement_authority_seen:
+        if (
+            interrupted_recovery
+            and interrupted_unit_staged
+            and not replacement_authority_seen
+            and not post_start_or_possible_replacement
+        ):
             try:
                 restore_legacy_unit()
             except BaseException as restore_error:

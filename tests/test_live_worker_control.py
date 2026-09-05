@@ -48,6 +48,7 @@ from codex_flow.domain import (
     ControllerDecisionSummary,
     ControlListKind,
     ControlListPage,
+    ControlListPageStatus,
     ControlListRequest,
     ControlListVisibility,
     ConversationContent,
@@ -895,7 +896,7 @@ def test_terminal_ui_models_are_typed_bounded_and_truthful_about_unexposed_facts
     assert len(view.activity) == 1
 
 
-def test_terminal_ui_explicit_refresh_preserves_offline_snapshot_and_rejects_mutation() -> None:
+def test_terminal_ui_explicit_refresh_disconnects_with_empty_snapshot_and_recovers() -> None:
     live = _TerminalUiLiveClient()
     decisions = _TerminalUiDecisionClient()
     client = TerminalUiClient(live, decisions)  # type: ignore[arg-type]
@@ -906,9 +907,88 @@ def test_terminal_ui_explicit_refresh_preserves_offline_snapshot_and_rejects_mut
         live.online = decisions.online = False
         offline = await client.refresh()
         assert not offline.connected
-        assert offline.workers == online.workers and offline.decisions == online.decisions
+        assert offline.workers == () and offline.decisions == ()
+        assert not offline.workers_complete and not offline.decisions_complete
+        live.online = decisions.online = True
+        recovered = await client.refresh()
+        assert recovered.connected
+        assert recovered.workers == online.workers and recovered.decisions == online.decisions
         with pytest.raises(TerminalUiOfflineError, match="read-only"):
+            live.online = decisions.online = False
+            await client.refresh()
             await client.interrupt(_tui_worker())
+
+    asyncio.run(scenario())
+
+
+def test_terminal_ui_refresh_stale_page_clears_tokens_and_requests_fresh_first_pages() -> None:
+    class RefreshLive(_TerminalUiLiveClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stale = False
+            self.page_calls: list[str | None] = []
+
+        def status_page(
+            self,
+            *,
+            visibility: ControlListVisibility,
+            page_token: str | None = None,
+            page_items: int = 24,
+        ) -> ControlListPage[LiveWorkerStatus]:
+            del visibility, page_items
+            self.page_calls.append(page_token)
+            return ControlListPage(
+                ControlListKind.WORKERS,
+                ControlListVisibility.ALL,
+                "a" * 64,
+                () if self.stale else (_tui_worker(),),
+                None,
+                True,
+                ControlListPageStatus.STALE if self.stale else ControlListPageStatus.AVAILABLE,
+            )
+
+    class RefreshDecisions(_TerminalUiDecisionClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stale = False
+            self.page_calls: list[str | None] = []
+
+        def pending_page(
+            self,
+            *,
+            visibility: ControlListVisibility,
+            page_token: str | None = None,
+            page_items: int = 24,
+        ) -> ControlListPage[ControllerDecisionStatus]:
+            del visibility, page_items
+            self.page_calls.append(page_token)
+            return ControlListPage(
+                ControlListKind.DECISIONS,
+                ControlListVisibility.ALL,
+                "b" * 64,
+                () if self.stale else (_tui_decision(),),
+                None,
+                True,
+                ControlListPageStatus.STALE if self.stale else ControlListPageStatus.AVAILABLE,
+            )
+
+    live = RefreshLive()
+    decisions = RefreshDecisions()
+    client = TerminalUiClient(live, decisions)  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        first = await client.refresh()
+        assert first.connected and first.workers and first.decisions
+        live.stale = decisions.stale = True
+        stale = await client.refresh()
+        assert not stale.connected
+        assert stale.workers == () and stale.decisions == ()
+        assert not stale.workers_complete and not stale.decisions_complete
+        live.stale = decisions.stale = False
+        recovered = await client.refresh()
+        assert recovered.connected and recovered.workers and recovered.decisions
+        assert live.page_calls == [None, None, None]
+        assert decisions.page_calls == [None, None, None]
 
     asyncio.run(scenario())
 
