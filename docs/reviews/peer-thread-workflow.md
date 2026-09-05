@@ -9140,237 +9140,299 @@ ModelFacingCapsule(
 )
 ```
 
-## Active selection after activation recovery replan
+## Active selection after final causal re-reviews
 
-The first implementation and evidence commits for
-`safe-refresh-and-control-list-paging` are not promotion-ready. CI-001 is
-closed by the separate base64url token-body and HMAC-signature framing and its
-focused discriminator passes. Two independent causal reviews nevertheless
-returned `REPLAN_RECOMMENDED` because CI-002 remains reachable after the
-replacement acquires `harness_authority` and because the retained tests do not
-yet prove paging, TUI or bootstrap behavior through their production
-entrypoints. The accepted
-`terminal-candidate-retention-and-harness-cutover` history and source candidate
-`f459cccafad45511d336138aa09d3b8c6dfa8345` remain immutable inputs, not work to
-repeat.
+The closure candidate `9d3071d544f16f2f34176ce4dfbb31ea0aa191d4`
+descends from planning base `a3c3dd66410d06cbbbfeb74c086a9ac2a5b5656f`.
+The full causal review base remains
+`ba05399d57da5ca65250f64727e36270f786c213`. CI-001 token framing,
+authenticated 120-worker/120-decision traversal, `Bootstrap.execute()`
+reachability, and the ordinary acquired-replacement refence, stop, rollback and
+retry path are accepted implementation inputs and must not be repeated or
+redesigned.
+
+The final correctness review returned `REPLAN_RECOMMENDED` for two reachable
+gaps. CI-003 permits a post-start authority row whose `requested_shutdown`
+value is malformed to raise before `replacement_authority_seen` is set, after
+which the outer exception path restores v18 bytes over a possibly live
+replacement. CI-004 clears `TerminalUiClient` control maps and page tokens on
+stale/error, but then republishes the previous worker and decision rows in the
+disconnected snapshot. ART-001 also makes the retained wheel non-promotable:
+SHA-256 `26d545487fc81a55468e1427b3919aba19009d005827d5208e076b4f04e203e2`
+has only 32/33 Python-path parity and contains stale
+`codex_flow/service.py`. The current evidence file's externally computed
+SHA-256 `067fc2d1e427f6cd93c83ea4283236a99fd5c75e31aaed9d3f9fc75d852577b6`
+describes that stale candidate and is not closure evidence.
 
 The serial milestone DAG is now:
 
-    safe-refresh-and-control-list-paging-causal-closure [ready; one mutable owner]
-      -> independent objective and architecture causal re-reviews
+    safe-refresh-and-control-disconnect-final-closure [ready; one mutable owner]
+      -> independent Luna XHigh correctness causal re-review
+      -> independent Sol Medium architecture causal re-review
       -> integration-owner promotion/install/refresh/provider-free activation step 5
       -> one already-authorized real streaming sentinel
       -> live-plan-dag-revision
       -> module-responsibility-decomposition
 
-Every edge is retained for an acceptance dependency. There is no safe mutable
-fan-out: the service failure protocol, production-path discriminators and one
-evidence record bind one candidate and one causal review range. The cancelled
-visual review remains cancelled.
+Each edge is an acceptance dependency. There is no mutable fan-out because the
+two production repairs, their public-path regressions and the one evidence
+record must bind the same final candidate and wheel. The cancelled visual review
+remains cancelled.
 
-## Safe refresh and paging causal closure architecture replan
+## Final safe-refresh and disconnected-snapshot architecture replan
 
-This bounded successor keeps the existing public and persisted contracts.
-Its outcome is a retryable, durably fenced schema-v19/stopped-v18-unit state
-after every post-staging failure, including a replacement that acquired
-authority before failing health, plus retained provider-free proof that the
-already-implemented paging and TUI behavior is reached through authenticated
-production clients and that `Bootstrap.execute()` reaches the canonical
-refresh once. It does not redesign paging, repeat CI-001, change installer
-production logic, install or touch a real service, consume a provider, or
-promote the candidate.
+Outcome: every state after a replacement start is issued is classified before
+legacy restoration, so malformed, missing or ambiguous authority can never
+hide a live replacement behind v18 unit bytes; and every offline, stale or
+error TUI snapshot immediately exposes cleared control-list state until fresh
+first pages arrive. The successor keeps every public and persisted contract,
+the accepted paging implementation, bootstrap path and ordinary replacement
+rollback protocol.
 
-### Started-replacement failure protocol
+Non-goals are redesigning service lifecycle or paging, changing the installer,
+adding another recovery authority, changing conversation history, installing or
+touching a real service, consuming a provider, using App APIs or promoting the
+candidate. No real service, provider, App, network or global configuration
+action is authorized.
 
-`refresh_with_credential` owns one rollback protocol after the current harness
-unit has been staged. The pre-staging discriminator and its captured exact v18
-unit bytes/mode remain unchanged. Once `systemctl --user start` has been issued,
-any exception or health deadline uses the following ordered recovery before
-legacy bytes may be restored:
+### Monotonic post-start failure classification
 
-1. Re-read the sole `harness_authority`. If it is still the captured fenced
-   predecessor row, retain `requested_shutdown=1`. If it is a replacement,
-   require the exact repository root, state root and controller version, an
-   epoch greater than the captured predecessor, and a distinct valid PID plus
-   process-birth identity. A missing row, malformed identity, unrelated owner,
-   unexpected epoch transition or subsequent identity change is an
-   unrecoverable-in-this-invocation `ServiceRefreshFailed`; do not overwrite
-   the installed current unit.
-2. For a matching replacement, call the existing
-   `Ledger.arm_harness_refresh_fence()` exactly once. Its existing immediate
-   transaction first rejects active dispatch claims, live worker leases and
-   active controller generations, then durably sets `requested_shutdown=1`.
-   Re-read and require the same epoch/PID/birth identity with the fence set.
-   `HarnessRefreshBlocked`, a missing row or identity drift leaves the current
-   harness unit installed and fails closed; there is no direct SQL, forced
-   child termination or alternate fence.
-3. Stop only the exact repository unit with `systemctl --user stop`. Within the
-   original bounded deadline, require both unit inactivity and death of the
-   exact replacement PID/birth identity. Re-read the same authority identity
-   with `requested_shutdown=1` after the stop. Stop failure, timeout, a live
-   birth-bound process or authority replacement leaves the current unit bytes
-   in place and raises `ServiceRefreshFailed`; rollback must never hide a
-   possibly live replacement behind legacy bytes.
-4. Only after that proof, restore the captured v18 unit bytes and mode through
-   the existing private-single-link/no-symlink checks, validate those complete
-   bytes as `_legacy_supervisor_unit(expected_harness_unit)`, and require the
-   repository unit still inactive. The schema remains 19 and the same stopped
-   authority remains durably fenced. Best-effort credential unsetting remains
-   cleanup, not recovery authority.
+`refresh_with_credential` retains its current pre-start recovery behavior but
+replaces the parse-dependent `replacement_authority_seen` decision with one
+monotonic post-start/possible-replacement guard. Set that guard immediately
+before invoking `systemctl --user start`, before the call can return, raise or
+make a replacement possible. Once set, it never clears during the invocation.
+Every exception path consults it before considering direct v18 restoration.
+After start has been issued, mark the observed state as post-start before
+parsing any authority field, especially `requested_shutdown`; no decoder or
+validation exception may fall back to the pre-start branch.
 
-Failures before a successful start retain the existing behavior: no
-replacement authority exists, the unit is inactive, the captured authority is
-still fenced, and the exact v18 bytes may be restored directly. A successful
-rollback has one retry contract: the next canonical `harness refresh` must
-match the same interrupted schema-v19/stopped-v18 discriminator, stage one
-current unit and acquire an epoch greater than every prior authority. A failed
-or ambiguous rollback is not labelled retryable and never asks an operator to
-edit SQLite; a later invocation may proceed only if the same canonical
-preflight independently proves a safe state.
+Direct legacy restoration is eligible in exactly two cases:
 
-This orchestration remains in `src/codex_flow/service.py`; SQLite transactions
-and child exclusion remain in the existing ledger method, and systemd remains
-the sole unit authority. No ledger, harness, service or installer authority is
-duplicated.
+1. an error occurs before the start guard is set and existing checks still
+   prove the current unit inactive and the captured predecessor fence intact;
+   or
+2. after start was issued, a new positive no-replacement proof establishes in
+   the same bounded observation that the unit is inactive, systemd exposes no
+   live current process identity, the sole authority is exactly the captured
+   dead predecessor with the same epoch/PID/birth identity and valid
+   `requested_shutdown=1`, and no replacement authority or process could have
+   existed.
 
-### Frozen successor architecture map and ownership
+Absence of evidence is never this proof. A start command returning nonzero or
+raising is still post-start because systemd may have accepted work before the
+client observed failure. It may restore directly only if case 2 is positively
+proved; otherwise it leaves the current harness bytes installed and raises
+`ServiceRefreshFailed`.
 
-One Luna XHigh implementation owner has these exact mutable paths:
+The complete post-start classification is fixed:
 
-- **Modify** `src/codex_flow/service.py` only for the ordered
-  started-replacement refence, stop, birth-bound verification and rollback
-  protocol above. No public API, ledger method or service entrypoint changes.
-- **Modify** `tests/test_service_lifecycle.py` for the acquired-replacement
-  health-failure discriminator, exact refence/stop/rollback facts and a
-  successful subsequent retry. Earlier post-staging failure coverage remains.
-- **Modify** `tests/test_plugin_installation.py` for one provider-free
-  `Bootstrap.execute()` invocation over the exact schema-v19, fenced
-  `harness_authority`, stopped-v18-unit state. The production bootstrap methods
-  and command sequence execute; only external command/systemd/provider/plugin
-  seams are disposable. Assert exactly one canonical `harness refresh` argv
-  reaches the service transition and closes the state.
-- **Modify** `tests/test_live_worker_control.py` for authenticated Unix-socket
-  production-path paging. Start one disposable `WorkflowHarness`, connect
-  `LiveWorkerControlClient`, `ControllerDecisionClient` and
-  `TerminalUiClient.for_state_root` through its real `harness.sock`, traverse
-  120 ordered worker rows and 120 ordered decision rows across multiple pages,
-  decode every opaque continuation through the public clients, and prove no
-  omission or duplicate. Exercise `M` accumulation and completion and `F`
-  active/all reset through the real clients; assert stale/error/filter reset
-  clears prior rows and tokens. Private `_control_list_page` and fake-client
-  tests may remain focused unit evidence but do not satisfy this gate.
+| Observation | Required action | Legacy restore eligibility |
+| --- | --- | --- |
+| Exact captured predecessor, fenced, dead, unit inactive, and no systemd process | Record positive no-replacement proof; a failed start or bounded wait may use the direct restore path | Eligible only from this complete proof |
+| Exact captured predecessor but unit active, a systemd process is live, or liveness is uncertain | Leave current unit bytes installed and fail closed | Ineligible |
+| Matching replacement with greater epoch, distinct valid PID/birth identity and `requested_shutdown=0` | Use the accepted atomic refence, exact-unit stop, unit-inactive plus birth-death proof, same-row revalidation and rollback protocol | Eligible only after the whole accepted stop/death proof |
+| Matching replacement already carrying `requested_shutdown=1` | Do not refence again; stop the exact unit, prove inactivity and birth-bound death, revalidate the same fenced row, then use the accepted rollback protocol | Eligible only after the whole stop/death proof |
+| Matching predecessor or replacement with malformed `requested_shutdown`, including `2` | Leave current unit bytes installed and raise; parsing failure is post-start and cannot select direct restoration | Permanently ineligible in this invocation |
+| Missing row, malformed row, ambiguous multiplicity/shape, unrelated repository/state/version, unexpected epoch, invalid PID/birth identity or identity drift | Leave current unit bytes installed and fail closed; do not infer an owner or issue direct SQL | Permanently ineligible in this invocation |
+| Valid matching replacement whose process or unit remains active after fence/stop, or whose stop/fence/revalidation fails | Leave current unit bytes installed so the possibly live process remains visible and fail closed | Ineligible |
+
+This is a private orchestration change in `src/codex_flow/service.py`. The
+ledger remains the only durable fence authority and systemd remains the only
+unit authority. No new public flag, enum, result, method, table or recovery
+service is introduced.
+
+### Disconnected TUI snapshot contract
+
+The minimal production change is confined to
+`TerminalUiClient.refresh()` in `src/codex_flow/tui_client.py`. On an offline,
+stale or error transition it continues to close the live stream and perform
+the existing conversation-history cleanup exactly as today. It clears worker
+and decision maps, next-page tokens and snapshot identities, then emits a
+disconnected `TerminalUiSnapshot` from that cleared state: zero worker rows,
+zero decision rows, no retained control-list tokens or snapshot identities,
+and `workers_complete=False` plus `decisions_complete=False` because there is
+no valid accumulated snapshot whose completeness can be asserted. It must not
+copy `previous_workers` or `previous_decisions` into the emitted snapshot.
+
+The next successful `refresh()` makes new tokenless first-page requests and
+atomically replaces the empty disconnected state with those results. Its
+completion flags again derive from the fresh pages' successor tokens. Existing
+conversation page retention/clearing, selected-subject reconciliation, live
+keyframes, history loading and `L` behavior are unchanged; this capsule changes
+only the control-list rows and completeness reported by a disconnected
+snapshot.
+
+### Frozen implementation architecture map and ownership
+
+One Luna XHigh mutable implementation owner has exactly five paths:
+
+- **Modify** `src/codex_flow/service.py` for the monotonic pre-start/post-start
+  guard, authority classification and positive no-replacement proof. Reuse the
+  current rollback helpers and public `refresh_with_credential` entrypoint.
+- **Modify** `src/codex_flow/tui_client.py` only in the stale/error/offline
+  `refresh()` transition so the disconnected public snapshot is empty and
+  incomplete until fresh first pages arrive.
+- **Modify** `tests/test_service_lifecycle.py` with public
+  `refresh_with_credential` regressions for malformed
+  `requested_shutdown=2` while the replacement is live, missing authority,
+  ambiguous/malformed authority, identity drift, matching predecessor,
+  matching replacement, active/live process and start failure. Each test binds
+  start issuance, installed unit bytes, stop/fence calls and liveness so it
+  proves no possibly live replacement is hidden by direct restoration.
+- **Modify** `tests/test_live_worker_control.py` through
+  `TerminalUiClient.for_state_root` and public `refresh()` with the existing
+  real authenticated `harness.sock` fixture. Prove stale and error/offline
+  transitions expose zero rows, no tokens/snapshot ids and false completeness,
+  then recover by requesting fresh first worker and decision pages. Keep the
+  accepted 120/120 traversal, `M`, `F`, IPC and bootstrap reachability
+  regressions green.
 - **Modify** the existing
-  `docs/reviews/evidence/safe-refresh-and-control-list-paging.json` only to
-  correct lineage, record the new production-path discriminators and replace
-  unsupported success claims. It is the sole evidence record.
+  `docs/reviews/evidence/safe-refresh-and-control-list-paging.json` after the
+  final source wheel is independently compared. Replace the stale wheel and
+  unsupported closure claims with exact final source/test and evidence commit
+  lineage, focused/full gate results, 33/33 parity and external wheel
+  path/hash/size. Do not embed the evidence file's own digest.
 
-**Preserve** `scripts/install_personal_workflow_skills.py`: its production
-`Bootstrap.execute -> fence_existing_harness -> install_controller ->
-refresh_existing_harness` path already delegates one refresh to the canonical
-CLI/service implementation. Preserve `src/codex_flow/ledger.py`,
+**Preserve** `scripts/install_personal_workflow_skills.py`,
+`tests/test_plugin_installation.py`, `src/codex_flow/ledger.py`,
 `src/codex_flow/harness.py`, `src/codex_flow/control_client.py`,
-`src/codex_flow/tui_client.py`, `src/codex_flow/tui_models.py`,
-`src/codex_flow/tui.py`, `src/codex_flow/cli.py`, all schemas/migrations and
-test-partition configuration unless a failed discriminator proves a production
-delta. Such a production delta is a material boundary change and returns to
-planning rather than widening this capsule. All other plan-protected surfaces,
-real services, retained wheels, provider/App/global state, remotes and unrelated
-worktree bytes remain protected.
+`src/codex_flow/tui_models.py`, `src/codex_flow/tui.py`,
+`src/codex_flow/cli.py`, all other production/test/evidence paths, schemas,
+migrations, contracts, entrypoints and test-partition configuration. If a
+discriminating test proves any of those need a material change, return to
+planning rather than widening ownership.
 
-The new durable-artifact budget is zero. Create/remove nothing: no module,
-table, schema, migration, API, transport, service, socket, compatibility alias,
-polling path, provider/App path, fixture file, evidence file or runner. The
-semantic-vocabulary delta is also zero; the change completes the existing
-refresh invariant and exercises existing types and entrypoints.
+Create and remove nothing. The new durable-artifact budget is zero: no new
+artifact, module, table, schema, migration, API, transport, service, socket,
+alias, polling path, provider/App path, fixture or runner. The semantic-
+vocabulary delta is zero: this capsule completes two existing invariants using
+existing types and entrypoints and deletes no concept.
 
-### Evidence lineage and causal review binding
+### Focused public-path regressions
 
-The evidence record must correct the known immutable lineage without claiming
-knowledge of the commit that contains itself:
+The service matrix must execute the production `refresh_with_credential`
+entrypoint, not a replacement helper in isolation. The malformed-shutdown test
+must cause start to be issued, expose an otherwise matching live replacement
+with `requested_shutdown=2`, and prove the current harness bytes remain
+installed; no legacy restoration may hide that process. Missing and ambiguous
+authority equivalents prove the same invariant. Separate rows prove exact
+predecessor/no-replacement restoration, ordinary matching replacement
+refence-stop-death restoration, already-fenced replacement handling, identity
+drift, still-live process and start-command failure.
 
-- original repair implementation commit:
-  `2a24c545a812b4c73a29bb7e9e79044fcdc85b2f`;
-- its actual parent and original repair base:
-  `ba05399d57da5ca65250f64727e36270f786c213`;
-- later evidence-only tip:
-  `d92b726453012c63a10f473e9b483c6b2d055f85`.
+The TUI matrix must use `TerminalUiClient.for_state_root` through the existing
+authenticated production clients. After a connected snapshot has rows and
+tokens, both a typed stale page and an IPC/client error must produce a public
+disconnected snapshot with empty worker/decision tuples, cleared internal
+maps/tokens/snapshot ids and both completeness flags false. The next refresh
+must send page tokens `None` for both lists, publish fresh first-page rows and
+derive completeness only from those fresh pages. Conversation-history behavior
+must remain byte-for-behavior unchanged. Existing accepted token framing,
+120-worker/120-decision traversal, paging accumulation, visibility, bootstrap
+reachability and acquired-replacement retry tests remain green and are evidence
+inputs, not new implementation scope.
 
-The successor implementation starts from the planning commit containing this
-capsule. Its commit SHA is computed only after committing and is never embedded
-in that same commit's JSON. Both causal re-reviews bind the externally supplied
-successor commit and inspect the full inclusive change history represented by
-`ba05399d57da5ca65250f64727e36270f786c213..SUCCESSOR_COMMIT`, not merely the
-final tree. The SHA-256 and byte size of the evidence file are likewise
-computed from the committed file and carried in the external review/promotion
-receipt, never inside the file whose hash they describe. The JSON may name the
-known base, original implementation and evidence-only tip and state that final
-candidate/range/hash binding is external; it contains no fabricated hash,
-placeholder presented as evidence, or self-reference.
+### Artifact and evidence sequencing
+
+ART-001 makes sequencing a correctness gate rather than bookkeeping:
+
+1. After focused and affected tests pass, stage only the four source/test
+   paths, inspect the staged diff, run `git diff --cached --check`, and create
+   one coherent source/test commit descended from this planning commit.
+2. Build one fresh wheel only from that exact source/test commit into a new
+   external temporary directory. Do not reuse or overwrite the stale retained
+   wheel. Independently enumerate every packaged Python path and compare bytes
+   against the exact source tree: acceptance is 33/33, including
+   `codex_flow/service.py` and `codex_flow/tui_client.py`. Any mismatch blocks
+   evidence update and review.
+3. Only after the independent 33/33 comparison, update the existing JSON with
+   the exact source/test commit, wheel external path, SHA-256, byte size,
+   enumerated 33/33 result and test results. Wheel facts belong in the JSON
+   because this evidence-only edit changes no packaged Python source. The JSON
+   must explicitly supersede stale wheel SHA-256
+   `26d545487fc81a55468e1427b3919aba19009d005827d5208e076b4f04e203e2`
+   and stale evidence SHA-256
+   `067fc2d1e427f6cd93c83ea4283236a99fd5c75e31aaed9d3f9fc75d852577b6`;
+   neither may be presented as passing parity.
+4. Stage only that existing JSON, inspect it, run
+   `git diff --cached --check`, and create one evidence-only commit. This
+   evidence commit is the exact final candidate tip; its Python tree must equal
+   the wheel-bound source/test commit. Compute the final evidence file SHA-256
+   and byte size after the commit and carry them in the external review and
+   promotion receipt, never inside the self-hashed JSON.
+
+The two-commit sequence is one serial milestone and one mutable owner. It does
+not authorize an extra artifact path. Evidence never claims parity before the
+independent comparison, and review binds both commits.
 
 ### Closure and promotion boundary
 
-Implementation closure requires all of the following provider-free gates:
+Provider-free implementation closure requires:
 
-- focused service rollback/retry, bootstrap reachability and authenticated
-  paging/TUI discriminators pass, including the acquired-authority health
-  failure and 120-row worker plus decision traversals;
-- every affected semantic partition passes, followed by the full `make check`;
-- one freshly built wheel has exact source parity for every packaged Python
-  path, with wheel path/hash/size and source identities retained outside the
-  self-hashing evidence record as appropriate;
-- only the five mutable paths above are staged, the staged diff is inspected,
-  `git diff --cached --check` passes, and one coherent local successor commit
-  descends from this planning commit with no unrelated commits or bytes; and
-- independent Luna XHigh objective/correctness and Sol Medium architecture
-  causal re-reviews each inspect the exact successor commit plus the complete
-  base-to-successor range and return P0=0/P1=0. Finding severity and
-  `promotion_blocking` remain distinct; every deferred lower-severity finding
+- the focused service classification and TUI disconnected/recovery tests pass,
+  and all accepted IPC/bootstrap/refence/paging regressions remain green;
+- every affected service and live-control/TUI semantic partition passes,
+  followed by the full `make check` because production behavior, tests,
+  packaging and evidence change;
+- staged-diff inspection and `git diff --cached --check` pass for each of the
+  two commits, final status is clean, the source/test commit descends from this
+  planning commit, the evidence-only tip descends directly from it, and no
+  unrelated commit or path entered the range;
+- the fresh external wheel has independently verified 33/33 packaged-Python
+  byte parity with the source/test commit and therefore with the final
+  evidence-only tip, and its path/hash/size are recorded truthfully; and
+- independent Luna XHigh correctness and Sol Medium architecture causal
+  re-reviews each bind the exact final evidence-only tip, wheel hash, external
+  evidence hash and complete
+  `ba05399d57da5ca65250f64727e36270f786c213..FINAL_TIP` history, inspect every
+  commit rather than only the final tree, and return P0=0/P1=0. Finding
+  severity and `promotion_blocking` remain distinct; every deferred finding
   names an owner and `defer_to`.
 
-These gates establish provider-free implementation closure only. Later
-promotion, install, target-service refresh, provider-free activation step 5,
-protected-service verification and the single already-authorized provider
-sentinel belong only to the integration owner after both reviews accept. They
-are not executor actions or claims.
+These gates prove provider-free closure only. Install, target-service refresh,
+provider-free activation step 5, protected-service verification and the one
+already-authorized real streaming sentinel remain integration-owner actions
+after both reviews accept.
 
-## Next execution — safe-refresh-and-control-list-paging-causal-closure
+## Next execution — safe-refresh-and-control-disconnect-final-closure
 
 ```python
 ModelFacingCapsule(
     schema_version=1,
     objective=(
-        "Close the remaining safe-refresh and control-list paging causal gaps: refence and stop an acquired "
-        "replacement before exact legacy-unit rollback, and retain authenticated production-entrypoint proof."
+        "Close CI-003 so no post-start malformed, missing or ambiguous authority can restore legacy bytes over a possible replacement; close CI-004 so disconnected TUI snapshots expose cleared control state; and replace ART-001 with independently verified 33/33 wheel parity."
     ),
     decomposition=(
-        "Repair only service rollback after a started replacement acquires harness authority and then fails health.",
-        "Prove 120-row worker and decision traversal plus TUI F/M accumulation and reset through authenticated harness.sock clients.",
-        "Prove one Bootstrap.execute invocation routes the exact schema-v19/stopped-v18 state to the canonical harness refresh without installer duplication.",
-        "Correct known evidence lineage and bind the future commit, full review range and evidence hash externally to avoid self-reference.",
-        "Run focused, partition, repository, wheel/source parity, commit-hygiene and two independent causal review gates before any promotion."
+        "Make post-start/possible-replacement state monotonic before authority parsing and allow direct legacy restoration only after positive proof that no replacement process or authority could have existed.",
+        "Emit stale/error/offline TerminalUiClient snapshots with zero control rows, cleared tokens and false completeness, then recover from fresh first pages without changing conversation-history behavior.",
+        "Add public production-entrypoint regressions for the full service classification and TUI disconnect/recovery matrix while preserving accepted paging, bootstrap and ordinary rollback proof.",
+        "Commit source/tests first, build and independently compare one fresh external wheel at 33/33 Python paths, then record truthful wheel facts in one evidence-only successor commit.",
+        "Run focused, affected-partition, full repository, ancestry, parity and two independent causal review gates before promotion."
     ),
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
-        "After replacement authority acquisition followed by health failure, the same replacement is atomically fenced, the exact unit is stopped, its PID/birth identity is dead, requested_shutdown remains 1, exact v18 bytes/mode are restored, and a later canonical retry succeeds at a higher epoch.",
-        "Identity drift, active children, fence failure, stop failure, live birth-bound process or ambiguous authority leaves current unit bytes in place and fails closed without direct SQLite edits or alternate authority.",
-        "One disposable authenticated harness.sock is traversed by LiveWorkerControlClient and ControllerDecisionClient for 120 workers and 120 decisions with public token decoding, bounded pages, and zero omissions or duplicates.",
-        "TerminalUiClient.for_state_root uses those real clients; M accumulates subsequent pages, F clears accumulation and tokens while toggling active/all, and stale/error/filter transitions reset before a fresh first page.",
-        "Bootstrap.execute production methods issue exactly one canonical harness refresh for the exact fenced schema-v19/stopped-v18 state; installer production code remains unchanged.",
-        "The existing evidence record names 2a24c545a812b4c73a29bb7e9e79044fcdc85b2f, ba05399d57da5ca65250f64727e36270f786c213 and d92b726453012c63a10f473e9b483c6b2d055f85 correctly and does not contain its own commit or file hash.",
-        "Focused tests, affected semantic partitions, full make check, exact wheel/source parity, staged diff hygiene, clean ancestry and independent objective plus architecture causal re-reviews close at P0=0/P1=0."
+        "The post-start guard is set before systemctl start and before requested_shutdown parsing; once set, direct v18 restoration is permanently ineligible unless unit inactivity, no live systemd process and the exact dead fenced predecessor positively prove no replacement could have existed.",
+        "Malformed requested_shutdown=2 on an otherwise matching live replacement, missing or ambiguous authority, identity drift, active/live process and uncertain start failure all leave current harness bytes installed and fail closed without hiding a process or issuing direct SQL.",
+        "Matching predecessor, matching replacement with shutdown 0 or 1, start failure, stop/fence failure and successful stop/death rollback follow the frozen classification, while the accepted later higher-epoch retry remains green.",
+        "A stale or error/offline public TerminalUiClient refresh exposes zero workers, zero decisions, cleared page tokens and snapshot ids, and workers_complete=False plus decisions_complete=False; the next refresh requests fresh first pages and publishes only fresh results.",
+        "Conversation history, token framing, authenticated 120-worker/120-decision traversal, M/F behavior, Bootstrap.execute reachability and ordinary acquired-replacement refence/stop/rollback/retry remain unchanged and green.",
+        "Only the four source/test paths are committed first; a fresh external wheel built afterward matches all 33 packaged Python source paths byte-for-byte, including service.py and tui_client.py.",
+        "The existing evidence JSON is updated only after parity, records exact wheel path/hash/size and 33/33 truth, supersedes the stale wheel/evidence hashes, and does not contain its own hash; its evidence-only commit changes no packaged Python source.",
+        "Focused tests, affected semantic partitions, full make check, staged diff hygiene, clean two-commit ancestry and independent correctness plus architecture causal re-reviews of ba05399d57da5ca65250f64727e36270f786c213..FINAL_TIP close at P0=0/P1=0."
     ),
     mutable_surfaces=(
         "src/codex_flow/service.py",
+        "src/codex_flow/tui_client.py",
         "tests/test_service_lifecycle.py",
-        "tests/test_plugin_installation.py",
         "tests/test_live_worker_control.py",
         "docs/reviews/evidence/safe-refresh-and-control-list-paging.json"
     ),
     protected_surfaces=(
         "docs/reviews/peer-thread-workflow.md and AGENTS.md after this planning commit",
-        "scripts/install_personal_workflow_skills.py and all other production modules including ledger, harness, control clients, TUI and CLI",
-        "schemas, migrations, public APIs, transports, services, sockets, compatibility paths, polling and provider/App paths",
-        "real installed services, retained wheels until the parity gate, provider/App/global Codex state and prior immutable evidence",
+        "scripts/install_personal_workflow_skills.py, tests/test_plugin_installation.py and all other production, test and evidence paths",
+        "ledger, harness, control-client, TUI model/UI/CLI, schemas, migrations, contracts, entrypoints and test-partition configuration",
+        "real services, stale retained wheel bytes, provider/App/network/global Codex state and immutable prior evidence",
         "remotes, push, rebase, history rewrite, discard, implicit cleanup and unrelated worktree bytes"
     ),
     authorities=(
@@ -9378,20 +9440,7 @@ ModelFacingCapsule(
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
     ),
     prompt=(
-        "Use execute-milestone as the single Luna XHigh mutable owner for only "
-        "safe-refresh-and-control-list-paging-causal-closure in the existing integration worktree. Modify "
-        "only service.py, the three named existing test files and the existing evidence JSON. Reuse the ledger's "
-        "atomic harness refresh fence: after a replacement acquires authority and health fails, validate its exact "
-        "epoch/PID/birth identity, arm requested_shutdown=1, stop the exact unit, prove unit inactivity and birth-bound "
-        "death, revalidate the same fenced row, and only then restore exact v18 bytes/mode. Ambiguity leaves current "
-        "unit bytes in place and fails closed. Keep installer production code and all paging/TUI production code "
-        "unchanged unless a discriminator proves a material delta, which must return to planning. Add retained tests "
-        "through authenticated harness.sock/public clients for 120 workers and 120 decisions, token decoding and TUI "
-        "F/M behavior, plus one Bootstrap.execute canonical-refresh invocation and acquired-replacement failure/retry. "
-        "Correct known lineage without embedding the future commit or evidence file's own hash. Create no durable "
-        "artifact and touch no real service, provider, App or network. Run focused tests, affected partitions, full "
-        "make check and exact wheel/source parity; stage only owned paths, inspect the staged diff, run git diff "
-        "--cached --check, create one coherent local commit, and return one terminal result with causal re-reviews pending."
+        "Use execute-milestone as the single Luna XHigh mutable owner for only safe-refresh-and-control-disconnect-final-closure in the existing integration worktree. Modify exactly service.py, tui_client.py, the two named tests and the existing evidence JSON; add no path. In service.py set a monotonic post-start/possible-replacement guard before invoking start and before parsing requested_shutdown. Direct legacy restoration after that point requires positive proof of the exact dead fenced predecessor, inactive unit and no live systemd process; malformed value 2, missing/ambiguous authority, identity drift, live/uncertain process or incomplete stop/fence proof leaves current bytes installed and fails closed. Preserve the accepted matching-replacement refence/stop/death/rollback/retry path. In TerminalUiClient.refresh, stale/error/offline clears control maps/tokens/ids and emits empty disconnected rows with both completeness flags false; the next call starts at fresh first pages, with conversation history unchanged. Add public-entrypoint regressions for every frozen case and keep accepted IPC/bootstrap/paging tests green. After focused and affected gates, commit only source/tests; then build one fresh external wheel and independently compare every Python path at 33/33. Only then update the existing JSON with exact wheel path/hash/size and truthful supersession, commit that JSON alone, and compute its hash externally. Run full make check, staged diff and clean ancestry gates. Touch no real service, provider, App, network or global state. Return one terminal result with exact two-commit lineage, wheel/evidence identities and independent causal re-reviews pending."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000
