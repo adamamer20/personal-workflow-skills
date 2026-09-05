@@ -9812,7 +9812,7 @@ ModelFacingCapsule(
 )
 ```
 
-## Active selection after final causal re-reviews
+## Historical selection before final lifecycle planning
 
 The closure candidate `9d3071d544f16f2f34176ce4dfbb31ea0aa191d4`
 descends from planning base `a3c3dd66410d06cbbbfeb74c086a9ac2a5b5656f`.
@@ -10067,7 +10067,7 @@ provider-free activation step 5, protected-service verification and the one
 already-authorized real streaming sentinel remain integration-owner actions
 after both reviews accept.
 
-## Next execution — safe-refresh-and-control-disconnect-final-closure
+## Historical execution capsule — safe-refresh-and-control-disconnect-final-closure
 
 ```python
 ModelFacingCapsule(
@@ -10113,6 +10113,275 @@ ModelFacingCapsule(
     ),
     prompt=(
         "Use execute-milestone as the single Luna XHigh mutable owner for only safe-refresh-and-control-disconnect-final-closure in the existing integration worktree. Modify exactly service.py, tui_client.py, the two named tests and the existing evidence JSON; add no path. In service.py set a monotonic post-start/possible-replacement guard before invoking start and before parsing requested_shutdown. Direct legacy restoration after that point requires positive proof of the exact dead fenced predecessor, inactive unit and no live systemd process; malformed value 2, missing/ambiguous authority, identity drift, live/uncertain process or incomplete stop/fence proof leaves current bytes installed and fails closed. Preserve the accepted matching-replacement refence/stop/death/rollback/retry path. In TerminalUiClient.refresh, stale/error/offline clears control maps/tokens/ids and emits empty disconnected rows with both completeness flags false; the next call starts at fresh first pages, with conversation history unchanged. Add public-entrypoint regressions for every frozen case and keep accepted IPC/bootstrap/paging tests green. After focused and affected gates, commit only source/tests; then build one fresh external wheel and independently compare every Python path at 33/33. Only then update the existing JSON with exact wheel path/hash/size and truthful supersession, commit that JSON alone, and compute its hash externally. Run full make check, staged diff and clean ancestry gates. Touch no real service, provider, App, network or global state. Return one terminal result with exact two-commit lineage, wheel/evidence identities and independent causal re-reviews pending."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
+## Active continuation — acceptance-owned control and incremental planning
+
+The prior implementation is retained and must not be replayed. Its exact
+source/test commit is `47a8fa3d67575ef00662f1b5693efaf45c7b52bd` and its
+evidence-only candidate tip is
+`977d8f5c8c55459625dbff8133c262e12f91bba0`. The latter descends directly
+from the former, the checkout was clean at planning start, and the candidate is not yet promoted:
+declared objective and architecture acceptance still belong to independent
+authorities. The stale earlier wheel and evidence identities remain historical
+only. No implementation, provider call, service refresh, install or App/global
+mutation is part of this planning continuation.
+
+Two independently closable follow-ups have disjoint mutable surfaces:
+
+1. `single-milestone-acceptance-lifecycle` owns the production `codex-flow
+   control` lifecycle. It is selected next because it can adopt and finish the
+   exact retained candidate without replaying implementation.
+2. `incremental-planning-readiness-policy` owns reusable planning instructions
+   and their behavior fixtures. Its design is decision-ready, but execution is
+   deferred until the selected lifecycle milestone closes.
+
+Their production/test mutable paths are disjoint, but one concrete `shared
+contract` edge keeps execution serial: the lifecycle owner must work under the
+currently frozen root instructions, while the policy owner later changes that
+same repository instruction authority. The future policy node and any blocker
+local to it do not block lifecycle review or promotion. After lifecycle
+acceptance, the policy owner works in the same program worktree from the
+promoted tip. The lifecycle milestone itself retains real
+acceptance-dependency edges:
+
+    exact candidate adoption
+      -> every declared independent review
+      -> accepted promotion
+         or one bounded same-owner repair
+           -> every declared fresh successor re-review
+             -> accepted promotion or truthful terminal blocker
+
+The program controller remains responsible only for program DAG readiness,
+parallel-lane integration and successor milestones. It does not compensate for
+an incomplete single-milestone `control` lifecycle.
+
+### Follow-up 1 — single-milestone acceptance lifecycle
+
+#### Outcome and boundaries
+
+`codex-flow control` must distinguish an executor turn ending from a milestone
+closing. A successful executor result with a verified commit becomes an exact
+candidate and leaves the milestone nonterminal while any declared acceptance
+authority is missing. The harness starts every authority declared by the
+capsule, binds each result to the exact candidate, and promotes only when every
+authority accepts with no open promotion-blocking P0/P1 finding or applicable
+terminal blocker.
+
+One or more concrete P0/P1 findings route to one bounded same-owner repair
+dispatch over the retained candidate. A coherent repair commit supersedes the
+candidate and invalidates all prior reviews; every declared authority then
+receives one fresh read-only re-review of the successor. A second blocking
+review, unavailable required authority, unresolvable candidate-integrity fact,
+or genuinely external/decision prerequisite closes as the matching truthful
+terminal blocker. It never becomes `completed` merely because an executor turn
+completed.
+
+This is a single-milestone lifecycle, not a one-node synthetic program graph.
+The existing SQLite ledger and detached `WorkflowHarness` remain sole runtime
+authority. The normal `control --plan-path ... --milestone-id ...` entrypoint
+owns enqueue/reconciliation; workers remain leaves; review and repair dispatch
+use the existing role routing, closed result contracts, candidate inspection,
+generation identities and one-shot external-effect semantics. No alternate
+scheduler, callback, polling loop, transport, table, schema version, service,
+socket, worktree manager or public result family is authorized.
+
+#### Current-candidate migration and adoption
+
+After this lifecycle implementation is promoted, one ordinary control
+reconciliation of historical milestone
+`safe-refresh-and-control-disconnect-final-closure` must inspect its already
+durable completed executor result and terminal workspace rather than invoke the
+executor again. Adoption succeeds only when the retained lineage proves exact
+source/test commit `47a8fa3d67575ef00662f1b5693efaf45c7b52bd`, direct
+evidence-only tip `977d8f5c8c55459625dbff8133c262e12f91bba0`, clean
+workspace identity, capsule ownership, protected-path integrity and no
+unrelated commit. It records `977d8f5...` as the unpromoted candidate and
+queues both the declared `code-reviewer` and `architecture-reviewer` exactly
+once. Existing matching adoption/review facts are idempotently reused; any
+conflicting identity fails closed. No implementation generation, provider
+execution retry, manual candidate copy or invented promotion receipt is
+allowed.
+
+#### Frozen implementation architecture map
+
+One Luna XHigh mutable owner may modify exactly these existing paths:
+
+- **Modify `src/codex_flow/cli.py`:** make `control` report candidate,
+  reviewing, repair and accepted/blocked closure truthfully and reconcile an
+  already completed exact execution without restarting it. Keep the existing
+  CLI command and options unless a focused test proves one generic adoption
+  selector is unavoidable; any new public option requires a bounded plan
+  update before implementation.
+- **Modify `src/codex_flow/controller.py`:** extend the existing `Controller`
+  and `ReviewWorkflow` composition so one compiled capsule drives candidate
+  retention, every declared review authority, one bounded repair and fresh
+  successor re-review. Do not introduce another manager, runner or protocol.
+- **Modify `src/codex_flow/ledger.py`:** reuse the current execution,
+  lifecycle, review, dispatch and candidate facts to keep executor completion
+  nonterminal until promotion or a truthful blocker. Add no table, migration,
+  schema version, alternate state store or duplicate program fact family.
+- **Modify `src/codex_flow/harness.py`:** translate terminal single-milestone
+  executor/reviewer/repair queue rows into the same exact-candidate lifecycle
+  and enqueue each controller-authorized role once. Keep program DAG and
+  integration effects separate.
+- **Modify `tests/test_workflow_control.py`,
+  `tests/test_controller_execution.py`, `tests/test_harness_recovery.py` and
+  `tests/test_plan_compilation.py` only:** prove public entrypoint behavior,
+  crash/restart idempotency, authority completeness, repair/re-review and exact
+  retained-candidate adoption. `config/test-partitions.toml` may be modified
+  only if current test membership requires it.
+
+Dependency direction remains `cli -> Controller/ReviewWorkflow -> Ledger`,
+with `WorkflowHarness -> Controller/Ledger` only at the existing authenticated
+queue boundary. `WorktreeManager`, typed domain/contracts, SDK adapter and
+configuration remain dependencies, never reverse callers.
+
+Preserve `src/codex_flow/domain.py`, `src/codex_flow/contracts.py`,
+`src/codex_flow/plan_capsule.py`, `src/codex_flow/worktrees.py`,
+`src/codex_flow/program_controller.py`, `workflow.toml`, schemas, migrations,
+service/IPC framing, SDK/profile/authentication, TUI/live-keyframe behavior,
+plugins/skills/templates, AGENTS.md, all evidence including
+`docs/reviews/evidence/safe-refresh-and-control-list-paging.json`, real services,
+provider/App/global state and remotes. The 128-character `durable_status`
+contract is unchanged. Add no alias or persisted/public type; improve existing
+worker/reviewer prompt guidance with one bounded example only if a failing
+behavior test proves ambiguity, and never widen the schema to solve prose.
+
+The new durable-artifact and production-module budgets are zero. The semantic
+delta is one existing lifecycle invariant: executor completion creates a
+candidate; acceptance promotion closes a milestone. Existing candidate,
+review, finding, repair, blocker, generation and authority vocabulary must be
+reused.
+
+#### Acceptance and promotion gates
+
+- A completed executor with pending declared authorities is observably
+  nonterminal, owns one verified exact candidate, and queues every declared
+  authority exactly once across wake, restart and replay.
+- Reviews bind exact candidate, role and acceptance mode. Missing, stale,
+  duplicated, cross-candidate or counterfeit reviews never satisfy promotion.
+- Any P0/P1 set produces one same-owner repair generation;
+  its successor commit invalidates all earlier reviews and every declared
+  authority re-reviews the exact successor. There is no second repair.
+- Promotion requires all declared fresh accepted reviews, P0=0/P1=0 and no
+  applicable unresolved candidate blocker. Closure otherwise uses an accurate
+  `NEEDS_DECISION`, `EXTERNAL_BLOCKED` or `FAILED` fact with retained candidate
+  and evidence.
+- The program controller neither starts these single-milestone reviews nor
+  marks their node complete; program readiness consumes only the accepted
+  promotion receipt after this lifecycle closes.
+- A migration regression adopts `47a8fa3... -> 977d8f5...` from retained
+  durable facts, starts objective and architecture reviews without executor
+  replay, and remains idempotent under crash/restart.
+- Focused lifecycle/adoption tests, every affected controller/harness/review
+  semantic partition, plan compilation, strict schema/validator/compile gates,
+  full `make check`, exact staged-diff inspection, `git diff --cached --check`
+  and independent Luna XHigh correctness plus Sol Medium architecture reviews
+  close at P0=0/P1=0 before promotion. No provider or real-service gate is
+  implied.
+
+### Follow-up 2 — incremental planning readiness policy
+
+This decision-ready policy milestone corrects reusable planning guidance
+without embedding any project-specific legal identifier or operational
+example. Stable program-level planning freezes the observable outcome,
+non-negotiable whole-program invariants, shared/public/persisted contracts,
+state and integration authority, production entrypoints, dependency DAG and
+current readiness. A decision-ready implementation architecture map is
+required only for a milestone whose prerequisites are satisfied and which is
+eligible for execution now.
+
+Later migration, cutover, rollout, cleanup or production-operation nodes may
+remain explicitly `deferred` with named prerequisite evidence and a bounded
+decision owner. They receive a full architecture map before becoming ready,
+after predecessor dry-run or retained evidence resolves the operational facts.
+A blocker scoped only to a future node does not block current milestone review
+or promotion unless it changes a shared contract, state/entrypoint authority,
+security/integrity boundary or other recorded whole-program invariant.
+
+Once the shared-instruction edge is satisfied, one Luna High mechanical owner
+may modify only:
+
+- `plugins/personal-workflow-skills/skills/plan-work/SKILL.md` for the
+  ready-milestone architecture-map rule and deferred-node contract;
+- `templates/AGENTS.workflow.md` and root `AGENTS.md` for the same reusable
+  controller/planner boundary, merged without weakening stronger local policy;
+- `tests/fixtures/prompt-input/plan-work.json` with a universal ready/deferred
+  example containing prerequisite evidence and blocker scope; and
+- `tests/test_workflow_assets.py` for proportional positive and adversarial
+  behavior tests. `scripts/validate_workflow.py` may be modified only if the
+  existing validator cannot express these assertions; that is a bounded Sol
+  replan trigger, not executor discretion.
+
+Create/remove nothing; new durable-artifact, production-module and public-type
+budgets are zero. Preserve runtime/controller code, schemas, other skills,
+tests and fixtures, plan history/evidence, installed plugins, global state and
+remotes. Acceptance requires consistent skill/template/root wording, one
+execution-ready node with a full map, one deferred operational node without
+speculative module/class design, readiness blocked until named predecessor
+evidence exists, and current promotion unaffected by a future-only blocker.
+Adversaries must reject calling an execution-ready map optional, promoting a
+deferred node without its prerequisite/map, or misclassifying a shared-contract
+or whole-program blocker as future-only. Run focused workflow-asset tests,
+validators, fixture/schema checks, affected partitions and full `make check`;
+commit only owned surfaces and obtain independent objective and architecture
+acceptance at P0=0/P1=0.
+
+## Next execution — single-milestone-acceptance-lifecycle
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make codex-flow control own one complete candidate/review/repair/promotion lifecycle so executor "
+        "completion cannot close a milestone while declared acceptance remains pending."
+    ),
+    decomposition=(
+        "Retain or adopt the exact committed candidate when a single-milestone executor ends, leaving acceptance pending rather than terminal.",
+        "Start every declared exact-candidate review authority once and require all fresh accepted results before promotion.",
+        "Route P0/P1 findings to one bounded same-owner repair, invalidate prior reviews and start every declared successor re-review.",
+        "Close only with an accepted promotion receipt or a truthful terminal blocker while keeping program DAG/integration ownership separate.",
+        "Adopt source 47a8fa3d67575ef00662f1b5693efaf45c7b52bd and evidence tip 977d8f5c8c55459625dbff8133c262e12f91bba0 without rerunning implementation."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Executor completion with pending declared authorities is nonterminal and queues every exact-candidate authority once across replay and restart.",
+        "Fresh accepted reviews from every declared authority plus no open promotion-blocking P0/P1 finding or applicable blocker are required for promotion.",
+        "One bounded repair creates a successor candidate, invalidates prior reviews and receives every declared fresh re-review; a second rejection closes truthfully without another repair.",
+        "The single-milestone lifecycle does not create a synthetic program graph or transfer review ownership to the program controller.",
+        "The exact retained 47a8fa3d source and direct 977d8f5c evidence tip are adopted from durable facts and reviewed without any executor/provider replay.",
+        "Focused and affected partitions, plan compilation, full make check, diff hygiene and independent correctness plus architecture reviews close with P0=0/P1=0."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/cli.py",
+        "src/codex_flow/controller.py",
+        "src/codex_flow/ledger.py",
+        "src/codex_flow/harness.py",
+        "tests/test_workflow_control.py",
+        "tests/test_controller_execution.py",
+        "tests/test_harness_recovery.py",
+        "tests/test_plan_compilation.py",
+        "config/test-partitions.toml only if current test membership requires it"
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md after this planning commit",
+        "domain, contracts, plan compiler, worktree manager, program controller, workflow configuration, schemas and migrations",
+        "SDK adapter, profile/authentication, service/IPC framing, TUI/live-keyframe behavior and reusable workflow policy surfaces",
+        "all evidence including docs/reviews/evidence/safe-refresh-and-control-list-paging.json",
+        "real services, providers, App/global Codex state, remotes, history rewrite, discard, implicit cleanup and unrelated worktree bytes",
+        "the 128-character durable_status contract and all unrelated tests and evidence"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt=(
+        "Use execute-milestone as the single Luna XHigh mutable owner for only single-milestone-acceptance-lifecycle in the existing python-sdk-controller integration worktree. Modify only the exact frozen runtime/test surfaces and request a bounded Sol plan update before adding any public option, type, table, migration, module, runner, registry, schema or entrypoint. Keep SQLite and WorkflowHarness authoritative; reuse existing candidate, review, repair, blocker, dispatch and worktree validation. A completed executor creates or retains a candidate but does not close while acceptance is pending. Queue every declared review once, permit one same-owner repair for P0/P1 findings, invalidate prior reviews, re-review the successor through every authority and terminate only at accepted promotion or a truthful blocker. Keep the program controller limited to DAG readiness, integration and successors. Preserve the durable_status 128-character contract. Add a crash/restart migration test that adopts exact 47a8fa3d67575ef00662f1b5693efaf45c7b52bd -> 977d8f5c8c55459625dbff8133c262e12f91bba0 from durable facts without rerunning implementation or consuming a provider. Run focused and affected partitions, plan compilation and full make check; stage only owned paths, inspect the staged diff, run git diff --cached --check, create one coherent local commit and return one typed result with independent reviews pending."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000
