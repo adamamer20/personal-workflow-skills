@@ -630,8 +630,6 @@ def test_completed_controller_execution_accepts_one_exact_repair_successor_idemp
         workspace_path=repository,
         result_contract_sha256=model_facing_result_schema_sha256(),
     )
-    queued = harness.ledger.queue_dispatch("run/m1/executor/2")
-    captured = harness._capture_control_repair_terminal_integrity(queued, raw_result)
     result_sha256 = hashlib.sha256(raw_result.encode()).hexdigest()
     authority = harness.ledger.acquire_harness(
         repository_root=repository,
@@ -656,15 +654,83 @@ def test_completed_controller_execution_accepts_one_exact_repair_successor_idemp
         token_sha256=hashlib.sha256(token.encode("ascii")).hexdigest(),
         expires_at="9999-12-31T23:59:59Z",
     )
-    row = harness.ledger.commit_queue_result(
+    token_sha256 = hashlib.sha256(token.encode("ascii")).hexdigest()
+    harness.ledger.bind_worker_liveness(
         "run/m1/executor/2",
+        epoch=int(authority["epoch"]),
+        generation=2,
+        attempt=1,
+        pid=os.getpid(),
+        process_birth_identity="repair-test-worker",
+        lease_token_sha256=token_sha256,
+    )
+    harness.ledger.bind_worker_thread(
+        "run/m1/executor/2",
+        epoch=int(authority["epoch"]),
         generation=2,
         attempt=1,
         token=token,
-        raw_result=raw_result,
-        terminal_integrity=captured,
+        thread_id="repair-thread",
     )
-    assert row["state"] == "completed"
+    harness.epoch = int(authority["epoch"])
+    harness._active_turns = {"run/m1/executor/2": (2, 1, "repair-thread", "repair-turn")}
+    event = harness._worker_event(
+        {
+            "version": 1,
+            "operation": "worker_event",
+            "dispatch_id": "run/m1/executor/2",
+            "generation": 2,
+            "attempt": 1,
+            "token": token,
+            "thread_id": "repair-thread",
+            "turn_id": "repair-turn",
+            "sequence": 1,
+            "kind": "turn/completed",
+            "text": None,
+        }
+    )
+    assert event["ok"] is True
+    captured = harness.ledger.dispatch_terminal_integrity("run/m1/executor/2")
+    assert captured["result_sha256"] is None
+    harness.close()
+
+    harness = WorkflowHarness(repository)
+    monkeypatch.setattr(harness, "_queue_control_reviews", lambda *_args, **_kwargs: None)
+    harness.epoch = int(authority["epoch"])
+    harness._active_turns = {"run/m1/executor/2": (2, 1, "repair-thread", "repair-turn")}
+    replayed_event = harness._worker_event(
+        {
+            "version": 1,
+            "operation": "worker_event",
+            "dispatch_id": "run/m1/executor/2",
+            "generation": 2,
+            "attempt": 1,
+            "token": token,
+            "thread_id": "repair-thread",
+            "turn_id": "repair-turn",
+            "sequence": 1,
+            "kind": "turn/completed",
+            "text": None,
+        }
+    )
+    assert replayed_event["ok"] is True
+    assert harness.ledger.dispatch_terminal_integrity("run/m1/executor/2")["captured_at"] == captured["captured_at"]
+    response = harness._submit_result(
+        {
+            "version": 1,
+            "operation": "submit_result",
+            "dispatch_id": "run/m1/executor/2",
+            "generation": 2,
+            "attempt": 1,
+            "backend": "sdk_headless",
+            "workspace_path": os.fspath(repository.resolve()),
+            "schema_sha256": model_facing_result_schema_sha256(),
+            "token": token,
+            "raw_result": raw_result,
+        }
+    )
+    assert response["terminal_status"] == "completed"
+    row = harness.ledger.queue_dispatch("run/m1/executor/2")
 
     def fail_on_rejection(_row: Mapping[str, object], error: Exception) -> None:
         raise error

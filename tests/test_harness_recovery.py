@@ -488,15 +488,9 @@ def test_control_acceptance_waits_for_all_authorities_and_repairs_once(
         result_contract_sha256=model_facing_result_schema_sha256(),
     )
     with harness.ledger._transaction():
-        harness.ledger._db().execute(
-            "UPDATE dispatch_queue SET state = 'result_submitted', raw_result_json = ?, raw_result_sha256 = ?, "
-            "terminal_status = 'completed' WHERE dispatch_id = 'control-run/control-milestone/executor/2'",
-            (repair_raw, repair_digest),
-        )
-        harness.ledger._record_dispatch_terminal_integrity_in_transaction(
+        harness.ledger._capture_dispatch_terminal_integrity_in_transaction(
             "control-run/control-milestone/executor/2",
-            result_sha256=repair_digest,
-            terminal_status="completed",
+            event_kind="turn/completed",
             terminal_integrity={
                 "workspace_terminal_head_sha": second_sha,
                 "workspace_terminal": (),
@@ -504,6 +498,16 @@ def test_control_acceptance_waits_for_all_authorities_and_repairs_once(
                 "protected_paths_sha256": "a" * 64,
                 "captured_at": utc_now(),
             },
+            allow_insert=True,
+        )
+        harness.ledger._db().execute(
+            "UPDATE dispatch_queue SET state = 'result_submitted', raw_result_json = ?, raw_result_sha256 = ?, "
+            "terminal_status = 'completed' WHERE dispatch_id = 'control-run/control-milestone/executor/2'",
+            (repair_raw, repair_digest),
+        )
+        harness.ledger._bind_dispatch_terminal_integrity_in_transaction(
+            "control-run/control-milestone/executor/2",
+            result_sha256=repair_digest,
         )
     monkeypatch.setattr(harness, "_assert_control_repair_terminal_authority", lambda *_args, **_kwargs: None)
 
@@ -618,7 +622,7 @@ def test_generation_two_result_terminalization_is_atomic_without_integrity(tmp_p
         expires_at="9999-12-31T23:59:59Z",
     )
 
-    with pytest.raises(StaleWriter, match="lacks dispatch terminal integrity"):
+    with pytest.raises(StaleWriter, match="lacks pre-ingestion terminal integrity"):
         ledger.commit_queue_result(
             dispatch_id,
             generation=2,
@@ -633,23 +637,131 @@ def test_generation_two_result_terminalization_is_atomic_without_integrity(tmp_p
     assert ledger._db().execute("SELECT COUNT(*) FROM dispatch_terminal_integrity").fetchone()[0] == 0
     capability = ledger.worker_attempt_capability(dispatch_id, generation=2, attempt=1, token=token)
     assert capability["consumed_at"] is None
-    with pytest.raises(StaleWriter, match="capture is stale"):
-        ledger.commit_queue_result(
+    with ledger._transaction():
+        ledger._capture_dispatch_terminal_integrity_in_transaction(
             dispatch_id,
-            generation=2,
-            attempt=1,
-            token=token,
-            raw_result=_completed_worker_result(),
+            event_kind="turn/completed",
             terminal_integrity={
                 "workspace_terminal_head_sha": "c" * 40,
                 "workspace_terminal": (),
                 "git_authority_sha256": "d" * 64,
                 "protected_paths_sha256": "e" * 64,
-                "captured_at": "2000-01-01T00:00:00.000000Z",
+                "captured_at": utc_now(),
             },
+            allow_insert=True,
         )
-    assert ledger.queue_dispatch(dispatch_id)["state"] == "starting"
-    assert ledger.worker_attempt_capability(dispatch_id, generation=2, attempt=1, token=token)["consumed_at"] is None
+    assert ledger.dispatch_terminal_integrity(dispatch_id)["result_sha256"] is None
+    terminal = ledger.commit_queue_result(
+        dispatch_id,
+        generation=2,
+        attempt=1,
+        token=token,
+        raw_result=_completed_worker_result(),
+    )
+    assert terminal["state"] == "completed"
+    assert (
+        ledger.dispatch_terminal_integrity(dispatch_id)["result_sha256"]
+        == hashlib.sha256(_completed_worker_result().encode()).hexdigest()
+    )
+    ledger.close()
+
+
+def test_persisted_control_repair_result_without_completed_event_capture_requires_human_attention(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    ledger.create_run("control-run")
+    ledger.create_milestone("control-run", "control-milestone")
+    ledger.claim_dispatch("control-run", "control-milestone", "executor", 1)
+    ledger.record_control_executor_result(
+        "control-run",
+        "control-milestone",
+        candidate=_control_candidate(tmp_path, "a" * 40),
+        terminal_status="completed",
+        dispatch_id="control-run/control-milestone/executor/1",
+        result_sha256="b" * 64,
+    )
+    ledger.record_review_transition(
+        "control-run",
+        "control-milestone",
+        WorkflowState.REPAIR_REQUIRED,
+        expected_state=WorkflowState.REVIEWING,
+        phase=LifecyclePhase.REPAIR,
+        kind="repair_requested",
+        data={
+            "candidate_sha": "a" * 40,
+            "finding_ids": ["preingestion-integrity"],
+            "same_owner": True,
+            "repair_generation": 2,
+        },
+    )
+    ledger.claim_program_repair_dispatch("control-run", "control-milestone", generation=2)
+    dispatch_id = "control-run/control-milestone/executor/2"
+    ledger.enqueue_dispatch(
+        dispatch_id,
+        backend="sdk_headless",
+        capsule_json='{"model":"test","prompt":"repair"}',
+        action_json=json.dumps(
+            {"candidate_sha": "a" * 40, "finding_ids": ["preingestion-integrity"], "repair_generation": 2},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        route_json="{}",
+        workspace_path=tmp_path,
+        result_contract_sha256=model_facing_result_schema_sha256(),
+    )
+    epoch = int(_harness(ledger, tmp_path)["epoch"])
+    ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="c" * 64)
+    ledger.set_queue_state(dispatch_id, "starting", epoch=epoch)
+    token = "missing-capture-token"
+    token_sha256 = hashlib.sha256(token.encode("ascii")).hexdigest()
+    ledger.issue_attempt_capability(
+        dispatch_id,
+        generation=2,
+        attempt=1,
+        operation="submit_result",
+        schema_sha256=model_facing_result_schema_sha256(),
+        workspace_path=tmp_path,
+        backend="sdk_headless",
+        token_sha256=token_sha256,
+        expires_at="9999-12-31T23:59:59Z",
+    )
+    ledger.bind_worker_liveness(
+        dispatch_id,
+        epoch=epoch,
+        generation=2,
+        attempt=1,
+        pid=os.getpid(),
+        process_birth_identity="missing-capture-worker",
+        lease_token_sha256=token_sha256,
+    )
+    ledger.bind_worker_thread(
+        dispatch_id,
+        epoch=epoch,
+        generation=2,
+        attempt=1,
+        token=token,
+        thread_id="persisted-repair-thread",
+    )
+    ledger.mark_worker_exit(
+        dispatch_id,
+        pid=os.getpid(),
+        process_birth_identity="missing-capture-worker",
+        exit_code=2,
+        classification="worker-exit",
+    )
+    harness = _configured_harness(ledger, tmp_path, epoch)
+    harness._thread_inspector = lambda thread_id: ThreadInspection(
+        thread_id,
+        ThreadInspectionKind.TERMINAL_RESULT,
+        turn_id="persisted-repair-turn",
+        raw_result=_completed_worker_result(),
+    )
+
+    assert harness._recover_exited_dispatch(ledger.queue_dispatch(dispatch_id)) is True
+    assert ledger.queue_dispatch(dispatch_id)["state"] == "human_attention_required"
+    assert ledger.recovery_state(dispatch_id)["recovery_state"] == "human_attention_required"
+    assert ledger._db().execute("SELECT COUNT(*) FROM dispatch_terminal_integrity").fetchone()[0] == 0
     ledger.close()
 
 
@@ -825,18 +937,21 @@ def test_control_terminal_authority_rejects_each_named_identity_drift(
         ("protected", "protected paths changed"),
     ),
 )
-def test_generation_two_terminal_integrity_rejects_post_ingestion_drift(
+@pytest.mark.parametrize("binding_state", ["preingestion", "post_ingestion"])
+def test_generation_two_terminal_integrity_rejects_pre_and_post_ingestion_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     drift: str,
     message: str,
+    binding_state: str,
 ) -> None:
     dispatch_id = "control-run/control-milestone/executor/2"
     candidate_sha = "a" * 40
     result_sha256 = "b" * 64
+    bound = binding_state == "post_ingestion"
     integrity = {
         "dispatch_id": dispatch_id,
-        "result_sha256": "c" * 64 if drift == "result" else result_sha256,
+        "result_sha256": "c" * 64 if drift == "result" else result_sha256 if bound else None,
         "workspace_terminal_head_sha": "d" * 40 if drift == "candidate" else candidate_sha,
         "workspace_terminal": (("owned.txt", "file:" + "e" * 64),),
         "workspace_terminal_sha256": "f" * 64,
@@ -849,8 +964,8 @@ def test_generation_two_terminal_integrity_rejects_post_ingestion_drift(
         "milestone_id": "control-milestone",
         "role": "executor",
         "generation": 2,
-        "terminal_status": "completed",
-        "raw_result_sha256": result_sha256,
+        "terminal_status": "completed" if bound else None,
+        "raw_result_sha256": result_sha256 if bound else None,
     }
     harness = object.__new__(WorkflowHarness)
     harness.state_root = tmp_path
@@ -896,7 +1011,7 @@ def test_generation_two_terminal_integrity_rejects_post_ingestion_drift(
             capsule,
             dispatch_id=dispatch_id,
             candidate_sha=candidate_sha,
-            result_sha256=result_sha256,
+            result_sha256=result_sha256 if bound else None,
         )
 
 
@@ -1134,6 +1249,32 @@ def test_control_restart_adopts_exact_retained_lineage_without_executor_replay(
     with pytest.raises(WorktreeError, match="Git authority changed"):
         corrupted.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
     corrupted.close()
+
+    service_test = repository / "tests" / "test_service_lifecycle.py"
+    service_test.write_text(service_test.read_text(encoding="utf-8") + "\n# non-allowlisted successor drift\n")
+    subprocess.run(("git", "add", "tests/test_service_lifecycle.py"), cwd=repository, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=Codex Flow Test",
+            "-c",
+            "user.email=codex-flow@example.test",
+            "commit",
+            "-qm",
+            "non-allowlisted historical drift",
+        ),
+        cwd=repository,
+        check=True,
+    )
+    drifted_head = subprocess.run(
+        ("git", "rev-parse", "HEAD"), cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert not WorkflowHarness._is_retained_historical_candidate(
+        capsule,
+        "977d8f5c8c55459625dbff8133c262e12f91bba0",
+        drifted_head,
+    )
 
 
 def test_harness_start_rejects_dangling_legacy_socket_entry_before_claim(tmp_path: Path) -> None:

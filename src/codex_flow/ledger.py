@@ -1121,7 +1121,7 @@ _V19_TABLE_DDL = {
 
 _DISPATCH_TERMINAL_INTEGRITY_DDL = """CREATE TABLE dispatch_terminal_integrity (
     dispatch_id TEXT PRIMARY KEY NOT NULL,
-    result_sha256 TEXT NOT NULL CHECK(length(result_sha256) = 64),
+    result_sha256 TEXT CHECK(result_sha256 IS NULL OR length(result_sha256) = 64),
     workspace_terminal_head_sha TEXT NOT NULL CHECK(length(workspace_terminal_head_sha) = 40),
     workspace_terminal_json TEXT NOT NULL,
     workspace_terminal_sha256 TEXT NOT NULL CHECK(length(workspace_terminal_sha256) = 64),
@@ -2733,7 +2733,7 @@ class Ledger:
         if version >= SchemaVersion(20):
             expected["dispatch_terminal_integrity"] = {
                 "dispatch_id": ("TEXT", 1, 1),
-                "result_sha256": ("TEXT", 1, 0),
+                "result_sha256": ("TEXT", 0, 0),
                 "workspace_terminal_head_sha": ("TEXT", 1, 0),
                 "workspace_terminal_json": ("TEXT", 1, 0),
                 "workspace_terminal_sha256": ("TEXT", 1, 0),
@@ -3147,11 +3147,32 @@ class Ledger:
                         or str(queue["role"]) != "executor"
                         or int(queue["generation"]) != 2
                         or queue["program_digest"] is not None
-                        or str(queue["state"]) not in {"result_submitted", "completed"}
-                        or str(queue["terminal_status"]) != "completed"
-                        or str(queue["raw_result_sha256"]) != str(integrity["result_sha256"])
                     ):
                         raise CorruptSchemaError("dispatch terminal integrity conflicts with its repair result")
+                    result_digest = integrity["result_sha256"]
+                    if result_digest is None:
+                        if (
+                            queue["raw_result_sha256"] is not None
+                            or queue["terminal_status"] is not None
+                            or str(queue["state"])
+                            not in {
+                                "starting",
+                                "running",
+                                "recovery_inspection_pending",
+                                "recovery_retry_wait",
+                                "recovery_continuation_pending",
+                                "human_attention_required",
+                            }
+                        ):
+                            raise CorruptSchemaError(
+                                "unbound dispatch terminal integrity conflicts with its repair result"
+                            )
+                    elif (
+                        str(queue["state"]) not in {"result_submitted", "completed", "failed"}
+                        or queue["terminal_status"] is None
+                        or str(queue["raw_result_sha256"]) != str(result_digest)
+                    ):
+                        raise CorruptSchemaError("bound dispatch terminal integrity conflicts with its repair result")
                     _decode_workspace_baseline(
                         str(integrity["workspace_terminal_json"]),
                         str(integrity["workspace_terminal_sha256"]),
@@ -6928,6 +6949,7 @@ class Ledger:
         text: str | None,
         payload_sha256: str | None,
         sequence: int,
+        terminal_integrity: Mapping[str, object] | None = None,
     ) -> JsonObject | None:
         """Renew one exact worker and append one diagnostic in the fast ring transaction."""
 
@@ -7013,11 +7035,23 @@ class Ledger:
                     or existing["payload_sha256"] != payload_sha256
                 ):
                     raise StaleWriter("diagnostic replay conflicts with durable activity")
+                self._capture_dispatch_terminal_integrity_in_transaction(
+                    identity,
+                    event_kind=kind,
+                    terminal_integrity=terminal_integrity,
+                    allow_insert=False,
+                )
                 return self._queue_row(existing)
             if sequence <= latest_sequence:
                 # A bounded-ring eviction after commit can race with the
                 # worker receiving its acknowledgement. The exact durable
                 # stream position proves this replay was already accepted.
+                self._capture_dispatch_terminal_integrity_in_transaction(
+                    identity,
+                    event_kind=kind,
+                    terminal_integrity=terminal_integrity,
+                    allow_insert=False,
+                )
                 return None
             if sequence != latest_sequence + 1:
                 raise StaleWriter("diagnostic sequence is stale or has a gap")
@@ -7029,6 +7063,12 @@ class Ledger:
                 payload_bytes=payload_bytes,
                 sequence=sequence,
                 occurred_at=now,
+            )
+            self._capture_dispatch_terminal_integrity_in_transaction(
+                identity,
+                event_kind=kind,
+                terminal_integrity=terminal_integrity,
+                allow_insert=True,
             )
             self._validate_diagnostic_ring_in_transaction(identity)
             return self._queue_row(row)
@@ -8411,15 +8451,15 @@ class Ledger:
             return review_result_from_agent_message(raw_result)
         raise ValueError("queue result contract is unsupported")
 
-    def _record_dispatch_terminal_integrity_in_transaction(
+    def _capture_dispatch_terminal_integrity_in_transaction(
         self,
         dispatch_id: DispatchId | str,
         *,
-        result_sha256: str,
-        terminal_status: str,
+        event_kind: str,
         terminal_integrity: Mapping[str, object] | None,
+        allow_insert: bool,
     ) -> None:
-        """Bind one completed ordinary-control repair to its terminal checkout."""
+        """Capture one authenticated repair-completion workspace exactly once."""
 
         dispatch = str(DispatchId(str(dispatch_id)))
         queue = (
@@ -8436,22 +8476,18 @@ class Ledger:
         is_control_repair = (
             str(queue["role"]) == "executor" and int(queue["generation"]) == 2 and queue["program_digest"] is None
         )
-        required = is_control_repair and terminal_status == "completed"
+        required = is_control_repair and event_kind == "turn/completed"
         existing = (
             self._db()
             .execute("SELECT * FROM dispatch_terminal_integrity WHERE dispatch_id = ?", (dispatch,))
             .fetchone()
         )
-        if existing is not None:
-            if not required or str(existing["result_sha256"]) != result_sha256:
-                raise StaleWriter("dispatch terminal integrity conflicts with its result authority")
-            return
         if not required:
             if terminal_integrity is not None:
-                raise StaleWriter("dispatch terminal integrity is not authorized for this result")
+                raise StaleWriter("dispatch terminal integrity is not authorized for this worker event")
             return
         if terminal_integrity is None:
-            raise StaleWriter("completed control repair lacks dispatch terminal integrity")
+            raise StaleWriter("completed control repair event lacks dispatch terminal integrity")
         expected_keys = {
             "workspace_terminal_head_sha",
             "workspace_terminal",
@@ -8489,17 +8525,39 @@ class Ledger:
         except ValueError as exc:
             raise ValueError("dispatch terminal capture time is invalid") from exc
         capture_age = (datetime.now(timezone.utc) - captured_time).total_seconds()
-        if capture_age < -1 or capture_age > 300:
+        if existing is None and (capture_age < -1 or capture_age > 300):
             raise StaleWriter("dispatch terminal integrity capture is stale")
-        if str(queue["raw_result_sha256"]) != result_sha256:
-            raise StaleWriter("dispatch terminal integrity result digest is stale")
+        expected = (
+            terminal_head,
+            workspace_json,
+            workspace_sha256,
+            git_authority,
+            protected_paths,
+            captured_at,
+        )
+        if existing is not None:
+            actual = (
+                str(existing["workspace_terminal_head_sha"]),
+                str(existing["workspace_terminal_json"]),
+                str(existing["workspace_terminal_sha256"]),
+                str(existing["git_authority_sha256"]),
+                str(existing["protected_paths_sha256"]),
+                str(existing["captured_at"]),
+            )
+            if actual != expected:
+                raise StaleWriter("dispatch terminal integrity capture conflicts with durable authority")
+            return
+        if not allow_insert:
+            raise StaleWriter("completed control repair event lacks its durable terminal capture")
+        if queue["raw_result_sha256"] is not None:
+            raise StaleWriter("dispatch terminal integrity capture followed result ingress")
         self._db().execute(
             "INSERT INTO dispatch_terminal_integrity(dispatch_id, result_sha256, workspace_terminal_head_sha, "
             "workspace_terminal_json, workspace_terminal_sha256, git_authority_sha256, protected_paths_sha256, "
             "captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 dispatch,
-                result_sha256,
+                None,
                 terminal_head,
                 workspace_json,
                 workspace_sha256,
@@ -8508,6 +8566,55 @@ class Ledger:
                 captured_at,
             ),
         )
+
+    def _bind_dispatch_terminal_integrity_in_transaction(
+        self,
+        dispatch_id: DispatchId | str,
+        *,
+        result_sha256: str,
+    ) -> None:
+        """Bind result ingress to the pre-existing completed-event capture."""
+
+        dispatch = str(DispatchId(str(dispatch_id)))
+        result_digest = _sha256(result_sha256, field_name="dispatch result digest")
+        queue = (
+            self._db()
+            .execute(
+                "SELECT q.role, q.generation, q.raw_result_sha256, r.program_digest "
+                "FROM dispatch_queue q JOIN runs r ON r.run_id = q.run_id WHERE q.dispatch_id = ?",
+                (dispatch,),
+            )
+            .fetchone()
+        )
+        if queue is None:
+            raise RecordNotFound(f"queue dispatch does not exist: {dispatch}")
+        is_control_repair = (
+            str(queue["role"]) == "executor" and int(queue["generation"]) == 2 and queue["program_digest"] is None
+        )
+        existing = (
+            self._db()
+            .execute("SELECT result_sha256 FROM dispatch_terminal_integrity WHERE dispatch_id = ?", (dispatch,))
+            .fetchone()
+        )
+        if not is_control_repair:
+            if existing is not None:
+                raise StaleWriter("dispatch terminal integrity is not authorized for this result")
+            return
+        if existing is None:
+            raise StaleWriter("completed control repair lacks pre-ingestion terminal integrity")
+        if str(queue["raw_result_sha256"]) != result_digest:
+            raise StaleWriter("dispatch terminal integrity result digest is stale")
+        bound = existing["result_sha256"]
+        if bound is not None:
+            if str(bound) != result_digest:
+                raise StaleWriter("dispatch terminal integrity conflicts with its result authority")
+            return
+        updated = self._db().execute(
+            "UPDATE dispatch_terminal_integrity SET result_sha256 = ? WHERE dispatch_id = ? AND result_sha256 IS NULL",
+            (result_digest, dispatch),
+        )
+        if updated.rowcount != 1:
+            raise StaleWriter("dispatch terminal integrity result binding was lost")
 
     def dispatch_terminal_integrity(self, dispatch_id: DispatchId | str) -> JsonObject:
         """Return one verified immutable repair terminal-authority row."""
@@ -8524,7 +8631,11 @@ class Ledger:
         )
         return {
             "dispatch_id": str(row["dispatch_id"]),
-            "result_sha256": _sha256(str(row["result_sha256"]), field_name="dispatch result digest"),
+            "result_sha256": (
+                None
+                if row["result_sha256"] is None
+                else _sha256(str(row["result_sha256"]), field_name="dispatch result digest")
+            ),
             "workspace_terminal_head_sha": _git_sha(
                 str(row["workspace_terminal_head_sha"]), field_name="dispatch terminal HEAD"
             ),
@@ -8585,7 +8696,6 @@ class Ledger:
         attempt: int,
         token: str,
         raw_result: str | bytes,
-        terminal_integrity: Mapping[str, object] | None = None,
     ) -> JsonObject:
         """Atomically ingest, terminalize, release and wake one worker result."""
 
@@ -8604,11 +8714,9 @@ class Ledger:
                 result=result,
                 digest=digest,
             )
-            self._record_dispatch_terminal_integrity_in_transaction(
+            self._bind_dispatch_terminal_integrity_in_transaction(
                 dispatch_id,
                 result_sha256=digest,
-                terminal_status=self._queue_result_terminal_status(result),
-                terminal_integrity=terminal_integrity,
             )
             now = utc_now()
             self._db().execute(
@@ -8626,7 +8734,6 @@ class Ledger:
         attempt: int,
         token: str,
         raw_result: str | bytes,
-        terminal_integrity: Mapping[str, object] | None = None,
     ) -> JsonObject:
         """Recover one exact private result after result transport exhausted.
 
@@ -8677,11 +8784,9 @@ class Ledger:
                 result=result,
                 digest=digest,
             )
-            self._record_dispatch_terminal_integrity_in_transaction(
+            self._bind_dispatch_terminal_integrity_in_transaction(
                 dispatch_id,
                 result_sha256=digest,
-                terminal_status=self._queue_result_terminal_status(result),
-                terminal_integrity=terminal_integrity,
             )
             self._db().execute(
                 "UPDATE retry_policies SET revision = revision + 1, strategy = 'none', next_eligible_at = NULL, "
@@ -8695,7 +8800,6 @@ class Ledger:
         dispatch_id: DispatchId | str,
         *,
         raw_result: str | bytes,
-        terminal_integrity: Mapping[str, object] | None = None,
     ) -> JsonObject:
         """Ingest one strictly validated persisted-thread terminal envelope.
 
@@ -8717,6 +8821,10 @@ class Ledger:
                 raise RecordNotFound(f"queue dispatch does not exist: {dispatch_id}")
             if row["state"] in {"completed", "failed"}:
                 if row["raw_result_sha256"] == digest:
+                    self._bind_dispatch_terminal_integrity_in_transaction(
+                        dispatch_id,
+                        result_sha256=digest,
+                    )
                     return self._queue_row(row)
                 raise StaleWriter("terminal queue result is immutable")
             if row["state"] != "recovery_inspection_pending":
@@ -8745,11 +8853,9 @@ class Ledger:
                 "human_attention_reason = NULL, updated_at = ? WHERE dispatch_id = ?",
                 (now, str(dispatch_id)),
             )
-            self._record_dispatch_terminal_integrity_in_transaction(
+            self._bind_dispatch_terminal_integrity_in_transaction(
                 dispatch_id,
                 result_sha256=digest,
-                terminal_status=self._queue_result_terminal_status(result),
-                terminal_integrity=terminal_integrity,
             )
             return self._finalize_queue_result_in_transaction(dispatch_id)
 

@@ -38,7 +38,6 @@ from .contracts import (
     ModelFacingProgramControllerAction,
     ModelFacingProgramControllerActionBundle,
     ModelFacingResult,
-    ModelResultStatus,
     PluginCapabilitySnapshot,
     PluginRequirement,
     review_result_from_agent_message,
@@ -1654,10 +1653,8 @@ class WorkflowHarness:
         except (OSError, RuntimeError, ValueError) as exc:
             raise WorktreeError("control terminal integrity could not be revalidated") from exc
 
-    def _capture_control_repair_terminal_integrity(
-        self, row: Mapping[str, object], raw_result: str
-    ) -> Mapping[str, object] | None:
-        """Capture one generation-2 executor checkout before result commit."""
+    def _capture_control_repair_terminal_integrity(self, row: Mapping[str, object]) -> Mapping[str, object] | None:
+        """Capture one generation-2 executor checkout at turn completion."""
 
         if str(row.get("role")) != "executor" or int(row.get("generation", 0)) != 2:
             return None
@@ -1666,9 +1663,6 @@ class WorkflowHarness:
         except RecordNotFound:
             pass
         else:
-            return None
-        result = ModelFacingResult.from_agent_message(raw_result)
-        if result.status is not ModelResultStatus.COMPLETED:
             return None
         run_id = row.get("run_id")
         milestone_id = row.get("milestone_id")
@@ -1692,6 +1686,18 @@ class WorkflowHarness:
         ):
             raise WorktreeError("control repair dispatch context is not bound to its generation")
         capsule = self._control_capsule(run_id, milestone_id)
+        try:
+            retained = self.ledger.dispatch_terminal_integrity(str(row.get("dispatch_id")))
+        except RecordNotFound:
+            pass
+        else:
+            return {
+                "workspace_terminal_head_sha": retained["workspace_terminal_head_sha"],
+                "workspace_terminal": retained["workspace_terminal"],
+                "git_authority_sha256": retained["git_authority_sha256"],
+                "protected_paths_sha256": retained["protected_paths_sha256"],
+                "captured_at": retained["captured_at"],
+            }
         candidate = self._worktrees.inspect_terminal_workspace(capsule, predecessor_sha=predecessor)
         if (
             candidate.disposition.value != "verified_commit"
@@ -1738,26 +1744,36 @@ class WorkflowHarness:
         *,
         dispatch_id: str,
         candidate_sha: str,
-        result_sha256: str,
+        result_sha256: str | None,
     ) -> None:
-        """Revalidate one immutable repair result against the live checkout."""
+        """Revalidate one immutable repair capture before or after binding."""
 
         try:
             integrity = self.ledger.dispatch_terminal_integrity(dispatch_id)
             queue_row = self.ledger.queue_dispatch(dispatch_id)
         except (LedgerError, KeyError, ValueError) as exc:
             raise WorktreeError("control repair lacks durable dispatch terminal integrity") from exc
-        if (
+        queue_identity_conflicts = (
             queue_row.get("run_id") != str(capsule.run_id)
             or queue_row.get("milestone_id") != str(capsule.milestone_id)
             or queue_row.get("role") != "executor"
             or queue_row.get("generation") != 2
-            or queue_row.get("terminal_status") != "completed"
-            or queue_row.get("raw_result_sha256") != result_sha256
             or integrity["dispatch_id"] != dispatch_id
-            or integrity["result_sha256"] != result_sha256
             or integrity["workspace_terminal_head_sha"] != candidate_sha
-        ):
+        )
+        if result_sha256 is None:
+            result_identity_conflicts = (
+                integrity["result_sha256"] is not None
+                or queue_row.get("raw_result_sha256") is not None
+                or queue_row.get("terminal_status") is not None
+            )
+        else:
+            result_identity_conflicts = (
+                queue_row.get("terminal_status") != "completed"
+                or queue_row.get("raw_result_sha256") != result_sha256
+                or integrity["result_sha256"] != result_sha256
+            )
+        if queue_identity_conflicts or result_identity_conflicts:
             raise WorktreeError("control repair dispatch terminal integrity is stale or conflicting")
         try:
             from .controller import Controller, git_authority_snapshot, protected_paths_digest
@@ -1801,18 +1817,61 @@ class WorkflowHarness:
         except (OSError, RuntimeError, ValueError) as exc:
             raise WorktreeError("control repair terminal integrity could not be revalidated") from exc
 
+    def _assert_control_repair_preingestion_authority(self, row: Mapping[str, object]) -> None:
+        """Require the existing completed-event capture without recapturing."""
+
+        if str(row.get("role")) != "executor" or int(row.get("generation", 0)) != 2:
+            return
+        try:
+            self.ledger.program_graph(str(row.get("run_id")))
+        except RecordNotFound:
+            pass
+        else:
+            return
+        run_id = row.get("run_id")
+        milestone_id = row.get("milestone_id")
+        dispatch_id = row.get("dispatch_id")
+        if not isinstance(run_id, str) or not isinstance(milestone_id, str) or not isinstance(dispatch_id, str):
+            raise WorktreeError("control repair dispatch lacks durable identity")
+        try:
+            integrity = self.ledger.dispatch_terminal_integrity(dispatch_id)
+        except (LedgerError, KeyError, ValueError) as exc:
+            raise WorktreeError("control repair lacks pre-ingestion terminal integrity") from exc
+        candidate_sha = integrity.get("workspace_terminal_head_sha")
+        if not isinstance(candidate_sha, str):
+            raise WorktreeError("control repair pre-ingestion terminal integrity is malformed")
+        self._assert_control_repair_terminal_authority(
+            self._control_capsule(run_id, milestone_id),
+            dispatch_id=dispatch_id,
+            candidate_sha=candidate_sha,
+            result_sha256=None,
+        )
+
     @staticmethod
     def _is_retained_historical_candidate(
         capsule: ExecutionCapsule,
         candidate_sha: str,
         current_head: str,
     ) -> bool:
-        """Recognize only the documented pre-lifecycle migration lineage."""
+        """Recognize the documented lineage plus its exact v20 test adaptation."""
 
         source_sha = "47a8fa3d67575ef00662f1b5693efaf45c7b52bd"
         retained_sha = "977d8f5c8c55459625dbff8133c262e12f91bba0"
         base_sha = "507645ea5e788eaa4ec803b142419655e1c6dd69"
-        if candidate_sha != retained_sha or capsule.base_sha != base_sha:
+        authorized_path = "tests/test_service_lifecycle.py"
+        retained_blob = "104738e142da74d6c1733c423479fee8093d4783"
+        authorized_v20_blob = "51f3a28a6987da5ee111176fd7de2526a8dc8d82"
+        authorized_v20_patch_sha256 = "9099c1ddfdee4b599009c9087f12a9d3ff540afa17e0ec0f0eeaf0c1693e0cd4"
+        compared_paths = tuple(
+            path for path in (*capsule.mutable_paths, *capsule.protected_paths) if path != authorized_path
+        )
+        if (
+            candidate_sha != retained_sha
+            or capsule.base_sha != base_sha
+            or authorized_path not in capsule.mutable_paths
+            or authorized_path in capsule.protected_paths
+            or not compared_paths
+        ):
             return False
         try:
             parent = subprocess.run(
@@ -1835,19 +1894,50 @@ class WorkflowHarness:
                 capture_output=True,
                 check=False,
             )
-            changed = subprocess.run(
+            unchanged = subprocess.run(
                 (
                     "git",
                     "diff",
-                    "--name-only",
+                    "--quiet",
                     retained_sha,
                     current_head,
                     "--",
-                    *capsule.mutable_paths,
-                    *capsule.protected_paths,
+                    *compared_paths,
                 ),
                 cwd=capsule.workspace_path,
+                capture_output=True,
+                check=False,
+            )
+            retained_blob_identity = subprocess.run(
+                ("git", "rev-parse", f"{retained_sha}:{authorized_path}"),
+                cwd=capsule.workspace_path,
                 text=True,
+                capture_output=True,
+                check=False,
+            )
+            current_blob_identity = subprocess.run(
+                ("git", "rev-parse", f"{current_head}:{authorized_path}"),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            adaptation = subprocess.run(
+                (
+                    "git",
+                    "-c",
+                    "core.quotePath=true",
+                    "diff",
+                    "--binary",
+                    "--full-index",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    retained_sha,
+                    current_head,
+                    "--",
+                    authorized_path,
+                ),
+                cwd=capsule.workspace_path,
                 capture_output=True,
                 check=False,
             )
@@ -1859,8 +1949,13 @@ class WorkflowHarness:
             and ancestry.returncode == 0
             and parent.stdout.strip() == source_sha
             and source_parent.stdout.strip() == base_sha
-            and changed.returncode == 0
-            and not changed.stdout.strip()
+            and unchanged.returncode == 0
+            and retained_blob_identity.returncode == 0
+            and retained_blob_identity.stdout.strip() == retained_blob
+            and current_blob_identity.returncode == 0
+            and current_blob_identity.stdout.strip() == authorized_v20_blob
+            and adaptation.returncode == 0
+            and hashlib.sha256(adaptation.stdout).hexdigest() == authorized_v20_patch_sha256
         )
 
     @staticmethod
@@ -3413,6 +3508,9 @@ class WorkflowHarness:
             # transaction.
             return {"version": 1, "ok": True, "event": None, "evicted": True}
         try:
+            terminal_integrity = (
+                self._capture_control_repair_terminal_integrity(row) if kind == "turn/completed" else None
+            )
             event = self.ledger.append_worker_diagnostic(
                 str(row["dispatch_id"]),
                 generation=generation,
@@ -3424,8 +3522,9 @@ class WorkflowHarness:
                 text=text,
                 payload_sha256=payload_sha256,
                 sequence=sequence,
+                terminal_integrity=terminal_integrity,
             )
-        except (LedgerError, ValueError) as exc:
+        except (LedgerError, ValueError, WorktreeError) as exc:
             raise IpcError("worker event capability or sequence is invalid") from exc
         response: dict[str, object] = {"version": 1, "ok": True, "event": event}
         if event is None:
@@ -3781,14 +3880,13 @@ class WorkflowHarness:
         if len(raw) > 65_536:
             raise IpcError("worker raw result exceeds bounded limit")
         try:
-            terminal_integrity = self._capture_control_repair_terminal_integrity(row, payload["raw_result"])
+            self._assert_control_repair_preingestion_authority(row)
             terminal = self.ledger.commit_queue_result(
                 str(row["dispatch_id"]),
                 generation=generation,
                 attempt=attempt,
                 token=token,
                 raw_result=raw,
-                terminal_integrity=terminal_integrity,
             )
         except StaleWriter as exc:
             code = (
@@ -5044,11 +5142,10 @@ class WorkflowHarness:
             else:
                 try:
                     row = self.ledger.queue_dispatch(dispatch_id)
-                    terminal_integrity = self._capture_control_repair_terminal_integrity(row, inspection.raw_result)
+                    self._assert_control_repair_preingestion_authority(row)
                     self.ledger.ingest_recovered_result(
                         dispatch_id,
                         raw_result=inspection.raw_result,
-                        terminal_integrity=terminal_integrity,
                     )
                 except (LedgerError, ValueError, WorktreeError):
                     self.ledger.mark_human_attention_required(
@@ -5376,14 +5473,13 @@ class WorkflowHarness:
         if any(capability.get(key) != value for key, value in expected.items()):
             raise WorkerError("retained worker capability does not match queue identity")
         raw_result = _read_private_file(result_path, max_bytes=65_536, require_readonly=True)
-        terminal_integrity = self._capture_control_repair_terminal_integrity(row, raw_result.decode("utf-8"))
+        self._assert_control_repair_preingestion_authority(row)
         terminal = self.ledger.commit_retained_queue_result(
             dispatch_id,
             generation=generation,
             attempt=attempt,
             token=str(capability["token"]),
             raw_result=raw_result,
-            terminal_integrity=terminal_integrity,
         )
         self._record_program_queue_result(terminal)
         return terminal["state"] in {"completed", "failed"}
