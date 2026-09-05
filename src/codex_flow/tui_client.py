@@ -85,12 +85,21 @@ class TerminalUiClient:
     ) -> None:
         self._live = live
         self._decisions = decisions
-        self._last_snapshot = TerminalUiSnapshot(False, datetime.now(UTC).isoformat(), (), (), "not connected")
+        self._visibility = ControlListVisibility.ACTIVE if active_only else ControlListVisibility.ALL
+        self._last_snapshot = TerminalUiSnapshot(
+            False,
+            datetime.now(UTC).isoformat(),
+            (),
+            (),
+            "not connected",
+            self._visibility.value,
+            False,
+            False,
+        )
         self._claims: dict[str, ControllerDecisionClaim] = {}
         self._claimant_id = f"terminal-ui-{uuid.uuid4().hex}"
         self._worker_statuses: dict[str, LiveWorkerStatus] = {}
         self._decision_statuses: dict[str, ControllerDecisionStatus] = {}
-        self._visibility = ControlListVisibility.ACTIVE if active_only else ControlListVisibility.ALL
         self._worker_next_token: str | None = None
         self._decision_next_token: str | None = None
         self._worker_snapshot_id: str | None = None
@@ -128,6 +137,22 @@ class TerminalUiClient:
         self._decision_next_token = None
         self._worker_snapshot_id = None
         self._decision_snapshot_id = None
+
+    def _disconnected_control_snapshot(self, *, observed: datetime, error: str | None) -> TerminalUiSnapshot:
+        """Clear all control-list state and publish an explicitly incomplete view."""
+
+        self._clear_control_accumulation()
+        self._last_snapshot = TerminalUiSnapshot(
+            False,
+            observed.isoformat(),
+            (),
+            (),
+            error,
+            self._visibility.value,
+            False,
+            False,
+        )
+        return self._last_snapshot
 
     def _snapshot_from_statuses(
         self, *, observed: datetime, connected: bool, error: str | None = None
@@ -316,18 +341,7 @@ class TerminalUiClient:
             await self.close_live_stream()
             self._history_pages.clear()
             self._history_bindings.clear()
-            self._clear_control_accumulation()
-            self._last_snapshot = TerminalUiSnapshot(
-                False,
-                observed.isoformat(),
-                (),
-                (),
-                str(exc),
-                self._visibility.value,
-                False,
-                False,
-            )
-            return self._last_snapshot
+            return self._disconnected_control_snapshot(observed=observed, error=str(exc))
         if worker_page is not None and decision_page is not None:
             new_workers = {str(item.dispatch_id): item for item in workers}
             new_decisions = {str(item.decision_id): item for item in decisions}
@@ -438,9 +452,7 @@ class TerminalUiClient:
                 else:
                     self._decision_next_token = page.next_token
         except (ControlClientError, OSError) as exc:
-            self._clear_control_accumulation()
-            self._last_snapshot = self._snapshot_from_statuses(observed=observed, connected=False, error=str(exc))
-            return self._last_snapshot
+            return self._disconnected_control_snapshot(observed=observed, error=str(exc))
         self._last_snapshot = self._snapshot_from_statuses(observed=observed, connected=True)
         return self._last_snapshot
 

@@ -1565,6 +1565,131 @@ def test_terminal_ui_reaches_real_local_harness_socket_without_provider_or_app_c
     harness.close()
 
 
+def test_terminal_ui_real_socket_disconnect_clears_control_state_and_reconnects_from_first_pages(
+    tmp_path: Path,
+) -> None:
+    """Stale and endpoint-loss transitions are proven through real clients."""
+
+    route_json = '{"leaf_worker_policy":{"agents.enabled":false,"features.multi_agent":false,"config_overrides":[]}}'
+
+    def populate(harness: WorkflowHarness, count: int = 30) -> list[str]:
+        ledger = harness.ledger
+        dispatch_ids: list[str] = []
+        for index in range(count):
+            run_id = f"run-disconnect-{index:03d}"
+            milestone_id = f"milestone-disconnect-{index:03d}"
+            dispatch_id = f"{run_id}/{milestone_id}/executor/1"
+            ledger.create_run(run_id)
+            ledger.create_milestone(run_id, milestone_id)
+            ledger.claim_dispatch(run_id, milestone_id, "executor", 1)
+            ledger.enqueue_dispatch(
+                dispatch_id,
+                backend="sdk_headless",
+                capsule_json=f'{{"model":"test","prompt":"disconnect-{index}"}}',
+                route_json=route_json,
+                workspace_path=tmp_path,
+                result_contract_sha256=model_facing_result_schema_sha256(),
+            )
+            ledger.create_controller_decision(dispatch_id, kind="checkpoint")
+            dispatch_ids.append(dispatch_id)
+        return dispatch_ids
+
+    def serve(harness: WorkflowHarness, stop: threading.Event) -> threading.Thread:
+        endpoint = harness._socket
+        assert endpoint is not None
+        endpoint.setblocking(True)
+
+        def run() -> None:
+            while not stop.is_set():
+                try:
+                    endpoint.settimeout(0.1)
+                    connection, _ = endpoint.accept()
+                except (TimeoutError, OSError):
+                    continue
+                harness._accept_connection(connection)
+
+        thread = threading.Thread(target=run, name="real-disconnect-harness")
+        thread.start()
+        return thread
+
+    harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+    dispatch_ids = populate(harness)
+    harness.acquire()
+    stop = threading.Event()
+    server = serve(harness, stop)
+    client = TerminalUiClient.for_state_root(tmp_path)
+
+    async def exercise() -> None:
+        first = await client.refresh()
+        assert first.connected and len(first.workers) == len(first.decisions) == 24
+        assert client._worker_next_token is not None and client._decision_next_token is not None
+        assert client._worker_snapshot_id is not None and client._decision_snapshot_id is not None
+
+        harness.ledger._db().execute(
+            "UPDATE dispatch_queue SET updated_at = ? WHERE dispatch_id = ?",
+            (datetime.now(UTC).isoformat().replace("+00:00", "Z"), dispatch_ids[0]),
+        )
+        harness.ledger._db().commit()
+        stale = await client.load_more_sessions()
+        assert not stale.connected and stale.workers == () and stale.decisions == ()
+        assert not stale.workers_complete and not stale.decisions_complete
+        assert client._worker_statuses == {} and client._decision_statuses == {}
+        assert client._worker_next_token is None and client._decision_next_token is None
+        assert client._worker_snapshot_id is None and client._decision_snapshot_id is None
+
+    try:
+        asyncio.run(exercise())
+        # Reconnect is tested after a real endpoint loss, so first repopulate a
+        # connected snapshot and then close the authenticated harness socket.
+        asyncio.run(client.refresh())
+        harness.ledger.request_harness_shutdown(
+            epoch=int(harness.epoch or 0), owner_nonce_sha256=harness.owner_nonce_sha256
+        )
+        stop.set()
+        server.join(timeout=2)
+        harness.close()
+        assert not server.is_alive()
+
+        offline = asyncio.run(client.refresh())
+        assert not offline.connected and offline.workers == () and offline.decisions == ()
+        assert not offline.workers_complete and not offline.decisions_complete
+        assert client._worker_statuses == {} and client._decision_statuses == {}
+        assert client._worker_next_token is None and client._decision_next_token is None
+        assert client._worker_snapshot_id is None and client._decision_snapshot_id is None
+
+        replacement = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
+        replacement.acquire()
+        replacement_stop = threading.Event()
+        replacement_server = serve(replacement, replacement_stop)
+        worker_tokens: list[str | None] = []
+        decision_tokens: list[str | None] = []
+        worker_reader = client._live.status_page
+        decision_reader = client._decisions.pending_page
+
+        def capture_workers(*args: object, **kwargs: object) -> object:
+            worker_tokens.append(kwargs.get("page_token"))
+            return worker_reader(*args, **kwargs)  # type: ignore[arg-type]
+
+        def capture_decisions(*args: object, **kwargs: object) -> object:
+            decision_tokens.append(kwargs.get("page_token"))
+            return decision_reader(*args, **kwargs)  # type: ignore[arg-type]
+
+        client._live.status_page = capture_workers  # type: ignore[method-assign]
+        client._decisions.pending_page = capture_decisions  # type: ignore[method-assign]
+        recovered = asyncio.run(client.refresh())
+        assert recovered.connected and len(recovered.workers) == len(recovered.decisions) == 24
+        assert worker_tokens == [None] and decision_tokens == [None]
+        replacement_stop.set()
+        replacement_server.join(timeout=2)
+        replacement.close()
+    finally:
+        if server.is_alive():
+            stop.set()
+            server.join(timeout=2)
+        if harness._socket is not None:
+            harness.close()
+
+
 def test_control_pages_frame_dot_containing_hmac_and_exhaust_large_snapshot(tmp_path: Path) -> None:
     harness = WorkflowHarness(tmp_path, worker_command=("provider-must-not-run",))
     ledger = harness.ledger
