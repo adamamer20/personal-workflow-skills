@@ -38,6 +38,7 @@ from .contracts import (
     ModelFacingProgramControllerAction,
     ModelFacingProgramControllerActionBundle,
     ModelFacingResult,
+    ModelResultStatus,
     PluginCapabilitySnapshot,
     PluginRequirement,
     review_result_from_agent_message,
@@ -1652,6 +1653,153 @@ class WorkflowHarness:
             raise
         except (OSError, RuntimeError, ValueError) as exc:
             raise WorktreeError("control terminal integrity could not be revalidated") from exc
+
+    def _capture_control_repair_terminal_integrity(
+        self, row: Mapping[str, object], raw_result: str
+    ) -> Mapping[str, object] | None:
+        """Capture one generation-2 executor checkout before result commit."""
+
+        if str(row.get("role")) != "executor" or int(row.get("generation", 0)) != 2:
+            return None
+        try:
+            self.ledger.program_graph(str(row.get("run_id")))
+        except RecordNotFound:
+            pass
+        else:
+            return None
+        result = ModelFacingResult.from_agent_message(raw_result)
+        if result.status is not ModelResultStatus.COMPLETED:
+            return None
+        run_id = row.get("run_id")
+        milestone_id = row.get("milestone_id")
+        action_raw = row.get("action_json")
+        if not isinstance(run_id, str) or not isinstance(milestone_id, str) or not isinstance(action_raw, str):
+            raise WorktreeError("control repair dispatch lacks durable identity")
+        try:
+            action = strict_json_loads(action_raw, max_bytes=16_384)
+        except ValueError:
+            raise WorktreeError("control repair dispatch context is malformed") from None
+        if not isinstance(action, dict) or set(action) != {"candidate_sha", "finding_ids", "repair_generation"}:
+            raise WorktreeError("control repair dispatch context has an unsupported shape")
+        predecessor = action.get("candidate_sha")
+        findings = action.get("finding_ids")
+        if (
+            not isinstance(predecessor, str)
+            or not isinstance(findings, list)
+            or not findings
+            or any(not isinstance(item, str) for item in findings)
+            or action.get("repair_generation") != 2
+        ):
+            raise WorktreeError("control repair dispatch context is not bound to its generation")
+        capsule = self._control_capsule(run_id, milestone_id)
+        candidate = self._worktrees.inspect_terminal_workspace(capsule, predecessor_sha=predecessor)
+        if (
+            candidate.disposition.value != "verified_commit"
+            or candidate.commit_sha != candidate.workspace_head
+            or candidate.dirty
+        ):
+            raise WorktreeError("control repair did not produce one direct clean terminal successor")
+        try:
+            from .controller import Controller, git_authority_snapshot, protected_paths_digest
+
+            parent = subprocess.run(
+                ("git", "show", "-s", "--format=%P", candidate.commit_sha or ""),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if parent.returncode != 0 or parent.stdout.strip() != predecessor:
+                raise WorktreeError("control repair did not produce one direct clean terminal successor")
+            execution = self.ledger.get_execution(run_id, milestone_id)
+            protected = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+            if execution.protected_after_sha256 is None or protected != execution.protected_after_sha256:
+                raise WorktreeError("control repair changed protected terminal authority")
+            snapshot_controller = Controller(self.state_root, worktrees=self._worktrees)
+            try:
+                workspace = snapshot_controller._owned_workspace_snapshot(capsule)
+            finally:
+                snapshot_controller.close()
+            return {
+                "workspace_terminal_head_sha": candidate.commit_sha,
+                "workspace_terminal": workspace,
+                "git_authority_sha256": git_authority_snapshot(capsule.workspace_path).sha256,
+                "protected_paths_sha256": protected,
+                "captured_at": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            }
+        except WorktreeError:
+            raise
+        except (RecordNotFound, OSError, RuntimeError, ValueError) as exc:
+            raise WorktreeError("control repair terminal authority could not be captured") from exc
+
+    def _assert_control_repair_terminal_authority(
+        self,
+        capsule: ExecutionCapsule,
+        *,
+        dispatch_id: str,
+        candidate_sha: str,
+        result_sha256: str,
+    ) -> None:
+        """Revalidate one immutable repair result against the live checkout."""
+
+        try:
+            integrity = self.ledger.dispatch_terminal_integrity(dispatch_id)
+            queue_row = self.ledger.queue_dispatch(dispatch_id)
+        except (LedgerError, KeyError, ValueError) as exc:
+            raise WorktreeError("control repair lacks durable dispatch terminal integrity") from exc
+        if (
+            queue_row.get("run_id") != str(capsule.run_id)
+            or queue_row.get("milestone_id") != str(capsule.milestone_id)
+            or queue_row.get("role") != "executor"
+            or queue_row.get("generation") != 2
+            or queue_row.get("terminal_status") != "completed"
+            or queue_row.get("raw_result_sha256") != result_sha256
+            or integrity["dispatch_id"] != dispatch_id
+            or integrity["result_sha256"] != result_sha256
+            or integrity["workspace_terminal_head_sha"] != candidate_sha
+        ):
+            raise WorktreeError("control repair dispatch terminal integrity is stale or conflicting")
+        try:
+            from .controller import Controller, git_authority_snapshot, protected_paths_digest
+
+            head = subprocess.run(
+                ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            status = subprocess.run(
+                ("git", "status", "--porcelain", "--untracked-files=all"),
+                cwd=capsule.workspace_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if head.returncode != 0 or status.returncode != 0:
+                raise WorktreeError("control repair workspace could not be inspected")
+            if status.stdout.strip():
+                raise WorktreeError("control repair workspace contains dirty bytes after terminalization")
+            if head.stdout.strip() != candidate_sha:
+                raise WorktreeError("control repair workspace HEAD changed after terminalization")
+            snapshot_controller = Controller(self.state_root, worktrees=self._worktrees)
+            try:
+                workspace = snapshot_controller._owned_workspace_snapshot(capsule)
+            finally:
+                snapshot_controller.close()
+            if workspace != integrity["workspace_terminal"]:
+                raise WorktreeError("control repair workspace bytes changed after terminalization")
+            if git_authority_snapshot(capsule.workspace_path).sha256 != integrity["git_authority_sha256"]:
+                raise WorktreeError("control repair Git authority changed after terminalization")
+            if (
+                protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+                != integrity["protected_paths_sha256"]
+            ):
+                raise WorktreeError("control repair protected paths changed after terminalization")
+        except WorktreeError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorktreeError("control repair terminal integrity could not be revalidated") from exc
 
     @staticmethod
     def _is_retained_historical_candidate(
@@ -3633,12 +3781,14 @@ class WorkflowHarness:
         if len(raw) > 65_536:
             raise IpcError("worker raw result exceeds bounded limit")
         try:
+            terminal_integrity = self._capture_control_repair_terminal_integrity(row, payload["raw_result"])
             terminal = self.ledger.commit_queue_result(
                 str(row["dispatch_id"]),
                 generation=generation,
                 attempt=attempt,
                 token=token,
                 raw_result=raw,
+                terminal_integrity=terminal_integrity,
             )
         except StaleWriter as exc:
             code = (
@@ -3648,7 +3798,7 @@ class WorkflowHarness:
             )
             self._record_worker_result_rejection(str(row["dispatch_id"]), code)
             raise WorkerResultRejected(code) from exc
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, WorktreeError):
             # The worker request contains only bounded UTF-8 text.  Keep the
             # parser's detailed failure private and expose one stable reason
             # that cannot leak a token or transcript fragment.
@@ -3928,6 +4078,18 @@ class WorkflowHarness:
 
         run_id = str(capsule.run_id)
         milestone_id = str(capsule.milestone_id)
+        if generation == 2:
+            repair_dispatch_id = str(DispatchId.from_parts(run_id, milestone_id, "executor", 2))
+            repair_row = self.ledger.queue_dispatch(repair_dispatch_id)
+            repair_result_sha256 = repair_row.get("raw_result_sha256")
+            if not isinstance(repair_result_sha256, str):
+                raise WorktreeError("control repair queue lacks its accepted result digest")
+            self._assert_control_repair_terminal_authority(
+                capsule,
+                dispatch_id=repair_dispatch_id,
+                candidate_sha=candidate_sha,
+                result_sha256=repair_result_sha256,
+            )
         facts = self.ledger.review_lifecycle(run_id, milestone_id)
         promotion = next(
             (
@@ -4142,6 +4304,12 @@ class WorkflowHarness:
                         raise WorktreeError("control repair predecessor conflicts with terminal candidate")
                 candidate = self._worktrees.inspect_terminal_workspace(capsule, predecessor_sha=predecessor_sha)
                 if terminal_status == "completed" and generation > 1:
+                    self._assert_control_repair_terminal_authority(
+                        capsule,
+                        dispatch_id=dispatch_id,
+                        candidate_sha=candidate.commit_sha or "",
+                        result_sha256=result_sha256,
+                    )
                     if (
                         candidate.disposition.value != "verified_commit"
                         or candidate.commit_sha != candidate.workspace_head
@@ -4198,6 +4366,18 @@ class WorkflowHarness:
                 }
                 if context != expected_context:
                     raise WorktreeError("control review result is not bound to its queue context")
+                if generation == 2:
+                    repair_dispatch_id = str(DispatchId.from_parts(run_id, milestone_id, "executor", 2))
+                    repair_row = self.ledger.queue_dispatch(repair_dispatch_id)
+                    repair_result_sha256 = repair_row.get("raw_result_sha256")
+                    if not isinstance(repair_result_sha256, str):
+                        raise WorktreeError("control repair queue lacks its accepted result digest")
+                    self._assert_control_repair_terminal_authority(
+                        capsule,
+                        dispatch_id=repair_dispatch_id,
+                        candidate_sha=result.reviewed_revision,
+                        result_sha256=repair_result_sha256,
+                    )
                 self.ledger.record_control_review(
                     run_id,
                     milestone_id,
@@ -4863,8 +5043,14 @@ class WorkflowHarness:
                 self.ledger.mark_human_attention_required(dispatch_id, reason="terminal inspection had no envelope")
             else:
                 try:
-                    self.ledger.ingest_recovered_result(dispatch_id, raw_result=inspection.raw_result)
-                except (LedgerError, ValueError):
+                    row = self.ledger.queue_dispatch(dispatch_id)
+                    terminal_integrity = self._capture_control_repair_terminal_integrity(row, inspection.raw_result)
+                    self.ledger.ingest_recovered_result(
+                        dispatch_id,
+                        raw_result=inspection.raw_result,
+                        terminal_integrity=terminal_integrity,
+                    )
+                except (LedgerError, ValueError, WorktreeError):
                     self.ledger.mark_human_attention_required(
                         dispatch_id,
                         reason="persisted-thread terminal envelope was invalid or conflicting",
@@ -5190,12 +5376,14 @@ class WorkflowHarness:
         if any(capability.get(key) != value for key, value in expected.items()):
             raise WorkerError("retained worker capability does not match queue identity")
         raw_result = _read_private_file(result_path, max_bytes=65_536, require_readonly=True)
+        terminal_integrity = self._capture_control_repair_terminal_integrity(row, raw_result.decode("utf-8"))
         terminal = self.ledger.commit_retained_queue_result(
             dispatch_id,
             generation=generation,
             attempt=attempt,
             token=str(capability["token"]),
             raw_result=raw_result,
+            terminal_integrity=terminal_integrity,
         )
         self._record_program_queue_result(terminal)
         return terminal["state"] in {"completed", "failed"}

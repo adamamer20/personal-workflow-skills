@@ -781,6 +781,7 @@ class LedgerTests(unittest.TestCase):
             ledger = Ledger(path)
             ledger.close()
             connection = sqlite3.connect(path)
+            connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
             connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
             connection.execute(
@@ -802,6 +803,43 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
             migrated.close()
 
+    def test_schema_v19_to_v20_migration_adds_one_empty_terminal_integrity_table(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            ledger = Ledger(path)
+            ledger.close()
+            connection = sqlite3.connect(path)
+            connection.execute("DROP TABLE dispatch_terminal_integrity")
+            connection.execute("UPDATE schema_meta SET value = '19' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(19)],),
+            )
+            connection.commit()
+            connection.close()
+
+            migrated = Ledger(path, migrate=True)
+            try:
+                self.assertEqual(migrated.schema_version, SchemaVersion(20))
+                self.assertEqual(
+                    migrated.schema_columns("dispatch_terminal_integrity"),
+                    (
+                        "dispatch_id",
+                        "result_sha256",
+                        "workspace_terminal_head_sha",
+                        "workspace_terminal_json",
+                        "workspace_terminal_sha256",
+                        "git_authority_sha256",
+                        "protected_paths_sha256",
+                        "captured_at",
+                    ),
+                )
+                self.assertEqual(
+                    migrated._db().execute("SELECT COUNT(*) FROM dispatch_terminal_integrity").fetchone()[0], 0
+                )
+            finally:
+                migrated.close()
+
     def test_v18_migration_requires_predecessor_fence(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -818,6 +856,7 @@ class LedgerTests(unittest.TestCase):
             )
             ledger.close()
             connection = sqlite3.connect(path)
+            connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
             connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
             connection.execute(
@@ -865,6 +904,7 @@ class LedgerTests(unittest.TestCase):
             ledger.close()
 
             connection = sqlite3.connect(path)
+            connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE retry_policies RENAME TO retry_policies_v17")
             connection.execute(_V16_TABLE_DDL["retry_policies"])
             connection.execute(
@@ -954,6 +994,7 @@ class LedgerTests(unittest.TestCase):
             connection = sqlite3.connect(path)
             connection.execute("PRAGMA foreign_keys = OFF")
             connection.execute("PRAGMA legacy_alter_table = ON")
+            connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("DROP TABLE integration_outbox")
             connection.execute("DROP TABLE milestone_dependencies")
             legacy_columns = {
@@ -1029,6 +1070,7 @@ class LedgerTests(unittest.TestCase):
                 separators=(",", ":"),
             )
             connection = sqlite3.connect(path)
+            connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
             connection.execute(
                 "UPDATE dispatch_queue SET result_contract_sha256 = ?, state = 'result_submitted', terminal_status = ?, "

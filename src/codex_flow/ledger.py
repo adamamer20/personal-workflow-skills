@@ -140,7 +140,7 @@ from .domain import (
     strict_json_loads,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(19)
+CURRENT_SCHEMA_VERSION = SchemaVersion(20)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -161,6 +161,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(16),
         SchemaVersion(17),
         SchemaVersion(18),
+        SchemaVersion(19),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -1118,6 +1119,22 @@ _V19_TABLE_DDL = {
     "harness_authority": _HARNESS_AUTHORITY_DDL,
 }
 
+_DISPATCH_TERMINAL_INTEGRITY_DDL = """CREATE TABLE dispatch_terminal_integrity (
+    dispatch_id TEXT PRIMARY KEY NOT NULL,
+    result_sha256 TEXT NOT NULL CHECK(length(result_sha256) = 64),
+    workspace_terminal_head_sha TEXT NOT NULL CHECK(length(workspace_terminal_head_sha) = 40),
+    workspace_terminal_json TEXT NOT NULL,
+    workspace_terminal_sha256 TEXT NOT NULL CHECK(length(workspace_terminal_sha256) = 64),
+    git_authority_sha256 TEXT NOT NULL CHECK(length(git_authority_sha256) = 64),
+    protected_paths_sha256 TEXT NOT NULL CHECK(length(protected_paths_sha256) = 64),
+    captured_at TEXT NOT NULL CHECK(length(captured_at) > 0),
+    FOREIGN KEY(dispatch_id) REFERENCES dispatch_queue(dispatch_id) ON DELETE CASCADE
+)"""
+_V20_TABLE_DDL = {
+    **_V19_TABLE_DDL,
+    "dispatch_terminal_integrity": _DISPATCH_TERMINAL_INTEGRITY_DDL,
+}
+
 
 def _canonical_ddl(sql: str) -> str:
     """Return exact SQLite DDL modulo whitespace outside quoted values."""
@@ -1220,6 +1237,7 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(17): "codex_flow_provider_transient_recovery_v17",
     SchemaVersion(18): "codex_flow_event_driven_program_controller_v18",
     SchemaVersion(19): "codex_flow_harness_candidate_retention_v19",
+    SchemaVersion(20): "codex_flow_dispatch_terminal_integrity_v20",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -1818,7 +1836,11 @@ class Ledger:
             self._validate_shape(SchemaVersion(18))
             self._validate_rows()
             return
-        if str(version[0]) != "19" or str(identity[0]) != _SCHEMA_IDENTITIES[SchemaVersion(19)]:
+        current_version = str(version[0])
+        if (
+            current_version not in {"19", "20"}
+            or str(identity[0]) != _SCHEMA_IDENTITIES[SchemaVersion(int(current_version))]
+        ):
             raise CorruptSchemaError("failed migration opener reached an unknown schema identity")
         supervisor_exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supervisor_authority'"
@@ -1832,6 +1854,8 @@ class Ledger:
         if supervisor_exists is not None or harness_exists is None or authority is None or int(authority[0]) != 1:
             raise CorruptSchemaError("failed migration opener cannot prove the fenced v19 authority")
         with self._transaction(validate_authority=False):
+            if current_version == "20":
+                connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
             connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
             connection.execute(
@@ -1907,11 +1931,12 @@ class Ledger:
             "controller_action_outbox",
             "milestone_dependencies",
             "integration_outbox",
+            "dispatch_terminal_integrity",
         ],
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V19_TABLE_DDL:
+        if table not in _V20_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -2044,7 +2069,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V19_TABLE_DDL.values():
+                for statement in _V20_TABLE_DDL.values():
                     self._db().execute(statement)
                 for _name, (_table, statement) in _V15_INDEX_DDL.items():
                     self._db().execute(statement)
@@ -2129,6 +2154,7 @@ class Ledger:
             SchemaVersion(17): _V17_TABLE_DDL,
             SchemaVersion(18): _V18_TABLE_DDL,
             SchemaVersion(19): _V19_TABLE_DDL,
+            SchemaVersion(20): _V20_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -2704,6 +2730,17 @@ class Ledger:
                 "created_at": ("TEXT", 1, 0),
                 "completed_at": ("TEXT", 0, 0),
             }
+        if version >= SchemaVersion(20):
+            expected["dispatch_terminal_integrity"] = {
+                "dispatch_id": ("TEXT", 1, 1),
+                "result_sha256": ("TEXT", 1, 0),
+                "workspace_terminal_head_sha": ("TEXT", 1, 0),
+                "workspace_terminal_json": ("TEXT", 1, 0),
+                "workspace_terminal_sha256": ("TEXT", 1, 0),
+                "git_authority_sha256": ("TEXT", 1, 0),
+                "protected_paths_sha256": ("TEXT", 1, 0),
+                "captured_at": ("TEXT", 1, 0),
+            }
         for table, expected_columns in expected.items():
             actual_table = table
             if table == "supervisor_authority":
@@ -2962,6 +2999,11 @@ class Ledger:
                     ("milestones", "milestone_id", "milestone_id", "CASCADE"),
                 ),
             )
+        if version >= SchemaVersion(20):
+            self._require_unique_index("dispatch_terminal_integrity", ("dispatch_id",))
+            self._require_foreign_keys(
+                "dispatch_terminal_integrity", (("dispatch_queue", "dispatch_id", "dispatch_id", "CASCADE"),)
+            )
         foreign_keys = self._db().execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
@@ -2993,6 +3035,9 @@ class Ledger:
         has_integrity = any(item[1] == "execution_integrity" for item in _schema_inventory(self._db()))
         has_app_native = any(item[1] == "app_native_dispatches" for item in _schema_inventory(self._db()))
         has_dispatch_queue = any(item[1] == "dispatch_queue" for item in _schema_inventory(self._db()))
+        has_dispatch_terminal_integrity = any(
+            item[1] == "dispatch_terminal_integrity" for item in _schema_inventory(self._db())
+        )
         has_queue_bindings = any(item[1] == "queue_bindings" for item in _schema_inventory(self._db()))
         has_recovery_state = any(item[1] == "recovery_state" for item in _schema_inventory(self._db()))
         has_live_control = any(item[1] == "diagnostic_ring" for item in _schema_inventory(self._db()))
@@ -3081,6 +3126,45 @@ class Ledger:
                     "ON q.dispatch_id = n.dispatch_id WHERE q.dispatch_id IS NULL",
                 )
             )
+            if has_dispatch_terminal_integrity:
+                orphan_queries.append(
+                    "SELECT COUNT(*) FROM dispatch_terminal_integrity i LEFT JOIN dispatch_queue q "
+                    "ON q.dispatch_id = i.dispatch_id WHERE q.dispatch_id IS NULL"
+                )
+                for integrity in self._db().execute("SELECT * FROM dispatch_terminal_integrity").fetchall():
+                    queue = (
+                        self._db()
+                        .execute(
+                            "SELECT q.role, q.generation, q.state, q.terminal_status, q.raw_result_sha256, "
+                            "r.program_digest FROM dispatch_queue q JOIN runs r ON r.run_id = q.run_id "
+                            "WHERE q.dispatch_id = ?",
+                            (integrity["dispatch_id"],),
+                        )
+                        .fetchone()
+                    )
+                    if (
+                        queue is None
+                        or str(queue["role"]) != "executor"
+                        or int(queue["generation"]) != 2
+                        or queue["program_digest"] is not None
+                        or str(queue["state"]) not in {"result_submitted", "completed"}
+                        or str(queue["terminal_status"]) != "completed"
+                        or str(queue["raw_result_sha256"]) != str(integrity["result_sha256"])
+                    ):
+                        raise CorruptSchemaError("dispatch terminal integrity conflicts with its repair result")
+                    _decode_workspace_baseline(
+                        str(integrity["workspace_terminal_json"]),
+                        str(integrity["workspace_terminal_sha256"]),
+                    )
+                    _git_sha(str(integrity["workspace_terminal_head_sha"]), field_name="dispatch terminal HEAD")
+                    _sha256(str(integrity["git_authority_sha256"]), field_name="dispatch Git authority")
+                    _sha256(str(integrity["protected_paths_sha256"]), field_name="dispatch protected paths")
+                    try:
+                        datetime.fromisoformat(str(integrity["captured_at"]).removesuffix("Z")).replace(
+                            tzinfo=timezone.utc
+                        )
+                    except ValueError as exc:
+                        raise CorruptSchemaError("dispatch terminal capture time is invalid") from exc
             for queue_row in self._db().execute("SELECT * FROM dispatch_queue ORDER BY sequence").fetchall():
                 dispatch_row = (
                     self._db()
@@ -4779,6 +4863,9 @@ class Ledger:
                 raise CorruptSchemaError("program controller action receipt is inconsistent")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(19):
+            self._migrate_v19_to_v20()
+            return
         if version == SchemaVersion(18):
             self._migrate_v18_to_v19()
             return
@@ -4870,6 +4957,22 @@ class Ledger:
             raise CorruptSchemaError("migrated ledger violates the canonical foreign-key contract")
         self._migrate_v2_to_v3()
 
+    def _migrate_v19_to_v20(self) -> None:
+        """Add immutable terminal authority for ordinary-control repairs."""
+
+        self._validate_schema_metadata(SchemaVersion(19))
+        self._validate_shape(SchemaVersion(19))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._db().execute(_DISPATCH_TERMINAL_INTEGRITY_DDL)
+            self._db().execute("UPDATE schema_meta SET value = '20' WHERE key = 'schema_version'")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(20)],),
+            )
+            self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+            self._fault("after_migration")
+
     def _migrate_v18_to_v19(self) -> None:
         """Rename the live supervisor authority in one forward migration.
 
@@ -4906,6 +5009,7 @@ class Ledger:
                 )
                 self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
                 self._fault("after_migration")
+            self._migrate_v19_to_v20()
             return
         authority = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
         if authority is not None and int(authority["requested_shutdown"]) not in {0, 1}:
@@ -4921,6 +5025,7 @@ class Ledger:
             )
             self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
             self._fault("after_migration")
+        self._migrate_v19_to_v20()
 
     def _migrate_v12_to_v13(self) -> None:
         """Add live diagnostics, retry policy and control-command authority."""
@@ -8306,6 +8411,132 @@ class Ledger:
             return review_result_from_agent_message(raw_result)
         raise ValueError("queue result contract is unsupported")
 
+    def _record_dispatch_terminal_integrity_in_transaction(
+        self,
+        dispatch_id: DispatchId | str,
+        *,
+        result_sha256: str,
+        terminal_status: str,
+        terminal_integrity: Mapping[str, object] | None,
+    ) -> None:
+        """Bind one completed ordinary-control repair to its terminal checkout."""
+
+        dispatch = str(DispatchId(str(dispatch_id)))
+        queue = (
+            self._db()
+            .execute(
+                "SELECT q.role, q.generation, q.raw_result_sha256, r.program_digest "
+                "FROM dispatch_queue q JOIN runs r ON r.run_id = q.run_id WHERE q.dispatch_id = ?",
+                (dispatch,),
+            )
+            .fetchone()
+        )
+        if queue is None:
+            raise RecordNotFound(f"queue dispatch does not exist: {dispatch}")
+        is_control_repair = (
+            str(queue["role"]) == "executor" and int(queue["generation"]) == 2 and queue["program_digest"] is None
+        )
+        required = is_control_repair and terminal_status == "completed"
+        existing = (
+            self._db()
+            .execute("SELECT * FROM dispatch_terminal_integrity WHERE dispatch_id = ?", (dispatch,))
+            .fetchone()
+        )
+        if existing is not None:
+            if not required or str(existing["result_sha256"]) != result_sha256:
+                raise StaleWriter("dispatch terminal integrity conflicts with its result authority")
+            return
+        if not required:
+            if terminal_integrity is not None:
+                raise StaleWriter("dispatch terminal integrity is not authorized for this result")
+            return
+        if terminal_integrity is None:
+            raise StaleWriter("completed control repair lacks dispatch terminal integrity")
+        expected_keys = {
+            "workspace_terminal_head_sha",
+            "workspace_terminal",
+            "git_authority_sha256",
+            "protected_paths_sha256",
+            "captured_at",
+        }
+        if set(terminal_integrity) != expected_keys:
+            raise ValueError("dispatch terminal integrity has an unsupported shape")
+        terminal_head = _git_sha(
+            cast(str, terminal_integrity["workspace_terminal_head_sha"]),
+            field_name="dispatch terminal HEAD",
+        )
+        workspace = terminal_integrity["workspace_terminal"]
+        if not isinstance(workspace, tuple) or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not isinstance(item[1], str)
+            for item in workspace
+        ):
+            raise ValueError("dispatch terminal workspace snapshot is invalid")
+        workspace_json, workspace_sha256 = _encode_workspace_baseline(cast(tuple[tuple[str, str], ...], workspace))
+        git_authority = _sha256(
+            cast(str, terminal_integrity["git_authority_sha256"]), field_name="dispatch Git authority"
+        )
+        protected_paths = _sha256(
+            cast(str, terminal_integrity["protected_paths_sha256"]), field_name="dispatch protected paths"
+        )
+        captured_at = terminal_integrity["captured_at"]
+        if not isinstance(captured_at, str) or not captured_at.endswith("Z") or "\x00" in captured_at:
+            raise ValueError("dispatch terminal capture time is invalid")
+        try:
+            captured_time = datetime.fromisoformat(captured_at.removesuffix("Z")).replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise ValueError("dispatch terminal capture time is invalid") from exc
+        capture_age = (datetime.now(timezone.utc) - captured_time).total_seconds()
+        if capture_age < -1 or capture_age > 300:
+            raise StaleWriter("dispatch terminal integrity capture is stale")
+        if str(queue["raw_result_sha256"]) != result_sha256:
+            raise StaleWriter("dispatch terminal integrity result digest is stale")
+        self._db().execute(
+            "INSERT INTO dispatch_terminal_integrity(dispatch_id, result_sha256, workspace_terminal_head_sha, "
+            "workspace_terminal_json, workspace_terminal_sha256, git_authority_sha256, protected_paths_sha256, "
+            "captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                dispatch,
+                result_sha256,
+                terminal_head,
+                workspace_json,
+                workspace_sha256,
+                git_authority,
+                protected_paths,
+                captured_at,
+            ),
+        )
+
+    def dispatch_terminal_integrity(self, dispatch_id: DispatchId | str) -> JsonObject:
+        """Return one verified immutable repair terminal-authority row."""
+
+        row = (
+            self._db()
+            .execute("SELECT * FROM dispatch_terminal_integrity WHERE dispatch_id = ?", (str(dispatch_id),))
+            .fetchone()
+        )
+        if row is None:
+            raise RecordNotFound(f"dispatch terminal integrity does not exist: {dispatch_id}")
+        workspace = _decode_workspace_baseline(
+            str(row["workspace_terminal_json"]), str(row["workspace_terminal_sha256"])
+        )
+        return {
+            "dispatch_id": str(row["dispatch_id"]),
+            "result_sha256": _sha256(str(row["result_sha256"]), field_name="dispatch result digest"),
+            "workspace_terminal_head_sha": _git_sha(
+                str(row["workspace_terminal_head_sha"]), field_name="dispatch terminal HEAD"
+            ),
+            "workspace_terminal": workspace,
+            "workspace_terminal_sha256": str(row["workspace_terminal_sha256"]),
+            "git_authority_sha256": _sha256(str(row["git_authority_sha256"]), field_name="dispatch Git authority"),
+            "protected_paths_sha256": _sha256(
+                str(row["protected_paths_sha256"]), field_name="dispatch protected paths"
+            ),
+            "captured_at": str(row["captured_at"]),
+        }
+
     def _late_result_transport_recovery_allowed_in_transaction(
         self,
         dispatch_id: str,
@@ -8354,6 +8585,7 @@ class Ledger:
         attempt: int,
         token: str,
         raw_result: str | bytes,
+        terminal_integrity: Mapping[str, object] | None = None,
     ) -> JsonObject:
         """Atomically ingest, terminalize, release and wake one worker result."""
 
@@ -8372,6 +8604,12 @@ class Ledger:
                 result=result,
                 digest=digest,
             )
+            self._record_dispatch_terminal_integrity_in_transaction(
+                dispatch_id,
+                result_sha256=digest,
+                terminal_status=self._queue_result_terminal_status(result),
+                terminal_integrity=terminal_integrity,
+            )
             now = utc_now()
             self._db().execute(
                 "UPDATE retry_policies SET revision = revision + 1, strategy = 'none', next_eligible_at = NULL, "
@@ -8388,6 +8626,7 @@ class Ledger:
         attempt: int,
         token: str,
         raw_result: str | bytes,
+        terminal_integrity: Mapping[str, object] | None = None,
     ) -> JsonObject:
         """Recover one exact private result after result transport exhausted.
 
@@ -8438,6 +8677,12 @@ class Ledger:
                 result=result,
                 digest=digest,
             )
+            self._record_dispatch_terminal_integrity_in_transaction(
+                dispatch_id,
+                result_sha256=digest,
+                terminal_status=self._queue_result_terminal_status(result),
+                terminal_integrity=terminal_integrity,
+            )
             self._db().execute(
                 "UPDATE retry_policies SET revision = revision + 1, strategy = 'none', next_eligible_at = NULL, "
                 "human_attention_reason = NULL, updated_at = ? WHERE dispatch_id = ?",
@@ -8445,7 +8690,13 @@ class Ledger:
             )
             return self._finalize_queue_result_in_transaction(dispatch_id)
 
-    def ingest_recovered_result(self, dispatch_id: DispatchId | str, *, raw_result: str | bytes) -> JsonObject:
+    def ingest_recovered_result(
+        self,
+        dispatch_id: DispatchId | str,
+        *,
+        raw_result: str | bytes,
+        terminal_integrity: Mapping[str, object] | None = None,
+    ) -> JsonObject:
         """Ingest one strictly validated persisted-thread terminal envelope.
 
         This path is used only after a read-only ``thread_read`` proves the
@@ -8493,6 +8744,12 @@ class Ledger:
                 "UPDATE retry_policies SET revision = revision + 1, strategy = 'none', next_eligible_at = NULL, "
                 "human_attention_reason = NULL, updated_at = ? WHERE dispatch_id = ?",
                 (now, str(dispatch_id)),
+            )
+            self._record_dispatch_terminal_integrity_in_transaction(
+                dispatch_id,
+                result_sha256=digest,
+                terminal_status=self._queue_result_terminal_status(result),
+                terminal_integrity=terminal_integrity,
             )
             return self._finalize_queue_result_in_transaction(dispatch_id)
 
@@ -11403,6 +11660,19 @@ class Ledger:
                 )
                 .fetchone()
             )
+            if dispatch.parts[3] == 2 and terminal_status == "completed":
+                if result_sha256 is None or candidate is None:
+                    raise StaleWriter("completed control repair lacks terminal result authority")
+                try:
+                    repair_integrity = self.dispatch_terminal_integrity(dispatch)
+                except (RecordNotFound, SchemaError, ValueError) as exc:
+                    raise StaleWriter("completed control repair lacks dispatch terminal integrity") from exc
+                if (
+                    repair_integrity["result_sha256"] != result_sha256
+                    or repair_integrity["workspace_terminal_head_sha"] != candidate.commit_sha
+                    or candidate.dirty
+                ):
+                    raise StaleWriter("control repair candidate conflicts with dispatch terminal integrity")
             if execution_row is not None and candidate is not None:
                 if Path(str(execution_row["workspace_path"])).resolve() != candidate.workspace_path.resolve():
                     raise StaleWriter("control candidate workspace conflicts with its durable execution")
@@ -11614,6 +11884,14 @@ class Ledger:
         with self._transaction():
             if self._program_candidate_sha(run, milestone) != candidate_sha:
                 raise StaleWriter("control review candidate is not the current candidate")
+            if generation == 2:
+                repair_dispatch = DispatchId.from_parts(run, milestone, RoleId("executor"), 2)
+                try:
+                    repair_integrity = self.dispatch_terminal_integrity(repair_dispatch)
+                except (RecordNotFound, SchemaError, ValueError) as exc:
+                    raise StaleWriter("generation-2 review lacks repair terminal integrity") from exc
+                if repair_integrity["workspace_terminal_head_sha"] != candidate_sha:
+                    raise StaleWriter("generation-2 review candidate conflicts with repair terminal integrity")
             for fact in reversed(self.review_lifecycle(run, milestone)):
                 if fact.kind == "review_completed" and fact.data.get("review_id") == result.review_id:
                     if fact.data != data:

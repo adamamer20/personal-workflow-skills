@@ -370,7 +370,7 @@ def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hi
     assert [call[2] for call in calls][:1] == ["is-active"]
     connection = sqlite3.connect(ledger_path)
     try:
-        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "19"
+        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "20"
         authority = connection.execute(
             "SELECT requested_shutdown FROM harness_authority WHERE singleton = 1"
         ).fetchone()
@@ -1142,6 +1142,7 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     )
     ledger.close()
     connection = sqlite3.connect(ledger_path)
+    connection.execute("DROP TABLE dispatch_terminal_integrity")
     connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
     connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
     connection.execute(
@@ -1211,7 +1212,7 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     assert [call[2] for call in calls] == ["is-active", "daemon-reload", "import-environment", "start", "is-active"]
     migrated = Ledger(ledger_path)
     try:
-        assert migrated.schema_version.value == 19
+        assert migrated.schema_version.value == 20
         assert (
             migrated._db().execute("SELECT 1 FROM sqlite_master WHERE name = 'supervisor_authority'").fetchone() is None
         )
@@ -1242,6 +1243,7 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
     )
     ledger.close()
     connection = sqlite3.connect(ledger_path)
+    connection.execute("DROP TABLE dispatch_terminal_integrity")
     connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
     connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
     connection.execute(
@@ -1314,6 +1316,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     )
     ledger.close()
     connection = sqlite3.connect(ledger_path)
+    connection.execute("DROP TABLE dispatch_terminal_integrity")
     connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
     connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
     connection.execute(
@@ -1387,7 +1390,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     assert [call[2] for call in calls] == ["is-active"]
     check = sqlite3.connect(ledger_path)
     try:
-        expected_version = "19" if failure_stage == "rollback_failure" else "18"
+        expected_version = "20" if failure_stage == "rollback_failure" else "18"
         assert (
             check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
             == expected_version
@@ -1457,7 +1460,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     ]
     migrated = Ledger(ledger_path)
     try:
-        assert migrated.schema_version.value == 19
+        assert migrated.schema_version.value == 20
         assert migrated.harness_authority() is not None
     finally:
         migrated.close()
@@ -1470,6 +1473,7 @@ def test_v18_refresh_rejects_dangling_or_new_socket_symlink_before_start(tmp_pat
     ledger.close()
     ledger_path = repository / ".codex-flow" / "workflow.db"
     connection = sqlite3.connect(ledger_path)
+    connection.execute("DROP TABLE dispatch_terminal_integrity")
     connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
     connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
     connection.execute(

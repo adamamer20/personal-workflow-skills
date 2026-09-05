@@ -25,7 +25,7 @@ import codex_flow.controller as controller_module
 import codex_flow.native_profile as native_profile_module
 from codex_flow.backends.codex_sdk import CodexSdkAdapter, CodexSdkConfig, NativeRuntimeConfig
 from codex_flow.cli import _detached_status_payload, app
-from codex_flow.contracts import PluginRequirement, model_facing_result_schema
+from codex_flow.contracts import PluginRequirement, model_facing_result_schema, model_facing_result_schema_sha256
 from codex_flow.controller import (
     Controller,
     ControllerError,
@@ -612,25 +612,59 @@ def test_completed_controller_execution_accepts_one_exact_repair_successor_idemp
         },
         separators=(",", ":"),
     )
-    row = {
-        "dispatch_id": "run/m1/executor/2",
-        "run_id": "run",
-        "milestone_id": "m1",
-        "role": "executor",
-        "generation": 2,
-        "terminal_status": "completed",
-        "raw_result_sha256": hashlib.sha256(raw_result.encode()).hexdigest(),
-        "raw_result_json": raw_result,
-        "action_json": json.dumps(
-            {
-                "candidate_sha": predecessor,
-                "finding_ids": ["CONTROL-CANDIDATE-IDENTITY-001"],
-                "repair_generation": 2,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-    }
+    action_json = json.dumps(
+        {
+            "candidate_sha": predecessor,
+            "finding_ids": ["CONTROL-CANDIDATE-IDENTITY-001"],
+            "repair_generation": 2,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    harness.ledger.enqueue_dispatch(
+        "run/m1/executor/2",
+        backend="sdk_headless",
+        capsule_json='{"model":"test","prompt":"repair"}',
+        action_json=action_json,
+        route_json="{}",
+        workspace_path=repository,
+        result_contract_sha256=model_facing_result_schema_sha256(),
+    )
+    queued = harness.ledger.queue_dispatch("run/m1/executor/2")
+    captured = harness._capture_control_repair_terminal_integrity(queued, raw_result)
+    result_sha256 = hashlib.sha256(raw_result.encode()).hexdigest()
+    authority = harness.ledger.acquire_harness(
+        repository_root=repository,
+        state_root=repository,
+        pid=os.getpid(),
+        process_birth_identity="repair-test-process",
+        executable_digest="c" * 64,
+        version="test",
+        owner_nonce_sha256="d" * 64,
+    )
+    harness.ledger.claim_queue_dispatch(epoch=int(authority["epoch"]), claim_nonce_sha256="e" * 64)
+    harness.ledger.set_queue_state("run/m1/executor/2", "starting", epoch=int(authority["epoch"]))
+    token = "repair-result-token"
+    harness.ledger.issue_attempt_capability(
+        "run/m1/executor/2",
+        generation=2,
+        attempt=1,
+        operation="submit_result",
+        schema_sha256=model_facing_result_schema_sha256(),
+        workspace_path=repository,
+        backend="sdk_headless",
+        token_sha256=hashlib.sha256(token.encode("ascii")).hexdigest(),
+        expires_at="9999-12-31T23:59:59Z",
+    )
+    row = harness.ledger.commit_queue_result(
+        "run/m1/executor/2",
+        generation=2,
+        attempt=1,
+        token=token,
+        raw_result=raw_result,
+        terminal_integrity=captured,
+    )
+    assert row["state"] == "completed"
 
     def fail_on_rejection(_row: Mapping[str, object], error: Exception) -> None:
         raise error
@@ -638,7 +672,24 @@ def test_completed_controller_execution_accepts_one_exact_repair_successor_idemp
     monkeypatch.setattr(harness, "_control_result_issue", fail_on_rejection)
 
     harness._record_control_queue_result(row)
+    retained_integrity = harness.ledger.dispatch_terminal_integrity("run/m1/executor/2")
+    assert retained_integrity["result_sha256"] == result_sha256
+    assert retained_integrity["workspace_terminal_head_sha"] == successor
+    assert retained_integrity["git_authority_sha256"] == controller_module.git_authority_snapshot(repository).sha256
+    assert retained_integrity["protected_paths_sha256"] == controller_module.protected_paths_digest(
+        repository, capsule.protected_paths
+    )
+    harness.close()
+
+    harness = WorkflowHarness(repository)
+    monkeypatch.setattr(harness, "_queue_control_reviews", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(harness, "_control_result_issue", fail_on_rejection)
+    row = harness.ledger.queue_dispatch("run/m1/executor/2")
     harness._record_control_queue_result(row)
+    assert (
+        harness.ledger.dispatch_terminal_integrity("run/m1/executor/2")["captured_at"]
+        == retained_integrity["captured_at"]
+    )
 
     facts = harness.ledger.review_lifecycle("run", "m1")
     successor_facts = [
@@ -4079,7 +4130,7 @@ def test_legacy_ledger_migrates_forward_to_canonical_execution_schema() -> None:
 
         ledger = Ledger(path, migrate=True)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_harness_candidate_retention_v19"
+        assert ledger.schema_identity == "codex_flow_dispatch_terminal_integrity_v20"
         assert "checkpoint" in ledger.schema_columns("executions")
         ledger.close()
 
@@ -4102,7 +4153,7 @@ def test_v4_sandbox_authority_schema_migrates_to_truthful_native_profile_authori
         connection.close()
 
         ledger = Ledger(path, migrate=True)
-        assert ledger.schema_identity == "codex_flow_harness_candidate_retention_v19"
+        assert ledger.schema_identity == "codex_flow_dispatch_terminal_integrity_v20"
         assert "native_profile_sha256" in ledger.schema_columns("execution_integrity")
         assert "sandbox_policy_sha256" not in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -4127,7 +4178,7 @@ def test_v5_native_profile_schema_migrates_to_permission_authority_v6() -> None:
 
         ledger = Ledger(path, migrate=True)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_harness_candidate_retention_v19"
+        assert ledger.schema_identity == "codex_flow_dispatch_terminal_integrity_v20"
         assert "native_compatibility_sha256" in ledger.schema_columns("execution_integrity")
         assert "effective_permission_json" in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -4254,7 +4305,7 @@ def test_v6_permission_schema_migrates_to_causal_workspace_v7() -> None:
 
         ledger = Ledger(path, migrate=True)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_harness_candidate_retention_v19"
+        assert ledger.schema_identity == "codex_flow_dispatch_terminal_integrity_v20"
         columns = ledger.schema_columns("execution_integrity")
         assert "workspace_baseline_sha256" in columns
         assert "turn_started_at" in columns
@@ -4294,6 +4345,7 @@ def test_migrated_v7_predecessor_without_terminal_snapshot_requires_explicit_rec
         connection.execute("PRAGMA foreign_keys = OFF")
         connection.execute("DROP TABLE app_native_dispatches")
         for table in (
+            "dispatch_terminal_integrity",
             "wake_outbox",
             "controller_action_outbox",
             "controller_decision_generations",
