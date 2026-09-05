@@ -74,7 +74,246 @@ tests/
 workflow.toml            # one routing and limit table
 ```
 
-## Active selection after replacement-state correctness review
+## Active selection after exhaustive refresh-policy causal reviews
+
+The fixed clean integration parent is
+`70a1065d188ec94ac3b734743177206a1e2e7249` on
+`agent/python-sdk-controller`. Its source/test commit is
+`c4f270d889582ba73483e43897d9a3b572f8d45a`. The reviewed external wheel at
+`/tmp/codex-flow-wheel-refresh.o9aH5N/codex_flow-0.2.0-py3-none-any.whl`,
+SHA-256 `2c68304a43c00c8b1fcce730e5053f67b2ee312fd408c5defbc59cdeef580f4b`,
+457834 bytes, matched 33/33 packaged Python paths; the evidence JSON SHA-256
+was `12d54409ba2778c066879171d591d08e425eb9203deb5320f1fd7ef7b2e021c7`,
+5646 bytes. These are immutable inputs, not successor closure proof.
+
+The correctness review left `CI-MATRIX-001` open because the public matrix did
+not discriminate delayed acquisition or the required fence, stop, inactivity,
+birth-death and revalidation failures. The architecture causal review also
+found that nonzero or raised `systemctl start` could still enter the absence
+restore branch, an already fenced inactive/dead replacement still received a
+redundant stop, and `make check` had not closed on the evidence tip. All are
+promotion-blocking P1 findings. The disconnected TUI behavior, authenticated
+`for_state_root` proof and wheel parity were accepted and are now protected.
+
+The remaining serial DAG is:
+
+    refresh-replacement-policy-matrix-closure [ready; one mutable owner]
+      -> independent Luna XHigh correctness causal review
+      -> independent Sol Medium architecture causal review
+      -> integration-owner promotion/install/refresh/provider-free activation step 5
+      -> one already-authorized real streaming sentinel
+      -> live-plan-dag-revision
+      -> module-responsibility-decomposition
+
+Every edge is an acceptance dependency. Production policy, its exhaustive
+public matrix, wheel identity and evidence bind one serial candidate.
+
+## Refresh replacement policy-matrix architecture
+
+### Outcome, non-goals and authorities
+
+`refresh_with_credential` restores legacy harness bytes only after a successful
+start followed by complete stable-absence proof or exact fenced-replacement
+shutdown and death proof. Every incomplete, uncertain, live, drifted, failed,
+missing, malformed or ambiguous proof retains current harness bytes. A delayed
+replacement transitions into replacement handling or fails closed; it is never
+reduced to a false absence result.
+
+This is not a service, ledger, systemd, TUI, IPC, schema, packaging or recovery
+redesign. It adds no production module, public or persisted type, entrypoint,
+table, migration, service, socket, transport, timer or polling owner. It does
+not install or refresh `codex-flow`, touch
+`codex-flow-937220b34ee45f7f.service` or
+`codex-flow-71308abd5aeed226.service`, invoke a provider sentinel, use App or
+network state, or alter accepted disconnected TUI behavior.
+
+The ledger remains durable row/fence authority, systemd remains unit authority,
+PID plus birth identity remains process-liveness authority, and installed-unit
+validation remains byte/configuration authority. Reuse the existing deadline,
+clock, sleeper, runner, liveness seam, rollback mechanics and public entrypoint.
+
+### Compact table-driven policy
+
+Keep one private policy in `src/codex_flow/service.py`. Descriptive private
+functions or a private declarative table are allowed, but no new public/domain
+type. Each complete observation combines exact authority identity and shutdown
+bit, unit activity, PID/birth liveness, socket presence where relevant, and
+installed-unit validity:
+
+| State | Required action | Restore eligibility |
+| --- | --- | --- |
+| `start` returns nonzero or raises | Preserve current bytes and raise; do not observe for absence or restore | Permanently ineligible because start is uncertain |
+| Zero start; exact predecessor shutdown 1, inactive unit, dead predecessor PID/birth, no current `harness.sock` | Run the stable-predecessor protocol below | Eligible only after three observations and immediate final revalidation |
+| Higher-epoch distinct valid replacement, shutdown 0 | Arm `Ledger.arm_harness_refresh_fence` exactly once and require the returned unchanged identity with shutdown 1 | Eligible only after complete shutdown, death and revalidation proof |
+| Higher-epoch replacement, shutdown 1, active unit or live PID/birth | Never refence; stop exact unit once and prove inactivity/death | Eligible only after complete revalidation |
+| Higher-epoch replacement, shutdown 1, already inactive and dead | Never refence and skip redundant stop | Eligible only after exact row and installed-unit revalidation |
+| Unit stays active, PID/birth stays live, fence/stop fails or deadline expires | Preserve current bytes and raise | Ineligible |
+| Post-fence or post-stop row is missing, malformed, ambiguous, unfenced or identity-drifted | Preserve current bytes and raise; issue no direct SQL | Ineligible |
+| Installed-unit revalidation fails | Preserve current bytes and raise | Ineligible |
+| Unexpected epoch, repository/state/version mismatch, invalid PID/birth, malformed/missing shutdown, socket/liveness uncertainty or any unclassifiable state | Preserve current bytes and raise | Permanently ineligible |
+
+Shutdown 0 fences exactly once before shutdown handling. After the returned
+fence is validated, an already inactive/dead replacement needs no stop;
+otherwise stop occurs exactly once. Shutdown 1 never refences, and its explicit
+already-inactive/dead branch skips stop.
+
+Stable-predecessor absence proof starts only after `start` returns zero. It
+requires three complete observations of the exact unchanged predecessor
+epoch/PID/birth row with shutdown 1, unit inactivity, birth-bound death and no
+current `harness.sock`. Observation 1 to 2 and 2 to 3 are separated by the
+existing sleeper by at least 50 milliseconds within the existing deadline.
+Immediately before restore, all facts are re-read and must still match. A
+higher-epoch replacement acquired before observation 1, 2 or 3, or during final
+revalidation, enters replacement handling in the same invocation; if safe
+completion is impossible, current bytes remain and the invocation fails.
+Missing, malformed, ambiguous, live, drifted or expired observations never
+reset the count or become absence.
+
+Restoration is exact in bytes and mode. The existing later retry must acquire
+the next epoch and succeed through the public entrypoint.
+
+### Exhaustive public test matrix
+
+`tests/test_service_lifecycle.py` owns one parameterized matrix through public
+`refresh_with_credential`. Every row records start result, ordered authority
+observations, unit-activity and PID/birth-liveness sequences, socket facts,
+expected fence/manager calls, installed bytes/mode, exception or success, and
+retry outcome. Distinct rows cover:
+
+- start success, nonzero and raised exception; both uncertain-start rows use an
+  exact inactive/dead/socket-free predecessor and prove no observation restore;
+- predecessor observations 1, 2 and 3, spacing of at least 50 milliseconds and
+  immediate final revalidation;
+- higher-epoch acquisition on observation 1, 2 and 3, each transitioning into
+  replacement handling or closed failure;
+- replacement shutdown 0 and 1 with active/live and already inactive/dead
+  states; shutdown 0 fences once, shutdown 1 never refences, and inactive/dead
+  shutdown 1 never stops;
+- fence failure, post-fence identity drift, stop failure, unit remaining active
+  and PID/birth remaining live;
+- post-stop authority drift, missing, malformed and ambiguous row;
+- installed-unit revalidation failure;
+- malformed/missing shutdown, repository/state/version/epoch/PID/birth drift,
+  socket or liveness uncertainty, and deadline exhaustion; and
+- exact restore of bytes/mode plus accepted higher-epoch retry success.
+
+Every unsafe row asserts current harness bytes remain and no forbidden fence,
+stop, restore or direct ledger mutation occurs. Test-local table helpers may
+compress setup/assertions but cannot become a production API or fixture file.
+
+### Architecture map, ownership and budgets
+
+One Luna XHigh implementation owner has exactly three mutable paths:
+
+- **Modify** `src/codex_flow/service.py`: complete the private policy,
+  delayed-acquisition transition and exact restore/retry behavior through the
+  existing public entrypoint and authorities.
+- **Modify** `tests/test_service_lifecycle.py`: add the exhaustive public table
+  and exact call, liveness, byte/mode and retry assertions.
+- **Modify**
+  `docs/reviews/evidence/safe-refresh-and-control-list-paging.json`: only after
+  source/test commit and fresh wheel parity, record successor lineage and gates
+  without a self-hash.
+
+**Preserve** `src/codex_flow/tui_client.py`,
+`tests/test_live_worker_control.py`, every other production/test/evidence path,
+`AGENTS.md`, this plan after its planning commit, retained wheels, installer,
+ledger, harness, control clients, TUI models/UI/CLI, schemas, migrations,
+contracts, entrypoints, services, sockets, provider/App/network/global state,
+remotes and unrelated bytes. A concrete defect requiring a protected path
+returns to planning rather than widening the capsule.
+
+Create and remove nothing. New durable-artifact, production-module,
+public-boundary, schema, entrypoint and dependency-edge budgets are zero. The
+semantic delta is one completed existing invariant: a total fail-closed refresh
+replacement policy. Descriptive private helpers and a private test-row
+representation may compress repeated decisions; no new class, protocol, enum,
+model, registry, runner, service or compatibility alias is justified. Timing
+and parity numbers support but cannot weaken the safety proof.
+
+### Artifact sequence, validation and promotion
+
+The single owner must:
+
+1. run the focused public matrix and affected service semantic partition;
+2. stage only `src/codex_flow/service.py` and
+   `tests/test_service_lifecycle.py`, inspect the staged diff, run
+   `git diff --cached --check`, and create one source/test commit whose exact
+   parent is this planning commit;
+3. build one fresh external wheel from that commit in a new external temporary
+   directory and independently compare all 33 packaged Python paths, including
+   `codex_flow/service.py`;
+4. after 33/33 parity only, update and stage only the existing evidence JSON,
+   inspect it, run `git diff --cached --check`, create one evidence-only commit,
+   and compute its final hash/size externally; and
+5. run full `make check` on the final evidence tip, verify clean status and
+   exact two-commit ancestry containing only the three mutable paths.
+
+The prior wheel/evidence identities are superseded, never reused or
+overwritten. Evidence records exact planning parent, source/test commit,
+evidence tip binding, external wheel path/hash/size, 33/33 enumeration, focused
+and final-tip gates, and no self-hash.
+
+Promotion requires independent Luna XHigh correctness and Sol Medium
+architecture causal reviews. Each binds the exact final tip, fresh wheel,
+external evidence hash/size and every commit in
+`ba05399d57da5ca65250f64727e36270f786c213..FINAL_TIP`, and returns P0=0/P1=0.
+No visual review is requested. Finding severity remains distinct from
+`promotion_blocking`; every deferred finding names owner and `defer_to`. These
+are provider-free gates only; installation, service refresh, activation,
+protected-service checks and the real streaming sentinel remain outside.
+
+## Next execution — refresh-replacement-policy-matrix-closure
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective=(
+        "Make refresh_with_credential a total fail-closed replacement policy: uncertain start never restores, delayed acquisition is handled causally, and legacy bytes return only after complete stable-absence or fenced-replacement death proof."
+    ),
+    decomposition=(
+        "Express one private table-driven classification over start outcome, exact authority identity, unit activity, birth-bound liveness, socket presence and installed-unit validity.",
+        "After successful start only, require three complete predecessor observations at least 50ms apart plus immediate final revalidation, routing acquisition on observation 1, 2 or 3 into replacement handling.",
+        "For shutdown 0 fence exactly once; for shutdown 1 never refence; stop only a live/active replacement and skip redundant stop for an already inactive/dead fenced replacement.",
+        "Drive every success, drift, malformed, uncertain and failed transition through a parameterized public refresh_with_credential matrix with exact calls, liveness and installed-byte assertions.",
+        "Commit source/tests, prove a fresh external wheel at 33/33, commit evidence alone, run make check on the final tip, then obtain both independent causal reviews."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Nonzero or raised systemctl start is permanently restore-ineligible and retains current harness bytes even with an exact inactive/dead/socket-free predecessor.",
+        "A zero start with the exact unchanged predecessor restores only after three complete observations separated by at least 50ms and immediate final revalidation; acquisition on observation 1, 2 or 3 enters replacement handling or fails closed.",
+        "Shutdown 0 fences exactly once; shutdown 1 never refences; active/live replacement shutdown is stopped and death-proven, while already inactive/dead shutdown 1 skips redundant stop.",
+        "Fence failure, post-fence drift, stop failure, active unit, live PID/birth, post-stop missing/malformed/ambiguous/drifted authority and installed-unit revalidation failure all retain current bytes.",
+        "Every missing, malformed, ambiguous, unexpected, uncertain, live, drifted, failed or incomplete proof retains current harness bytes and issues no inferred direct ledger repair.",
+        "Eligible proofs restore exact legacy bytes/mode, and the accepted later higher-epoch retry succeeds.",
+        "The exhaustive public matrix covers every frozen row with ordered inputs and exact manager, fence, byte/mode and outcome assertions.",
+        "Only service.py and test_service_lifecycle.py form the source/test commit; a fresh wheel matches 33/33 Python paths; only the existing JSON forms the evidence commit; make check passes on that final tip and status is clean.",
+        "Independent Luna XHigh correctness and Sol Medium architecture reviews bind the full candidate and return P0=0/P1=0; no visual or runtime/provider action occurs."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/service.py",
+        "tests/test_service_lifecycle.py",
+        "docs/reviews/evidence/safe-refresh-and-control-list-paging.json"
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md after this planning commit",
+        "src/codex_flow/tui_client.py, tests/test_live_worker_control.py and all other production/test/evidence paths",
+        "retained wheels, installer, ledger, harness, control clients, TUI model/UI/CLI, schemas, migrations, contracts, entrypoints, services and sockets",
+        "provider/App/network/global state, both named real services, remotes, push, rebase, history rewrite, discard, cleanup and unrelated bytes"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt=(
+        "Use execute-milestone as the one Luna XHigh mutable owner for only refresh-replacement-policy-matrix-closure in the existing integration checkout. Modify exactly service.py, test_service_lifecycle.py and, after wheel parity, the existing evidence JSON; create nothing. Implement the frozen table through public refresh_with_credential: nonzero/raised start never observes for absence or restores; zero start needs three exact predecessor observations >=50ms apart plus final revalidation; delayed acquisition on observation 1/2/3 enters replacement handling or fails closed; shutdown 0 fences once, shutdown 1 never refences, and already inactive/dead shutdown 1 skips stop. Exhaustively test fence/stop/inactivity/death/row/installed-unit failures and exact restore/retry success; every unsafe case retains current bytes. Preserve accepted TUI code/tests and all protected surfaces. Commit source/tests, build a fresh external wheel and prove 33/33, commit evidence alone, run make check on the final evidence tip, verify clean ancestry, and return exact identities with both independent causal reviews pending. Do not install or refresh codex-flow, touch either named service, run a provider sentinel, create a task, or perform App/network/global-state actions."
+    ),
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
+## Superseded selection after replacement-state correctness review
 
 The clean integration tip is
 `17e6d2f0f1786c1fd7c35931877e595cbde70f87`: source/test commit
