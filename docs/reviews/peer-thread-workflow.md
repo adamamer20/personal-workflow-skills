@@ -1,5 +1,841 @@
 # Plan: Deterministic Codex workflow controller
 
+## Priority accepted work — program outcome and approval authority
+
+This section supersedes every historical next-action instruction below. The user
+requested planning AND implementation of missing program capabilities; this leaf
+owns architecture only. Parent controller 01a076b2-e4c5-7bc0-b5b1-d6ca5a7be818,
+host local, released canonical-plan ownership on 2026-09-06. It owns dispatch,
+independent acceptance, integration and installation. Conversational TUI work is
+PAUSED/deferred, including program-observation; its draft and untracked evidence
+remain preserved. Source-notification recovery is separate and deferred. Prior
+reviewed-sdk-runtime-proof history remains historical, with no new execution.
+
+### Outcome, evidence and scope
+
+Enable one registered program to combine source commits, immutable runtime
+artifacts, adoption of an already integrated source candidate, and a persistent
+user approval requirement. Runtime smoke, mixed, isolated and report nodes must
+close without empty commits or fake candidates. Approval gates block every
+protected successor dispatch, including implementation/configuration, not merely
+provider calls. Keep SQLite and WorkflowHarness as the only lifecycle authority,
+with the official SDK transport and existing independent review machinery.
+
+Read-only inspection at db5a8561bc43e87f4514220a3f3345fbdeb3b152 establishes:
+
+- WorktreeManager.adopt_candidate already calls inspect_terminal_workspace with
+  require_direct_candidate=True. An explicit candidate at HEAD can pass when its
+  exact parent equals capsule.base_sha; HEAD alone is not an incompatibility.
+  plan_capsule.CompiledProgramGraph.to_program_graph currently projects the
+  checkout HEAD as each node base. The registration binding must distinguish
+  current program trunk from an adopted node's historical review base.
+- ledger.adopt_program_candidate requires VERIFIED_COMMIT; terminal completion
+  and review selection likewise assume a commit. ProgramNodeStatus.integrated
+  and complete_program_integration currently derive closure from Git integration
+  receipts/counts. Those assumptions cannot represent runtime-only work honestly.
+- ReviewResult.reviewed_revision is already a bounded string, not a SHA-only
+  type. Reuse it for a tagged evidence subject; do not create a second reviewer.
+- The downstream application-capacity-load-testing-plan.md explicitly requires
+  no source commit for runtime nodes, retained first failures, immutable ignored
+  artifacts, and USER_APPROVAL_AFTER_PROVIDER_FREE_RESULTS before even the
+  provider-inclusive contract/configuration implementation. A later live-run
+  approval must additionally bind the promoted implementation and run envelope.
+- Read-only git show verifies be7526b9129115c1bcb677a8eafeac2a3f3746d6 has sole
+  parent e62c7ff63ae54f12cc587aadda8512ad59aef693. Its presence at downstream HEAD,
+  installed codex-flow 0.2.0 and unregistered-program status are supplied runtime
+  facts, not independently refreshed ledger/install evidence in this planning
+  turn. Neither this parent observation nor previous review prose accepts the
+  candidate for a new program.
+
+Non-goals: downstream edits/registration/load tests, provider contact, installation,
+service/global/auth changes, retries of failed proof rows, TUI implementation,
+source-wake repair, new transport/controller, arbitrary ancestral adoption,
+automatic migration of failed outcomes, and production/capacity claims.
+
+### Frozen contracts and semantic delta
+
+Extend existing contracts; one new IO module is justified below. No new service,
+registry, Protocol, runner, sidecar capsule or parallel acceptance engine.
+
+1. Add ProgramOutcomeKind with commit and runtime_evidence values, plus
+   ProgramIntegrationMode with git, already_integrated and no_integration values.
+   Valid pairs are commit/git, commit/already_integrated and
+   runtime_evidence/no_integration only. ModelFacingCapsule schema 4 adds
+   outcome_kind, integration_mode, runtime_artifact_paths, runtime_artifact_max_files,
+   runtime_artifact_max_bytes and approval_gates;
+   legacy schemas 1-3 decode strictly to commit/git, empty paths/gates. The model
+   declares intent, never proof, operator approval, review SHA or execution identity.
+   Carry intent through ExecutionCapsule, CompiledProgramNode and ProgramNodeSpec.
+   An evidence node must declare bounded artifact roots and acceptance criteria;
+   an empty candidate on an ordinary node still cannot succeed.
+2. Extend ProgramNodeSpec with optional review_base_sha and adopted_candidate_sha,
+   paired and allowed only for already_integrated nodes. Registration binds
+   these operator-supplied facts, not inferred model defaults. ProgramGraph.trunk_head
+   stays the current trunk; node capsule.base_sha is the historical review base.
+   Existing direct-parent validation remains mandatory. This iteration accepts
+   only candidate == registered trunk == current HEAD, exact sole parent ==
+   review_base_sha, clean checkout and exact owned/protected diff proof. Ancestor
+   candidates with later commits, merge candidates, patch-equivalent substitutes,
+   unrelated history, dirty aliases and synthesized historical facts fail closed.
+3. Add RuntimeEvidenceManifest and RuntimeEvidenceFile in domain.py. Manifest v1
+   fields: schema_version, program_id, milestone_id, dispatch_id, generation,
+   attempt, plan_revision_sha256, capsule_sha256, source_head_sha,
+   environment_revision, command, terminal_outcome, acceptance_criteria_sha256,
+   files, predecessor_evidence_sha256 (nullable). Files contain normalized
+   relative path, SHA-256, size_bytes. Exact ordered command argv is content-free;
+   environment_revision is a digest of explicitly declared non-secret target
+   facts. Never retain environment dumps, credentials, response bodies or secrets.
+   Each manifest is tied to the durable dispatch, capability, artifact allowlist,
+   source and outcome; worker assertions alone cannot establish these facts.
+4. Add ReviewSubject, the sole repeated subject identity: kind commit or
+   runtime_evidence, digest (40 or 64 lowercase hex respectively). Reuse candidate
+   storage for commits and ReviewResult.reviewed_revision (commit SHA unchanged;
+   evidence uses runtime_evidence:<sha256>). Program controller review, repair and
+   promotion actions accept exactly one subject; candidate_sha remains the
+   historical commit wire form, evidence_sha256 is the evidence wire form.
+   Neither can be supplied together. Integrate-candidate remains commit-only.
+   No SHA placeholder or conversion of evidence into CandidateRecord is allowed.
+5. Add ProgramApprovalGate (gate_id, prerequisite milestone IDs, protected
+   milestone IDs, scope description). IDs/lists are semantic intent, sorted/unique,
+   bounded, and reference existing graph nodes. Scope digest is harness-derived.
+   Freeze this declaration/parser in program-evidence-and-adoption, but reject
+   registration of any graph containing a gate as approval_capability_unavailable;
+   do not drop the gate, run its predecessors, or persist a partly active graph.
+   program-user-approval later enables those declarations with UserApprovalReceipt
+   and ProgramApprovalContext as specified below. Gate prerequisites cannot be
+   gated by themselves; graph validation rejects missing targets and bypass edges.
+   No model action can approve, resolve or remove a user gate.
+6. Extend ProgramNodeStatus/ProgramControllerNodeContext with outcome_kind,
+   integration_mode, evidence_sha256, closure_satisfied and unsatisfied_gate_ids.
+   integrated remains false for runtime evidence. already_integrated is true only
+   after exact adoption proof AND independent promotion. One pure
+   program_node_closure_satisfied policy in domain.py defines closure for all
+   three modes; readiness, status, completion and successor scheduling reuse it.
+   Program completion counts satisfied node closures, not integration rows.
+
+The semantic additions encode three distinct invariants: non-Git evidence
+identity, exact existing-trunk adoption, and user-originated scoped authority.
+ReviewSubject and the closure policy remove distributed commit-only decisions.
+Do not add parallel evidence-review result/config/status families. CandidateRecord
+keeps its existing Git-only meaning. Historical wire forms and schema versions
+are compatibility exceptions, tested as exact immutable old-state fixtures.
+
+### Result and authority boundary details
+
+ModelFacingResult adds nullable runtime_artifact_paths as an exact tuple of
+relative output paths; legacy results omit it. It is mandatory and nonempty only
+for successful explicitly typed runtime evidence nodes, forbidden for commit
+nodes, and never contains a candidate SHA, operator approval or worker-generated
+manifest authority. Harness constructs RuntimeEvidenceManifest from retained
+terminal/dispatch facts and verified files. ModelFacingResult schema 2 adds this field; schema 1 retains its exact decoder.
+New evidence dispatches require schema 2. The executor documents exact provider
+schema digest changes in retained commit evidence before closure; no implicit
+schema acceptance. Schema-4 capsules retain optional plugin requirements and
+local image paths with their existing validation, without forcing either to be
+present for nonvisual evidence work.
+
+Runtime artifact max-files/max-bytes are positive integers for evidence nodes and
+null for commit nodes, chosen in plan intent and fixed at registration. Zero,
+missing evidence limits, overflow and booleans reject. Limits account for the
+whole manifest/file set, never partial ingestion. Manifest environment_revision
+is captured from declared non-secret target observations by the harness; a domain
+runner may supply the observation artifact, but the harness binds its bytes and
+review must judge whether it proves target identity. Source/target observations
+are not fabricated for report-only nodes: reports cite exact predecessor evidence
+subjects and their environment revisions, plus their own report-generation source.
+
+Approval declarations are inert intent until program-user-approval is promoted.
+The first milestone validates their closed syntax and rejects gate-bearing graph
+registration before ledger mutation or dispatch. Its launch/replay guard also
+rejects such an unsupported graph if encountered in retained/imported state.
+This is an explicit unavailable capability, not a satisfied gate or a model
+choice. A gate-free mixed commit/evidence program is independently executable and
+reviewable. No automatic rewrite of an existing graph removes a gate to get work
+started. Downstream activation remains blocked until both controller milestones
+are accepted and installed.
+
+### Artifact integrity and lifecycle
+
+runtime_evidence.py owns bounded filesystem ingestion/verification only and
+imports domain, never ledger/harness. WorkflowHarness captures pre-execution Git,
+protected-path and capability facts and issues artifact roots before dispatch.
+Finalization verifies the declared command/outcome against the terminal dispatch,
+source and declared non-secret environment revision; domain-specific assertions
+(cleanup, provider counts, redaction, SLOs) require actual retained artifacts and
+independent review. Hashes prove bytes, not those assertions.
+
+Accept regular files only, no symlinks, hardlink aliases, traversal, devices or
+paths outside approved roots. Use no-follow descriptor reads, bounded file count
+and bytes from the registered capsule, before/after fstat and path identity checks;
+reject mutation during capture. Manifest canonical bytes use UTF-8 JSON, sorted
+keys, compact separators, no NaN, duplicate keys or unknown fields. File ordering
+is lexical. SHA-256 covers every manifest field and file identity. Freeze a
+content-addressed snapshot below existing .codex-flow/artifacts/runtime-evidence/
+<manifest-sha256>/ via staging, fsync and atomic no-overwrite publication. Artifact
+budget is one manifest plus its declared files per attempt; no duplicated original
+run tree unless those exact files are required review inputs. Existing downstream
+var bytes stay untouched. Byte/file limits are registered explicitly, no arbitrary
+size cap may truncate mandatory proof; exceedance requires bounded replan.
+
+Reviewers receive that exact snapshot and subject digest. Rehash snapshot before
+review dispatch, promotion, approval creation/verification and successor launch;
+reject missing, replaced or changed bytes. Changing the source artifact after
+capture cannot change accepted immutable snapshot identity; a newer run is a new
+subject requiring new review. Snapshot corruption marks evidence stale, invalidates
+its effective closure and gate eligibility, blocks unstarted descendants and
+emits attention; it cannot silently rewrite historical receipts or pretend to undo
+an already executed successor. Revalidate immediately before effect dispatch,
+under the same harness authority/ledger revision fence; no scheduled stale action
+can launch merely because it was once queued.
+
+Evidence terminal success goes RUNNING -> COMPLETED -> REVIEWING, then existing
+independent authorities accept/reject the exact subject. Promotion atomically
+records no_integration closure and successor readiness; never create or apply a
+Git integration outbox for it. A failed/missing/incomplete/uncertain artifact is
+retained with a typed blocker and never turns into successful closure. A failure
+may have a valid manifest without satisfying the node's success criteria. Repair
+requires an explicitly authorized successor attempt and new subject; no replay of
+a real load run from an automatic completion-biased repair. Superseded evidence,
+reviews and failure rows remain intact. Restart resumes ingestion/publication or
+queued review idempotently; it never restarts completed workload commands. A crash
+after snapshot publication but before ledger commit can reuse identical bytes;
+orphan snapshots are retained, not garbage-collected in this milestone.
+
+### Existing candidate adoption and no Git mutation
+
+Extend program register with explicit repeated --adopted-node entries, each a
+closed milestone/candidate/review-base triple; reject duplicates and partial
+bindings. Existing program adopt-candidate verifies those bindings through
+WorktreeManager.adopt_candidate. Preserve its owned/protected path inspection and
+require_direct_candidate check. Do not reset/rebase/recommit/replay the executor.
+The adoption receipt binds physical repository/worktree, branch, graph digest,
+review base, candidate, candidate tree/parents, changed paths/protected fingerprints
+and observed trunk head. Same tuple is idempotent; a conflicting tuple is stale.
+
+Existing review lifecycle may import only mechanically verified exact review
+receipts with matching subject, authority, criteria and graph scope; prose or old
+acceptance labels are insufficient. Otherwise launch fresh read-only reviews.
+Promotion with no blocking findings permits a distinct already_integrated closure
+receipt after rechecking exact HEAD/tree/cleanliness. No Git command that changes
+refs/index/worktree is issued, and no false merge/fast-forward receipt is written.
+Trunk CAS/revision changes invalidate pending adoption. Retain old ordinary
+commit/git paths and their merge/fast-forward/cherry-pick proof unchanged.
+
+### Durable explicit operator approval authority — serial milestone
+
+USER_APPROVAL_AFTER_PROVIDER_FREE_RESULTS protects provider-inclusive contract
+implementation AND provider configuration/execution. The results-review node
+produces a sealed packet with accepted smoke/mixed/isolated subjects and exact
+review IDs. It may close independently; protected successors stay
+acceptance_blocked. Green provider-free evidence, elapsed time, a model decision,
+prior broader permission, a human claimant string or a worker terminal packet is
+not approval. A second gate for provider execution binds the promoted source SHA
+and exact run envelope; first-gate approval never grants spend.
+
+Guarantee correction, outcome/spec lens: the previous draft inferred a requirement
+to prove human origin against same-account arbitrary execution. That guarantee was
+stronger than the accepted threat and created unnecessary external signing UX.
+The downstream plan's exact relevant requirement is that the user "explicitly
+approves proceeding after reviewing this evidence" and that "Even this
+provider-free implementation work is withheld until the user-owned approval gate".
+It specifies no external attestation mechanism. The sufficient guarantee is an
+explicit operator command, durable evidence/scope binding, no autonomous approval
+path and truthful provenance. This correction needs no new user decision.
+
+Inspected existing boundaries: cli.program_decide obtains a
+ControllerClaimantKind.HUMAN claim through
+ControllerDecisionClient.program_claim with exact decision revision, then submits
+and acknowledges an action using claimant/token CAS. WorkflowHarness dispatches
+program_claim/program_submit_actions through the existing local control endpoint;
+Ledger.claim_program_controller_decision rejects stale program/decision revision
+and concurrent ownership. Worker events instead use _worker_capability tied to
+an exact attempt. A HUMAN claim is an operator workflow classification, not proof
+that a human typed the command. Reuse these boundaries and document their limits.
+
+Add ProgramApprovalContext as one closed read projection: program_id,
+graph_digest, gate_id, gate_revision, decision_id, decision_revision,
+prerequisite evidence subjects, exact accepted review IDs, protected milestone IDs,
+scope description, scope_sha256, optional implementation_sha/envelope_sha256,
+eligible and blocker. Its context_sha256 is canonical hash of those facts and
+accepted artifact identities. The existing harness computes it from durable
+facts; the operator never supplies a replacement prerequisite/review set.
+program approval-context renders this packet and exact artifact references without
+changing authority. It is read-only and may be used by the parent to present the
+results to the user. An ineligible context cannot be approved.
+
+program approve requires explicit --approve, exact program/gate,
+--expected-context-sha256, --expected-gate-revision, --request-id and
+--user-statement containing the relevant affirmative approval text. It also takes
+--provenance-kind (conversation or direct_operator), optional source task/message
+references actually available, and claimant identity. Conversation submission is
+permitted to the parent only after the user explicitly approves that exact
+presented evidence/scope in conversation; preserve the available source reference
+and relevant quote. If a message ID is unavailable store null and say so. Never
+fabricate IDs, infer intent from prose with a classifier, scrape private App state,
+copy whole transcripts, or claim verified authorship. A direct operator invocation
+is explicit operator input; its statement is operator-supplied provenance.
+
+The CLI uses the existing HUMAN decision claim/token, then calls the new dedicated
+operator operation program_approve_gate on ControllerDecisionClient and the same
+harness socket. The endpoint requires a live HUMAN claim for the exact program
+and revision, rejects model claim/worker attempt tokens, verifies context freshness
+and immutable artifacts, and constructs UserApprovalReceipt from server facts.
+ModelFacingProgramControllerAction has NO approve/revoke kind, no worker result
+field can contain approval and no autonomous generation/recovery/repair policy
+may invoke operator approval operations or CLI. Worker and controller prompts
+state this prohibition. The parent may relay an explicit user decision using this
+operator path; it may not use it as an autonomous next-step action.
+
+UserApprovalReceipt v1 fields: request_id, action (approve or revoke), program_id,
+graph_digest, gate_id, gate_revision, context_sha256, evidence subjects, review IDs,
+protected milestone IDs, scope_sha256, optional implementation_sha/envelope_sha256,
+claimant_id, decision_id, user_statement, provenance_kind, source_thread_id
+(nullable), source_message_id (nullable), recorded_at, supersedes_receipt_id
+(nullable). All fields are bounded; unknown fields reject. Integrity SHA-256 uses
+canonical UTF-8 JSON with sorted keys, compact separators and no duplicate keys
+or non-finite numbers. The receipt records who submitted what approval and what
+it applies to; invocation/quote/hash is NOT cryptographic human proof.
+
+Ledger.record_user_approval validates the claim and commits the operator receipt,
+effective gate state, claim completion and one program wake atomically under CAS.
+Reuse the existing ACKNOWLEDGE_ONLY decision commit/acknowledgement bookkeeping
+for the consumed HUMAN claim, constructed by the harness; approval itself remains
+only in the dedicated operator receipt, never in a model action bundle. No
+intermediate committed acknowledgement without its approval receipt is allowed.
+Lost response: lookup identical request_id/payload returns the original receipt
+and CURRENT effectiveness without another mutation or claim. Conflicting reuse
+fails closed. Crash before commit leaves no approval; crash after commit recovers
+receipt/wake idempotently. Do not leave an active human lease after acceptance.
+
+program revoke-approval takes the exact receipt ID, explicit operator revocation
+statement and the same HUMAN claim/revision checks. It appends a revoke receipt,
+retains the prior grant, blocks future protected starts and raises attention for
+already active work; no rollback of runtime effects is claimed. A replay of an
+old grant after revocation returns the historical receipt as ineffective and
+cannot grant again. Fresh approval requires a new request ID and current context.
+
+No elapsed time or successful review creates approval. All paths that enqueue,
+start or resume protected work, including repair and action-outbox replay,
+revalidate the gate and effective receipt immediately before SDK thread creation
+or other protected effect. Graph/scope/evidence/review/implementation/envelope
+drift invalidates eligibility and requires fresh explicit user input; it cannot
+rewrite the old receipt. Ordinary blocker resolution cannot clear user gates.
+Restart revalidates persisted facts, never asks a model whether permission exists.
+
+Accepted threat boundary is separation of operator commands from autonomous
+controller/worker actions under the existing local trust/permissions model. It
+does not protect the ledger/controller against an arbitrary danger-full-access
+same-account process rewriting code/state or impersonating an operator. Do not
+claim stronger isolation, narrow native permissions, add keys or introduce an
+external approval service. Available conversation provenance is retained truthfully,
+not treated as authenticated attestation. Missing explicit user approval keeps
+acceptance_blocked; it is not an infrastructure prerequisite or automatic retry.
+
+### Frozen implementation map and serialization ownership
+
+The ownership columns below are exact: E = program-evidence-and-adoption,
+A = program-user-approval. A cannot start until E is promoted and integrated in
+the existing program worktree. Where both own a path, ownership is serial, never
+concurrent. Unlisted paths are preserved. Private helpers may be split within
+these modules; new production paths/types/entrypoints require a plan update.
+
+| Path | E action/responsibility | A action/responsibility |
+| --- | --- | --- |
+| src/codex_flow/domain.py | modify: outcome/integration kinds, manifest/file/subject, declared gate, closure policy, status/context | modify: ProgramApprovalContext/UserApprovalReceipt and enabled gate eligibility |
+| src/codex_flow/contracts.py | modify: schema-4 intent, schema-2 result reference, exclusive evidence/commit action subjects; no approval action | modify: only operator/worker prompt contract exclusions if housed here; model approve/revoke remains forbidden |
+| src/codex_flow/plan_capsule.py | modify: literal schema-4 compiler, declared gate validation, adoption bindings | preserve |
+| src/codex_flow/projection.py | modify: intent/operator runtime facts into ExecutionCapsule | preserve |
+| src/codex_flow/runtime_evidence.py | create: safe capture/rehash and canonical snapshot publication | preserve; consume accepted verifier |
+| src/codex_flow/worktrees.py | modify: exact existing-trunk adoption proof, ordinary Git checks unchanged | preserve |
+| src/codex_flow/ledger.py | modify: outcome/closure migration, subjects/reviews/readiness; reject gate-bearing registration | modify: approval receipt migration, enable gate-bearing registration, operator claim transaction and pre-effect eligibility |
+| src/codex_flow/harness.py | modify: evidence ingestion/review/closure, adoption, unsupported-gate effect guard | modify: operator receipt endpoints, HUMAN claim checks and active gate effect enforcement |
+| src/codex_flow/program_controller.py | modify: evidence subject/status, unsupported gates | modify: unsatisfied gate context and explicit autonomous approval prohibition |
+| src/codex_flow/controller.py | modify: registration/status bindings, gate capability rejection | modify: enable declared-gate registration and status; no autonomous approval path |
+| src/codex_flow/cli.py | modify: adopted-node register/adopt options and honest status | modify: approval-context/approve/revoke-approval operator commands |
+| src/codex_flow/control_client.py | preserve | modify: typed approval-context/operator approve/revoke operations on existing socket |
+| src/codex_flow/worker.py | modify: typed result reference propagation only | modify: explicit operator-command prohibition in worker prompt; no new capability |
+| src/codex_flow/artifacts.py | modify: existing projection includes evidence closure | modify: existing projection shows effective/blocked gate state and receipt identity |
+| tests/test_program_controller.py | modify: mixed DAG, commit parity, adoption, unsupported-gate rejection | modify: gate-enabled mixed DAG, readiness and action bypass rejection |
+| tests/test_ledger_integrity.py | modify: schema-20 -> 21, old rows and CAS | modify: schema-21 -> 22, operator atomicity and retained receipts |
+| tests/test_plan_compilation.py | modify: schema-4 intent/capsule, invalid pair/gate rejection | preserve |
+| tests/test_model_facing_projection.py | modify: strict schema/result/action round trips and legacy parity | modify: no approval/revocation model wire route |
+| tests/test_review_lifecycle.py | modify: evidence freshness and repair/review parity | modify: review/evidence changes invalidate gate approval |
+| tests/test_multi_authority_review.py | modify: objective/architecture exact subject binding | preserve |
+| tests/test_harness_recovery.py | modify: crash/restart/no-workload-replay, adoption and unsupported-gate rejection | modify: approval/revocation/restart/outbox races |
+| tests/test_controller_execution.py | modify: result ingestion and ordinary NO_CANDIDATE rejection | modify: no protected worker creation without current receipt |
+| tests/test_runtime_evidence.py | create: filesystem/digest/snapshot failures | preserve |
+| tests/test_program_user_approval.py | preserve/absent | create: operator input/provenance, HUMAN vs MODEL/worker tokens, idempotency/staleness and revocation |
+| tests/test_local_ipc.py | preserve | modify: closed operator endpoint shapes and rejected unauthorized tokens |
+| config/test-partitions.toml | modify: new runtime-evidence test membership | modify: new operator-approval test membership |
+| docs/reviews/peer-thread-workflow.md | preserve; parent/planner-owned | preserve; parent/planner-owned |
+
+Allowed dependency direction remains domain -> nothing with IO; contracts ->
+domain; compiler -> projection/domain; runtime_evidence -> domain/stdlib IO only;
+ledger -> domain for new policy; harness -> ledger/worktrees/runtime_evidence;
+CLI -> existing controller/control_client; control_client -> existing IPC/domain.
+artifacts reads existing ledger projections, never becomes an acceptance writer.
+No service, SDK, native permissions, transport framing, auth, TUI or UI changes.
+Preserve plugin hooks/skills/manifests, Makefile/dependencies/lockfile, untracked
+conversational-tui bytes, primary checkout, downstream and var.
+
+E adds exactly one production module, runtime_evidence.py, and one test module.
+Named new functions: runtime_evidence.capture_runtime_evidence and
+verify_runtime_evidence; Ledger.record_runtime_evidence and close_program_node;
+WorktreeManager.verify_integrated_candidate. RuntimeEvidenceError is its one new
+IO error. Reuse WorktreeError/WorkspaceConflict, LedgerError/StaleWriter and
+PlanCapsuleError. The closed unsupported-gate reason is
+approval_capability_unavailable; it cannot be coerced to PLANNED/ready.
+
+A adds no production module and one test module. Named methods:
+ControllerDecisionClient.program_approval_context, approve_program_gate,
+revoke_program_approval; matching WorkflowHarness operator handlers/methods;
+Ledger.record_user_approval and revoke_user_approval on the sole state authority.
+Validation failures use existing IpcError/ControlClientError/StaleWriter and typed
+blockers. Unknown/model/worker authority fails before receipt creation.
+
+Durable budget: E migrates SQLite 20 -> 21 and adds one table program_outcomes
+(program/node/subject identity, kind, canonical manifest/adoption receipt JSON and
+digest, acceptance/closure generation). A migrates 21 -> 22 and adds one table
+program_approvals (program/gate/request identity, append-only approve/revoke receipt
+JSON/digest and claim audit linkage). Gate declarations remain in immutable graph
+JSON; no separate registry or persisted approval challenge. Existing review facts,
+events and outboxes remain authority. One immutable snapshot manifest plus its
+bounded declared files per evidence attempt is the only added filesystem artifact
+family. No runtime evidence committed into Git and no redundant evidence report.
+
+Both migrations update exact schema fingerprints and shape validation together,
+are transactional under existing backup/integrity machinery, and preserve original
+failed execution/proof rows. Legacy graphs retain commit/git decoding and original
+integration closure; never backfill evidence or approvals. A can enable new
+registration of previously rejected gate-bearing plans; no successful prior row
+exists to rewrite. Registered immutable plans cannot change gate/scope in place;
+a new explicit graph identity preserves prior rows and does not inherit approval.
+Historical open dispatch/review generations retain old schema bindings. Full
+repository gates apply to each schema/collection change. A's migration must cover
+20 -> 21 -> 22 as well as already-upgraded 21 -> 22, without replaying real work.
+
+### Milestone DAG, ownership and acceptance
+
+Factoring revised: evidence+adoption has an observable independent outcome for
+gate-free mixed programs. It can ship with a closed unsupported-gate boundary.
+Approval is a later vertical capability that enables declared gates and proves
+explicit user-controlled successor release. Shared paths require a serial schema/
+state-authority edge, not one combined implementation. No mutable fan-out or new
+worktree is authorized. Parallel read-only acceptance authorities are allowed only
+after each exact candidate is frozen; the controller dispatches them.
+
+1. program-evidence-and-adoption — READY after parent accepts this revision.
+   Single Luna XHigh implementation owner; exact E paths only. Existing worktree
+   /home/adam/personal-workflow-skills.worktrees/python-sdk-controller, branch
+   agent/python-sdk-controller, inspected base db5a8561bc43e87f4514220a3f3345fbdeb3b152.
+   Parent records actual plan commit/base before dispatch, never a guessed SHA.
+   Closes independently when runtime evidence and exact adoption work end-to-end,
+   ordinary commit parity holds and gate-bearing registration/effects reject.
+2. program-user-approval — WAITING on E promotion/integration (shared schema and
+   state authority). Same reused worktree, one Luna XHigh owner of A paths.
+   Contract/map above is frozen; parent compiles its next detailed capsule after
+   recording E's exact accepted tip. Observable closure: operator approval releases
+   only exact scoped successors, including implementation/configuration, survives
+   restart, and is never created by model/worker policy. No downstream runs here.
+3. program-capabilities-activation — WAITING on both promoted milestones
+   (acceptance/entrypoint dependency). Controller-owned install/runtime verification;
+   detailed capsule deferred. No external signing/enrollment prerequisite.
+4. application-load-program-proof — WAITING on activation (entrypoint dependency)
+   and explicit downstream ownership. Downstream canonical plan registration and
+   exact candidate adoption/review, then smoke -> mixed -> isolated -> report
+   (acceptance/target-state dependencies). Downstream stays blocked until BOTH
+   controller milestones pass; E alone never authorizes stripping its approval
+   gates or running a partial ungated replacement program. Provider-inclusive
+   implementation waits for fresh results approval; provider execution additionally
+   waits for exact promoted-SHA/envelope approval.
+5. Conversational TUI and source-notification recovery remain PAUSED/deferred;
+   no edge silently starts either.
+
+E non-negotiable proof: temporary-repository/ledger mixed DAG actually reaches
+ordinary commit integration plus independently reviewed evidence closure without
+any evidence Git mutation; commit NO_CANDIDATE still fails. Exact existing-HEAD
+candidate adopts/reviews/closes without refs/index/worktree change; differing
+parent, unknown ancestry, dirty state and stale trunk reject. Evidence matrix:
+missing/traversal/symlink/hardlink/oversize/mutating/late-corrupt files, wrong
+source/dispatch/attempt/environment, failed manifests, post-publication crash,
+stale reviews and replay. A declared gate is not silently ignored: graph
+registration rejects before any row/worker creation; retained/imported unsupported
+gate attempts reject at scheduling/replay before effects. Exercise real public
+harness/CLI boundaries with fake worker transport and real temporary Git/SQLite.
+
+A non-negotiable proof: a reviewed packet remains blocked after green tests,
+model decisions, arbitrary quoted text in worker output and elapsed time. An
+explicit operator command with current HUMAN claim, exact context and retained
+provenance creates one effective receipt; missing explicit confirmation, MODEL
+claim, worker attempt token, stale claim, stale context or conflicting request ID
+rejects without worker creation. Valid receipt survives restart; lost reply/replay
+is idempotent; revocation and scope/graph/evidence/review/implementation/envelope
+drift block future starts. Test every implementation/config/repair/resume/outbox
+bypass before SDK creation, concurrent approval/evidence changes, atomic claim
+completion/receipt/wake and old-grant replay after revocation. Null unavailable
+message ID remains null; no manufactured authorship claim. No user keys/services,
+provider/real SDK/network or downstream operations are required.
+
+Each milestone runs focused checks during execution, then all affected execution,
+controller/integration, review, contracts, ledger (and A operator IPC) partitions
+plus full make check. Both require exact staged paths/complete diff self-review,
+git diff --cached --check and one coherent owned commit. No empty commits. Parent
+owns the combined dirty plan/TUI draft commit. Independent Luna XHigh objective
+and Astra Medium combined architecture/security acceptance bind each exact
+candidate/range; no open promotion-blocking findings and P0/P1=0. A's reviews
+check operator separation under the stated threat, not invented same-account
+isolation. Reuse E acceptance for unchanged bytes; verify A's changed behavior and
+final integrated gates. Repairs create successor commits and causal re-reviews.
+File budgets cannot remove mandatory proof; request bounded map update if needed.
+No visual acceptance or production claim applies.
+
+## Next execution — program-evidence-and-adoption
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective="Implement program-evidence-and-adoption: honest runtime_evidence/no_integration closure and exact already-integrated candidate adoption, with user-gate capability explicitly unsupported and fail-closed until its serial milestone.",
+    decomposition=(
+        "Implement the frozen schema-4 intent and schema-2 result, typed evidence/commit subjects and closure contracts; preserve legacy commit behavior and schema-20 rows.",
+        "Connect immutable evidence capture to terminal ingestion, existing independent review and mixed-DAG closure without Git mutation, fake candidates or workload replay.",
+        "Bind historical review base separately from trunk and verify exact already-integrated adoption without executor replay or ancestry relaxation.",
+        "Parse the frozen gate declarations but reject every gate-bearing registration before mutation; reject unsupported retained/imported gates at scheduling and replay before effects.",
+        "Run discriminating temporary Git/SQLite public-boundary tests, affected partitions and full make check; self-review and commit E-owned paths only.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "A gate-free mixed program closes runtime evidence after exact independent acceptance with integrated false, no candidate and no Git effect; ordinary commit-node parity holds.",
+        "Already-integrated nodes require exact parent/range/trunk/path proof and independent review, then close idempotently without Git mutation; stale or unrelated history rejects.",
+        "Evidence identity binds dispatch/source/environment/criteria and snapshot bytes; corrupt, missing, stale or failed proof cannot authorize successors or reuse acceptance.",
+        "Gate-bearing graph registration fails approval_capability_unavailable before row/worker creation; retained/imported unsupported gates cannot pass start/replay guards or be stripped implicitly.",
+        "SQLite 20-to-21 migration preserves failed rows and old commit behavior without invented outcomes; focused/affected/full make check gates pass.",
+        "One coherent E-owned commit is delivered with independent objective and combined architecture/security acceptance pending; approval implementation, downstream activation and runtime mutations remain outside this milestone.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/domain.py", "src/codex_flow/contracts.py", "src/codex_flow/plan_capsule.py",
+        "src/codex_flow/projection.py", "src/codex_flow/runtime_evidence.py", "src/codex_flow/worktrees.py",
+        "src/codex_flow/ledger.py", "src/codex_flow/harness.py", "src/codex_flow/program_controller.py",
+        "src/codex_flow/controller.py", "src/codex_flow/cli.py", "src/codex_flow/worker.py",
+        "src/codex_flow/artifacts.py", "tests/test_program_controller.py", "tests/test_ledger_integrity.py",
+        "tests/test_plan_compilation.py", "tests/test_model_facing_projection.py", "tests/test_review_lifecycle.py",
+        "tests/test_multi_authority_review.py", "tests/test_harness_recovery.py", "tests/test_controller_execution.py",
+        "tests/test_runtime_evidence.py", "config/test-partitions.toml",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md", "docs/reviews/conversational-tui",
+        "src/codex_flow/backends", "src/codex_flow/service.py", "src/codex_flow/ipc.py",
+        "src/codex_flow/native_profile.py", "src/codex_flow/control_client.py", "src/codex_flow/tui.py",
+        "src/codex_flow/tui_client.py", "src/codex_flow/tui_models.py", "pyproject.toml", "uv.lock", "Makefile",
+        "tests/test_program_user_approval.py", "tests/test_local_ipc.py",
+    ),
+    authorities=(ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")), ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))),
+    prompt="Use execute-milestone as one Luna XHigh leaf for program-evidence-and-adoption in this canonical plan. Implement only E-owned paths/contracts and its acceptance matrix. Preserve the dirty canonical plan and every untracked conversational-tui artifact; parent owns their commits. Reuse existing SDK/harness/SQLite/review authorities. Approval declarations are parsed but all gate-bearing graph registration/effects fail closed unsupported; do not implement operator approval, receipt storage, or bypass gates. No second controller, transport, registry, fake candidate or empty commit. Do not install, inspect secrets, invoke provider/real SDK, register/modify downstream, run loads, mutate global/service/real-ledger state or retry failed proof. Use disposable Git/SQLite for provider-free verification. Return material architecture changes before adding paths/public types/dependencies. Complete affected partitions and full make check, self-review, stage E-owned paths only, inspect staged diff and git diff --cached --check, commit coherently and return exact candidate/evidence with independent reviews pending. No subagents, peer dispatch, review launch, workflow-control or successor scheduling; parent owns lifecycle.",
+    recovery_policy="completion_biased",
+)
+```
+
+## Paused prior work — complete conversational TUI redesign
+
+This section supersedes the historical next-action instructions below. The new
+objective is a natural conversation under a visible plan, grouped milestones and
+worker/review children, with slash commands and clicks as the primary interaction.
+Planning only in this leaf; no production implementation or dispatch is authorized
+to this leaf. Controller receives this plan and owns subsequent execution/reviews.
+
+Prior outcome, as verified and supplied by the source controller on 2026-09-06:
+economical instructions/routing PROMOTED at a1f12099542041a02f28427d338a3ecd5efa9d12;
+installed plugin 0.1.11/controller 0.2.0. Fresh run
+model-7862fea9333634adc94ee5f89830ebf7, milestone
+milestone-22ed5b33cd7797d87977c43ed2745dac is **ACCEPTED** at worker commit
+db5a8561bc43e87f4514220a3f3345fbdeb3b152. Independent objective
+review-db5a8561-code-reviewer-g1 and architecture
+architecture-review-db5a8561-generation-1 accepted; no pending authorities.
+Source 01a076f0-b284-7df3-8474-d50de777bfe2 terminal wake FAILED,
+attempt_count=2, source_turn_id=null. Thus work accepted, notification failed;
+full source-wake success is not claimed. This leaf verified HEAD/clean baseline,
+not the live ledger or installation. Preserve prior evidence and failed rows;
+no retry. Source-wake repair is a separate deferred follow-up owned by the source
+controller, defer_to=source-notification-recovery. No web frontend/backend now.
+
+### Evidence and chosen architecture
+
+Reference: official openai/codex at immutable
+9daf7d22ca707c2b2f40860bf2b2035d8cc4deef, Apache-2.0 with root NOTICE attribution.
+Detailed inspected sources, hashes, licenses and observed current renders live in
+[conversational-tui/reference-evidence.md](conversational-tui/reference-evidence.md).
+The actual Textual app was rendered at 120x40 dark and 80x24 light using synthetic
+in-memory clients; narrow view clips controls and exposes only one worker row.
+Source confirms selected-worker streaming already works, while inventory refresh
+is explicit. Upstream test renders show compact slash composer and inline plan;
+source separates stable history from mutable stream tail. No upstream live session
+was run. Do not claim observed upstream milestone-DAG UI or runtime compatibility.
+
+Recommendation: retain Textual and existing Python/control transport. Adapt
+interaction patterns, not Rust source. Ratatui/Crossterm/Codex workspace coupling
+makes direct widget reuse unsuitable; a Rust rewrite adds packaging and transport
+work without solving plan observation. No new dependencies, backend, SDK transport,
+service, global configuration or lifecycle controller. Complete visual redesign
+replaces the current sidebar/detail shell with one reading column, compact visible
+plan, grouped collapsible milestones, role children, and persistent slash composer.
+The [visual contract](conversational-tui/visual-contract.md) is normative;
+[visual-contract.yaml](conversational-tui/visual-contract.yaml) is schema-valid.
+
+### Intent and command boundary
+
+Free text does **not** talk to the controller in this design. There is no current
+public arbitrary controller-chat input API. Existing controller APIs consume typed
+claims/action bundles and exact revision facts; worker steer targets an exact
+active dispatch/generation/attempt/thread/turn. Default composer is command mode;
+plain prose is a preserved local draft with an explicit /steer explanation.
+/steer opens a visibly targeted direction editor and uses existing confirmation
+and acknowledgement logic. No guessed routing or synthesized controller speech.
+This resolves routine UI intent without silently promising a new chat lifecycle.
+
+Read-only commands: /plan, /program, /workers, /details, /older, /follow, /refresh,
+/theme, /help, /quit; /open and /copy reuse existing resume behavior. Mutating
+commands /steer, /interrupt, /claim, /acknowledge, /checkpoint reuse exactly the
+existing supported TerminalUiClient methods and permissions. No /retry or /start,
+no notification retry and no direct program action submission is added. Each
+command and click share one handler. Tab completes, never submits; modal actions
+bind exact targets and stale identities reject. UI observation is never authority
+for mutation. Existing human claim/CAS/idempotency constraints remain in force.
+
+### Missing read contract and frozen design
+
+Current worker status supplies opaque run/milestone IDs; persisted program_graph
+contains node objectives/DAG, ProgramNodeStatus contains outcomes/candidates,
+and wake_outbox contains independent delivery facts. Current program_pending is
+not complete discovery; program_status is decision status; program_context needs
+known revision/trunk identity. Do not scrape Markdown/App state or read SQLite
+from the TUI to fill these gaps.
+
+Extend the existing authenticated paged control-list boundary with
+ControlListKind.OVERVIEW (`overview`) and `overview_page`, using existing version-2
+ControlListRequest/ControlListPage[T], page limits, signed tokens and error kinds.
+No schema migration and no new persistent records. Exactly two new public domain
+records, both frozen/typed with closed serializers:
+
+- **WorkflowOverviewItem**: one run/milestone relationship. Fields: run_id (RunId),
+  milestone_id (MilestoneId), objective (str | None), plan_path (Path | None),
+  plan_digest (str | None), program_revision (int | None), program_state
+  (ProgramState | None), milestone_state (WorkflowState | None), node
+  (ProgramNodeStatus | None), dispatch_ids (tuple[DispatchId, ...]), notifications
+  (tuple[SourceNotificationStatus, ...]). Registered graph rows include planned
+  nodes without workers, authoritative ProgramNodeStatus and DAG order. Ordinary
+  capsule runs have null program fields/node and execution state when available;
+  label “Standalone work · plan unavailable”, never invent a registered plan.
+- **SourceNotificationStatus**: delivery_id, dispatch_id, kind, state,
+  attempt_count, source_turn_id. Use existing ID/domain types where available;
+  kind/state are closed Literal sets exactly matching existing wake_outbox
+  constraints (including suppressed), count is nonnegative; delivered requires
+  source_turn_id and non-delivered requires null. No payload, credentials, claim
+  token, source history or guessed failure reason. Missing notification row means
+  unavailable, not delivered or failed. Keep all bounded matching rows, identify
+  terminal versus checkpoint; never confuse older failure with newer delivery.
+
+Objective comes from the immutable registered node capsule or existing execution
+capsule, parsed at the ledger boundary with the existing capsule codec. If absent
+in a legacy row use null, not an invented objective. Never use reviewer prompts as
+milestone titles. Plan path/digest come only from registered graph; display a
+filename plus “Plan” as header, objective as milestone label. Do not read a file
+merely because its path was returned. Existing node acceptance fields remain the
+sole source of acceptance, not count of completed workers. Dispatch membership
+uses exact run/milestone identities, preserving role/generation distinctions.
+
+**Read consistency:** Ledger.control_list_rows/control_list_fingerprint extend
+for overview. One SQLite read snapshot covers graph/execution/dispatch/wake reads
+and fingerprint for a response, with no lifecycle changes. Fingerprint includes
+all exposed facts, including notification updates that do not bump program
+revision. Stable ordering is run_id then graph node order (standalone milestone_id)
+with unique run/milestone tie-break. Continuations bind overview kind, visibility,
+snapshot, ledger identity and harness epoch. Any contributing change makes an
+old page STALE; never combine pages from different snapshots. Use existing bounded
+page sizing; an individual item too large returns item_too_large explicitly.
+Do not truncate IDs, dependencies or notification receipts to meet byte limits.
+Under oversized items the UI remains usable and shows incomplete/unavailable.
+
+Visibility uses existing active/all meaning: include a milestone when it or an
+associated worker/decision is nonterminal or needs attention; include an entire
+registered graph when any node qualifies so dependencies stay interpretable.
+All mode includes terminal/standalone runs. Complete means no remaining page,
+not all work complete. Authenticate through existing harness peer/capability
+checks. Decode closed payload once in control_client; UI receives trusted types.
+Unknown operation on old harness is “overview unavailable/update required”, never
+an empty success or permission fallback. Existing worker and decision endpoints
+keep their exact compatibility behavior.
+
+### Automatic observation, state and error boundaries
+
+TerminalUiClient owns one cancellable read-only observation task while the TUI is
+mounted; the app owns its lifecycle. Refresh inventory every 2 seconds when idle,
+coalesce explicit refresh with in-flight refresh, maximum one refresh cycle at a
+time, and exponential reconnect delay 2/4/8/16/30 seconds. Stop on unmount. This is
+UI polling, not workflow supervision: no open model turn, claim, checkpoint,
+worker launch, provider call or ledger write. Existing selected-worker live
+subscription remains the streaming source. Do not open one stream per worker.
+On terminal live event reconcile stable history, then update overview. Retry only
+read operations; command retries remain existing idempotency policy.
+
+Fetch bounded first pages; load additional pages on explicit navigation. Show
+partial counts as “loaded” and preserve selected older-page rows marked stale
+until refreshed by identity; do not silently drop selection every 2 seconds.
+Keep overview and worker facts' provenance distinct: no cross-page inference of
+acceptance, and no action can use overview as a substitute for exact fresh worker
+status. Incompatible identity invalidates action capability and stale live tail;
+compatible refresh preserves selected run/node/role, expanded nodes, draft and
+message anchor. Offline keeps last view visibly stale, disables mutations and
+reconnects read-only. No new transcript persistence: bounded memory/page caches,
+existing history API for older pages, and ephemeral live tail with one final
+reconciliation. Display any cache bound as a load-older boundary, not lost history.
+
+### Frozen implementation architecture map
+
+All unlisted paths are preserve. No new production module, protocol, registry,
+runner, CLI entrypoint, dependency, database table, transport or durable UI store.
+
+| Path | Action / owner | Responsibility and allowed dependency |
+| --- | --- | --- |
+| src/codex_flow/domain.py | modify / program-observation | Two observation records, extend ControlListKind; pure validation/codecs; no UI or IO imports |
+| src/codex_flow/ledger.py | modify / program-observation | Coherent read projection and fingerprints from existing tables; domain types; no new state transition |
+| src/codex_flow/harness.py | modify / program-observation | overview_page auth/shape/pagination/serialization using existing control-list path; depends on ledger/domain, never UI |
+| src/codex_flow/control_client.py | modify / program-observation | ControllerDecisionClient.overview_page -> ControlListPage[WorkflowOverviewItem], closed decoding; existing IPC only |
+| tests/test_live_worker_control.py | modify / program-observation, then conversational-terminal | Provider-free observation/IPC boundary checks, then existing UI/control regressions; serial ownership |
+| tests/test_program_controller.py | modify / program-observation | Real temporary-ledger graph/notification read invariants, no provider |
+| src/codex_flow/tui_models.py | modify / conversational-terminal | Extend TerminalUiSnapshot with typed overview/page availability; reuse worker/decision models; pure grouping by exact identity |
+| src/codex_flow/tui_client.py | modify / conversational-terminal | Read-only observation loop, cache/selection identity, existing live/history and command capabilities |
+| src/codex_flow/tui.py | modify / conversational-terminal | CodexFlowTerminalApp shell, slash dispatch, plan outline, persistent composer, stable transcript; existing ModalScreens retained/adapted |
+| tests/test_workflow_control.py | modify / conversational-terminal | Existing headless driver assertions updated for intended public interaction |
+| tests/test_conversational_tui.py | create / conversational-terminal | Behavioral sentinel fixtures and headless rendering/interaction; one coherent UI test module |
+| docs/reviews/evidence/conversational-tui/ | create / conversational-terminal | Candidate-bound sentinel images and interaction record only |
+| README.md | modify / conversational-terminal | User command help, passive observation and explicit chat limitations |
+| src/codex_flow/cli.py, contracts.py, ipc.py, controller.py, codex_sdk_adapter.py, supervisor.py | preserve | Existing execution/CLI/lifecycle/transport and capsule authority |
+| AGENTS.md, plugins/, schemas/, scripts/, templates/, workflow.toml, config/, pyproject.toml, uv.lock | preserve | Policy/package/install/configuration outside this redesign |
+| docs/reviews/peer-thread-workflow.md | modify / planning-controller only | Canonical architecture, scope, ordering and readiness |
+| docs/reviews/conversational-tui/ | create / current planner | Frozen visual contract and provenance artifacts only |
+
+UI private widget subclasses may live inside tui.py when they own focus or
+render state, but no new public production class besides the two typed observation
+records without planner update. One declarative command specification within
+existing tui.py unifies slash/click/help availability; it is not a second domain
+command registry or control plane. Unknown input is inert, never shell execution.
+
+Semantic delta: add read-only milestone observation and source notification
+receipt as two explicit domain distinctions; reuse pages, program node status,
+workers, history and control commands. Collapse repeated worker lists into the
+existing run→milestone→role relationship. No new “session manager”, “chat service”,
+result/config wrapper family, general event bus or persisted chat concept.
+
+Artifact budget: this planning delivery adds exactly eight files: two baseline
+SVGs, reference-board.svg, reference-evidence.md, upstream-LICENSE,
+upstream-NOTICE, visual-contract.md and visual-contract.yaml. They justify baseline,
+reference/license evidence and shared acceptance without a parallel plan. Runtime
+milestones add zero durable production artifacts; one new UI test file; rendered
+evidence budget up to 24 SVG/PNG pairs and one interaction record covers five
+sentinel families and variants. These are secondary budgets: a required proof
+must be preserved if more artifacts are necessary; return a bounded plan update,
+never delete checks or reduce required accessibility/lineage to hit a count.
+The IPC frame ceiling remains hard; explicit oversize failure/page handling is
+its conflict policy. No line/token cap overrides observable acceptance.
+
+### Milestone DAG and workspace
+
+Program integration trunk remains existing_worktree:
+/home/adam/personal-workflow-skills.worktrees/python-sdk-controller,
+branch agent/python-sdk-controller. Inspected baseline SHA
+ db5a8561bc43e87f4514220a3f3345fbdeb3b152 (clean). The controller binds execution
+to the committed planning tip containing this section. No fan-out worktree needed;
+fan_out_base is not applicable. No lifecycle operations in this planning leaf.
+
+1. **program-observation — PAUSED/deferred; not executable**. Single Luna XHigh mutable owner; objective
+   Luna XHigh plus combined architecture/security Astra Medium (new public read
+   boundary and notification provenance). Deliver trustworthy plan/notification
+   observation independently through actual authenticated provider-free IPC.
+2. **conversational-terminal — WAITING on program-observation acceptance**.
+   Single Astra Medium visual implementation owner, same workspace. Own complete
+   Textual redesign, passive observation and all five visual sentinels. Objective
+   Luna XHigh, independent visual Astra Low, conformance Sol Medium; escalate
+   combined architecture/security to Astra Medium only if a material boundary
+   ambiguity arises. All three modes required, independent reviews may overlap.
+3. **terminal-release-verification — WAITING on conversational-terminal acceptance**.
+   Controller-only installation/cutover planning at that time; no preauthorized
+   dependency changes or live provider proof. Verify distribution/install scope
+   and exact accepted bytes before any user runtime claim. This is an acceptance
+   stage, not a speculative extra implementation capsule.
+
+Factoring attempted: observer contract is independently closable via control API;
+UI rendering, composer and streaming all mutate tui.py/tui_client.py and share
+selection/focus state, so artificial parallel lanes would create unsafe ownership.
+The serial edge is a **shared schema/acceptance dependency**, not convenience.
+No production parallel mutable lanes; independent read-only reviews can overlap.
+A future split requires a frozen exact base and disjoint surfaces before fan-out.
+Each mutable owner self-reviews and creates an owned-surface local commit after
+staged path inspection and git diff --cached --check. Repairs create successors;
+reviews bind exact commit. Same-checkout serial ownership requires no merge.
+Only controller promotes, integrates, dispatches successors or installs.
+
+### Validation, migration and promotion
+
+Observer: real temporary SQLite fixtures and authenticated harness IPC, including
+planned nodes without workers, two reviewers on one candidate, standalone runs,
+accepted/failed-wake tuple, cross-page change in wake-only facts, unauthorized
+requests, malformed enums/IDs, stale tokens, epoch change, empty/all/active and
+oversized rows. Prove reads leave workflow rows/counters/outboxes unchanged and
+start zero model turns. Public/shared types mandate full **make check**.
+No DB migration; additive endpoint supports old clients; new TUI reports missing
+endpoint accurately on older harnesses. Keep historical rows and all old authority
+checks. Prove behavior before removing/replacing any test coverage.
+
+UI: discriminating interaction checks during implementation; closure runs affected
+live-worker/control and program partitions and full make check as an integration
+gate, plus five sentinel families and keyboard/click traces in the visual contract.
+Performance evidence uses bounded fixture history and updates; no absolute latency
+claim without recording environment/measurement. Passive discovery must update
+within one successful 2-second refresh interval plus IPC completion without key
+input, while writes/provider turns remain zero. Stable read position and usable
+80x24 composer are required outcomes, not optional polish.
+
+Promotion requires no open promotion-blocking findings and blocking P0/P1=0;
+severity and promotion_blocking are separate. Optional branches block their branch.
+Retain exact candidate SHA, code/architecture/visual authority results, render
+hashes, fixtures and traces. No visual acceptance from tests or this plan's
+wireframe. No installation or live/source-wake claim from provider-free evidence.
+Astra Medium owns bounded non-convergence recovery within accepted intent; only
+new authority or materially underdetermined intent goes to the user. General
+controller chat and notification recovery remain explicit non-goals, not hidden
+partial implementations.
+
+## Paused capsule — program-observation
+
+This is the only new executable capsule. It references the frozen architecture
+above; harness compiles it, owns JSON projection and all runtime route/identity facts.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective="Expose truthful read-only plan, milestone and source-notification observations through the existing authenticated paged control API for the conversational TUI.",
+    decomposition=("Extend existing paged control types with the frozen overview relationship and source notification receipt.", "Project coherent graph/execution/dispatch/wake facts without lifecycle writes and expose overview_page through the existing harness/client boundary.", "Prove outcome, pagination, provenance and authorization with provider-free real-ledger IPC tests, then commit only owned surfaces."),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "The frozen program-observation map and two-record contract in this plan are implemented without new production modules, dependencies, persistent records, transports or lifecycle authority.",
+        "A registered program includes planned nodes and grouped dispatch membership with original objective, node acceptance and independent notification facts; standalone work and missing metadata remain explicitly unavailable.",
+        "Authenticated provider-free IPC proves coherent bounded overview pages, wake-only stale invalidation, epoch/identity rejection, active/all semantics and explicit oversized-item errors; no observation schedules work or changes workflow state.",
+        "Accepted work with failed source wake remains accepted and exposes failed attempt_count=2/source_turn_id=null; completed worker alone never implies milestone acceptance.",
+        "Full make check passes, complete owned diff is self-reviewed, staged paths and git diff --cached --check pass, and a coherent local commit is returned. Independent objective and architecture acceptance remain harness-owned."
+    ),
+    mutable_surfaces=("src/codex_flow/domain.py", "src/codex_flow/ledger.py", "src/codex_flow/harness.py", "src/codex_flow/control_client.py", "tests/test_live_worker_control.py", "tests/test_program_controller.py"),
+    protected_surfaces=("src/codex_flow/tui.py", "src/codex_flow/tui_client.py", "src/codex_flow/tui_models.py", "src/codex_flow/controller.py", "src/codex_flow/codex_sdk_adapter.py", "src/codex_flow/cli.py", "src/codex_flow/contracts.py", "src/codex_flow/ipc.py", "src/codex_flow/supervisor.py", "docs/reviews/peer-thread-workflow.md", "docs/reviews/conversational-tui", "plugins", "scripts", "schemas", "templates", "config", "workflow.toml", "AGENTS.md", "pyproject.toml", "uv.lock", "README.md"),
+    authorities=(ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")), ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))),
+    prompt="Implement only program-observation in the canonical plan's Current accepted work section and frozen map. Reuse ControlListRequest/ControlListPage, signed page tokens, existing capsule decoding and harness authentication. Add the two named domain records and overview_page only. Read facts in a coherent snapshot; no direct TUI database access, no notification retry, SDK/provider turn, production ledger/service/global mutation or later UI implementation. Tests use disposable local ledgers and provider-free IPC. Preserve all unrelated bytes. Run discriminating checks, full make check, self-review complete diff, inspect staged scope and git diff --cached --check, create a local owned-surface commit, return one typed result with exact candidate and evidence. You are a leaf: no subagents, peer tasks/messages, workflow-control, review launch or successor scheduling. Material changes to the frozen contract or module map return to planning; bounded repairs stay within intent. Independent reviews and promotion are harness-owned and pending at work delivery.",
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
+## Historical record — prior routing and runtime proof
+
+The sections below retain original evidence and superseded instructions. They do
+not authorize re-running historical capsules or override the current TUI program.
+
 ## Routing closed — next App-originated runtime proof
 
 Economical routing is PROMOTED at a1f12099542041a02f28427d338a3ecd5efa9d12.
@@ -154,7 +990,7 @@ call it a released upgrade. This read-only target-resolution task does not
 dispatch workers, reviewers, SDK turns or live wake retries, and does not edit
 the plan. It returns one terminal callback to this controller.
 
-## Next execution — reviewed-sdk-runtime-proof
+## Historical execution — reviewed-sdk-runtime-proof
 
 This new proof supersedes no historical result and retries no old dispatch.
 Installed source is `e37e834`; service activation verified all 33 Python module
