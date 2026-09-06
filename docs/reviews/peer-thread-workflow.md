@@ -1,5 +1,61 @@
 # Plan: Deterministic Codex workflow controller
 
+## Fresh runtime activation — accepted candidate and retained predecessor
+
+Candidate `693a29a01d236c1006ebe1f45c4278fa90dbfa0d` is independently accepted:
+native objective task `01a075b2-ae63-7de3-b25f-63ace62d34ba` (Luna XHigh) and
+architecture task `01a075b3-0a8c-7a61-bcd8-56d4437a5654` (Astra Medium) both
+returned ACCEPT with P0=0/P1=0 and no blocking/deferred findings. The range is
+`6d020566..693a29a`, exactly six owned paths, clean tip. The initial complete
+gate had 930 passes and two concurrent policy failures; both exact failures
+were rerun by the controller and passed after the policy repair. Retained
+partition, workflow, validator, compile and pre-commit evidence completes the
+required gates without describing the initial invocation as green.
+
+The user has withdrawn old-execution backward compatibility. Read-only
+activation preflight found the exact repository service inactive/dead,
+MainPID=0; no active queue launch, unexited worker or active controller
+generation; no codex-flow process; the old authority PID is absent and its
+lease expired. Old claimed decision leases also expired. The v19 state is
+preserved historical material, not an execution to resume. Current refresh
+handles v18 predecessors and rejects v19-to-v20; repairing that retired
+compatibility route is outside this activation.
+
+The integration/controller owner may perform this reversible local activation:
+
+1. Retain one private archive under
+   `/home/adam/.local/state/codex-flow/retained/python-sdk-controller/` containing
+   the old entire `.codex-flow` directory, exact stopped user-unit bytes, and a
+   copy of the installed tool tree. Record file/digest inventory and the exact
+   accepted source commit. Recheck inactive service and absence of active
+   durable children immediately before moving state. No deletion, SQL rewrite,
+   old-result promotion, callback replay, authentication/config copy or history
+   rewrite is authorized. The archive is excluded from new runtime discovery.
+2. Move the stopped unit into that same retained archive and daemon-reload the
+   user manager. Run the canonical `make install-personal-workflow-skills`
+   entrypoint with the old unit/state preserved out of its active paths; this
+   is a fresh installation, not a bypass of an active-child refresh fence.
+   Verify installed source and SDK/plugin identity. Existing global native
+   authentication remains shared; no private CODEX_HOME is created.
+3. Use installed `codex-flow harness install/start` for this same repository.
+   It creates fresh schema-v20 state with no historical queue to replay.
+   Verify exact service/PID, schema and empty initial dispatch authority before
+   any newly authorized provider work. Provider credential remains environment
+   only; never print it or embed it in evidence.
+4. On a genuine failure, stop before another provider/start attempt and retain
+   diagnostics. Rollback means stopping the new exact service and preserving
+   its state separately, then restoring the retained old unit/tool/state;
+   never discard either state or automatically restart old pending work.
+
+This operational milestone changes no production code, schema or public
+contract. Owned surfaces are only the exact local tool installation, this
+repository's state directory and user service, this plan and one private
+retention archive. All unrelated tasks, worktrees, global Codex configuration,
+authentication, remotes and old evidence remain protected. New durable artifact
+budget: one retained archive with inventory. Activation success is distinct
+from the following fresh self-hosted milestone closure, whose capsule and
+provider proof are prepared only after installation is verified.
+
 ## Native leaf-task guidance clarification
 
 The user explicitly requires native implementation/review tasks to perform only
