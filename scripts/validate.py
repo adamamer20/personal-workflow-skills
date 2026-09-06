@@ -1092,7 +1092,10 @@ def validate_native_routing_contract() -> None:
         "Visual-judgment implementation",
         "acceptance modes: `objective`, `visual`, and `architecture`",
         "Objective code review uses Luna XHigh",
-        "visual-quality promotion review",
+        "Astra Medium implements and Astra Low performs",
+        "Normal architecture conformance and semantic orchestration use Sol Medium",
+        "combined architecture/security review",
+        "High is an explicit exceptional escalation only",
         "A mixed objective/visual milestone must pass both gates",
         "Non-convergence triggers diagnosis and a change of authority or approach",
         "`CONTINUE_WITH_REPLAN` is internal and nonterminal",
@@ -1129,6 +1132,96 @@ def validate_native_routing_contract() -> None:
         "explicit legacy command `$codex-thread-handoff`",
     )
     require_contract(README_PATH, readme_required)
+    validate_readme_routing_table(README_PATH)
+
+
+def _configured_route_pair(path: Path, role: str, *, effort_key: str) -> tuple[str, str]:
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        fail(f"{path}: invalid workflow configuration: {exc}")
+    roles = config.get("roles")
+    route = roles.get(role) if isinstance(roles, dict) else None
+    if not isinstance(route, dict):
+        fail(f"{path}: missing routing role {role!r}")
+    model = route.get("model")
+    effort = route.get(effort_key)
+    if not isinstance(model, str) or not isinstance(effort, str):
+        fail(f"{path}: routing role {role!r} must define model and {effort_key}")
+    return model, effort
+
+
+def _readme_route_rows(path: Path) -> dict[str, tuple[str, str]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        fail(f"{path}: unable to read routing table: {exc}")
+    header = "| Situation | Task context | Native `model` | Native `thinking` |"
+    in_table = False
+    rows: dict[str, tuple[str, str]] = {}
+    for line in lines:
+        stripped = line.strip()
+        if stripped == header:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not stripped:
+            break
+        if not stripped.startswith("|"):
+            fail(f"{path}: routing table ended before its rows were complete")
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) != 4:
+            fail(f"{path}: routing table row must contain four cells")
+        if all(set(cell) <= {"-", " "} for cell in cells):
+            continue
+        label, _context, model, effort = cells
+        if label in rows:
+            fail(f"{path}: routing table repeats {label!r}")
+        rows[label] = (model.strip("`"), effort.strip("`"))
+    if not rows:
+        fail(f"{path}: routing table is missing or empty")
+    return rows
+
+
+def validate_readme_routing_table(path: Path | None = None) -> None:
+    """Keep public route rows bound to the existing controller configurations."""
+
+    readme_path = ROOT / "README.md" if path is None else path
+    rows = _readme_route_rows(readme_path)
+    workflow_path = ROOT / "workflow.toml"
+    example_path = ROOT / "config" / "workflow.toml.example"
+    workflow_roles = {
+        role: _configured_route_pair(workflow_path, role, effort_key="reasoning_effort")
+        for role in ("planner", "architecture-reviewer", "recovery", "decision")
+    }
+    example_roles = {
+        role: _configured_route_pair(example_path, role, effort_key="thinking")
+        for role in ("execute_substantial", "execute_visual", "recover_local", "review_visual", "plan", "review")
+    }
+    expected = {
+        "Small/local change": ("gpt-5.6-luna", "high"),
+        "Decision-ready substantial milestone": example_roles["execute_substantial"],
+        "Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents)": example_roles[
+            "execute_visual"
+        ],
+        "Recovery implementation after demonstrated non-convergence": example_roles["recover_local"],
+        "Independent visual-quality promotion review": example_roles["review_visual"],
+        "First-time large or uncertain program": example_roles["plan"],
+        "Architecture conformance": workflow_roles["architecture-reviewer"],
+        "Recovery diagnosis": workflow_roles["recovery"],
+        "Controller decisions": workflow_roles["decision"],
+        "Significant/ambiguous architecture or security boundary": workflow_roles["planner"],
+        "Mechanical repair after a precise finding": ("gpt-5.6-luna", "high"),
+        "Independent objective/code review": example_roles["review"],
+    }
+    if set(rows) != set(expected):
+        missing = sorted(set(expected) - set(rows))
+        unexpected = sorted(set(rows) - set(expected))
+        fail(f"{readme_path}: routing table labels drifted; missing={missing}, unexpected={unexpected}")
+    for label, route in expected.items():
+        if rows[label] != route:
+            fail(f"{readme_path}: route for {label!r} drifted; expected={route}, actual={rows[label]}")
 
 
 def validate_global_agents_template() -> None:

@@ -220,11 +220,12 @@ routes; these defaults apply to newly dispatched work.
 | Decision-ready substantial milestone | fresh execution | `gpt-5.6-luna` | `xhigh` |
 | Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents) | fresh execution | `gpt-6-astra` | `medium` |
 | Recovery implementation after demonstrated non-convergence | fresh execution | `gpt-6-astra` | `medium` |
-| Independent visual-quality promotion review | fresh peer | `gpt-6-astra` | `high` |
+| Independent visual-quality promotion review | fresh peer | `gpt-6-astra` | `low` |
 | First-time large or uncertain program | planning | `gpt-6-astra` | `medium` |
-| Architecture conformance or recovery diagnosis | fresh peer or planning | `gpt-6-astra` | `medium` |
-| Controller decisions | ephemeral controller turn | `gpt-6-astra` | `medium` |
-| Critical security or explicit escalation | fresh peer or planning | `gpt-6-astra` | `high` |
+| Architecture conformance | fresh peer or planning | `gpt-5.6-sol` | `medium` |
+| Recovery diagnosis | fresh peer or planning | `gpt-6-astra` | `medium` |
+| Controller decisions | ephemeral controller turn | `gpt-5.6-sol` | `medium` |
+| Significant/ambiguous architecture or security boundary | fresh peer or planning | `gpt-6-astra` | `medium` |
 | Mechanical repair after a precise finding | fresh/current execution | `gpt-5.6-luna` | `high` |
 | Independent objective/code review | fresh peer | `gpt-5.6-luna` | `xhigh` |
 
@@ -232,8 +233,11 @@ Classify every milestone by one or more acceptance modes: `objective`, `visual`,
 and `architecture`. Derive implementation and review authorities for each mode,
 not from file type alone. Objective code review uses Luna XHigh. When success
 depends on composition, hierarchy, responsive behavior, rendered inspection, or
-other subjective visual judgment, Astra Medium implements and Astra High performs
-the independent visual-quality review. A mixed objective/visual milestone must
+other subjective visual judgment, Astra Medium implements and Astra Low performs
+the independent visual-quality review. Normal architecture conformance and
+semantic orchestration use Sol Medium. A combined architecture/security review
+escalates to Astra Medium for significant or ambiguous boundaries; High is an
+explicit exceptional escalation only. A mixed objective/visual milestone must
 pass both gates. Luna remains appropriate when the visual target is frozen and
 the remaining work is mechanical and objectively verifiable, such as bounded
 wiring, copy replacement, asset processing, export, or a precisely identified

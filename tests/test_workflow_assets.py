@@ -38,6 +38,7 @@ validate_manifest = _VALIDATOR.validate_manifest
 validate_outcome_evidence_priority_contract = _VALIDATOR.validate_outcome_evidence_priority_contract
 validate_reconciliation_evidence = _VALIDATOR.validate_reconciliation_evidence
 validate_workflow_routing_speeds = _VALIDATOR._validate_workflow_routing_speeds
+validate_readme_routing_table = _VALIDATOR.validate_readme_routing_table
 
 
 def _schemas() -> list[tuple[str, dict[str, object]]]:
@@ -373,6 +374,19 @@ def test_default_routes_preserve_role_and_effort_boundaries() -> None:
     visual = config.route("visual-reviewer")
     assert (visual.model, visual.reasoning_effort.value) == ("gpt-6-astra", "low")
     assert WorkflowHarness._controller_model_and_effort({}) == ("gpt-5.6-sol", "medium")
+
+
+def test_readme_routing_table_rejects_stale_visual_review_route(tmp_path: Path) -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    stale = readme.replace(
+        "| Independent visual-quality promotion review | fresh peer | `gpt-6-astra` | `low` |",
+        "| Independent visual-quality promotion review | fresh peer | `gpt-6-astra` | `high` |",
+        1,
+    )
+    candidate = tmp_path / "README.md"
+    candidate.write_text(stale, encoding="utf-8")
+    with pytest.raises(ValueError, match="Independent visual-quality promotion review"):
+        validate_readme_routing_table(candidate)
 
 
 @pytest.mark.parametrize(
