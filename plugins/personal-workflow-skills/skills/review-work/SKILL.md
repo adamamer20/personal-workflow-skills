@@ -59,7 +59,10 @@ prior review. Review is read-only and never integrates the lane.
 ### Outcome / spec
 
 Check whether the change implements the required behavior and avoids unrequested
-scope.
+scope. For architecture acceptance, include the named security/privacy and trust
+boundaries in this same review. Do not split architecture and security into
+separate default passes; escalate only a concrete unresolved risk. This does not
+replace a separately requested security audit.
 
 ### Correctness / integration
 

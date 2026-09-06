@@ -83,7 +83,9 @@
 - A substantial code milestone requires focused validation, self-review and
   at least one independent objective review. Add architecture review when
   ownership, public/persisted contracts, trust boundaries or a named integration
-  risk changes. Require visual review for visual acceptance. Small local work
+  risk changes. Include the named security boundaries in that same architecture
+  review; do not create a separate security review by default. Require visual
+  review for visual acceptance. Small local work
   uses proportional checks unless the project names another gate.
 - Review is one general workflow; the selected lens changes its evidence, not
   its ownership or transport boundary.

@@ -229,9 +229,9 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   boundary, public or persisted contract, ownership, security/privacy, cost,
   destructive-behavior, or scope change to Astra Medium for a bounded plan update.
 - Luna XHigh is the normal objective/code reviewer. Astra Medium is the normal
-  architecture-conformance authority when that mode is declared. Astra High is
-  reserved for critical security, irreversible or system-wide decisions, or an
-  explicit escalation after Astra Medium cannot close a material blocker. Use one
+  combined architecture/security authority when that mode is declared. Do not
+  split security into another default review. Astra High is reserved for visual
+  promotion or explicit escalation. Use one
   review per declared authority by default and at most one bounded repair for
   concrete promotion blockers; do not run repeated broad review waves.
 - Model milestones with explicit `objective`, `visual`, and `architecture`
@@ -240,7 +240,7 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 - Objective/code review uses Luna. Visual-judgment implementation and rendered-
   quality review use Astra, with a separate objective reviewer when both modes
   apply. Architecture design/review and ordinary recovery diagnosis use Astra
-  Medium; the critical exceptions above use Astra High.
+  Medium; explicit escalations use Astra High.
 - Non-convergence changes authority or approach; it does not terminate work.
   The recovery authority may finish locally, replace the implementation
   strategy, or update an implementation-level architecture assumption and

@@ -1,5 +1,44 @@
 # Plan: Deterministic Codex workflow controller
 
+## Latest user direction — matched SDK update and combined boundary review
+
+The user requests updating the Python SDK to the latest version through a
+native Codex App task, and one combined architecture/security review by Astra
+Medium. Current default: Luna XHigh objective review; when required, one Astra
+Medium architecture review includes the named security/privacy/trust boundaries.
+Do not create a separate automatic security review or select High just because
+the subject is security. High remains for visual promotion or explicit
+escalation. Existing acceptance modes and role identifiers remain unchanged;
+standalone explicitly requested security audits retain their own scope.
+
+The controller owns this bounded policy update to global/root/template
+instructions, review-work, plugin manifests/version constant and this plan.
+Plugin-only version 0.1.10 is separate from the runtime/dependency update.
+Validator and 88 workflow/plugin/control checks pass; the combined loaded
+global/root instruction size remains below 32 KiB. No review authority was
+removed from the existing runtime milestone.
+
+Fresh official SDK documentation at https://developers.openai.com/codex/sdk/
+confirms Python distributions bundle their own pinned runtime. Published package
+metadata currently reports openai-codex 0.147.0 as latest stable and no newer
+prerelease; it requires openai-codex-cli-bin==0.147.0. Local codex --version is
+0.153.4. Thus a blind stable dependency bump changes nothing and local CLI
+updates do not update the SDK's bundled app-server.
+
+Next bounded native Astra Medium architecture task: resolve whether an official
+SDK/runtime pair matching current stored App events is available from a release
+or exact upstream source revision. Inspect published metadata and official
+upstream SDK/runtime sources without changing the repository/runtime. Distinguish
+latest stable from unreleased source; do not silently switch to a binary-only
+override, mutable main branch, private transport or session rewrite. Return an
+exact version/revision, dependency/runtime constraints and a frozen Luna upgrade
+map with full package gates plus provider-free functionCallOutput and
+subAgentActivity completed deserialization proof. If only an unreleased pair
+exists, expose its provenance and material tradeoff before installation; do not
+call it a released upgrade. This read-only target-resolution task does not
+dispatch workers, reviewers, SDK turns or live wake retries, and does not edit
+the plan. It returns one terminal callback to this controller.
+
 ## Next execution — reviewed-sdk-runtime-proof
 
 This new proof supersedes no historical result and retries no old dispatch.

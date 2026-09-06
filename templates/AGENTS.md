@@ -137,9 +137,9 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   and `architecture`. Route by the judgment required for acceptance, not by file
   type. Objective code review uses Luna XHigh. Visual-judgment implementation
   uses Astra Medium and independent visual-quality promotion review uses Astra High.
-  Architecture-conformance review uses Astra Medium. Astra High is reserved for
-  critical security, irreversible/system-wide decisions, or explicit
-  escalation after Astra Medium cannot close a material blocker. When objective and visual modes
+  Architecture-conformance review uses Astra Medium, including named security
+  and trust-boundary checks in that same review. Do not add a separate security
+  reviewer by default. Astra High requires explicit escalation. When objective and visual modes
   both apply, require both authorities; passing code tests never implies that a
   rendered result is good. Luna is appropriate for visually adjacent work only
   after the target is frozen and the remaining execution is mechanical and
@@ -160,9 +160,9 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   `model=gpt-5.6-luna, thinking=xhigh` for a substantial milestone or
   independent objective/code review, `model=gpt-5.6-luna, thinking=high` for
   bounded/mechanical work, `model=gpt-6-astra, thinking=medium` for architecture
-  planning/conformance, visual-judgment or ordinary recovery work, and
-  `model=gpt-6-astra, thinking=high` only for visual-quality promotion, critical
-  security/system-wide decisions, or explicit escalation. The most specific
+  planning/conformance with security, visual-judgment or ordinary recovery work, and
+  `model=gpt-6-astra, thinking=high` only for visual-quality promotion or
+  explicit escalation. The most specific
   applicable user instruction wins. Every Luna task uses `speed=fast` by
   default, including implementation and review, unless a more specific user
   instruction selects another speed. If the native schema advertises `speed`,
