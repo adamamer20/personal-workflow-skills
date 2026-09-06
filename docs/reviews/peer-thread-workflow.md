@@ -1,5 +1,171 @@
 # Plan: Deterministic Codex workflow controller
 
+## Current recovery decision — fresh runtime acceptance
+
+On 6 September 2026 the user explicitly withdrew historical backward
+compatibility as an outcome: "fa niente per backward compatibility. non mi
+interessa". This supersedes the historical-adoption acceptance requirements
+below, including automatic adoption of `47a8fa3d -> 977d8f5c` and the previous
+`single-milestone-acceptance-lifecycle` recovery capsule. Preserve those records
+and evidence unchanged, but do not migrate, replay, rebaseline or promote an
+old execution merely to satisfy that retired requirement. This is not authority
+to delete user data or remove unrelated compatibility code.
+
+The observable goal remains a NEW Codex-backed milestone that modifies a file,
+returns its result to the harness, receives every declared independent review,
+executes at most one bounded repair if needed, and reaches exact-candidate
+acceptance. Fresh execution integrity, permission authority, independent review,
+result lineage and failure retention remain non-negotiable.
+
+Read-only architecture analysis of `af7e4ed..94389ea` found persistent
+`ARCH-CONFORMANCE-HISTORICAL-SNAPSHOT-006`: the new historical commit-only Git
+digest differs from the original `git_authority_snapshot` codec. The positive
+fixture seeds the new digest, so cannot prove authentic old adoption. That
+historical requirement is superseded by the user's scope decision, not fixed
+or accepted. Internal subagent analyses in this continuation are diagnostic
+input only, not controller-registered promotion receipts.
+
+Two repository failures were reproduced at `1baaee0ac4385c58030690ea30d277fd1dbb9a3e`:
+the active native profile lacks `model_catalog_json`, which production currently
+requires, and the installer active-child fixture reads the real ignored ledger
+and selects an unmocked legacy constructor path. Read-only schema diagnostics
+report real ledger v19, candidate v20, compatible with migration required; no
+migration or service operation occurred.
+
+### Ownership, route and readiness
+
+The integration owner maintains this plan. One native Astra Medium recovery
+task owns the bounded implementation below in the existing saved project
+checkout `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller`,
+branch `agent/python-sdk-controller`, starting at the exact local planning
+commit delivered in its handoff. No new worktree or parallel mutable owner.
+The user requested Codex-flow/native tasks after internal delegation; select
+the explicit native compatibility bridge for this controller bootstrap only.
+Do not START this same milestone through codex-flow as well. Native task
+completion returns to source task `01a0759e-62c3-7420-b2e1-17771977ded9`, host
+`local`. No subagents or nested orchestration in the recovery owner.
+
+The DAG is serial for concrete reasons:
+
+1. `fresh-runtime-acceptance-readiness`: ready; bounded recovery code and
+   deterministic proof, then exact-commit objective Luna XHigh and architecture
+   Astra Medium native reviews. The architecture lens covers removal of the
+   historical trust exception and native profile authority.
+2. Safe runtime activation: deferred on acceptance dependency; verify service
+   and worker liveness, exact install/migration path and rollback evidence at
+   that point. Preserve the old ledger; the user did not authorize deletion.
+3. Fresh self-hosted closure: deferred on production entrypoint installation;
+   use codex-flow with a newly compiled milestone and fresh durable identity,
+   no old execution adoption. Retain actual worker/review/repair/promotion proof.
+4. Reconcile incremental-policy acceptance, then SDK-fork continuity and final
+   terminal work according to their existing dependencies. They do not block
+   this bounded recovery.
+
+### Frozen recovery architecture map
+
+- Modify `src/codex_flow/harness.py`: remove the historical-only branch in
+  `_assert_control_terminal_authority`, `_historical_git_authority_digest`,
+  `_historical_workspace_snapshot`, and `_is_retained_historical_candidate`,
+  plus their now-unused imports. Every completed execution uses the existing
+  exact current-terminal workspace/Git/protected checks. Preserve generation-2
+  completed-turn capture, immutable predecessor/findings, result binding and
+  one-repair state transitions. No synthetic replacement digest or allowlist.
+- Modify `src/codex_flow/native_profile.py`: make the explicit native model
+  catalog optional, matching native runtime omission semantics after parser
+  proof. Existing `NativeProfileProjection.model_catalog_source` becomes
+  `SourceIdentity | None`; absence omits the TOML key and uses null for
+  `model_catalog_sha256` in digest/sanitized facts. Keep optional table checks
+  separate from this optional string. Explicit catalogs retain all existing
+  path, file, size, identity and mutation checks; config verification always
+  runs. Presence/absence changes remain incompatible with a retained route.
+  Preserve explicit-catalog v2 fact/digest bytes. Document the nullable optional
+  field extension; no new schema version, provider override, guessed path,
+  copied authentication, cache substitution or private production CODEX_HOME.
+- Modify `tests/test_harness_recovery.py`: remove only tests/fixtures unique to
+  the retired hardcoded historical adoption route. Prove ordinary stale HEAD
+  fails closed and retain/add production-codec tests for fresh terminal facts,
+  review, direct generation-2 repair, fresh re-review and forbidden drift.
+  Required current-execution guarantees must not disappear with old fixtures.
+- Modify `tests/test_controller_execution.py`: prove omitted catalog through
+  isolated bundled-runtime `doctor --json` without a provider call; explicit
+  catalogs preserve facts and strict failures; both source verifiers detect
+  mutation and presence changes. Preserve the active-profile MCP/source-byte
+  proof, and make its environment assumptions explicit rather than skipping or
+  fabricating global configuration. If another actual profile incompatibility
+  appears, report exact shape-only evidence for a bounded plan update.
+- Modify `tests/test_plugin_installation.py`: isolate schema compatibility in
+  the active-child fence fixture. Keep explicit modern and legacy active-child
+  rejection proof, asserting no shared tool install happens while a worker is
+  active. Never read or mutate the real ledger in this fake installer test.
+- Modify `tests/test_plan_compilation.py` only to bind the new capsule and
+  retired active-capsule expectations if necessary.
+- Preserve all other production modules, public entrypoints, ledger/schema,
+  SDK transport, service/IPC, routing, TUI, authentication, global configuration,
+  installed runtime/plugin, protected primary checkout, old evidence and data.
+  The planning owner alone modifies this plan and AGENTS.md.
+
+Dependency direction is unchanged. Native configuration is validated once at
+the existing profile boundary; harness consumes those trusted facts. SQLite
+and harness remain lifecycle authority. New production modules, public classes,
+durable artifact families and dependencies: zero. Semantic delta: delete the
+special historical acceptance route; represent explicit-catalog presence as an
+optional existing field, not a new compatibility manager. No numeric cap may
+remove a required current-runtime integrity check.
+
+### Gates and failure handling
+
+Use focused causal checks first, then affected controller/integration partitions,
+plan compilation and full `make check`. No skips, global config changes or real
+ledger mutations to make deterministic tests pass. Run bounded local bundled
+runtime parser diagnostics only; no provider, sentinel, service, installer or
+historical dispatch action in this implementation. A clean local commit must
+contain only owned surfaces after self-review, exact staged-path inspection,
+`git diff --check` and `git diff --cached --check`. Independent native objective
+and architecture reviews bind that commit and require no open promotion-blocking
+findings before runtime activation. Implementation difficulty triggers bounded
+replanning within this accepted outcome, not repeated historical recovery.
+
+## Next execution — fresh-runtime-acceptance-readiness
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective="Prepare fresh runtime milestone acceptance without historical execution adoption or global configuration workarounds.",
+    decomposition=(
+        "Remove only the retired hardcoded historical adoption branch while preserving fresh terminal and repair authority.",
+        "Support native omission of an explicit model catalog with strict configured-file identity and route-drift checks.",
+        "Isolate installer active-child fencing proof from the real ignored ledger and validate the current runtime boundaries."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Fresh production-codec terminal facts reach every declared review; one direct repair invalidates reviews and requires fresh authorities; stale HEAD, dirty workspace, protected/Git drift and wrong predecessor/findings fail closed.",
+        "Historical hardcoded adoption is removed; historical evidence and real ledger bytes remain untouched and unpromoted.",
+        "An omitted native catalog passes the bundled parser without provider calls; explicit catalogs preserve strict identity and existing fact/digest semantics; route changes invalidate retained authority.",
+        "Active child fencing prevents shared tool installation for modern and legacy fixtures without inspecting the real ledger.",
+        "Focused tests, affected partitions, plan compilation and full make check pass; exact owned-surface commit and independent objective plus architecture acceptance are required before installation."
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/harness.py",
+        "src/codex_flow/native_profile.py",
+        "tests/test_harness_recovery.py",
+        "tests/test_controller_execution.py",
+        "tests/test_plugin_installation.py",
+        "tests/test_plan_compilation.py"
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md and AGENTS.md; all other production modules, ledger/schema, SDK transport, routing, service/IPC and TUI",
+        "real ledger, services, providers, installed runtime/plugin, global configuration/authentication, historical evidence, protected primary checkout and remotes"
+    ),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt="Use recover-milestone as the single Astra Medium native recovery owner. Follow Current recovery decision — fresh runtime acceptance and its frozen map. The user withdrew historical backward compatibility; remove its special acceptance code without weakening current execution integrity. Implement only the six owned paths, run the named gates, inspect and commit the owned diff, and return the exact candidate with independent objective/architecture reviews pending. Do not call providers, services, installers, modify global state or create workers/subagents. Return a material boundary change to the planning owner before expanding scope.",
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
 ## Authorized workflow routing update — Astra and Luna
 
 The user authorized migrating shared instructions, cognitive skill guidance and
