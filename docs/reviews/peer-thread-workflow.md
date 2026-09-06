@@ -1,5 +1,46 @@
 # Plan: Deterministic Codex workflow controller
 
+## Reviewer wire repair promotion and next live boundary
+
+Exact runtime candidate `e37e83429a2e8235b1c803941585d15f7cc658f8` is accepted.
+Independent native Luna XHigh correctness task
+`01a07608-7947-76c1-b902-b6a6dac82e02` and Astra Medium architecture task
+`01a07608-db49-7a23-8423-4d4d3763f569` both returned ACCEPT, no P0/P1 or
+promotion-blocking/deferred findings. Objective independently ran full make
+check: 944 passed plus validation, compilation and pre-commit. Both authorities
+checked the closed v2 schema, semantic evidence codec and exact SDK boundary;
+this is provider-free acceptance, not live closure.
+
+Controller-owned activation may use the canonical installer/refresh now: current
+ledger is already v20, service is active, no unexited workers or active controller
+generations, and only the completed old executor plus two attention-required
+reviewers remain. Recheck the durable active-child fence through the installer.
+Preserve that run, its v1 review digests/identities, exact fixture commit and
+failed source wake without retry or rebaseline. Retain the pre-refresh installed
+tool/unit identity for rollback. Verify installed source/SDK and live epoch after
+refresh. Do not claim old reviewers can consume the new wire contract.
+
+The next live proof is a NEW milestone identity, not recovery of those rows.
+Use the same program checkout with a new one-file fixture and the current
+installed runtime. A fresh native Astra Medium controller task, with no inherited
+subagent history, is selected as source because the old source task cannot be
+read by pinned SDK 0.147.0. Before any new worker/provider dispatch, prove that
+the official installed SDK can read that exact source identity and its normal
+messages. Read failure leaves the new live branch undispatched; do not infer
+compatibility from task creation alone. This is an explicit new controller
+identity, never redirection/replay of the old failed wake. Keep the same SDK
+transport, shared session store and harness lifecycle authority. The new
+controller invokes codex-flow once, leaves workers as leaves, and returns its
+terminal program result to this planning task by the explicit native bridge.
+It may not create another controller or subagents. Runtime proof requires fresh
+worker identity, exact committed output, both fresh v2 authority reviews and
+promotion; receipt/wake proof remains a separate observed fact. Retain first
+failure and stop before any retry if the new source or runtime is incompatible.
+
+The current controller owns only this plan and operational activation; native
+implementation tasks have no further work or review-dispatch authority. No
+production code change or dependency upgrade is authorized by this note.
+
 ## Current executable repair — reviewer wire contract
 
 Source-wake diagnostic disposition (native Astra task
