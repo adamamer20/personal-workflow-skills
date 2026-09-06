@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import io
 import json
 import os
 import queue
@@ -15,12 +16,14 @@ import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from .backends.codex_sdk import (
     LEAF_WORKER_CONFIG_OVERRIDES,
@@ -1609,7 +1612,12 @@ class WorkflowHarness:
             raise WorktreeError("control candidate does not match the durable terminal HEAD")
 
         try:
-            from .controller import Controller, git_authority_snapshot, protected_paths_digest
+            from .controller import (
+                Controller,
+                git_authority_snapshot,
+                protected_paths_digest,
+                protected_paths_digest_at_revision,
+            )
 
             current_head = subprocess.run(
                 ("git", "rev-parse", "--verify", "HEAD^{commit}"),
@@ -1637,6 +1645,21 @@ class WorkflowHarness:
             )
             if current_head_value != terminal_head and not historical_candidate:
                 raise WorktreeError("control workspace HEAD advanced after terminalization")
+            if historical_candidate:
+                historical_workspace = self._historical_workspace_snapshot(capsule, terminal_head)
+                if historical_workspace != terminal_workspace:
+                    raise WorktreeError("control historical workspace bytes changed after terminalization")
+                historical_git = self._historical_git_authority_digest(capsule, terminal_head)
+                if historical_git != terminal_git:
+                    raise WorktreeError("control historical Git authority changed after terminalization")
+                historical_protected = protected_paths_digest_at_revision(
+                    capsule.workspace_path,
+                    terminal_head,
+                    capsule.protected_paths,
+                )
+                if historical_protected != terminal_protected:
+                    raise WorktreeError("control historical protected paths changed after terminalization")
+                return
             snapshot_controller = Controller(self.state_root, worktrees=self._worktrees)
             try:
                 current_workspace = snapshot_controller._owned_workspace_snapshot(capsule)
@@ -1652,6 +1675,86 @@ class WorkflowHarness:
             raise
         except (OSError, RuntimeError, ValueError) as exc:
             raise WorktreeError("control terminal integrity could not be revalidated") from exc
+
+    @staticmethod
+    def _historical_git_authority_digest(capsule: ExecutionCapsule, revision: str) -> str:
+        """Bind the one retained adoption to its immutable commit object and branch."""
+
+        resolved = subprocess.run(
+            ("git", "rev-parse", "--verify", f"{revision}^{{commit}}"),
+            cwd=capsule.workspace_path,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        commit = subprocess.run(
+            ("git", "cat-file", "commit", revision),
+            cwd=capsule.workspace_path,
+            capture_output=True,
+            check=False,
+        )
+        if resolved.returncode != 0 or commit.returncode != 0 or resolved.stdout.strip() != revision:
+            raise WorktreeError("control historical Git authority could not resolve its retained commit")
+        identity = (
+            b"codex-flow/historical-git-authority/v1\0"
+            + capsule.branch.encode("utf-8")
+            + b"\0"
+            + revision.encode("ascii")
+            + b"\0"
+            + commit.stdout
+        )
+        return hashlib.sha256(identity).hexdigest()
+
+    @staticmethod
+    def _historical_workspace_snapshot(
+        capsule: ExecutionCapsule,
+        revision: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """Reconstruct owned path signatures from the retained Git tree."""
+
+        archive = subprocess.run(
+            ("git", "archive", "--format=tar", revision, "--", *capsule.mutable_paths),
+            cwd=capsule.workspace_path,
+            capture_output=True,
+            check=False,
+        )
+        if archive.returncode != 0 or len(archive.stdout) > 64 * 1024 * 1024:
+            raise WorktreeError("control historical workspace archive could not be inspected")
+        with TemporaryDirectory(prefix="codex-flow-historical-workspace-") as directory:
+            snapshot_root = Path(directory)
+            try:
+                with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as retained:
+                    members = retained.getmembers()
+                    if any(
+                        not (member.isfile() or member.isdir())
+                        or Path(member.name).is_absolute()
+                        or ".." in Path(member.name).parts
+                        for member in members
+                    ):
+                        raise WorktreeError("control historical workspace archive contains an unsafe object")
+                    retained.extractall(snapshot_root, members=members, filter="data")
+                    for member in members:
+                        (snapshot_root / member.name).chmod(member.mode & 0o777)
+            except (tarfile.TarError, ValueError) as exc:
+                raise WorktreeError("control historical workspace archive is malformed") from exc
+            tracked_paths = frozenset(member.name.rstrip("/") for member in members)
+            from .controller import Controller
+
+            snapshot_controller = object.__new__(Controller)
+            return tuple(
+                (
+                    relative,
+                    "missing"
+                    if not (snapshot_root / relative).exists()
+                    else snapshot_controller._path_signature(
+                        snapshot_root / relative,
+                        workspace=snapshot_root,
+                        tracked_paths=tracked_paths,
+                        ignored_paths=frozenset(),
+                    ),
+                )
+                for relative in sorted(capsule.mutable_paths)
+            )
 
     def _capture_control_repair_terminal_integrity(self, row: Mapping[str, object]) -> Mapping[str, object] | None:
         """Capture one generation-2 executor checkout at turn completion."""
