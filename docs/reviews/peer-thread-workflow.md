@@ -1,5 +1,29 @@
 # Plan: Deterministic Codex workflow controller
 
+## Native leaf-task guidance clarification
+
+The user explicitly requires native implementation/review tasks to perform only
+one assigned role and return one terminal callback to the controller. They must
+not spawn subagents, peer workers or independent reviews. The controller alone
+routes review, repair and successors. Self-review/tests remain implementation
+work; implementation delivery must name pending acceptance and never claim
+promotion. SDK leaves still return typed results to the harness without peer
+messages. This specific rule overrides general delegation/follow-through wording
+inside a leaf task.
+
+The planning owner owns this small policy-only update to global instructions,
+`templates/AGENTS.md`, `templates/AGENTS.workflow.md`, the execute/review/recover/
+handoff skills, plugin manifests and installer version constant. Plugin version
+is `0.1.9+codex.20260906000000`; plugin-only activation is separate from runtime
+installation. No runtime behavior changes belong to this policy edit. Preserve
+the six dirty implementation paths owned by the active native task. Shared
+instructions remain under 32 KiB combined. Validate skills/plugin assets and
+installed bundle parity; runtime gates remain with the implementation owner.
+The existing native task `01a075a6-fa55-7643-89c5-c02effecec64` was explicitly
+changed by the user to Luna XHigh. This supersedes the original Astra execution
+routing below without changing its frozen implementation scope; Astra remains
+architecture authority.
+
 ## Current recovery decision — fresh runtime acceptance
 
 On 6 September 2026 the user explicitly withdrew historical backward

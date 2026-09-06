@@ -11,7 +11,7 @@
 - Plan the next executable milestone in detail. Record later milestones and
   dependencies at the detail needed now; defer live cutover and deployment
   prerequisites until the milestone that actually needs them.
-- Delegate ready independent lanes when it saves time or improves evidence.
+- Controllers delegate ready independent lanes when useful.
   Keep one mutable owner per surface and one lifecycle controller. Small tasks
   stay direct; delegation is not a mandatory extra layer.
 - Require at least one independent objective review for a substantial code
@@ -176,13 +176,15 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   `list_threads` reconciliation snapshot after an error, but it never retries
   `create_thread`. If no user authorization applies, omit the overrides and
   state that routing was not enforced.
-- Execution threads message the planning thread only for a material escalation
-  or terminal milestone outcome. Every terminal outcome returns exactly one
-  `COMPLETION` or accurately labelled `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, or
-  `FAILED` escalation using the exact callback thread/host route. Replanning
-  within accepted intent continues automatically and is not terminal. Keep the
-  planning thread unarchived while a peer owes it a callback. The planning
-  thread never polls execution and execution sends no routine progress updates.
+- Native implementation, review and recovery tasks are leaves: no subagents,
+  peer dispatch, independent review launches or successor scheduling. Implement,
+  test and self-review, or perform the assigned review. The controller owns
+  independent reviews, repairs and successors; delivery is not promotion.
+  Every terminal outcome returns exactly one `COMPLETION` or
+  accurately labelled `NEEDS_DECISION`, `EXTERNAL_BLOCKED`, or `FAILED`
+  callback to the exact controller thread/host, with pending acceptance explicit.
+  Send only terminal outcomes or material escalations, not routine updates.
+  Keep the planning thread unarchived while a callback is owed; it never polls execution.
 - A failed-looking START is never automatic retry authorization. Reconcile it
   once without creating anything; if the host is unavailable, preserve an
   uncertain recovery capsule. Before replacing a peer whose callback is missing,

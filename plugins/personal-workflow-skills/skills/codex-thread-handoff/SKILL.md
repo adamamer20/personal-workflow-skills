@@ -29,6 +29,14 @@ never invoke both routes for one milestone and never silently switch between
 them. Legacy availability is a reachability bridge, not a retirement or
 compatibility decision.
 
+Every implementation, review or recovery START prompt must identify the task
+as a leaf: no subagents, peer dispatch, independent review launches, successor
+scheduling or workflow-control invocation. Assign one role and require its exact
+terminal callback to the controller. Implementation delivery reports pending
+independent acceptance; only the controller dispatches review, repair and
+successors. A leaf may use MESSAGE only for its authorized terminal callback or
+material escalation, never START to delegate its assignment.
+
 ## Native routing authorization
 
 The creator may pass model overrides only when a governing user instruction

@@ -12,6 +12,11 @@
   fresh workspace.
 - Routing is model-independent at the skill boundary: the controller resolves
   role classes from its configuration.
+- Native implementation/review/recovery tasks are leaves: no subagents, peer
+  dispatch, independent review launches or successors. Implement/test/self-review
+  or perform the assigned review, then send one terminal callback to the exact
+  controller route. Report pending independent acceptance; delivery is not
+  promotion. The controller owns reviews, repairs and successor scheduling.
 - One mutable owner controls a surface at a time. Shared contracts and
   production entrypoints have one integration owner.
 

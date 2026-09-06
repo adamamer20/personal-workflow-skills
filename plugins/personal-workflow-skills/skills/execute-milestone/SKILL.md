@@ -93,27 +93,27 @@ retries, successor scheduling, worktree creation, or ledger mutation.
 
 ## Controller boundary
 
-Use `$workflow-control`, backed by packaged `codex-flow`, as the sole runtime
-control surface. Do not add orchestration or ad-hoc state; durable controller
-status supplements rather than replaces repository outcome.
+The parent controller alone invokes `$workflow-control`/`codex-flow`, dispatches independent
+reviews, requests repairs and schedules successors. This task is a leaf: never
+spawn subagents or peer tasks, start reviews, invoke workflow-control or
+supervise workers. Implement, test and self-review only; report independent
+acceptance as pending. Delivery is not promotion.
 
-Recovery is completion-biased within the capsule: finish a bounded repair or
-change implementation approach while intent, contract, safety boundary, cost,
-destructive behavior, and scope remain unchanged. Ask for a decision only when
-accepted intent or required authority is genuinely missing; report an external
-block only for a missing prerequisite; report failure only when evidence shows
-the accepted outcome is infeasible. Never weaken a gate to make a result look
-complete.
+Recovery is completion-biased within the capsule: repair within accepted intent,
+contracts, safety, cost, destructive authority and scope. Return material changes
+to the controller. Never
+weaken a gate or expand scope to force completion.
 
 ## Return one result
 
-Write exactly one `codex_flow.contracts.ModelFacingResult` containing the
+For the SDK route, return one raw `codex_flow.contracts.ModelFacingResult` to the
+harness containing the
 terminal status, concise summary, changed surfaces, validation facts, durable
 controller status, and (when needed) one next action. JSON/JSONL is the
 controller serialization format, not the model-facing authoring language.
 
-The result must identify the observable repository outcome, not merely test
-counts or bookkeeping. Include residual risks and the recommended next
-milestone in the handoff to the planner. Stop after this capsule is complete;
-later pilots, compatibility decisions, legacy retirement, and unrelated audits
-belong to later milestones.
+For the explicit native route, send exactly one terminal callback to the supplied
+controller thread/host with the exact candidate, validation, residual risks and
+pending acceptance. Material escalations may return earlier; no routine progress
+callbacks. This delivery exception does not grant lifecycle authority. Stop after
+your assigned work; the controller owns independent acceptance and next actions.

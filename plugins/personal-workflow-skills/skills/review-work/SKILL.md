@@ -17,6 +17,23 @@ The controller owns dispatch, callbacks, routing, retries, successor
 scheduling, worktrees, and ledger mutation. This skill owns findings and review
 reasoning only.
 
+## Leaf task boundary
+
+A task assigned implementation, review or recovery does only that role. Never
+spawn subagents or peer tasks, invoke workflow-control, launch independent
+reviews, schedule successors or supervise other workers. The controller owns
+those actions. Implementation includes tests, self-review and bounded repairs;
+independent acceptance may remain pending when the assigned work is delivered.
+A reviewer returns findings and a verdict without implementing fixes or
+launching another review.
+
+For an explicitly selected native task route, send exactly one terminal callback
+to the supplied controller thread/host after the assigned work ends. Report the
+exact candidate, validation or findings, and pending acceptance. A material
+escalation may return earlier; do not send routine progress callbacks. For the
+SDK route, return the raw typed result to the harness; do not send peer messages.
+Callback delivery in native mode does not grant lifecycle authority.
+
 ## Pin the review target
 
 Record:
