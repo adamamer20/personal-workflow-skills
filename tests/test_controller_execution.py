@@ -790,6 +790,29 @@ def test_completed_controller_execution_accepts_one_exact_repair_successor_idemp
             dispatch_id="run/m1/executor/3",
             result_sha256="e" * 64,
         )
+    for role, mode in (
+        ("code-reviewer", AcceptanceMode.OBJECTIVE),
+        ("architecture-reviewer", AcceptanceMode.ARCHITECTURE),
+    ):
+        harness.ledger.record_control_review(
+            "run",
+            "m1",
+            candidate_sha=successor,
+            dispatch_id=f"run/m1/{role}/2",
+            generation=2,
+            result=ReviewResult(
+                f"fresh-{role}",
+                RoleId(role),
+                True,
+                (),
+                successor,
+                acceptance_mode=mode,
+            ),
+        )
+        harness._advance_control_acceptance(capsule, successor, 2)
+        expected = WorkflowState.REVIEWING if mode is AcceptanceMode.OBJECTIVE else WorkflowState.ACCEPTED
+        assert harness.ledger.current_state("run", "m1") is expected
+    assert harness.ledger.dispatch_terminal_integrity("run/m1/executor/2") == retained_integrity
     harness.close()
 
 
@@ -3237,6 +3260,7 @@ def _doctor_config_details(home: Path) -> dict[str, object]:
         check=False,
     )
     report = json.loads(completed.stdout)
+    assert report["checks"]["config.load"]["status"] == "ok"
     return report["checks"]["config.load"]["details"]
 
 
@@ -3263,6 +3287,11 @@ def test_blank_private_home_selects_builtin_openai_but_projection_selects_codex_
 
 
 def test_active_native_profile_projects_all_mcp_servers_through_pinned_runtime_parser() -> None:
+    """Environment proof: requires the active codex-lb profile and discovery roots.
+
+    This deliberately fails on unsupported native shapes instead of substituting
+    a fixture or skipping. Only a temporary diagnostic home is written.
+    """
     import codex_cli_bin
 
     source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
@@ -4922,3 +4951,87 @@ def test_controller_binding_failure_leaves_no_outside_root_state() -> None:
         with pytest.raises(ControllerError):
             Controller(outside)
         assert not (outside / ".codex-flow" / "workflow.db").exists()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_native_catalog_presence_is_parsed_and_bound_to_route(tmp_path: Path, explicit: bool) -> None:
+    home = tmp_path / "native-home"
+    original = _test_native_profile(home)
+    config = home / "config.toml"
+    explicit_text = config.read_text()
+    omitted_text = (
+        "\n".join(line for line in explicit_text.splitlines() if not line.startswith("model_catalog_json")) + "\n"
+    )
+    config.write_text(explicit_text if explicit else omitted_text)
+    profile = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+    assert (profile.model_catalog_source is not None) is explicit
+    assert ("model_catalog_json" in tomllib.loads(profile.projected_toml)) is explicit
+    if explicit:
+        # Metadata is not part of v2 facts: identical explicit bytes retain all digests.
+        assert profile.sanitized_facts == original.sanitized_facts
+        assert profile.projected_toml == original.projected_toml
+    else:
+        assert profile.sanitized_facts["model_catalog_sha256"] is None
+        assert profile.worker_compatibility_sha256 != original.worker_compatibility_sha256
+        assert profile.compatibility_sha256 != original.compatibility_sha256
+        assert profile.profile_sha256 != original.profile_sha256
+    runtime = NativeRuntimeConfig(tmp_path / "runtime", profile)
+    runtime.prepare()
+    if not explicit:
+        # The omission proof uses native discovery; the explicit fixture catalog
+        # is a boundary identity fixture, not a bundled model inventory.
+        assert _doctor_config_details(runtime.runtime_home)["model provider"] == "codex-lb"
+    profile.verify_sources()
+    profile.verify_worker_sources()
+    config.write_text(omitted_text if explicit else explicit_text)
+    for verify in (profile.verify_sources, profile.verify_worker_sources):
+        with pytest.raises(NativeProfileError, match="changed during launch"):
+            verify()
+
+
+@pytest.mark.parametrize("mutation", ["relative", "empty", "table", "missing", "symlink", "hardlink", "oversized"])
+def test_explicit_native_catalog_remains_strict(tmp_path: Path, mutation: str) -> None:
+    home = tmp_path / "native-home"
+    _test_native_profile(home)
+    config = home / "config.toml"
+    catalog = home / "models.json"
+    if mutation in {"relative", "empty", "table"}:
+        value = {"relative": '"models.json"', "empty": '""', "table": "{}"}[mutation]
+        config.write_text(config.read_text().replace(f'"{catalog}"', value))
+    elif mutation == "missing":
+        catalog.unlink()
+    elif mutation == "symlink":
+        target = home / "target.json"
+        catalog.rename(target)
+        catalog.symlink_to(target)
+    elif mutation == "hardlink":
+        os.link(catalog, home / "alias.json")
+    else:
+        with catalog.open("r+b") as stream:
+            stream.truncate(8_388_609)
+    with pytest.raises(NativeProfileError):
+        NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("surface", ["config", "catalog"])
+def test_native_catalog_and_config_mutation_are_checked_by_both_verifiers(
+    tmp_path: Path, explicit: bool, surface: str
+) -> None:
+    home = tmp_path / "native-home"
+    _test_native_profile(home)
+    config = home / "config.toml"
+    if not explicit:
+        config.write_text(
+            "\n".join(line for line in config.read_text().splitlines() if not line.startswith("model_catalog_json"))
+            + "\n"
+        )
+    profile = NativeProfileProjection.load(home, environment={"CODEX_LB_API_KEY": "test-only"})
+    path = config if surface == "config" else home / "models.json"
+    path.write_text(path.read_text() + "\n")
+    for verify in (profile.verify_sources, profile.verify_worker_sources):
+        if surface == "catalog" and not explicit:
+            verify()  # An unconfigured file confers no route authority.
+        else:
+            with pytest.raises(NativeProfileError, match="changed during launch"):
+                verify()

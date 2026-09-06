@@ -49,7 +49,6 @@ _REQUIRED_PRESERVED_TOP_LEVEL = frozenset(
         "features",
         "marketplaces",
         "mcp_servers",
-        "model_catalog_json",
         "model_provider",
         "model_providers",
         "personality",
@@ -61,7 +60,7 @@ _REQUIRED_PRESERVED_TOP_LEVEL = frozenset(
     }
 )
 _OPTIONAL_PRESERVED_TOP_LEVEL = frozenset({"agents", "hooks", "shell_environment_policy"})
-_PRESERVED_TOP_LEVEL = _REQUIRED_PRESERVED_TOP_LEVEL | _OPTIONAL_PRESERVED_TOP_LEVEL
+_PRESERVED_TOP_LEVEL = _REQUIRED_PRESERVED_TOP_LEVEL | _OPTIONAL_PRESERVED_TOP_LEVEL | {"model_catalog_json"}
 _CONTROLLER_OWNED_TOP_LEVEL = frozenset(
     {
         "model",
@@ -156,11 +155,16 @@ class DiscoveryMount:
 
 @dataclass(frozen=True, slots=True)
 class NativeProfileProjection:
-    """Immutable, sanitized native configuration prepared for one SDK child."""
+    """Immutable, sanitized native configuration prepared for one SDK child.
+
+    Native-profile v2 permits a null model_catalog_sha256 when the native
+    config omits model_catalog_json. Explicit-catalog fact and digest bytes
+    retain their existing encoding; omission delegates discovery to the runtime.
+    """
 
     source_home: Path
     config_source: SourceIdentity
-    model_catalog_source: SourceIdentity
+    model_catalog_source: SourceIdentity | None
     discovery_mounts: tuple[DiscoveryMount, ...]
     projected_toml: str
     provider_id: str
@@ -244,15 +248,17 @@ class NativeProfileProjection:
         if native_approval_policy not in {"untrusted", "on-request", "never"}:
             raise NativeProfileError("native approval_policy is unsupported")
 
-        catalog_path = Path(_required_string(data, "model_catalog_json"))
-        if not catalog_path.is_absolute():
-            raise NativeProfileError("native model catalog path must be absolute")
-        _, catalog_identity = _read_regular(
-            catalog_path,
-            _MAX_MODEL_CATALOG_BYTES,
-            label="native model catalog",
-            require_private_permissions=False,
-        )
+        catalog_identity = None
+        if "model_catalog_json" in data:
+            catalog_path = Path(_required_string(data, "model_catalog_json"))
+            if not catalog_path.is_absolute():
+                raise NativeProfileError("native model catalog path must be absolute")
+            _, catalog_identity = _read_regular(
+                catalog_path,
+                _MAX_MODEL_CATALOG_BYTES,
+                label="native model catalog",
+                require_private_permissions=False,
+            )
         mounts = tuple(
             DiscoveryMount(
                 source=home / name,
@@ -285,7 +291,7 @@ class NativeProfileProjection:
                 "approval_policy": native_approval_policy,
                 "source": "native_config",
             },
-            "model_catalog_sha256": catalog_identity.sha256,
+            "model_catalog_sha256": catalog_identity.sha256 if catalog_identity is not None else None,
             "projected_config_sha256": projected_digest,
             "discovery_surfaces": [mount.target_name for mount in mounts],
             "controller_overrides": ["cwd", "model", "reasoning_effort", "workspace"],
@@ -377,7 +383,9 @@ class NativeProfileProjection:
                 "approval_policy": self.native_approval_policy,
                 "source": "native_config",
             },
-            "model_catalog_sha256": self.model_catalog_source.sha256,
+            "model_catalog_sha256": (
+                self.model_catalog_source.sha256 if self.model_catalog_source is not None else None
+            ),
             "projected_config_sha256": self.projected_config_sha256,
             "worker_compatibility_sha256": self.worker_compatibility_sha256,
             "compatibility_sha256": self.compatibility_sha256,
@@ -396,12 +404,14 @@ class NativeProfileProjection:
             label="native Codex config",
             require_private_permissions=True,
         )
-        _, current_catalog = _read_regular(
-            self.model_catalog_source.path,
-            _MAX_MODEL_CATALOG_BYTES,
-            label="native model catalog",
-            require_private_permissions=False,
-        )
+        current_catalog = None
+        if self.model_catalog_source is not None:
+            _, current_catalog = _read_regular(
+                self.model_catalog_source.path,
+                _MAX_MODEL_CATALOG_BYTES,
+                label="native model catalog",
+                require_private_permissions=False,
+            )
         if current_config != self.config_source or current_catalog != self.model_catalog_source:
             raise NativeProfileError("native profile source changed during launch")
         for mount in self.discovery_mounts:
@@ -425,12 +435,14 @@ class NativeProfileProjection:
             label="native Codex config",
             require_private_permissions=True,
         )
-        _, current_catalog = _read_regular(
-            self.model_catalog_source.path,
-            _MAX_MODEL_CATALOG_BYTES,
-            label="native model catalog",
-            require_private_permissions=False,
-        )
+        current_catalog = None
+        if self.model_catalog_source is not None:
+            _, current_catalog = _read_regular(
+                self.model_catalog_source.path,
+                _MAX_MODEL_CATALOG_BYTES,
+                label="native model catalog",
+                require_private_permissions=False,
+            )
         if current_config != self.config_source or current_catalog != self.model_catalog_source:
             raise NativeProfileError("native profile source changed during launch")
         for mount in self.discovery_mounts:

@@ -6,7 +6,6 @@ import base64
 import binascii
 import hashlib
 import hmac
-import io
 import json
 import os
 import queue
@@ -16,14 +15,12 @@ import signal
 import socket
 import subprocess
 import sys
-import tarfile
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from .backends.codex_sdk import (
     LEAF_WORKER_CONFIG_OVERRIDES,
@@ -1616,7 +1613,6 @@ class WorkflowHarness:
                 Controller,
                 git_authority_snapshot,
                 protected_paths_digest,
-                protected_paths_digest_at_revision,
             )
 
             current_head = subprocess.run(
@@ -1640,26 +1636,8 @@ class WorkflowHarness:
             if status.stdout.strip():
                 raise WorktreeError("control workspace contains dirty bytes after terminalization")
             current_head_value = current_head.stdout.strip()
-            historical_candidate = current_head_value != terminal_head and self._is_retained_historical_candidate(
-                capsule, candidate_sha, current_head_value
-            )
-            if current_head_value != terminal_head and not historical_candidate:
+            if current_head_value != terminal_head:
                 raise WorktreeError("control workspace HEAD advanced after terminalization")
-            if historical_candidate:
-                historical_workspace = self._historical_workspace_snapshot(capsule, terminal_head)
-                if historical_workspace != terminal_workspace:
-                    raise WorktreeError("control historical workspace bytes changed after terminalization")
-                historical_git = self._historical_git_authority_digest(capsule, terminal_head)
-                if historical_git != terminal_git:
-                    raise WorktreeError("control historical Git authority changed after terminalization")
-                historical_protected = protected_paths_digest_at_revision(
-                    capsule.workspace_path,
-                    terminal_head,
-                    capsule.protected_paths,
-                )
-                if historical_protected != terminal_protected:
-                    raise WorktreeError("control historical protected paths changed after terminalization")
-                return
             snapshot_controller = Controller(self.state_root, worktrees=self._worktrees)
             try:
                 current_workspace = snapshot_controller._owned_workspace_snapshot(capsule)
@@ -1675,86 +1653,6 @@ class WorkflowHarness:
             raise
         except (OSError, RuntimeError, ValueError) as exc:
             raise WorktreeError("control terminal integrity could not be revalidated") from exc
-
-    @staticmethod
-    def _historical_git_authority_digest(capsule: ExecutionCapsule, revision: str) -> str:
-        """Bind the one retained adoption to its immutable commit object and branch."""
-
-        resolved = subprocess.run(
-            ("git", "rev-parse", "--verify", f"{revision}^{{commit}}"),
-            cwd=capsule.workspace_path,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        commit = subprocess.run(
-            ("git", "cat-file", "commit", revision),
-            cwd=capsule.workspace_path,
-            capture_output=True,
-            check=False,
-        )
-        if resolved.returncode != 0 or commit.returncode != 0 or resolved.stdout.strip() != revision:
-            raise WorktreeError("control historical Git authority could not resolve its retained commit")
-        identity = (
-            b"codex-flow/historical-git-authority/v1\0"
-            + capsule.branch.encode("utf-8")
-            + b"\0"
-            + revision.encode("ascii")
-            + b"\0"
-            + commit.stdout
-        )
-        return hashlib.sha256(identity).hexdigest()
-
-    @staticmethod
-    def _historical_workspace_snapshot(
-        capsule: ExecutionCapsule,
-        revision: str,
-    ) -> tuple[tuple[str, str], ...]:
-        """Reconstruct owned path signatures from the retained Git tree."""
-
-        archive = subprocess.run(
-            ("git", "archive", "--format=tar", revision, "--", *capsule.mutable_paths),
-            cwd=capsule.workspace_path,
-            capture_output=True,
-            check=False,
-        )
-        if archive.returncode != 0 or len(archive.stdout) > 64 * 1024 * 1024:
-            raise WorktreeError("control historical workspace archive could not be inspected")
-        with TemporaryDirectory(prefix="codex-flow-historical-workspace-") as directory:
-            snapshot_root = Path(directory)
-            try:
-                with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as retained:
-                    members = retained.getmembers()
-                    if any(
-                        not (member.isfile() or member.isdir())
-                        or Path(member.name).is_absolute()
-                        or ".." in Path(member.name).parts
-                        for member in members
-                    ):
-                        raise WorktreeError("control historical workspace archive contains an unsafe object")
-                    retained.extractall(snapshot_root, members=members, filter="data")
-                    for member in members:
-                        (snapshot_root / member.name).chmod(member.mode & 0o777)
-            except (tarfile.TarError, ValueError) as exc:
-                raise WorktreeError("control historical workspace archive is malformed") from exc
-            tracked_paths = frozenset(member.name.rstrip("/") for member in members)
-            from .controller import Controller
-
-            snapshot_controller = object.__new__(Controller)
-            return tuple(
-                (
-                    relative,
-                    "missing"
-                    if not (snapshot_root / relative).exists()
-                    else snapshot_controller._path_signature(
-                        snapshot_root / relative,
-                        workspace=snapshot_root,
-                        tracked_paths=tracked_paths,
-                        ignored_paths=frozenset(),
-                    ),
-                )
-                for relative in sorted(capsule.mutable_paths)
-            )
 
     def _capture_control_repair_terminal_integrity(self, row: Mapping[str, object]) -> Mapping[str, object] | None:
         """Capture one generation-2 executor checkout at turn completion."""
@@ -1948,117 +1846,6 @@ class WorkflowHarness:
             dispatch_id=dispatch_id,
             candidate_sha=candidate_sha,
             result_sha256=None,
-        )
-
-    @staticmethod
-    def _is_retained_historical_candidate(
-        capsule: ExecutionCapsule,
-        candidate_sha: str,
-        current_head: str,
-    ) -> bool:
-        """Recognize the documented lineage plus its exact v20 test adaptation."""
-
-        source_sha = "47a8fa3d67575ef00662f1b5693efaf45c7b52bd"
-        retained_sha = "977d8f5c8c55459625dbff8133c262e12f91bba0"
-        base_sha = "507645ea5e788eaa4ec803b142419655e1c6dd69"
-        authorized_path = "tests/test_service_lifecycle.py"
-        retained_blob = "104738e142da74d6c1733c423479fee8093d4783"
-        authorized_v20_blob = "51f3a28a6987da5ee111176fd7de2526a8dc8d82"
-        authorized_v20_patch_sha256 = "9099c1ddfdee4b599009c9087f12a9d3ff540afa17e0ec0f0eeaf0c1693e0cd4"
-        compared_paths = tuple(
-            path for path in (*capsule.mutable_paths, *capsule.protected_paths) if path != authorized_path
-        )
-        if (
-            candidate_sha != retained_sha
-            or capsule.base_sha != base_sha
-            or authorized_path not in capsule.mutable_paths
-            or authorized_path in capsule.protected_paths
-            or not compared_paths
-        ):
-            return False
-        try:
-            parent = subprocess.run(
-                ("git", "show", "-s", "--format=%P", candidate_sha),
-                cwd=capsule.workspace_path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            source_parent = subprocess.run(
-                ("git", "show", "-s", "--format=%P", source_sha),
-                cwd=capsule.workspace_path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            ancestry = subprocess.run(
-                ("git", "merge-base", "--is-ancestor", retained_sha, current_head),
-                cwd=capsule.workspace_path,
-                capture_output=True,
-                check=False,
-            )
-            unchanged = subprocess.run(
-                (
-                    "git",
-                    "diff",
-                    "--quiet",
-                    retained_sha,
-                    current_head,
-                    "--",
-                    *compared_paths,
-                ),
-                cwd=capsule.workspace_path,
-                capture_output=True,
-                check=False,
-            )
-            retained_blob_identity = subprocess.run(
-                ("git", "rev-parse", f"{retained_sha}:{authorized_path}"),
-                cwd=capsule.workspace_path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            current_blob_identity = subprocess.run(
-                ("git", "rev-parse", f"{current_head}:{authorized_path}"),
-                cwd=capsule.workspace_path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            adaptation = subprocess.run(
-                (
-                    "git",
-                    "-c",
-                    "core.quotePath=true",
-                    "diff",
-                    "--binary",
-                    "--full-index",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    retained_sha,
-                    current_head,
-                    "--",
-                    authorized_path,
-                ),
-                cwd=capsule.workspace_path,
-                capture_output=True,
-                check=False,
-            )
-        except OSError:
-            return False
-        return (
-            parent.returncode == 0
-            and source_parent.returncode == 0
-            and ancestry.returncode == 0
-            and parent.stdout.strip() == source_sha
-            and source_parent.stdout.strip() == base_sha
-            and unchanged.returncode == 0
-            and retained_blob_identity.returncode == 0
-            and retained_blob_identity.stdout.strip() == retained_blob
-            and current_blob_identity.returncode == 0
-            and current_blob_identity.stdout.strip() == authorized_v20_blob
-            and adaptation.returncode == 0
-            and hashlib.sha256(adaptation.stdout).hexdigest() == authorized_v20_patch_sha256
         )
 
     @staticmethod

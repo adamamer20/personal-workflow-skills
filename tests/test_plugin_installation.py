@@ -273,8 +273,9 @@ def test_external_failure_preserves_truthful_completed_phases(standard_home: Pat
     assert bootstrap.completed == ["preflight", "controller-installed"]
 
 
+@pytest.mark.parametrize("migration_required", [False, True])
 def test_bootstrap_fences_active_harness_before_shared_tool_install(
-    standard_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    standard_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, migration_required: bool
 ) -> None:
     root = Path(__file__).parents[1].resolve()
     config_home = tmp_path / "config"
@@ -286,10 +287,16 @@ def test_bootstrap_fences_active_harness_before_shared_tool_install(
     unit_path.write_text("existing harness unit\n", encoding="utf-8")
 
     class ActiveChildLedger:
-        def __init__(self, _path: Path) -> None:
-            pass
+        def __init__(self, path: Path, *, allow_legacy: bool = False) -> None:
+            assert path == root / ".codex-flow" / "workflow.db"
+            assert allow_legacy is migration_required
 
         def arm_harness_refresh_fence(self) -> None:
+            assert not migration_required
+            raise installer.HarnessRefreshBlocked("worker child is active")
+
+        def arm_predecessor_refresh_fence(self) -> None:
+            assert migration_required
             raise installer.HarnessRefreshBlocked("worker child is active")
 
         def close(self) -> None:
@@ -301,6 +308,11 @@ def test_bootstrap_fences_active_harness_before_shared_tool_install(
         Path,
         "is_file",
         lambda path: True if path == ledger_path else original_is_file(path),
+    )
+    monkeypatch.setattr(
+        installer,
+        "ledger_schema_compatibility",
+        lambda path: {"migration_required": migration_required},
     )
     monkeypatch.setattr(installer, "Ledger", ActiveChildLedger)
 

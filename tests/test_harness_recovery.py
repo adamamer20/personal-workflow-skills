@@ -6,7 +6,6 @@ import json
 import os
 import socket
 import sqlite3
-import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -27,7 +26,6 @@ from codex_flow.contracts import (
     PluginRequirement,
     model_facing_result_schema_sha256,
 )
-from codex_flow.controller import Controller, protected_paths_digest
 from codex_flow.domain import (
     AcceptanceMode,
     CandidateDisposition,
@@ -48,7 +46,6 @@ from codex_flow.domain import (
     MilestoneId,
     NativePermissionAuthority,
     NativePermissionMode,
-    ReasonCode,
     ReasoningEffort,
     RecoveryActionKind,
     RetryBudgetChange,
@@ -62,7 +59,6 @@ from codex_flow.domain import (
     ThreadIdentity,
     ValidationSpec,
     WorkerResultRejectionCode,
-    WorkflowReason,
     WorkflowState,
     WorkspaceMode,
 )
@@ -1071,310 +1067,6 @@ def test_control_dispatch_reuse_rejects_conflicting_repair_findings(tmp_path: Pa
             candidate_sha="a" * 40,
             finding_ids=("finding-new",),
         )
-
-
-def test_control_restart_adopts_exact_retained_lineage_without_executor_replay(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_repository = Path(__file__).parents[1]
-    repository = tmp_path / "repo"
-    subprocess.run(("git", "clone", "--quiet", os.fspath(source_repository), os.fspath(repository)), check=True)
-    assert (
-        subprocess.run(
-            ("git", "show", "-s", "--format=%P", "47a8fa3d67575ef00662f1b5693efaf45c7b52bd"),
-            cwd=repository,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        == "507645ea5e788eaa4ec803b142419655e1c6dd69"
-    )
-    assert (
-        subprocess.run(
-            ("git", "show", "-s", "--format=%P", "977d8f5c8c55459625dbff8133c262e12f91bba0"),
-            cwd=repository,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        == "47a8fa3d67575ef00662f1b5693efaf45c7b52bd"
-    )
-    branch = subprocess.run(
-        ("git", "branch", "--show-current"), cwd=repository, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    adapted_head = subprocess.run(
-        ("git", "rev-parse", "HEAD"), cwd=repository, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    capsule = ExecutionCapsule(
-        2,
-        RunId("safe-refresh-control"),
-        MilestoneId("safe-refresh-final-closure"),
-        repository,
-        WorkspaceMode.CURRENT_CHECKOUT,
-        repository,
-        branch,
-        "507645ea5e788eaa4ec803b142419655e1c6dd69",
-        "control-migration",
-        (
-            "src/codex_flow/service.py",
-            "tests/test_service_lifecycle.py",
-            "docs/reviews/evidence",
-        ),
-        ("schemas/result.schema.json",),
-        ValidationSpec(("true",), 5),
-        "gpt-test",
-        ReasoningEffort.MEDIUM,
-        "adopt the retained candidate and return one typed result",
-        {
-            "type": "object",
-            "properties": {"status": {"type": "string"}},
-            "required": ["status"],
-            "additionalProperties": False,
-        },
-        permission_mode=NativePermissionMode.READ_ONLY,
-        acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
-    )
-    planner = Controller(repository)
-    planner.plan(capsule)
-    planner.close()
-
-    harness = WorkflowHarness(repository)
-    harness.ledger.acquire_workspace_lease(capsule)
-    harness.ledger.record_native_profile(
-        capsule.run_id,
-        capsule.milestone_id,
-        str("1" * 64),
-        str("2" * 64),
-        NativePermissionAuthority(NativePermissionMode.READ_ONLY, "read-only", "never"),
-        capsule.base_sha,
-        (),
-        str("3" * 64),
-    )
-    harness.ledger.claim_dispatch(capsule.run_id, capsule.milestone_id, "executor", 1)
-    now = utc_now()
-    subprocess.run(
-        ("git", "checkout", "--quiet", "--detach", "977d8f5c8c55459625dbff8133c262e12f91bba0"),
-        cwd=repository,
-        check=True,
-    )
-    snapshot_controller = Controller(repository)
-    terminal_workspace = snapshot_controller._owned_workspace_snapshot(capsule)
-    snapshot_controller.close()
-    terminal_workspace_json = json.dumps(terminal_workspace, separators=(",", ":"))
-    terminal_workspace_sha = hashlib.sha256(terminal_workspace_json.encode("utf-8")).hexdigest()
-    terminal_git_sha = WorkflowHarness._historical_git_authority_digest(
-        capsule,
-        "977d8f5c8c55459625dbff8133c262e12f91bba0",
-    )
-    terminal_protected_sha = protected_paths_digest(repository, capsule.protected_paths)
-    assert (
-        WorkflowHarness._historical_workspace_snapshot(
-            capsule,
-            "977d8f5c8c55459625dbff8133c262e12f91bba0",
-        )
-        == terminal_workspace
-    )
-    subprocess.run(("git", "checkout", "--quiet", branch), cwd=repository, check=True)
-    assert (
-        subprocess.run(
-            ("git", "rev-parse", "HEAD"), cwd=repository, check=True, capture_output=True, text=True
-        ).stdout.strip()
-        == adapted_head
-    )
-    current_snapshot_controller = Controller(repository)
-    current_workspace = current_snapshot_controller._owned_workspace_snapshot(capsule)
-    current_snapshot_controller.close()
-    current_workspace_json = json.dumps(current_workspace, separators=(",", ":"))
-    current_workspace_sha = hashlib.sha256(current_workspace_json.encode("utf-8")).hexdigest()
-    result_json = json.dumps({"status": "completed"}, separators=(",", ":"))
-    with harness.ledger._transaction():
-        harness.ledger._db().execute(
-            "UPDATE executions SET status = 'completed', checkpoint = 'result_durable', thread_id = ?, turn_id = ?, "
-            "result_json = ?, validation_argv_json = ?, validation_exit_code = 0, validation_stdout_sha256 = ?, "
-            "validation_stderr_sha256 = ?, validation_timed_out = 0, validation_duration_seconds = 0.01, "
-            "protected_after_sha256 = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
-            (
-                "historical-thread",
-                "historical-turn",
-                result_json,
-                json.dumps(["true"], separators=(",", ":")),
-                "5" * 64,
-                "6" * 64,
-                terminal_protected_sha,
-                now,
-                str(capsule.run_id),
-                str(capsule.milestone_id),
-            ),
-        )
-        harness.ledger._db().execute(
-            "UPDATE execution_integrity SET workspace_terminal_head_sha = ?, workspace_terminal_json = ?, "
-            "workspace_terminal_sha256 = ?, turn_started_at = ?, git_authority_after_sha256 = ?, updated_at = ? "
-            "WHERE run_id = ? AND milestone_id = ?",
-            (
-                "977d8f5c8c55459625dbff8133c262e12f91bba0",
-                terminal_workspace_json,
-                terminal_workspace_sha,
-                now,
-                terminal_git_sha,
-                now,
-                str(capsule.run_id),
-                str(capsule.milestone_id),
-            ),
-        )
-        harness.ledger._db().execute(
-            "UPDATE milestones SET current_state = 'RUNNING', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
-            (now, str(capsule.run_id), str(capsule.milestone_id)),
-        )
-        harness.ledger._append_event_in_transaction(
-            capsule.run_id,
-            capsule.milestone_id,
-            from_state=WorkflowState.STARTING,
-            to_state=WorkflowState.RUNNING,
-            event_type="state_transition",
-            reason=None,
-            dispatch_id=None,
-            data=None,
-        )
-        harness.ledger._db().execute(
-            "UPDATE milestones SET current_state = 'COMPLETED', updated_at = ? WHERE run_id = ? AND milestone_id = ?",
-            (now, str(capsule.run_id), str(capsule.milestone_id)),
-        )
-        harness.ledger._append_event_in_transaction(
-            capsule.run_id,
-            capsule.milestone_id,
-            from_state=WorkflowState.RUNNING,
-            to_state=WorkflowState.COMPLETED,
-            event_type="state_transition",
-            reason=WorkflowReason(ReasonCode.TERMINAL_OUTCOME),
-            dispatch_id=None,
-            data=None,
-        )
-    monkeypatch.setenv("CODEX_HOME", os.fspath(tmp_path / "native-home"))
-    monkeypatch.setenv("CODEX_LB_API_KEY", "test-only")
-    _write_test_native_profile(tmp_path / "native-home", tmp_path / "native-home" / "models.json")
-
-    adopted = harness.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
-    assert adopted.commit_sha == "977d8f5c8c55459625dbff8133c262e12f91bba0"
-    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REVIEWING
-    assert {str(row["dispatch_id"]) for row in harness.ledger.queue_dispatches()} == {
-        "safe-refresh-control/safe-refresh-final-closure/code-reviewer/1",
-        "safe-refresh-control/safe-refresh-final-closure/architecture-reviewer/1",
-    }
-    harness.close()
-
-    restarted = WorkflowHarness(repository)
-    replayed = restarted.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
-    assert replayed.commit_sha == adopted.commit_sha
-    assert len(restarted.ledger.queue_dispatches()) == 2
-    with pytest.raises(CorruptSchemaError):
-        restarted.ledger.program_status(str(capsule.run_id))
-    restarted.close()
-
-    corrupted = WorkflowHarness(repository)
-    with corrupted.ledger._transaction():
-        corrupted.ledger._db().execute(
-            "UPDATE execution_integrity SET workspace_terminal_json = ?, workspace_terminal_sha256 = ? "
-            "WHERE run_id = ? AND milestone_id = ?",
-            (current_workspace_json, current_workspace_sha, str(capsule.run_id), str(capsule.milestone_id)),
-        )
-    with pytest.raises(WorktreeError, match="historical workspace bytes changed"):
-        corrupted.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
-    with corrupted.ledger._transaction():
-        corrupted.ledger._db().execute(
-            "UPDATE execution_integrity SET workspace_terminal_json = ?, workspace_terminal_sha256 = ? "
-            "WHERE run_id = ? AND milestone_id = ?",
-            (terminal_workspace_json, terminal_workspace_sha, str(capsule.run_id), str(capsule.milestone_id)),
-        )
-    corrupted.close()
-
-    corrupted = WorkflowHarness(repository)
-    with corrupted.ledger._transaction():
-        corrupted.ledger._db().execute(
-            "UPDATE execution_integrity SET git_authority_after_sha256 = ? WHERE run_id = ? AND milestone_id = ?",
-            ("4" * 64, str(capsule.run_id), str(capsule.milestone_id)),
-        )
-    with pytest.raises(WorktreeError, match="historical Git authority changed"):
-        corrupted.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
-    with corrupted.ledger._transaction():
-        corrupted.ledger._db().execute(
-            "UPDATE execution_integrity SET git_authority_after_sha256 = ? WHERE run_id = ? AND milestone_id = ?",
-            (terminal_git_sha, str(capsule.run_id), str(capsule.milestone_id)),
-        )
-    corrupted.close()
-
-    corrupted = WorkflowHarness(repository)
-    with corrupted.ledger._transaction():
-        corrupted.ledger._db().execute(
-            "UPDATE executions SET protected_after_sha256 = ? WHERE run_id = ? AND milestone_id = ?",
-            ("4" * 64, str(capsule.run_id), str(capsule.milestone_id)),
-        )
-    with pytest.raises(WorktreeError, match="historical protected paths changed"):
-        corrupted.reconcile_control_execution(str(capsule.run_id), str(capsule.milestone_id))
-    with corrupted.ledger._transaction():
-        corrupted.ledger._db().execute(
-            "UPDATE executions SET protected_after_sha256 = ? WHERE run_id = ? AND milestone_id = ?",
-            (terminal_protected_sha, str(capsule.run_id), str(capsule.milestone_id)),
-        )
-    corrupted.close()
-
-    assert not WorkflowHarness._is_retained_historical_candidate(
-        capsule,
-        "977d8f5c8c55459625dbff8133c262e12f91bba0",
-        "47a8fa3d67575ef00662f1b5693efaf45c7b52bd",
-    )
-
-    service_test = repository / "tests" / "test_service_lifecycle.py"
-    service_test.write_text(service_test.read_text(encoding="utf-8") + "\n# non-allowlisted successor drift\n")
-    subprocess.run(("git", "add", "tests/test_service_lifecycle.py"), cwd=repository, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Codex Flow Test",
-            "-c",
-            "user.email=codex-flow@example.test",
-            "commit",
-            "-qm",
-            "non-allowlisted historical drift",
-        ),
-        cwd=repository,
-        check=True,
-    )
-    drifted_head = subprocess.run(
-        ("git", "rev-parse", "HEAD"), cwd=repository, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    assert not WorkflowHarness._is_retained_historical_candidate(
-        capsule,
-        "977d8f5c8c55459625dbff8133c262e12f91bba0",
-        drifted_head,
-    )
-
-    subprocess.run(("git", "checkout", "--quiet", "-B", "unrelated-drift", adapted_head), cwd=repository, check=True)
-    service = repository / "src" / "codex_flow" / "service.py"
-    service.write_text(service.read_text(encoding="utf-8") + "\n# unrelated historical drift\n")
-    subprocess.run(("git", "add", "src/codex_flow/service.py"), cwd=repository, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Codex Flow Test",
-            "-c",
-            "user.email=codex-flow@example.test",
-            "commit",
-            "-qm",
-            "unrelated historical drift",
-        ),
-        cwd=repository,
-        check=True,
-    )
-    unrelated_head = subprocess.run(
-        ("git", "rev-parse", "HEAD"), cwd=repository, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    assert not WorkflowHarness._is_retained_historical_candidate(
-        capsule,
-        "977d8f5c8c55459625dbff8133c262e12f91bba0",
-        unrelated_head,
-    )
 
 
 def test_harness_start_rejects_dangling_legacy_socket_entry_before_claim(tmp_path: Path) -> None:

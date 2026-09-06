@@ -486,3 +486,20 @@ def test_wake_delivery_failure_keeps_one_bounded_retry_pending(tmp_path: Path) -
     assert final_failure["state"] == "failed"
     assert final_failure["attempt_count"] == 2
     ledger.close()
+
+
+def test_fresh_runtime_readiness_compiles_the_six_owned_surfaces() -> None:
+    compiled = compile_canonical_plan(
+        Path("docs/reviews/peer-thread-workflow.md"), "fresh-runtime-acceptance-readiness"
+    )
+    assert compiled.capsule.acceptance_modes == (AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE)
+    assert compiled.capsule.mutable_surfaces == (
+        "src/codex_flow/harness.py",
+        "src/codex_flow/native_profile.py",
+        "tests/test_harness_recovery.py",
+        "tests/test_controller_execution.py",
+        "tests/test_plugin_installation.py",
+        "tests/test_plan_compilation.py",
+    )
+    assert "without historical execution adoption" in compiled.capsule.objective
+    assert compiled.capsule.recovery_policy == "completion_biased"
