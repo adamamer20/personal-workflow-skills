@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+
 from codex_flow.config import load_workflow_config
+from codex_flow.contracts import (
+    model_facing_review_result_schema,
+    review_result_from_agent_message,
+    review_result_from_json,
+    review_result_to_json,
+)
 from codex_flow.controller import ReviewWorkflow
 from codex_flow.domain import (
+    AcceptanceMode,
     Budget,
     BudgetExhaustion,
     DecisionRequest,
@@ -19,8 +29,94 @@ from codex_flow.domain import (
     RoleId,
     Severity,
     TerminalFailureAfterIdentity,
+    validate_output_schema,
 )
 from codex_flow.ledger import Ledger
+
+
+def _wire_review(evidence: dict[str, object]) -> ReviewResult:
+    return ReviewResult(
+        "review-wire",
+        RoleId("code-reviewer"),
+        False,
+        (
+            ReviewFinding(
+                "F-wire",
+                FindingCausalClass.CONTRACT,
+                Severity.P1,
+                True,
+                "preserve the review evidence contract",
+                evidence,
+                "review evidence roundtrips without semantic loss",
+            ),
+        ),
+        "a" * 40,
+        acceptance_mode=AcceptanceMode.OBJECTIVE,
+        evidence_ids=("evidence-wire",),
+    )
+
+
+def test_review_wire_v2_roundtrips_semantic_evidence_and_projects_closed_schema() -> None:
+    result = _wire_review(
+        {
+            "integer": 1,
+            "number": 1.0,
+            "boolean": True,
+            "nested": {"second": [None, False, "è"], "first": {"b": 2, "a": 1}},
+        }
+    )
+
+    wire = review_result_to_json(result)
+    assert wire["schema_version"] == 2
+    finding = wire["findings"][0]
+    assert "evidence" not in finding
+    assert isinstance(finding["evidence_json"], str)
+    assert "è" in finding["evidence_json"]
+
+    validate_output_schema(model_facing_review_result_schema())
+    parsed = review_result_from_json(wire)
+    parsed_from_message = review_result_from_agent_message(
+        json.dumps(wire, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+    assert parsed == result
+    assert parsed_from_message == result
+    parsed_evidence = parsed.findings[0].evidence
+    assert type(parsed_evidence["integer"]) is int
+    assert type(parsed_evidence["number"]) is float
+    assert type(parsed_evidence["boolean"]) is bool
+    assert parsed_evidence["nested"] == result.findings[0].evidence["nested"]
+
+
+@pytest.mark.parametrize(
+    "evidence_json",
+    (
+        r'{"key":1,"key":2}',
+        r'{"nested":{"key":1,"key":2}}',
+        '\ufeff{"key":true}',
+        '{"key":NaN}',
+        r'{"key":"\ud800"}',
+        "[]",
+        "null",
+        "not-json",
+    ),
+)
+def test_review_wire_rejects_malformed_or_non_object_evidence(evidence_json: str) -> None:
+    wire = review_result_to_json(_wire_review({"key": True}))
+    wire["findings"][0]["evidence_json"] = evidence_json
+
+    with pytest.raises(ValueError):
+        review_result_from_json(wire)
+
+
+def test_review_wire_enforces_per_evidence_byte_bound_on_encode_and_decode() -> None:
+    oversized = {"value": "x" * 16_373}
+    with pytest.raises(ValueError, match="byte limit"):
+        review_result_to_json(_wire_review(oversized))
+
+    wire = review_result_to_json(_wire_review({"key": True}))
+    wire["findings"][0]["evidence_json"] = '{"value":"' + ("x" * 16_373) + '"}'
+    with pytest.raises(ValueError, match="strict JSON"):
+        review_result_from_json(wire)
 
 
 def test_workflow_toml_has_typed_routes_and_fail_closed_limits() -> None:

@@ -43,6 +43,8 @@ from .domain import (
 _MAX_TEXT = 16_384
 _MAX_ITEMS = 128
 _MAX_AGENT_MESSAGE_BYTES = 65_536
+_REVIEW_EVIDENCE_BYTES = 16_384
+_REVIEW_WIRE_SCHEMA_VERSION = 2
 _TEXT_PATTERN = r"^(?![\s\S]*\u0000)(?=[\s\S]*\S)"
 _CANONICAL_ACCEPTANCE_ROLES = {
     AcceptanceMode.OBJECTIVE: RoleId("code-reviewer"),
@@ -648,13 +650,42 @@ class ModelFacingResult:
         return cls.from_json(decoded)
 
 
+def _review_evidence_to_json(evidence: JsonObject) -> str:
+    """Encode one reviewer evidence object into the closed wire scalar."""
+
+    try:
+        encoded = json.dumps(
+            thaw_json(evidence), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        encoded_bytes = encoded.encode("utf-8", errors="strict")
+    except (TypeError, UnicodeError, ValueError, RecursionError) as exc:
+        raise ValueError("review finding evidence is not interoperable JSON") from exc
+    if len(encoded_bytes) > _REVIEW_EVIDENCE_BYTES:
+        raise ValueError("review finding evidence exceeds its byte limit")
+    return encoded
+
+
+def _review_evidence_from_json(value: object) -> JsonObject:
+    """Decode one strict, bounded reviewer evidence object exactly once."""
+
+    if not isinstance(value, str):
+        raise ValueError("review finding evidence_json must be a string")
+    try:
+        decoded = strict_json_loads(value, max_bytes=_REVIEW_EVIDENCE_BYTES)
+    except ValueError as exc:
+        raise ValueError("review finding evidence_json is not strict JSON") from exc
+    if not isinstance(decoded, Mapping):
+        raise ValueError("review finding evidence_json must contain an object")
+    return dict(decoded)
+
+
 def review_result_to_json(result: ReviewResult) -> JsonObject:
     """Project one read-only reviewer result at the worker boundary."""
 
     if not isinstance(result, ReviewResult):
         raise TypeError("review result must be typed")
     return {
-        "schema_version": 1,
+        "schema_version": _REVIEW_WIRE_SCHEMA_VERSION,
         "review_id": result.review_id,
         "reviewer_role": str(result.reviewer_role),
         "accepted": result.accepted,
@@ -665,7 +696,7 @@ def review_result_to_json(result: ReviewResult) -> JsonObject:
                 "severity": finding.severity.value,
                 "promotion_blocking": finding.promotion_blocking,
                 "promotion_reason": finding.promotion_reason,
-                "evidence": thaw_json(finding.evidence),
+                "evidence_json": _review_evidence_to_json(finding.evidence),
                 "criterion": finding.criterion,
                 "defer_to": finding.defer_to,
                 "survives_prior_repair": finding.survives_prior_repair,
@@ -699,7 +730,7 @@ def review_result_from_json(value: Mapping[str, object]) -> ReviewResult:
     }
     if not isinstance(value, Mapping) or set(value) != expected:
         raise ValueError("review result keys are unsupported")
-    if value["schema_version"] != 1 or not isinstance(value["schema_version"], int):
+    if value["schema_version"] != _REVIEW_WIRE_SCHEMA_VERSION or not isinstance(value["schema_version"], int):
         raise ValueError("review result schema version is unsupported")
     raw_findings = value["findings"]
     if not isinstance(raw_findings, list):
@@ -711,7 +742,7 @@ def review_result_from_json(value: Mapping[str, object]) -> ReviewResult:
         "severity",
         "promotion_blocking",
         "promotion_reason",
-        "evidence",
+        "evidence_json",
         "criterion",
         "defer_to",
         "survives_prior_repair",
@@ -719,9 +750,7 @@ def review_result_from_json(value: Mapping[str, object]) -> ReviewResult:
     for raw in raw_findings:
         if not isinstance(raw, Mapping) or set(raw) != finding_keys:
             raise ValueError("review finding shape is unsupported")
-        evidence = raw["evidence"]
-        if not isinstance(evidence, Mapping):
-            raise ValueError("review finding evidence must be an object")
+        evidence = _review_evidence_from_json(raw["evidence_json"])
         try:
             findings.append(
                 ReviewFinding(
@@ -781,7 +810,7 @@ def model_facing_review_result_schema() -> JsonObject:
             "severity",
             "promotion_blocking",
             "promotion_reason",
-            "evidence",
+            "evidence_json",
             "criterion",
             "defer_to",
             "survives_prior_repair",
@@ -792,7 +821,11 @@ def model_facing_review_result_schema() -> JsonObject:
             "severity": {"type": "string", "enum": [item.value for item in Severity]},
             "promotion_blocking": {"type": "boolean"},
             "promotion_reason": finding_text,
-            "evidence": {"type": "object"},
+            "evidence_json": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": _REVIEW_EVIDENCE_BYTES,
+            },
             "criterion": finding_text,
             "defer_to": {"type": ["string", "null"], "maxLength": 256, "pattern": _TEXT_PATTERN},
             "survives_prior_repair": {"type": "boolean"},
@@ -818,7 +851,7 @@ def model_facing_review_result_schema() -> JsonObject:
             "evidence_ids",
         ],
         "properties": {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": _REVIEW_WIRE_SCHEMA_VERSION},
             "review_id": text,
             "reviewer_role": text,
             "accepted": {"type": "boolean"},

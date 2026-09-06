@@ -22,7 +22,11 @@ from codex_flow.backends.codex_sdk import (
     _decode_schema_output,
     _provider_output_schema,
 )
-from codex_flow.contracts import model_facing_controller_action_schema, model_facing_result_schema
+from codex_flow.contracts import (
+    model_facing_controller_action_schema,
+    model_facing_result_schema,
+    model_facing_review_result_schema,
+)
 from codex_flow.domain import (
     Capability,
     CapabilityStatus,
@@ -524,6 +528,36 @@ class CodexSdkAdapterTests(unittest.TestCase):
                     adapter.start_turn(identity, "hello", output_schema=schema)
 
                 self.assertEqual(client.thread.turn_calls, [])
+
+    def test_reviewer_schema_projects_to_closed_provider_wire_and_reaches_sdk(self) -> None:
+        schema = model_facing_review_result_schema()
+        projected = _provider_output_schema(schema)
+        assert projected is not None
+        finding = projected["properties"]["findings"]["items"]
+        assert finding["properties"]["evidence_json"] == {"type": "string"}
+        assert schema["properties"]["findings"]["items"]["properties"]["evidence_json"] == {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 16_384,
+        }
+        assert "evidence" not in finding["properties"]
+
+        client = FakeClient()
+        adapter = CodexSdkAdapter(self.config(), client_factory=lambda: client, sdk=_sdk())
+        identity = adapter.start_thread()
+        adapter.start_turn(identity, "review", output_schema=schema)
+
+        self.assertEqual(client.thread.turn_calls[0]["output_schema"], projected)
+
+    def test_invalid_local_output_schema_fails_before_raw_turn_and_is_not_unknown_sdk_failure(self) -> None:
+        client = FakeClient()
+        adapter = CodexSdkAdapter(self.config(), client_factory=lambda: client, sdk=_sdk())
+        identity = adapter.start_thread()
+
+        with self.assertRaisesRegex(TerminalFailureAfterIdentity, "malformed output schema"):
+            adapter.start_turn(identity, "hello", output_schema={"type": "object"})
+
+        self.assertEqual(client.thread.turn_calls, [])
 
     def test_controller_action_schema_retains_supported_numeric_bounds(self) -> None:
         schema = model_facing_controller_action_schema()

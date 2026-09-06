@@ -2135,12 +2135,19 @@ class CodexSdkAdapter:
         if any(thread_id == thread.id for thread_id, _turn_id in self._turns):
             raise TerminalFailureAfterIdentity(f"SDK thread {thread.id!r} already has a retained live turn")
         try:
+            projected_output_schema = _provider_output_schema(output_schema)
+        except TerminalFailureAfterIdentity:
+            raise
+        except (RecursionError, TypeError, ValueError) as exc:
+            detail = redact_diagnostic_text(str(exc).replace("\x00", "[NUL]"), limit=256)
+            raise TerminalFailureAfterIdentity(f"schema-bounded turn used a malformed output schema: {detail}") from exc
+        try:
             raw_turn = raw_thread.turn(
                 _wire_turn_input(self._sdk, input, local_image_inputs),
                 cwd=str(self.config.cwd) if self.config.cwd is not None else None,
                 effort=_wire_effort(self._sdk, self.config.reasoning_effort),
                 model=self.config.model,
-                output_schema=_provider_output_schema(output_schema),
+                output_schema=projected_output_schema,
                 **self._permission_kwargs(),
             )
             turn_id = _turn_id(raw_turn)
