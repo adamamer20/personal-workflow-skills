@@ -1,5 +1,39 @@
 # Plan: Deterministic Codex workflow controller
 
+## Next execution — reviewed-sdk-runtime-proof
+
+This new proof supersedes no historical result and retries no old dispatch.
+Installed source is `e37e834`; service activation verified all 33 Python module
+bytes, live epoch 2 with refresh fence cleared, and unchanged old queue rows.
+One fresh native Astra Medium controller uses this canonical capsule through
+codex-flow, only after official installed SDK read of its own source identity
+passes. Same existing checkout and branch, base is the planning commit supplied
+to that controller. The only worker-owned surface is the new fixture below;
+all other tracked bytes are protected. No new module, type or schema. Artifact
+budget is one text fixture, not a success receipt. A read failure means no START;
+a later genuine runtime failure means retain the run and report it without retry.
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective="Prove installed reviewer wire v2 through a fresh SDK worker, two harness-owned reviews and exact-candidate promotion.",
+    decomposition=("Create and commit the exact assigned one-line fixture.", "Return one raw typed result so the harness can obtain both independent authorities and promote the same candidate."),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "docs/reviews/evidence/reviewed-sdk-runtime-output.txt contains exactly reviewed SDK runtime completed followed by LF and is the sole path in the worker commit.",
+        "SDK worker only writes/verifies/commits the assigned fixture and submits its result; no subagents, peers, review dispatch, global/service/ledger mutation or historical adoption.",
+        "The harness obtains independent objective and architecture v2 review results bound to the exact worker commit; no missing or stale authority can promote it.",
+        "Final lifecycle is accepted only after both authorities accept, with retained dispatch/result/review/promotion proof. Native source wake is claimed delivered only if its durable receipt proves delivery."
+    ),
+    mutable_surfaces=("docs/reviews/evidence/reviewed-sdk-runtime-output.txt",),
+    protected_surfaces=("src", "tests", "scripts", "plugins", "schemas", "templates", "AGENTS.md", "workflow.toml", "pyproject.toml", "uv.lock", "docs/reviews/peer-thread-workflow.md", "docs/reviews/evidence/fresh-runtime-worker-output.txt"),
+    authorities=(ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")), ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))),
+    prompt="Write docs/reviews/evidence/reviewed-sdk-runtime-output.txt with exact UTF-8 bytes reviewed SDK runtime completed plus LF. Verify exact bytes and only that path staged; git diff --cached --check; commit only that file and return one raw typed result with exact commit and validation evidence. Do not modify other tracked bytes or create tests. You are a leaf: no subagents, peer messages/tasks, independent review launch, workflow-control, service/install/global/ledger operations. Independent acceptance is harness-owned and pending at your delivery. Reviewers must verify exact fixture bytes/commit scope and role/candidate binding; they are also leaves. No old result adoption or retry.",
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
 ## Reviewer wire repair promotion and next live boundary
 
 Exact runtime candidate `e37e83429a2e8235b1c803941585d15f7cc658f8` is accepted.
