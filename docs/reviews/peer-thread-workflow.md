@@ -2,6 +2,30 @@
 
 ## Current executable repair — reviewer wire contract
 
+Source-wake diagnostic disposition (native Astra task
+`01a075ef-b6ed-7d30-aa2b-05a66289a8ee`): the fixed pair openai-codex and
+openai-codex-cli-bin 0.147.0 rejects this source task's stored subAgentActivity
+kind `completed` in the app-server storage decoder (-32603), before Python
+response validation. The generated Python enum independently supports only
+started/interacted/interrupted. Adapter normalization or a binary-only override
+does not establish a valid fix. No compatible release number was established
+from official evidence; do not guess one or modify installed packages/history.
+The exact-source wake branch is EXTERNAL_BLOCKED pending a proven matched
+official package/runtime pair with lossless storage-decoder and generated-model
+coverage. The failed historical wake's original exception was not retained, so
+the current read failure is a demonstrated incompatibility, not recovered
+historical exception evidence. No further wake/read/resume attempt is authorized
+by this diagnostic. The exhausted wake remains failed.
+
+This limitation is scoped to notification into the existing source identity;
+it does not block the independent provider-free reviewer-wire repair. It must
+not silently become a whole-program compatibility requirement after the user
+withdrew historical compatibility. A later fresh-run plan may explicitly select
+a new supported controller identity through the existing official lifecycle;
+that would be a new run with truthful identity/provenance, never successful
+delivery of this failed wake. No alternate transport, source substitution in
+the old row, SDK upgrade or new task is launched by this plan note.
+
 The fresh SDK worker produced candidate
 `14ef9e39c7d710964026f275ca26f2a7b64c431f`, but live acceptance is NOT complete.
 Both reviewer dispatches failed before their turns: the reviewer output schema's
