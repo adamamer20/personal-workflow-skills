@@ -24,6 +24,7 @@ from .domain import (
     ExecutionCapsule,
     MilestoneId,
     NativePermissionMode,
+    ProgramOutcomeKind,
     RunId,
     ValidationSpec,
     WorkspaceMode,
@@ -50,6 +51,19 @@ _MODEL_KEYS: Final[frozenset[str]] = frozenset(
 _MODEL_KEYS_WITH_PLUGINS: Final[frozenset[str]] = _MODEL_KEYS | {"plugin_requirements"}
 _MODEL_KEYS_WITH_IMAGES: Final[frozenset[str]] = _MODEL_KEYS | {"local_image_paths"}
 _MODEL_KEYS_WITH_IMAGES_AND_PLUGINS: Final[frozenset[str]] = _MODEL_KEYS_WITH_IMAGES | {"plugin_requirements"}
+_MODEL_KEYS_WITH_RUNTIME: Final[frozenset[str]] = _MODEL_KEYS | {
+    "outcome_kind",
+    "integration_mode",
+    "runtime_artifact_paths",
+    "runtime_artifact_max_files",
+    "runtime_artifact_max_bytes",
+    "approval_gates",
+}
+_MODEL_KEYS_WITH_RUNTIME_AND_PLUGINS: Final[frozenset[str]] = _MODEL_KEYS_WITH_RUNTIME | {"plugin_requirements"}
+_MODEL_KEYS_WITH_RUNTIME_AND_IMAGES: Final[frozenset[str]] = _MODEL_KEYS_WITH_RUNTIME | {"local_image_paths"}
+_MODEL_KEYS_WITH_RUNTIME_IMAGES_AND_PLUGINS: Final[frozenset[str]] = _MODEL_KEYS_WITH_RUNTIME_AND_IMAGES | {
+    "plugin_requirements"
+}
 _EXECUTION_KEYS: Final[frozenset[str]] = frozenset(
     {
         "capsule_version",
@@ -206,7 +220,11 @@ def _projection_prompt(capsule: ModelFacingCapsule) -> str:
         "mutable_surfaces": list(capsule.mutable_surfaces),
         "protected_surfaces": list(capsule.protected_surfaces),
         "recovery_policy": capsule.recovery_policy,
-        "output_contract": "ModelFacingResult schema_version=1",
+        "output_contract": f"ModelFacingResult schema_version={'2' if capsule.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE else '1'}",
+        "outcome_kind": capsule.outcome_kind.value,
+        "integration_mode": capsule.integration_mode.value,
+        "runtime_artifact_paths": list(capsule.runtime_artifact_paths),
+        "approval_gates": [item.to_json() for item in capsule.approval_gates],
     }
     return (
         capsule.prompt
@@ -246,7 +264,7 @@ def project_model_facing_capsule(capsule: ModelFacingCapsule, *, state_root: Pat
         run_id = RunId(f"model-{digest[:32]}")
         milestone_id = MilestoneId(f"milestone-{digest[32:]}")
         return ExecutionCapsule(
-            3 if capsule.schema_version == 3 else 2,
+            3 if capsule.schema_version in {3, 4} and capsule.local_image_paths else 2,
             run_id,
             milestone_id,
             repository,
@@ -261,11 +279,18 @@ def project_model_facing_capsule(capsule: ModelFacingCapsule, *, state_root: Pat
             executor.model,
             executor.reasoning_effort,
             _projection_prompt(capsule),
-            model_facing_result_schema(),
+            model_facing_result_schema(2 if capsule.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE else 1),
             NativePermissionMode.INHERIT_NATIVE,
             capsule.acceptance_modes,
             tuple(item.to_json() for item in capsule.plugin_requirements),
             capsule.local_image_paths,
+            outcome_kind=capsule.outcome_kind,
+            integration_mode=capsule.integration_mode,
+            runtime_artifact_paths=capsule.runtime_artifact_paths,
+            runtime_artifact_max_files=capsule.runtime_artifact_max_files,
+            runtime_artifact_max_bytes=capsule.runtime_artifact_max_bytes,
+            approval_gates=capsule.approval_gates,
+            acceptance_criteria_sha256=hashlib.sha256(_canonical_json(list(capsule.acceptance_criteria))).hexdigest(),
         )
     except (TypeError, ValueError) as exc:
         raise ProjectionError("model-facing capsule cannot be projected into an execution capsule") from exc
@@ -292,6 +317,10 @@ def load_control_capsule(path: Path, *, state_root: Path) -> tuple[ExecutionCaps
         _MODEL_KEYS_WITH_PLUGINS,
         _MODEL_KEYS_WITH_IMAGES,
         _MODEL_KEYS_WITH_IMAGES_AND_PLUGINS,
+        _MODEL_KEYS_WITH_RUNTIME,
+        _MODEL_KEYS_WITH_RUNTIME_AND_PLUGINS,
+        _MODEL_KEYS_WITH_RUNTIME_AND_IMAGES,
+        _MODEL_KEYS_WITH_RUNTIME_IMAGES_AND_PLUGINS,
     }:
         try:
             return project_model_facing_capsule(

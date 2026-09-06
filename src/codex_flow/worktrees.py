@@ -336,10 +336,69 @@ class WorktreeManager:
             else None,
         )
 
-    def adopt_candidate(self, capsule: ExecutionCapsule, candidate_sha: str) -> CandidateRecord:
-        """Validate one pre-existing serial candidate for later review."""
+    def adopt_candidate(
+        self,
+        capsule: ExecutionCapsule,
+        candidate_sha: str,
+        *,
+        review_base_sha: str | None = None,
+        expected_trunk_head: str | None = None,
+    ) -> CandidateRecord:
+        """Validate one pre-existing candidate without changing Git state.
 
-        return self.inspect_terminal_workspace(capsule, candidate_sha=candidate_sha, require_direct_candidate=True)
+        Ordinary adoption keeps its historical capsule-base semantics.  The
+        already-integrated form additionally binds the registered program
+        trunk and requires the candidate to be the exact current checkout
+        tip, so an arbitrary ancestor or substitute commit cannot be adopted.
+        """
+
+        if review_base_sha is None and expected_trunk_head is None:
+            return self.inspect_terminal_workspace(capsule, candidate_sha=candidate_sha, require_direct_candidate=True)
+        if review_base_sha is None or expected_trunk_head is None:
+            raise WorkspaceConflict("already-integrated adoption requires review base and trunk head")
+        return self.verify_already_integrated_candidate(
+            capsule,
+            candidate_sha=candidate_sha,
+            review_base_sha=review_base_sha,
+            expected_trunk_head=expected_trunk_head,
+        )
+
+    def verify_already_integrated_candidate(
+        self,
+        capsule: ExecutionCapsule,
+        *,
+        candidate_sha: str,
+        review_base_sha: str,
+        expected_trunk_head: str,
+    ) -> CandidateRecord:
+        """Prove an exact existing-trunk candidate using read-only Git checks."""
+
+        if any(
+            len(value) != 40 or any(character not in "0123456789abcdef" for character in value)
+            for value in (candidate_sha, review_base_sha, expected_trunk_head)
+        ):
+            raise WorkspaceConflict("already-integrated adoption identities are invalid")
+        workspace = _absolute_lexical(capsule.workspace_path)
+        self._validate_checkout(capsule, workspace)
+        if workspace != _absolute_lexical(capsule.repository_root):
+            raise WorkspaceConflict("already-integrated adoption must use the program trunk checkout")
+        head = self._git(workspace, "rev-parse", "--verify", "HEAD^{commit}")
+        if candidate_sha != expected_trunk_head or head != expected_trunk_head:
+            raise WorkspaceConflict("already-integrated candidate is not the registered current trunk HEAD")
+        self._require_clean_checkout(workspace, label="already-integrated adoption")
+        if self._commit_parents(workspace, candidate_sha) != [review_base_sha]:
+            raise WorkspaceConflict("already-integrated candidate must have the exact sole review-base parent")
+        self._validate_candidate_history(capsule, workspace, candidate_sha, base_sha=review_base_sha)
+        tree = self._git(workspace, "show", "-s", "--format=%T", candidate_sha)
+        return CandidateRecord(
+            CandidateDisposition.VERIFIED_COMMIT,
+            workspace,
+            commit_sha=candidate_sha,
+            workspace_head=head,
+            workspace_digest=hashlib.sha256(tree.encode("ascii")).hexdigest(),
+            dirty=False,
+            reason="exact already-integrated trunk candidate verified",
+        )
 
     def validate_candidate(self, capsule: ExecutionCapsule, candidate_sha: str) -> None:
         """Revalidate candidate ancestry and path ownership before an effect."""
@@ -732,7 +791,9 @@ class WorktreeManager:
             raise WorktreeError("Git commit parent receipt is invalid")
         return values[1:]
 
-    def _validate_candidate_history(self, capsule: ExecutionCapsule, workspace: Path, candidate_sha: str) -> None:
+    def _validate_candidate_history(
+        self, capsule: ExecutionCapsule, workspace: Path, candidate_sha: str, *, base_sha: str | None = None
+    ) -> None:
         """Prove every commit and changed path is owned by one capsule.
 
         Checking only the final tree is insufficient: a candidate can add and
@@ -743,10 +804,11 @@ class WorktreeManager:
 
         if capsule.workspace_path != workspace.resolve():
             raise CandidateIntegrityError("candidate workspace does not match the capsule")
-        base_check = self._runner(("git", "merge-base", "--is-ancestor", capsule.base_sha, candidate_sha), workspace)
+        selected_base = base_sha or capsule.base_sha
+        base_check = self._runner(("git", "merge-base", "--is-ancestor", selected_base, candidate_sha), workspace)
         if base_check.returncode != 0:
             raise CandidateIntegrityError("candidate commit does not descend from the capsule base")
-        commits = self._git(workspace, "rev-list", "--reverse", f"{capsule.base_sha}..{candidate_sha}").splitlines()
+        commits = self._git(workspace, "rev-list", "--reverse", f"{selected_base}..{candidate_sha}").splitlines()
         if not commits:
             raise CandidateIntegrityError("candidate commit is not ahead of the capsule base")
         mutable = tuple(Path(value) for value in capsule.mutable_paths)

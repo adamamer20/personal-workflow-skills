@@ -4225,7 +4225,7 @@ def test_legacy_ledger_migrates_forward_to_canonical_execution_schema() -> None:
 
         ledger = Ledger(path, migrate=True)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_dispatch_terminal_integrity_v20"
+        assert ledger.schema_identity == "codex_flow_program_outcomes_v21"
         assert "checkpoint" in ledger.schema_columns("executions")
         ledger.close()
 
@@ -4248,7 +4248,7 @@ def test_v4_sandbox_authority_schema_migrates_to_truthful_native_profile_authori
         connection.close()
 
         ledger = Ledger(path, migrate=True)
-        assert ledger.schema_identity == "codex_flow_dispatch_terminal_integrity_v20"
+        assert ledger.schema_identity == "codex_flow_program_outcomes_v21"
         assert "native_profile_sha256" in ledger.schema_columns("execution_integrity")
         assert "sandbox_policy_sha256" not in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -4273,7 +4273,7 @@ def test_v5_native_profile_schema_migrates_to_permission_authority_v6() -> None:
 
         ledger = Ledger(path, migrate=True)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_dispatch_terminal_integrity_v20"
+        assert ledger.schema_identity == "codex_flow_program_outcomes_v21"
         assert "native_compatibility_sha256" in ledger.schema_columns("execution_integrity")
         assert "effective_permission_json" in ledger.schema_columns("execution_integrity")
         ledger.close()
@@ -4400,7 +4400,7 @@ def test_v6_permission_schema_migrates_to_causal_workspace_v7() -> None:
 
         ledger = Ledger(path, migrate=True)
         assert ledger.schema_version == CURRENT_SCHEMA_VERSION
-        assert ledger.schema_identity == "codex_flow_dispatch_terminal_integrity_v20"
+        assert ledger.schema_identity == "codex_flow_program_outcomes_v21"
         columns = ledger.schema_columns("execution_integrity")
         assert "workspace_baseline_sha256" in columns
         assert "turn_started_at" in columns

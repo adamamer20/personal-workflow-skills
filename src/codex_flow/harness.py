@@ -78,10 +78,14 @@ from .domain import (
     ProgramControllerActionKind,
     ProgramControllerDecisionStatus,
     ProgramGraph,
+    ProgramIntegrationMode,
+    ProgramNodeSpec,
+    ProgramOutcomeKind,
     ReasonCode,
     ReasoningEffort,
     RecoveryActionKind,
     RetryBudgetChange,
+    RuntimeEvidenceManifest,
     Sandbox,
     ThreadIdentity,
     TypedBlocker,
@@ -97,6 +101,12 @@ from .ipc import IpcError, IpcReasonCode, decode_frame, encode_frame, ensure_run
 from .ledger import HarnessRefreshBlocked, Ledger, LedgerError, RecordNotFound, StaleWriter
 from .native_profile import NativeProfileProjection
 from .plugin_capabilities import PluginCapabilityError, _verified_skill_input
+from .runtime_evidence import (
+    RuntimeEvidenceError,
+    RuntimeEvidenceSnapshot,
+    capture_runtime_evidence,
+    verify_runtime_evidence,
+)
 from .worker import (
     WORKER_EXIT_AUTHENTICATION,
     WORKER_EXIT_CAPABILITY,
@@ -1073,17 +1083,21 @@ class WorkflowHarness:
                         or changed
                     )
             elif action.kind is ProgramControllerActionKind.START_REVIEWS:
-                if action.milestone_id is None or action.candidate_sha is None:
+                if action.milestone_id is None or action.subject_wire is None:
                     raise HarnessError("program review effect is incomplete")
                 milestone_id = action.milestone_id
                 candidate_sha = action.candidate_sha
+                evidence_sha256 = action.evidence_sha256
+                if evidence_sha256 is not None:
+                    self._verify_program_runtime_evidence(str(bundle.program_id), milestone_id, evidence_sha256)
                 for role in action.review_roles:
                     generation = self.ledger.next_program_dispatch_generation(bundle.program_id, milestone_id, role)
 
                     def enqueue_review_worker(
                         role_value: str = role,
                         milestone_value: str = milestone_id,
-                        candidate_value: str = candidate_sha,
+                        candidate_value: str | None = candidate_sha,
+                        evidence_value: str | None = evidence_sha256,
                         generation_value: int = generation,
                     ) -> bool:
                         return self._enqueue_program_worker(
@@ -1094,7 +1108,11 @@ class WorkflowHarness:
                             action_context={
                                 "program_id": str(bundle.program_id),
                                 "milestone_id": milestone_value,
-                                "candidate_sha": candidate_value,
+                                **(
+                                    {"candidate_sha": candidate_value}
+                                    if candidate_value is not None
+                                    else {"evidence_sha256": evidence_value}
+                                ),
                                 "review_role": role_value,
                             },
                         )
@@ -1102,22 +1120,24 @@ class WorkflowHarness:
                     changed = (
                         self._apply_program_external_effect(
                             bundle,
-                            f"review:{milestone_id}:{role}",
+                            f"review:{milestone_id}:{action.subject_wire}:{role}",
                             enqueue_review_worker,
                         )
                         or changed
                     )
             elif action.kind is ProgramControllerActionKind.REQUEST_REPAIR:
-                if action.milestone_id is None or action.candidate_sha is None:
+                if action.milestone_id is None or action.subject_wire is None:
                     raise HarnessError("program repair effect is incomplete")
                 milestone_id = action.milestone_id
                 candidate_sha = action.candidate_sha
+                evidence_sha256 = action.evidence_sha256
                 finding_ids = action.finding_ids
                 generation = self.ledger.next_program_dispatch_generation(bundle.program_id, milestone_id, "executor")
 
                 def enqueue_repair_worker(
                     milestone_value: str = milestone_id,
-                    candidate_value: str = candidate_sha,
+                    candidate_value: str | None = candidate_sha,
+                    evidence_value: str | None = evidence_sha256,
                     finding_values: tuple[str, ...] = finding_ids,
                     generation_value: int = generation,
                 ) -> bool:
@@ -1129,7 +1149,11 @@ class WorkflowHarness:
                         action_context={
                             "program_id": str(bundle.program_id),
                             "milestone_id": milestone_value,
-                            "candidate_sha": candidate_value,
+                            **(
+                                {"candidate_sha": candidate_value}
+                                if candidate_value is not None
+                                else {"evidence_sha256": evidence_value}
+                            ),
                             "finding_ids": list(finding_values),
                             "repair": True,
                         },
@@ -1138,7 +1162,7 @@ class WorkflowHarness:
                 changed = (
                     self._apply_program_external_effect(
                         bundle,
-                        f"repair:{milestone_id}",
+                        f"repair:{milestone_id}:{action.subject_wire}",
                         enqueue_repair_worker,
                     )
                     or changed
@@ -1530,7 +1554,24 @@ class WorkflowHarness:
 
         graph = self.ledger.program_graph(program_id)
         node = graph.node(milestone_id)
-        candidate = self._worktrees.adopt_candidate(node.capsule, candidate_sha)
+        if node.capsule.integration_mode is ProgramIntegrationMode.ALREADY_INTEGRATED:
+            if node.review_base_sha is None or node.adopted_candidate_sha != candidate_sha:
+                raise WorktreeError("already-integrated adoption is not bound to the registered candidate")
+            candidate = self._worktrees.adopt_candidate(
+                node.capsule,
+                candidate_sha,
+                review_base_sha=node.review_base_sha,
+                expected_trunk_head=graph.trunk_head,
+            )
+            adoption_receipt = self._already_integrated_adoption_receipt(
+                graph,
+                node,
+                candidate_sha,
+                node.review_base_sha,
+            )
+        else:
+            candidate = self._worktrees.adopt_candidate(node.capsule, candidate_sha)
+            adoption_receipt = None
         if candidate.workspace_path != node.capsule.workspace_path:
             raise WorktreeError("adopted candidate workspace does not match the dispatch capsule")
         return self.ledger.adopt_program_candidate(
@@ -1538,7 +1579,85 @@ class WorkflowHarness:
             milestone_id,
             candidate,
             dispatch_id=dispatch_id,
+            adoption_receipt=adoption_receipt,
         )
+
+    def _already_integrated_adoption_receipt(
+        self,
+        graph: ProgramGraph,
+        node: ProgramNodeSpec,
+        candidate_sha: str,
+        review_base_sha: str,
+    ) -> dict[str, object]:
+        """Build the exact read-only receipt for an existing trunk candidate."""
+
+        capsule = node.capsule
+        workspace = capsule.workspace_path
+
+        def git(*arguments: str) -> str:
+            result = subprocess.run(("git", *arguments), cwd=workspace, text=True, capture_output=True, check=False)
+            if result.returncode != 0:
+                raise WorktreeError(f"unable to capture adoption receipt Git fact: {arguments[0]}")
+            return result.stdout.strip()
+
+        tree = git("show", "-s", "--format=%T", candidate_sha)
+        parents = git("show", "-s", "--format=%P", candidate_sha).split()
+        commits = git("rev-list", "--reverse", f"{review_base_sha}..{candidate_sha}").splitlines()
+        changed: set[str] = set()
+        for commit in commits:
+            raw = subprocess.run(
+                (
+                    "git",
+                    "diff-tree",
+                    "--no-commit-id",
+                    "--name-only",
+                    "-r",
+                    "-m",
+                    "-z",
+                    commit,
+                ),
+                cwd=workspace,
+                capture_output=True,
+                check=False,
+            )
+            if raw.returncode != 0:
+                raise WorktreeError("unable to capture adoption receipt changed paths")
+            changed.update(os.fsdecode(item) for item in raw.stdout.split(b"\0") if item)
+        changed_paths = sorted(changed)
+        changed_paths_digest = hashlib.sha256(
+            json.dumps(
+                changed_paths, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+        ).hexdigest()
+        from .controller import protected_paths_digest
+
+        return {
+            "schema": "codex-flow/already-integrated-adoption/v1",
+            "program_id": str(graph.program_id),
+            "milestone_id": str(node.milestone_id),
+            "repository_root": str(capsule.repository_root),
+            "workspace_path": str(capsule.workspace_path),
+            "branch": capsule.branch,
+            "graph_digest": graph.plan_revision_sha256,
+            "review_base_sha": review_base_sha,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": tree,
+            "candidate_parents": parents,
+            "changed_paths": changed_paths,
+            "changed_paths_sha256": changed_paths_digest,
+            "protected_paths_sha256": protected_paths_digest(workspace, capsule.protected_paths),
+            "observed_trunk_head": graph.trunk_head,
+        }
+
+    def _verify_program_runtime_evidence(self, program_id: str, milestone_id: str, evidence_sha256: str) -> None:
+        """Rehash the immutable runtime snapshot before review or promotion."""
+
+        try:
+            manifest = self.ledger.runtime_evidence_manifest(program_id, milestone_id, evidence_sha256)
+            snapshot_root = self.state_root / ".codex-flow" / "artifacts" / "runtime-evidence" / evidence_sha256
+            verify_runtime_evidence(RuntimeEvidenceSnapshot(manifest, snapshot_root))
+        except (LedgerError, RuntimeEvidenceError, OSError, ValueError) as exc:
+            raise WorktreeError("runtime evidence snapshot failed its pre-acceptance rehash") from exc
 
     def reconcile_control_execution(self, run_id: str, milestone_id: str) -> CandidateRecord:
         """Adopt one already-completed ordinary execution without a provider call."""
@@ -2259,10 +2378,27 @@ class WorkflowHarness:
             bundle = ModelFacingProgramControllerActionBundle.from_json(payload["bundle"])
             graph = self.ledger.program_graph(bundle.program_id)
             for action in bundle.actions:
+                if (
+                    action.kind
+                    in {
+                        ProgramControllerActionKind.START_REVIEWS,
+                        ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                    }
+                    and action.evidence_sha256 is not None
+                ):
+                    if action.milestone_id is None:
+                        raise IpcError("program evidence action is incomplete")
+                    self._verify_program_runtime_evidence(
+                        str(bundle.program_id), action.milestone_id, action.evidence_sha256
+                    )
                 if action.kind not in {
                     ProgramControllerActionKind.PROMOTE_CANDIDATE,
                     ProgramControllerActionKind.INTEGRATE_CANDIDATE,
                 }:
+                    continue
+                if action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE and action.evidence_sha256 is not None:
+                    # Runtime evidence is rehashed above; it has no Git
+                    # candidate for WorktreeManager to inspect.
                     continue
                 if action.milestone_id is None or action.candidate_sha is None:
                     raise IpcError("program candidate action is incomplete")
@@ -4378,6 +4514,88 @@ class WorkflowHarness:
         except (AuthorityUnavailable, WorkflowConfigError, LedgerError, TypeError, ValueError, WorktreeError) as exc:
             self._control_result_issue(row, exc)
 
+    @staticmethod
+    def _runtime_evidence_blocker(
+        gate_id: str,
+        required_action: str,
+        *,
+        terminal_status: str,
+    ) -> TypedBlocker:
+        """Project one harness-observed runtime evidence failure."""
+
+        scope = BlockerScope.CURRENT_PROMOTION if terminal_status == "completed" else BlockerScope.CURRENT_REPAIR
+        return TypedBlocker(
+            gate_id,
+            BlockerKind.EXECUTION,
+            scope,
+            True,
+            required_action,
+        )
+
+    @staticmethod
+    def _runtime_git_head(workspace: Path) -> str:
+        result = subprocess.run(
+            ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        head = result.stdout.strip()
+        if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise WorktreeError("runtime evidence source HEAD is unavailable")
+        return head
+
+    @staticmethod
+    def _runtime_environment_revision(row: Mapping[str, object], workspace: Path, source_head: str) -> str:
+        """Hash declared non-secret target facts without retaining their values."""
+
+        route_raw = row.get("route_json")
+        route: Mapping[str, object] = {}
+        if isinstance(route_raw, str):
+            try:
+                decoded = strict_json_loads(route_raw, max_bytes=1_048_576)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, Mapping):
+                route = decoded
+        facts = {
+            "schema": "codex-flow/runtime-environment/v1",
+            "backend": str(row.get("backend")),
+            "workspace_path": str(workspace),
+            "source_head_sha": source_head,
+            "effective_permission": route.get("effective_permission"),
+            "native_profile_sha256": route.get("native_profile_sha256"),
+            "native_compatibility_sha256": route.get("native_compatibility_sha256"),
+        }
+        encoded = json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _runtime_acceptance_criteria_digest(capsule: ExecutionCapsule) -> str:
+        if capsule.acceptance_criteria_sha256 is not None:
+            return capsule.acceptance_criteria_sha256
+        # Direct low-level graph callers may predate the projection's explicit
+        # criteria digest.  Bind the available controller-owned acceptance
+        # facts rather than inventing a worker assertion.
+        facts = {
+            "acceptance_modes": [mode.value for mode in capsule.acceptance_modes],
+            "prompt": capsule.prompt,
+            "validation": {
+                "argv": list(capsule.validation.argv),
+                "timeout_seconds": capsule.validation.timeout_seconds,
+            },
+        }
+        encoded = json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _runtime_paths_are_allowed(capsule: ExecutionCapsule, paths: tuple[str, ...]) -> bool:
+        declared = tuple(Path(item) for item in capsule.runtime_artifact_paths)
+        return bool(paths) and all(
+            any(Path(path) == root or root in Path(path).parents for root in declared) for path in paths
+        )
+
     def _record_program_queue_result(self, row: Mapping[str, object]) -> None:
         """Translate one already-terminal queue row into one program event."""
 
@@ -4418,6 +4636,137 @@ class WorkflowHarness:
                 ):
                     return
                 graph = self.ledger.program_graph(program_id)
+                node = graph.node(milestone_id)
+                if node.capsule.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+                    # Runtime nodes are never inspected as commit candidates.
+                    # The terminal queue result is still parsed first so the
+                    # raw digest and status remain bound to the worker attempt.
+                    try:
+                        result = ModelFacingResult.from_agent_message(raw)
+                    except (TypeError, ValueError):
+                        result = None
+                    if result is not None and result.status.value != terminal_status:
+                        runtime_blocker = self._runtime_evidence_blocker(
+                            "runtime-result-status",
+                            "Reconcile the terminal result status with its durable queue status.",
+                            terminal_status=terminal_status,
+                        )
+                    else:
+                        runtime_blocker = (
+                            result.blocker
+                            if result is not None
+                            else self._runtime_evidence_blocker(
+                                "runtime-result-malformed",
+                                "Retain the malformed terminal result and inspect the worker result contract.",
+                                terminal_status=terminal_status,
+                            )
+                        )
+                    artifact_paths = result.runtime_artifact_paths if result is not None else None
+                    if result is not None and result.schema_version != 2:
+                        runtime_blocker = self._runtime_evidence_blocker(
+                            "runtime-result-schema",
+                            "Use the registered schema-2 runtime result contract.",
+                            terminal_status=terminal_status,
+                        )
+                    if terminal_status == "completed" and not artifact_paths:
+                        runtime_blocker = self._runtime_evidence_blocker(
+                            "runtime-evidence-missing",
+                            "Retain the terminal failure and publish the required runtime evidence files.",
+                            terminal_status=terminal_status,
+                        )
+                    if artifact_paths is not None and not self._runtime_paths_are_allowed(node.capsule, artifact_paths):
+                        runtime_blocker = self._runtime_evidence_blocker(
+                            "runtime-evidence-allowlist",
+                            "Use only files below the registered runtime evidence roots.",
+                            terminal_status=terminal_status,
+                        )
+                        artifact_paths = None
+                    source_head = self._runtime_git_head(node.workspace_path)
+                    context_value: Mapping[str, object] = {}
+                    action_context = row.get("action_json")
+                    if isinstance(action_context, str):
+                        try:
+                            parsed_context = strict_json_loads(action_context, max_bytes=16_384)
+                        except ValueError:
+                            parsed_context = None
+                        if isinstance(parsed_context, Mapping):
+                            context_value = parsed_context
+                    predecessor = context_value.get("evidence_sha256")
+                    predecessor_sha = predecessor if isinstance(predecessor, str) else None
+                    capsule_json = row.get("capsule_json")
+                    if not isinstance(capsule_json, str):
+                        from .controller import capsule_json as project_capsule_json
+
+                        capsule_json = json.dumps(
+                            project_capsule_json(node.capsule),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        runtime_blocker = self._runtime_evidence_blocker(
+                            "runtime-capsule-identity",
+                            "Retain the terminal result and repair the missing queued capsule identity.",
+                            terminal_status=terminal_status,
+                        )
+                    capsule_digest = hashlib.sha256(capsule_json.encode("utf-8")).hexdigest()
+                    manifest = RuntimeEvidenceManifest(
+                        1,
+                        graph.program_id,
+                        node.milestone_id,
+                        DispatchId(dispatch_id),
+                        int(row.get("generation", 0)),
+                        int(row.get("attempt", 0)),
+                        graph.plan_revision_sha256,
+                        capsule_digest,
+                        source_head,
+                        self._runtime_environment_revision(row, node.workspace_path, source_head),
+                        tuple(node.capsule.validation.argv),
+                        terminal_status,
+                        self._runtime_acceptance_criteria_digest(node.capsule),
+                        (),
+                        predecessor_sha,
+                    )
+                    if artifact_paths:
+                        try:
+                            snapshot = capture_runtime_evidence(
+                                node.workspace_path,
+                                artifact_paths,
+                                max_files=node.capsule.runtime_artifact_max_files or 0,
+                                max_bytes=node.capsule.runtime_artifact_max_bytes or 0,
+                                manifest=manifest,
+                                snapshot_root=self.state_root / ".codex-flow" / "artifacts" / "runtime-evidence",
+                            )
+                            manifest = snapshot.manifest
+                        except RuntimeEvidenceError:
+                            runtime_blocker = self._runtime_evidence_blocker(
+                                "runtime-evidence-integrity",
+                                "Retain the first failure and repair the missing, unsafe, or changing evidence files.",
+                                terminal_status=terminal_status,
+                            )
+                    if runtime_blocker is None:
+                        try:
+                            if self._runtime_git_head(node.workspace_path) != source_head:
+                                runtime_blocker = self._runtime_evidence_blocker(
+                                    "runtime-source-head-changed",
+                                    "Retain the first result and reconcile the runtime checkout identity.",
+                                    terminal_status=terminal_status,
+                                )
+                        except WorktreeError:
+                            runtime_blocker = self._runtime_evidence_blocker(
+                                "runtime-source-head-unavailable",
+                                "Retain the first result and restore a readable runtime checkout identity.",
+                                terminal_status=terminal_status,
+                            )
+                    self.ledger.record_runtime_evidence(
+                        program_id,
+                        milestone_id,
+                        manifest=manifest,
+                        terminal_status=terminal_status,
+                        dispatch_id=dispatch_id,
+                        result_sha256=result_sha256,
+                        blocker=runtime_blocker,
+                    )
+                    return
                 candidate_record: CandidateRecord | None = None
                 blocker: TypedBlocker | None = None
                 predecessor_sha: str | None = None
@@ -4478,14 +4827,21 @@ class WorkflowHarness:
                 result = review_result_from_agent_message(raw)
                 context_raw = row.get("action_json")
                 if not isinstance(context_raw, str):
-                    raise WorktreeError("program review queue lacks candidate context")
+                    raise WorktreeError("program review queue lacks subject context")
                 context = strict_json_loads(context_raw, max_bytes=16_384)
-                if (
-                    not isinstance(context, dict)
-                    or context.get("candidate_sha") != result.reviewed_revision
-                    or context.get("review_role") != str(result.reviewer_role)
+                if not isinstance(context, dict):
+                    raise WorktreeError("program review queue subject context is malformed")
+                expected_subject = (
+                    context.get("candidate_sha")
+                    if isinstance(context.get("candidate_sha"), str)
+                    else f"runtime_evidence:{context.get('evidence_sha256')}"
+                    if isinstance(context.get("evidence_sha256"), str)
+                    else None
+                )
+                if expected_subject != result.reviewed_revision or context.get("review_role") != str(
+                    result.reviewer_role
                 ):
-                    raise WorktreeError("program review result is not bound to its queue context")
+                    raise WorktreeError("program review result is not bound to its subject context")
                 self.ledger.record_program_review(program_id, milestone_id, result)
         except (LedgerError, TypeError, ValueError, WorktreeError) as exc:
             try:

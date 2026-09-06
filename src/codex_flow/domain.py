@@ -3302,13 +3302,14 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
         validate_metadata(node)
         if "oneOf" in node:
             branches = node["oneOf"]
+            structural_union_keys = {"oneOf", "type", "properties", "required"}
             if (
-                set(node) - _SCHEMA_METADATA_KEYS != {"oneOf"}
+                not (set(node) - _SCHEMA_METADATA_KEYS <= structural_union_keys and "oneOf" in node)
                 or not isinstance(branches, list | tuple)
                 # Program controller actions currently have nine closed
                 # discriminated variants; keep the union bounded while
                 # allowing the additive action contract to remain explicit.
-                or not (2 <= len(branches) <= (3 if root else 16))
+                or not (2 <= len(branches) <= (4 if root else 16))
                 or any(not isinstance(branch, Mapping) for branch in branches)
             ):
                 raise ValueError("output schema oneOf must be a single bounded branch authority")
@@ -3419,11 +3420,20 @@ def validate_output_schema(schema: Mapping[str, object]) -> None:
                     is_optional_plugin_capsule = (
                         optional == {"plugin_requirements"}
                         and isinstance(version_property, Mapping)
-                        and version_property.get("const") == 3
+                        and version_property.get("const") in {3, 4}
                         and "local_image_paths" in properties
                     )
+                    is_optional_schema4_capsule = (
+                        optional <= {"plugin_requirements", "local_image_paths"}
+                        and isinstance(version_property, Mapping)
+                        and version_property.get("const") == 4
+                        and "local_image_paths" in properties
+                        and "outcome_kind" in properties
+                    )
                     is_optional_typed_blocker = optional == {"blocker"}
-                    if optional and not (is_optional_plugin_capsule or is_optional_typed_blocker):
+                    if optional and not (
+                        is_optional_plugin_capsule or is_optional_schema4_capsule or is_optional_typed_blocker
+                    ):
                         raise ValueError("record schemas must require every declared property")
                     if len(required) != len(set(required)):
                         raise ValueError("record schema required names must be unique")
@@ -3696,6 +3706,295 @@ def _relative_paths(values: tuple[str, ...], *, label: str) -> None:
         seen.add(value)
 
 
+class ProgramOutcomeKind(str, Enum):
+    """The observable subject produced by a program node."""
+
+    COMMIT = "commit"
+    RUNTIME_EVIDENCE = "runtime_evidence"
+
+
+class ProgramIntegrationMode(str, Enum):
+    """How a node's outcome reaches the program trunk."""
+
+    GIT = "git"
+    ALREADY_INTEGRATED = "already_integrated"
+    NO_INTEGRATION = "no_integration"
+
+
+def validate_program_outcome_pair(
+    outcome_kind: ProgramOutcomeKind | str, integration_mode: ProgramIntegrationMode | str
+) -> tuple[ProgramOutcomeKind, ProgramIntegrationMode]:
+    """Normalize and validate the closed outcome/integration product."""
+
+    try:
+        outcome = outcome_kind if isinstance(outcome_kind, ProgramOutcomeKind) else ProgramOutcomeKind(outcome_kind)
+        integration = (
+            integration_mode
+            if isinstance(integration_mode, ProgramIntegrationMode)
+            else ProgramIntegrationMode(integration_mode)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("program outcome or integration mode is unsupported") from exc
+    valid = {
+        (ProgramOutcomeKind.COMMIT, ProgramIntegrationMode.GIT),
+        (ProgramOutcomeKind.COMMIT, ProgramIntegrationMode.ALREADY_INTEGRATED),
+        (ProgramOutcomeKind.RUNTIME_EVIDENCE, ProgramIntegrationMode.NO_INTEGRATION),
+    }
+    if (outcome, integration) not in valid:
+        raise ValueError("program outcome and integration mode are incompatible")
+    return outcome, integration
+
+
+def _digest(value: str, *, label: str, length: int) -> str:
+    if not isinstance(value, str) or re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-{'256' if length == 64 else '1'}")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEvidenceFile:
+    """One immutable, regular-file member of a runtime evidence snapshot."""
+
+    relative_path: str
+    sha256: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        _relative_paths((self.relative_path,), label="runtime evidence file path")
+        _digest(self.sha256, label="runtime evidence file digest", length=64)
+        if isinstance(self.size_bytes, bool) or not isinstance(self.size_bytes, int) or self.size_bytes < 0:
+            raise ValueError("runtime evidence file size must be a non-negative integer")
+
+    def to_json(self) -> JsonObject:
+        return {"relative_path": self.relative_path, "sha256": self.sha256, "size_bytes": self.size_bytes}
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> RuntimeEvidenceFile:
+        if set(value) != {"relative_path", "sha256", "size_bytes"}:
+            raise ValueError("runtime evidence file shape is unsupported")
+        return cls(value["relative_path"], value["sha256"], value["size_bytes"])  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEvidenceManifest:
+    """Controller-authored identity and byte manifest for one runtime attempt."""
+
+    schema_version: int
+    program_id: ProgramId
+    milestone_id: MilestoneId
+    dispatch_id: DispatchId
+    generation: int
+    attempt: int
+    plan_revision_sha256: str
+    capsule_sha256: str
+    source_head_sha: str
+    environment_revision: str
+    command: tuple[str, ...]
+    terminal_outcome: str
+    acceptance_criteria_sha256: str
+    files: tuple[RuntimeEvidenceFile, ...]
+    predecessor_evidence_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.schema_version, bool) or self.schema_version != 1:
+            raise ValueError("runtime evidence manifest schema version is unsupported")
+        if not isinstance(self.program_id, ProgramId):
+            object.__setattr__(self, "program_id", ProgramId(self.program_id))
+        if not isinstance(self.milestone_id, MilestoneId):
+            object.__setattr__(self, "milestone_id", MilestoneId(self.milestone_id))
+        if not isinstance(self.dispatch_id, DispatchId):
+            object.__setattr__(self, "dispatch_id", DispatchId(self.dispatch_id))
+        for label, value in (("generation", self.generation), ("attempt", self.attempt)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > 128:
+                raise ValueError(f"runtime evidence {label} is invalid")
+        for label, value in (
+            ("plan revision digest", self.plan_revision_sha256),
+            ("capsule digest", self.capsule_sha256),
+            ("environment revision", self.environment_revision),
+            ("acceptance criteria digest", self.acceptance_criteria_sha256),
+        ):
+            _digest(value, label=label, length=64)
+        _digest(self.source_head_sha, label="runtime evidence source HEAD", length=40)
+        for label, value, limit in (("terminal outcome", self.terminal_outcome, 128),):
+            if not isinstance(value, str) or not value.strip() or len(value) > limit or "\x00" in value:
+                raise ValueError(f"runtime evidence {label} is invalid")
+        command = tuple(self.command)
+        if (
+            not command
+            or len(command) > 128
+            or any(not isinstance(item, str) or not item or len(item) > 4096 or "\x00" in item for item in command)
+        ):
+            raise ValueError("runtime evidence command is invalid")
+        object.__setattr__(self, "command", command)
+        files = tuple(self.files)
+        if len(files) > 128 or any(not isinstance(item, RuntimeEvidenceFile) for item in files):
+            raise ValueError("runtime evidence files are invalid")
+        if tuple(sorted(item.relative_path for item in files)) != tuple(item.relative_path for item in files):
+            raise ValueError("runtime evidence files must be lexically ordered")
+        if len({item.relative_path for item in files}) != len(files):
+            raise ValueError("runtime evidence files must be unique")
+        object.__setattr__(self, "files", files)
+        if self.predecessor_evidence_sha256 is not None:
+            _digest(self.predecessor_evidence_sha256, label="predecessor evidence digest", length=64)
+
+    def to_json(self) -> JsonObject:
+        return {
+            "schema_version": self.schema_version,
+            "program_id": str(self.program_id),
+            "milestone_id": str(self.milestone_id),
+            "dispatch_id": str(self.dispatch_id),
+            "generation": self.generation,
+            "attempt": self.attempt,
+            "plan_revision_sha256": self.plan_revision_sha256,
+            "capsule_sha256": self.capsule_sha256,
+            "source_head_sha": self.source_head_sha,
+            "environment_revision": self.environment_revision,
+            "command": list(self.command),
+            "terminal_outcome": self.terminal_outcome,
+            "acceptance_criteria_sha256": self.acceptance_criteria_sha256,
+            "files": [item.to_json() for item in self.files],
+            "predecessor_evidence_sha256": self.predecessor_evidence_sha256,
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.to_json(), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> RuntimeEvidenceManifest:
+        expected = {
+            "schema_version",
+            "program_id",
+            "milestone_id",
+            "dispatch_id",
+            "generation",
+            "attempt",
+            "plan_revision_sha256",
+            "capsule_sha256",
+            "source_head_sha",
+            "environment_revision",
+            "command",
+            "terminal_outcome",
+            "acceptance_criteria_sha256",
+            "files",
+            "predecessor_evidence_sha256",
+        }
+        if set(value) != expected:
+            raise ValueError("runtime evidence manifest shape is unsupported")
+        command = value["command"]
+        files = value["files"]
+        if not isinstance(command, list) or any(not isinstance(item, str) for item in command):
+            raise ValueError("runtime evidence command is malformed")
+        if not isinstance(files, list) or any(not isinstance(item, Mapping) for item in files):
+            raise ValueError("runtime evidence files are malformed")
+        return cls(
+            value["schema_version"],
+            value["program_id"],
+            value["milestone_id"],
+            value["dispatch_id"],
+            value["generation"],
+            value["attempt"],
+            value["plan_revision_sha256"],
+            value["capsule_sha256"],
+            value["source_head_sha"],
+            value["environment_revision"],
+            tuple(command),
+            value["terminal_outcome"],
+            value["acceptance_criteria_sha256"],
+            tuple(RuntimeEvidenceFile.from_json(item) for item in files),
+            value["predecessor_evidence_sha256"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewSubject:
+    """The sole identity accepted by review and promotion lifecycle code."""
+
+    kind: ProgramOutcomeKind
+    digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ProgramOutcomeKind):
+            object.__setattr__(self, "kind", ProgramOutcomeKind(self.kind))
+        _digest(self.digest, label="review subject digest", length=40 if self.kind is ProgramOutcomeKind.COMMIT else 64)
+
+    @property
+    def wire_value(self) -> str:
+        return self.digest if self.kind is ProgramOutcomeKind.COMMIT else f"runtime_evidence:{self.digest}"
+
+    def to_json(self) -> JsonObject:
+        return {"kind": self.kind.value, "digest": self.digest}
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> ReviewSubject:
+        if set(value) != {"kind", "digest"}:
+            raise ValueError("review subject shape is unsupported")
+        return cls(value["kind"], value["digest"])  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramApprovalGate:
+    """Closed, inert approval intent retained in a program graph."""
+
+    gate_id: str
+    prerequisite_milestone_ids: tuple[MilestoneId, ...]
+    protected_milestone_ids: tuple[MilestoneId, ...]
+    scope_description: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.gate_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", self.gate_id) is None:
+            raise ValueError("program approval gate id is invalid")
+        for label, values in (
+            ("prerequisite", self.prerequisite_milestone_ids),
+            ("protected", self.protected_milestone_ids),
+        ):
+            converted = tuple(item if isinstance(item, MilestoneId) else MilestoneId(item) for item in values)
+            if not converted or len(converted) > 128 or len(converted) != len(set(converted)):
+                raise ValueError(f"program approval gate {label} milestones are invalid")
+            if tuple(sorted(converted, key=str)) != converted:
+                raise ValueError(f"program approval gate {label} milestones must be sorted")
+            object.__setattr__(self, f"{label}_milestone_ids", converted)
+        if set(self.prerequisite_milestone_ids) & set(self.protected_milestone_ids):
+            raise ValueError("program approval gate prerequisite and protected milestones overlap")
+        if (
+            not isinstance(self.scope_description, str)
+            or not self.scope_description.strip()
+            or len(self.scope_description) > 4096
+        ):
+            raise ValueError("program approval gate scope description is invalid")
+
+    def to_json(self) -> JsonObject:
+        return {
+            "gate_id": self.gate_id,
+            "prerequisite_milestone_ids": [str(item) for item in self.prerequisite_milestone_ids],
+            "protected_milestone_ids": [str(item) for item in self.protected_milestone_ids],
+            "scope_description": self.scope_description,
+        }
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> ProgramApprovalGate:
+        expected = {"gate_id", "prerequisite_milestone_ids", "protected_milestone_ids", "scope_description"}
+        if set(value) != expected:
+            raise ValueError("program approval gate shape is unsupported")
+        prerequisites = value["prerequisite_milestone_ids"]
+        protected = value["protected_milestone_ids"]
+        if not isinstance(prerequisites, list) or any(not isinstance(item, str) for item in prerequisites):
+            raise ValueError("program approval gate prerequisite milestones are malformed")
+        if not isinstance(protected, list) or any(not isinstance(item, str) for item in protected):
+            raise ValueError("program approval gate protected milestones are malformed")
+        return cls(
+            value["gate_id"],
+            tuple(MilestoneId(item) for item in prerequisites),
+            tuple(MilestoneId(item) for item in protected),
+            value["scope_description"],
+        )  # type: ignore[arg-type]
+
+
 MAX_LOCAL_IMAGE_COUNT = 8
 MAX_LOCAL_IMAGE_PATH_BYTES = 4_096
 MAX_LOCAL_IMAGE_BYTES = 20 * 1_048_576
@@ -3817,6 +4116,13 @@ class ExecutionCapsule:
     acceptance_modes: tuple[AcceptanceMode, ...] = (AcceptanceMode.OBJECTIVE,)
     plugin_requirements: tuple[JsonObject, ...] = ()
     local_image_paths: tuple[str, ...] = ()
+    outcome_kind: ProgramOutcomeKind = ProgramOutcomeKind.COMMIT
+    integration_mode: ProgramIntegrationMode = ProgramIntegrationMode.GIT
+    runtime_artifact_paths: tuple[str, ...] = ()
+    runtime_artifact_max_files: int | None = None
+    runtime_artifact_max_bytes: int | None = None
+    approval_gates: tuple[ProgramApprovalGate, ...] = ()
+    acceptance_criteria_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.capsule_version, bool) or not isinstance(self.capsule_version, int):
@@ -3877,6 +4183,38 @@ class ExecutionCapsule:
             raise ValueError("execution capsule version 3 requires local images")
         _relative_paths(image_paths, label="execution local image paths")
         object.__setattr__(self, "local_image_paths", image_paths)
+        outcome, integration = validate_program_outcome_pair(self.outcome_kind, self.integration_mode)
+        object.__setattr__(self, "outcome_kind", outcome)
+        object.__setattr__(self, "integration_mode", integration)
+        artifact_paths = tuple(self.runtime_artifact_paths)
+        if outcome is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+            if not artifact_paths:
+                raise ValueError("runtime evidence capsules require bounded artifact paths")
+            if self.runtime_artifact_max_files is None or self.runtime_artifact_max_bytes is None:
+                raise ValueError("runtime evidence capsules require artifact limits")
+            for label, value in (
+                ("runtime artifact max files", self.runtime_artifact_max_files),
+                ("runtime artifact max bytes", self.runtime_artifact_max_bytes),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError(f"{label} must be a positive integer")
+        else:
+            if (
+                artifact_paths
+                or self.runtime_artifact_max_files is not None
+                or self.runtime_artifact_max_bytes is not None
+            ):
+                raise ValueError("commit capsules cannot carry runtime artifact limits or paths")
+        _relative_paths(artifact_paths, label="execution runtime artifact paths")
+        object.__setattr__(self, "runtime_artifact_paths", artifact_paths)
+        gates = tuple(self.approval_gates)
+        if len(gates) > 32 or any(not isinstance(gate, ProgramApprovalGate) for gate in gates):
+            raise ValueError("execution approval gates are invalid")
+        if len({gate.gate_id for gate in gates}) != len(gates):
+            raise ValueError("execution approval gates must be unique")
+        object.__setattr__(self, "approval_gates", gates)
+        if self.acceptance_criteria_sha256 is not None:
+            _digest(self.acceptance_criteria_sha256, label="acceptance criteria digest", length=64)
 
 
 class ProgramId(_ValidatedIdentifier):
@@ -3927,6 +4265,8 @@ class ProgramNodeSpec:
     milestone_id: MilestoneId
     capsule: ExecutionCapsule
     dependencies: tuple[MilestoneId, ...] = ()
+    review_base_sha: str | None = None
+    adopted_candidate_sha: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.milestone_id, MilestoneId):
@@ -3939,6 +4279,15 @@ class ProgramNodeSpec:
         if self.milestone_id in dependencies or len(dependencies) != len(set(dependencies)):
             raise ValueError("program node dependencies must be unique and acyclic at the node boundary")
         object.__setattr__(self, "dependencies", dependencies)
+        if (self.review_base_sha is None) != (self.adopted_candidate_sha is None):
+            raise ValueError("adopted program nodes require both review base and candidate")
+        if self.review_base_sha is not None:
+            _digest(self.review_base_sha, label="program review base", length=40)
+            _digest(self.adopted_candidate_sha or "", label="adopted program candidate", length=40)
+            if self.capsule.integration_mode is not ProgramIntegrationMode.ALREADY_INTEGRATED:
+                raise ValueError("review base and adopted candidate are only valid for already-integrated nodes")
+        elif self.capsule.integration_mode is ProgramIntegrationMode.ALREADY_INTEGRATED:
+            raise ValueError("already-integrated nodes require an explicit review base and candidate")
 
     @property
     def mutable_surfaces(self) -> tuple[str, ...]:
@@ -4013,6 +4362,19 @@ class ProgramGraph:
                     pending.extend(graph[current])
             return False
 
+        gates = tuple(gate for node in nodes for gate in node.capsule.approval_gates)
+        if len({gate.gate_id for gate in gates}) != len(gates):
+            raise ValueError("program approval gate ids must be unique")
+        for gate in gates:
+            if not set(gate.prerequisite_milestone_ids) <= known or not set(gate.protected_milestone_ids) <= known:
+                raise ValueError("program approval gate references an unknown milestone")
+            if any(
+                protected == prerequisite or depends_on(protected, prerequisite)
+                for protected in gate.protected_milestone_ids
+                for prerequisite in gate.prerequisite_milestone_ids
+            ):
+                raise ValueError("program approval gate creates a dependency bypass")
+
         for node in nodes:
             for surface in node.mutable_surfaces:
                 owners = owned_paths.setdefault(surface, [])
@@ -4049,6 +4411,11 @@ class ProgramNodeStatus:
     integrated: bool = False
     candidate_disposition: CandidateDisposition | None = None
     blocker: TypedBlocker | None = None
+    outcome_kind: ProgramOutcomeKind = ProgramOutcomeKind.COMMIT
+    integration_mode: ProgramIntegrationMode = ProgramIntegrationMode.GIT
+    evidence_sha256: str | None = None
+    closure_satisfied: bool = False
+    unsatisfied_gate_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.milestone_id, MilestoneId):
@@ -4072,10 +4439,87 @@ class ProgramNodeStatus:
             object.__setattr__(self, "candidate_disposition", CandidateDisposition(self.candidate_disposition))
         if self.blocker is not None and not isinstance(self.blocker, TypedBlocker):
             raise ValueError("program node blocker is not typed")
+        outcome, integration = validate_program_outcome_pair(self.outcome_kind, self.integration_mode)
+        object.__setattr__(self, "outcome_kind", outcome)
+        object.__setattr__(self, "integration_mode", integration)
+        if self.evidence_sha256 is not None:
+            _digest(self.evidence_sha256, label="program evidence subject", length=64)
+        if outcome is ProgramOutcomeKind.RUNTIME_EVIDENCE and self.candidate_sha is not None:
+            raise ValueError("runtime evidence status cannot carry a commit candidate")
+        if outcome is ProgramOutcomeKind.RUNTIME_EVIDENCE and self.integrated:
+            raise ValueError("runtime evidence status cannot be integrated")
+        if outcome is ProgramOutcomeKind.COMMIT and self.evidence_sha256 is not None:
+            raise ValueError("commit status cannot carry an evidence subject")
+        if not isinstance(self.closure_satisfied, bool):
+            raise ValueError("program node closure state is invalid")
+        gate_ids = tuple(self.unsatisfied_gate_ids)
+        if (
+            len(gate_ids) > 128
+            or len(gate_ids) != len(set(gate_ids))
+            or any(not isinstance(item, str) or not item.strip() for item in gate_ids)
+        ):
+            raise ValueError("program node unsatisfied gates are invalid")
+        object.__setattr__(self, "unsatisfied_gate_ids", tuple(sorted(gate_ids)))
 
     @property
     def ready(self) -> bool:
-        return self.state == WorkflowState.PLANNED.value and not self.integrated
+        return (
+            self.state == WorkflowState.PLANNED.value and not self.closure_satisfied and not self.unsatisfied_gate_ids
+        )
+
+
+def program_node_closure_satisfied(
+    node_or_outcome: ProgramNodeStatus | ProgramOutcomeKind | str,
+    integration_mode: ProgramIntegrationMode | str | None = None,
+    *,
+    candidate_sha: str | None = None,
+    evidence_sha256: str | None = None,
+    reviews_accepted: bool = False,
+    integrated: bool = False,
+    adopted: bool = False,
+    blocker: TypedBlocker | None = None,
+) -> bool:
+    """Pure closure predicate shared by status, readiness and completion.
+
+    A status object is preferred by production callers.  The keyword form is
+    intentionally small for boundary tests and makes the three valid product
+    pairs explicit without introducing another status family.
+    """
+
+    if isinstance(node_or_outcome, ProgramNodeStatus):
+        node = node_or_outcome
+        if node.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+            return (
+                node.integration_mode is ProgramIntegrationMode.NO_INTEGRATION
+                and node.evidence_sha256 is not None
+                and not node.integrated
+                and node.blocker is None
+                and node.closure_satisfied
+            )
+        return (
+            node.candidate_sha is not None
+            and node.blocker is None
+            and node.closure_satisfied
+            and (
+                (node.integration_mode is ProgramIntegrationMode.GIT and node.integrated)
+                or (node.integration_mode is ProgramIntegrationMode.ALREADY_INTEGRATED and node.integrated)
+            )
+        )
+    if integration_mode is None:
+        raise ValueError("integration mode is required for a raw closure predicate")
+    outcome, integration = validate_program_outcome_pair(node_or_outcome, integration_mode)
+    if blocker is not None or not reviews_accepted:
+        return False
+    if outcome is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+        return integration is ProgramIntegrationMode.NO_INTEGRATION and evidence_sha256 is not None and not integrated
+    return (
+        candidate_sha is not None
+        and integrated
+        and (
+            integration is ProgramIntegrationMode.GIT
+            or (integration is ProgramIntegrationMode.ALREADY_INTEGRATED and adopted)
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -4107,10 +4551,10 @@ class ProgramStatus:
 
     @property
     def ready_milestones(self) -> tuple[MilestoneId, ...]:
-        integrated = {node.milestone_id for node in self.nodes if node.integrated}
+        closed = {node.milestone_id for node in self.nodes if node.closure_satisfied}
         ready: list[MilestoneId] = []
         for node in self.nodes:
-            if not node.ready or not all(dependency in integrated for dependency in node.dependencies):
+            if not node.ready or not all(dependency in closed for dependency in node.dependencies):
                 continue
             if any(
                 source.blocker is not None
@@ -4145,6 +4589,11 @@ class ProgramControllerNodeContext:
     ready: bool
     candidate_disposition: CandidateDisposition | None = None
     blocker: TypedBlocker | None = None
+    outcome_kind: ProgramOutcomeKind = ProgramOutcomeKind.COMMIT
+    integration_mode: ProgramIntegrationMode = ProgramIntegrationMode.GIT
+    evidence_sha256: str | None = None
+    closure_satisfied: bool = False
+    unsatisfied_gate_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.milestone_id, MilestoneId):
@@ -4187,6 +4636,25 @@ class ProgramControllerNodeContext:
             object.__setattr__(self, "candidate_disposition", CandidateDisposition(self.candidate_disposition))
         if self.blocker is not None and not isinstance(self.blocker, TypedBlocker):
             raise ValueError("program node context blocker is not typed")
+        outcome, integration = validate_program_outcome_pair(self.outcome_kind, self.integration_mode)
+        object.__setattr__(self, "outcome_kind", outcome)
+        object.__setattr__(self, "integration_mode", integration)
+        if self.evidence_sha256 is not None:
+            _digest(self.evidence_sha256, label="program node context evidence", length=64)
+        if outcome is ProgramOutcomeKind.RUNTIME_EVIDENCE and self.candidate_sha is not None:
+            raise ValueError("runtime evidence context cannot carry a commit candidate")
+        if outcome is ProgramOutcomeKind.COMMIT and self.evidence_sha256 is not None:
+            raise ValueError("commit context cannot carry an evidence subject")
+        if not isinstance(self.closure_satisfied, bool):
+            raise ValueError("program node context closure is invalid")
+        gate_ids = tuple(self.unsatisfied_gate_ids)
+        if (
+            len(gate_ids) > 128
+            or len(gate_ids) != len(set(gate_ids))
+            or any(not isinstance(item, str) or not item.strip() for item in gate_ids)
+        ):
+            raise ValueError("program node context unsatisfied gates are invalid")
+        object.__setattr__(self, "unsatisfied_gate_ids", tuple(sorted(gate_ids)))
 
     def to_json(self) -> JsonObject:
         return {
@@ -4203,6 +4671,11 @@ class ProgramControllerNodeContext:
             "ready": self.ready,
             "candidate_disposition": self.candidate_disposition.value if self.candidate_disposition else None,
             "blocker": self.blocker.to_json() if self.blocker else None,
+            "outcome_kind": self.outcome_kind.value,
+            "integration_mode": self.integration_mode.value,
+            "evidence_sha256": self.evidence_sha256,
+            "closure_satisfied": self.closure_satisfied,
+            "unsatisfied_gate_ids": list(self.unsatisfied_gate_ids),
         }
 
     @classmethod
@@ -4221,8 +4694,22 @@ class ProgramControllerNodeContext:
             "ready",
             "candidate_disposition",
             "blocker",
+            "outcome_kind",
+            "integration_mode",
+            "evidence_sha256",
+            "closure_satisfied",
+            "unsatisfied_gate_ids",
         }
-        if set(value) not in (expected - {"candidate_disposition", "blocker"}, expected):
+        legacy_expected = expected - {
+            "candidate_disposition",
+            "blocker",
+            "outcome_kind",
+            "integration_mode",
+            "evidence_sha256",
+            "closure_satisfied",
+            "unsatisfied_gate_ids",
+        }
+        if set(value) not in (legacy_expected, expected - {"candidate_disposition", "blocker"}, expected):
             raise ValueError("program node context shape is unsupported")
         arrays = {
             name: value[name]
@@ -4255,6 +4742,11 @@ class ProgramControllerNodeContext:
             if value.get("candidate_disposition") is not None
             else None,
             TypedBlocker.from_json(value["blocker"]) if isinstance(value.get("blocker"), Mapping) else None,
+            ProgramOutcomeKind(value.get("outcome_kind", ProgramOutcomeKind.COMMIT.value)),
+            ProgramIntegrationMode(value.get("integration_mode", ProgramIntegrationMode.GIT.value)),
+            value.get("evidence_sha256"),
+            value.get("closure_satisfied", False),
+            tuple(value.get("unsatisfied_gate_ids", [])),
         )
 
 
@@ -4413,6 +4905,13 @@ def canonicalize_execution_capsule(capsule: ExecutionCapsule) -> ExecutionCapsul
         tuple(capsule.acceptance_modes),
         tuple(capsule.plugin_requirements),
         tuple(capsule.local_image_paths),
+        capsule.outcome_kind,
+        capsule.integration_mode,
+        tuple(capsule.runtime_artifact_paths),
+        capsule.runtime_artifact_max_files,
+        capsule.runtime_artifact_max_bytes,
+        tuple(capsule.approval_gates),
+        capsule.acceptance_criteria_sha256,
     )
 
 

@@ -13,6 +13,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 from .domain import (
     MAX_LOCAL_IMAGE_COUNT,
@@ -27,9 +28,12 @@ from .domain import (
     JsonObject,
     LocalImageInput,
     MilestoneId,
+    ProgramApprovalGate,
     ProgramControllerActionKind,
     ProgramEventKind,
     ProgramId,
+    ProgramIntegrationMode,
+    ProgramOutcomeKind,
     RetryBudgetChange,
     ReviewFinding,
     ReviewResult,
@@ -338,12 +342,18 @@ class ModelFacingCapsule:
     prompt_budget_bytes: int = field(default=12_000, compare=False)
     plugin_requirements: tuple[PluginRequirement, ...] = field(default=(), compare=True)
     local_image_paths: tuple[str, ...] = field(default=(), compare=True)
+    outcome_kind: ProgramOutcomeKind = ProgramOutcomeKind.COMMIT
+    integration_mode: ProgramIntegrationMode = ProgramIntegrationMode.GIT
+    runtime_artifact_paths: tuple[str, ...] = ()
+    runtime_artifact_max_files: int | None = None
+    runtime_artifact_max_bytes: int | None = None
+    approval_gates: tuple[ProgramApprovalGate, ...] = ()
 
     def __post_init__(self) -> None:
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
-            or self.schema_version not in {1, 2, 3}
+            or self.schema_version not in {1, 2, 3, 4}
         ):
             raise ValueError("unsupported model-facing capsule schema version")
         _text(self.objective, label="capsule objective")
@@ -409,6 +419,67 @@ class ModelFacingCapsule:
             raise ValueError("capsule local image paths are malformed") from exc
         object.__setattr__(self, "plugin_requirements", requirements)
         object.__setattr__(self, "local_image_paths", image_paths)
+        try:
+            outcome = (
+                self.outcome_kind
+                if isinstance(self.outcome_kind, ProgramOutcomeKind)
+                else ProgramOutcomeKind(self.outcome_kind)
+            )
+            integration = (
+                self.integration_mode
+                if isinstance(self.integration_mode, ProgramIntegrationMode)
+                else ProgramIntegrationMode(self.integration_mode)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("capsule outcome or integration mode is unsupported") from exc
+        valid_pairs = {
+            (ProgramOutcomeKind.COMMIT, ProgramIntegrationMode.GIT),
+            (ProgramOutcomeKind.COMMIT, ProgramIntegrationMode.ALREADY_INTEGRATED),
+            (ProgramOutcomeKind.RUNTIME_EVIDENCE, ProgramIntegrationMode.NO_INTEGRATION),
+        }
+        if (outcome, integration) not in valid_pairs:
+            raise ValueError("capsule outcome and integration mode are incompatible")
+        artifact_paths = tuple(self.runtime_artifact_paths)
+        if any(
+            not isinstance(item, str)
+            or not item
+            or item == "."
+            or Path(item).is_absolute()
+            or ".." in Path(item).parts
+            or Path(item).as_posix() != item
+            for item in artifact_paths
+        ):
+            raise ValueError("capsule runtime artifact paths must be repository-relative")
+        if len(artifact_paths) > _MAX_ITEMS or len(set(artifact_paths)) != len(artifact_paths):
+            raise ValueError("capsule runtime artifact paths must be unique and bounded")
+        if outcome is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+            if not artifact_paths or self.runtime_artifact_max_files is None or self.runtime_artifact_max_bytes is None:
+                raise ValueError("runtime evidence capsules require artifact paths and positive limits")
+            if any(
+                isinstance(item, bool) or not isinstance(item, int) or item <= 0
+                for item in (self.runtime_artifact_max_files, self.runtime_artifact_max_bytes)
+            ):
+                raise ValueError("runtime evidence artifact limits must be positive integers")
+        elif (
+            artifact_paths or self.runtime_artifact_max_files is not None or self.runtime_artifact_max_bytes is not None
+        ):
+            raise ValueError("commit capsules cannot carry runtime artifact fields")
+        gates = tuple(self.approval_gates)
+        if len(gates) > 32 or any(not isinstance(item, ProgramApprovalGate) for item in gates):
+            raise ValueError("capsule approval gates must use bounded typed records")
+        if len({item.gate_id for item in gates}) != len(gates):
+            raise ValueError("capsule approval gate ids must be unique")
+        if self.schema_version != 4 and (
+            outcome is not ProgramOutcomeKind.COMMIT
+            or integration is not ProgramIntegrationMode.GIT
+            or artifact_paths
+            or gates
+        ):
+            raise ValueError("runtime outcome fields require capsule schema version 4")
+        object.__setattr__(self, "outcome_kind", outcome)
+        object.__setattr__(self, "integration_mode", integration)
+        object.__setattr__(self, "runtime_artifact_paths", artifact_paths)
+        object.__setattr__(self, "approval_gates", gates)
 
     def to_json(self) -> JsonObject:
         """Return the controller's detached JSON projection."""
@@ -430,6 +501,21 @@ class ModelFacingCapsule:
             value["plugin_requirements"] = [item.to_json() for item in self.plugin_requirements]
         if self.schema_version == 3:
             value["local_image_paths"] = list(self.local_image_paths)
+        if self.schema_version == 4:
+            value.update(
+                {
+                    "outcome_kind": self.outcome_kind.value,
+                    "integration_mode": self.integration_mode.value,
+                    "runtime_artifact_paths": list(self.runtime_artifact_paths),
+                    "runtime_artifact_max_files": self.runtime_artifact_max_files,
+                    "runtime_artifact_max_bytes": self.runtime_artifact_max_bytes,
+                    "approval_gates": [item.to_json() for item in self.approval_gates],
+                }
+            )
+            if self.plugin_requirements:
+                value["plugin_requirements"] = [item.to_json() for item in self.plugin_requirements]
+            if self.local_image_paths:
+                value["local_image_paths"] = list(self.local_image_paths)
         return value
 
     @classmethod
@@ -447,16 +533,29 @@ class ModelFacingCapsule:
             "recovery_policy",
         }
         raw_version = value.get("schema_version")
-        if isinstance(raw_version, bool) or not isinstance(raw_version, int) or raw_version not in {1, 2, 3}:
+        if isinstance(raw_version, bool) or not isinstance(raw_version, int) or raw_version not in {1, 2, 3, 4}:
             raise ValueError("model-facing capsule schema_version is unsupported")
         if raw_version == 1:
             accepted = expected
         elif raw_version == 2:
             accepted = expected | {"plugin_requirements"}
-        else:
+        elif raw_version == 3:
             accepted = expected | {"local_image_paths"}
             if "plugin_requirements" in value:
                 accepted.add("plugin_requirements")
+        else:
+            accepted = expected | {
+                "outcome_kind",
+                "integration_mode",
+                "runtime_artifact_paths",
+                "runtime_artifact_max_files",
+                "runtime_artifact_max_bytes",
+                "approval_gates",
+            }
+            if "plugin_requirements" in value:
+                accepted.add("plugin_requirements")
+            if "local_image_paths" in value:
+                accepted.add("local_image_paths")
         if set(value) != accepted:
             raise ValueError("model-facing capsule keys do not match the selected schema version")
 
@@ -501,6 +600,14 @@ class ModelFacingCapsule:
         raw_images = value.get("local_image_paths", [])
         if not isinstance(raw_images, list) or any(not isinstance(item, str) for item in raw_images):
             raise ValueError("capsule local_image_paths must be an array of strings")
+        raw_outcome = value.get("outcome_kind", ProgramOutcomeKind.COMMIT.value)
+        raw_integration = value.get("integration_mode", ProgramIntegrationMode.GIT.value)
+        raw_artifacts = value.get("runtime_artifact_paths", [])
+        raw_gates = value.get("approval_gates", [])
+        if not isinstance(raw_artifacts, list) or any(not isinstance(item, str) for item in raw_artifacts):
+            raise ValueError("capsule runtime_artifact_paths must be an array of strings")
+        if not isinstance(raw_gates, list) or any(not isinstance(item, Mapping) for item in raw_gates):
+            raise ValueError("capsule approval_gates must be an array of objects")
         return cls(
             version,
             objective,
@@ -515,6 +622,12 @@ class ModelFacingCapsule:
             _MAX_AGENT_MESSAGE_BYTES,
             requirements,
             tuple(raw_images),
+            ProgramOutcomeKind(raw_outcome),
+            ProgramIntegrationMode(raw_integration),
+            tuple(raw_artifacts),
+            value.get("runtime_artifact_max_files"),  # type: ignore[arg-type]
+            value.get("runtime_artifact_max_bytes"),  # type: ignore[arg-type]
+            tuple(ProgramApprovalGate.from_json(item) for item in raw_gates),
         )
 
 
@@ -545,12 +658,13 @@ class ModelFacingResult:
     durable_status: str
     next_action: str | None = None
     blocker: TypedBlocker | None = None
+    runtime_artifact_paths: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
-            or self.schema_version != 1
+            or self.schema_version not in {1, 2}
         ):
             raise ValueError("unsupported model-facing result schema version")
         if not isinstance(self.status, ModelResultStatus):
@@ -566,9 +680,29 @@ class ModelFacingResult:
         if len(validations) > _MAX_ITEMS or any(not isinstance(item, ModelValidation) for item in validations):
             raise ValueError("result validations must use ModelValidation records")
         object.__setattr__(self, "validations", validations)
+        if self.schema_version == 1 and self.runtime_artifact_paths is not None:
+            raise ValueError("result schema version 1 cannot carry runtime artifact paths")
+        if self.runtime_artifact_paths is not None:
+            paths = tuple(self.runtime_artifact_paths)
+            if (
+                not paths
+                or len(paths) > _MAX_ITEMS
+                or len(paths) != len(set(paths))
+                or any(
+                    not isinstance(item, str)
+                    or not item
+                    or item == "."
+                    or Path(item).is_absolute()
+                    or ".." in Path(item).parts
+                    or Path(item).as_posix() != item
+                    for item in paths
+                )
+            ):
+                raise ValueError("result runtime artifact paths are invalid")
+            object.__setattr__(self, "runtime_artifact_paths", paths)
 
     def to_json(self) -> JsonObject:
-        return {
+        value: JsonObject = {
             "schema_version": self.schema_version,
             "status": self.status.value,
             "summary": self.summary,
@@ -580,6 +714,11 @@ class ModelFacingResult:
             "next_action": self.next_action,
             "blocker": self.blocker.to_json() if self.blocker is not None else None,
         }
+        if self.schema_version == 2:
+            value["runtime_artifact_paths"] = (
+                list(self.runtime_artifact_paths) if self.runtime_artifact_paths is not None else None
+            )
+        return value
 
     @classmethod
     def from_json(cls, value: Mapping[str, object]) -> ModelFacingResult:
@@ -592,7 +731,14 @@ class ModelFacingResult:
             "durable_status",
             "next_action",
         }
-        if set(value) not in (expected, expected | {"blocker"}):
+        raw_version = value.get("schema_version")
+        if raw_version == 1:
+            accepted_shapes = (expected, expected | {"blocker"})
+        elif raw_version == 2:
+            accepted_shapes = (expected | {"runtime_artifact_paths"}, expected | {"blocker", "runtime_artifact_paths"})
+        else:
+            accepted_shapes = ()
+        if set(value) not in accepted_shapes:
             raise ValueError(f"model-facing result keys must be exactly {sorted(expected)!r}")
         raw_validations = value["validations"]
         if not isinstance(raw_validations, list):
@@ -622,6 +768,11 @@ class ModelFacingResult:
         raw_blocker = value.get("blocker")
         if raw_blocker is not None and not isinstance(raw_blocker, Mapping):
             raise ValueError("result blocker must be an object or null")
+        raw_artifacts = value.get("runtime_artifact_paths")
+        if raw_artifacts is not None and (
+            not isinstance(raw_artifacts, list) or any(not isinstance(item, str) for item in raw_artifacts)
+        ):
+            raise ValueError("result runtime_artifact_paths must be an array of strings or null")
         return cls(
             version,
             ModelResultStatus(status),
@@ -631,6 +782,7 @@ class ModelFacingResult:
             durable_status,
             next_action,
             TypedBlocker.from_json(raw_blocker) if isinstance(raw_blocker, Mapping) else None,
+            tuple(raw_artifacts) if isinstance(raw_artifacts, list) else None,
         )
 
     @classmethod
@@ -1143,6 +1295,7 @@ class ModelFacingProgramControllerAction:
     milestone_ids: tuple[str, ...] = ()
     milestone_id: str | None = None
     candidate_sha: str | None = None
+    evidence_sha256: str | None = None
     expected_trunk_head: str | None = None
     review_roles: tuple[str, ...] = ()
     review_ids: tuple[str, ...] = ()
@@ -1165,6 +1318,10 @@ class ModelFacingProgramControllerAction:
             MilestoneId(self.milestone_id)
         if self.candidate_sha is not None and re.fullmatch(r"[0-9a-f]{40}", self.candidate_sha) is None:
             raise ValueError("program candidate commit is invalid")
+        if self.evidence_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", self.evidence_sha256) is None:
+            raise ValueError("program evidence subject is invalid")
+        if self.candidate_sha is not None and self.evidence_sha256 is not None:
+            raise ValueError("program action cannot carry both a commit and evidence subject")
         if self.blocker_gate_id is not None:
             _text(self.blocker_gate_id, label="program blocker gate id", limit=256)
         if self.blocker_resolution is not None and self.blocker_resolution not in {"resolve", "supersede"}:
@@ -1198,6 +1355,7 @@ class ModelFacingProgramControllerAction:
                 for value in (
                     self.milestone_id,
                     self.candidate_sha,
+                    self.evidence_sha256,
                     self.expected_trunk_head,
                     self.integration_strategy,
                     self.reason,
@@ -1205,11 +1363,19 @@ class ModelFacingProgramControllerAction:
             ):
                 raise ValueError("start_ready_milestones requires only milestone_ids")
         elif self.kind is ProgramControllerActionKind.START_REVIEWS:
-            if self.milestone_id is None or self.candidate_sha is None or not self.review_roles:
-                raise ValueError("start_reviews requires candidate and review roles")
+            if (
+                self.milestone_id is None
+                or (self.candidate_sha is None) == (self.evidence_sha256 is None)
+                or not self.review_roles
+            ):
+                raise ValueError("start_reviews requires exactly one subject and review roles")
         elif self.kind is ProgramControllerActionKind.REQUEST_REPAIR:
-            if self.milestone_id is None or self.candidate_sha is None or not self.finding_ids:
-                raise ValueError("request_repair requires candidate and finding ids")
+            if (
+                self.milestone_id is None
+                or (self.candidate_sha is None) == (self.evidence_sha256 is None)
+                or not self.finding_ids
+            ):
+                raise ValueError("request_repair requires exactly one subject and finding ids")
         elif self.kind is ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER:
             if (
                 self.milestone_id is None
@@ -1219,8 +1385,12 @@ class ModelFacingProgramControllerAction:
             ):
                 raise ValueError("resolve_candidate_blocker requires candidate, gate id and resolution")
         elif self.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE:
-            if self.milestone_id is None or self.candidate_sha is None or not self.review_ids:
-                raise ValueError("promote_candidate requires candidate and review ids")
+            if (
+                self.milestone_id is None
+                or (self.candidate_sha is None) == (self.evidence_sha256 is None)
+                or not self.review_ids
+            ):
+                raise ValueError("promote_candidate requires exactly one subject and review ids")
         elif self.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
             if (
                 self.milestone_id is None
@@ -1241,6 +1411,7 @@ class ModelFacingProgramControllerAction:
                 self.milestone_ids,
                 self.milestone_id,
                 self.candidate_sha,
+                self.evidence_sha256,
                 self.blocker_gate_id,
                 self.blocker_resolution,
                 self.expected_trunk_head,
@@ -1261,6 +1432,8 @@ class ModelFacingProgramControllerAction:
             value["milestone_id"] = self.milestone_id
         if self.candidate_sha is not None:
             value["candidate_sha"] = self.candidate_sha
+        if self.evidence_sha256 is not None:
+            value["evidence_sha256"] = self.evidence_sha256
         if self.blocker_gate_id is not None:
             value["blocker_gate_id"] = self.blocker_gate_id
         if self.blocker_resolution is not None:
@@ -1280,6 +1453,16 @@ class ModelFacingProgramControllerAction:
         return value
 
     @property
+    def subject_wire(self) -> str | None:
+        """Return the exclusive commit/evidence subject in review wire form."""
+
+        if self.candidate_sha is not None:
+            return self.candidate_sha
+        if self.evidence_sha256 is not None:
+            return f"runtime_evidence:{self.evidence_sha256}"
+        return None
+
+    @property
     def external_effects(self) -> tuple[tuple[str, str], ...]:
         """Return durable effect identities paired with their milestone owner."""
 
@@ -1287,10 +1470,15 @@ class ModelFacingProgramControllerAction:
             return tuple((f"start:{milestone_id}", milestone_id) for milestone_id in self.milestone_ids)
         if self.kind is ProgramControllerActionKind.START_REVIEWS:
             assert self.milestone_id is not None
-            return tuple((f"review:{self.milestone_id}:{role}", self.milestone_id) for role in self.review_roles)
+            assert self.subject_wire is not None
+            return tuple(
+                (f"review:{self.milestone_id}:{self.subject_wire}:{role}", self.milestone_id)
+                for role in self.review_roles
+            )
         if self.kind is ProgramControllerActionKind.REQUEST_REPAIR:
             assert self.milestone_id is not None
-            return ((f"repair:{self.milestone_id}", self.milestone_id),)
+            assert self.subject_wire is not None
+            return ((f"repair:{self.milestone_id}:{self.subject_wire}", self.milestone_id),)
         if self.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
             assert self.milestone_id is not None and self.candidate_sha is not None
             return ((f"integrate:{self.milestone_id}:{self.candidate_sha}", self.milestone_id),)
@@ -1306,8 +1494,14 @@ class ModelFacingProgramControllerAction:
             raise ValueError("program action kind is unsupported") from exc
         allowed = {
             ProgramControllerActionKind.START_READY_MILESTONES: {"kind", "milestone_ids"},
-            ProgramControllerActionKind.START_REVIEWS: {"kind", "milestone_id", "candidate_sha", "review_roles"},
-            ProgramControllerActionKind.REQUEST_REPAIR: {"kind", "milestone_id", "candidate_sha", "finding_ids"},
+            ProgramControllerActionKind.START_REVIEWS: (
+                {"kind", "milestone_id", "candidate_sha", "review_roles"},
+                {"kind", "milestone_id", "evidence_sha256", "review_roles"},
+            ),
+            ProgramControllerActionKind.REQUEST_REPAIR: (
+                {"kind", "milestone_id", "candidate_sha", "finding_ids"},
+                {"kind", "milestone_id", "evidence_sha256", "finding_ids"},
+            ),
             ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER: {
                 "kind",
                 "milestone_id",
@@ -1315,7 +1509,10 @@ class ModelFacingProgramControllerAction:
                 "blocker_gate_id",
                 "blocker_resolution",
             },
-            ProgramControllerActionKind.PROMOTE_CANDIDATE: {"kind", "milestone_id", "candidate_sha", "review_ids"},
+            ProgramControllerActionKind.PROMOTE_CANDIDATE: (
+                {"kind", "milestone_id", "candidate_sha", "review_ids"},
+                {"kind", "milestone_id", "evidence_sha256", "review_ids"},
+            ),
             ProgramControllerActionKind.INTEGRATE_CANDIDATE: {
                 "kind",
                 "milestone_id",
@@ -1327,7 +1524,10 @@ class ModelFacingProgramControllerAction:
             ProgramControllerActionKind.REQUIRE_HUMAN_ATTENTION: {"kind", "reason"},
             ProgramControllerActionKind.ACKNOWLEDGE_ONLY: {"kind"},
         }[kind]
-        if set(value) != allowed:
+        if isinstance(allowed, tuple):
+            if set(value) not in allowed:
+                raise ValueError("program action has an unsupported shape")
+        elif set(value) != allowed:
             raise ValueError("program action has an unsupported shape")
         arrays: dict[str, tuple[str, ...]] = {}
         for name in ("milestone_ids", "review_roles", "review_ids", "finding_ids"):
@@ -1340,6 +1540,7 @@ class ModelFacingProgramControllerAction:
             arrays["milestone_ids"],
             value.get("milestone_id"),  # type: ignore[arg-type]
             value.get("candidate_sha"),  # type: ignore[arg-type]
+            value.get("evidence_sha256"),  # type: ignore[arg-type]
             value.get("expected_trunk_head"),  # type: ignore[arg-type]
             arrays["review_roles"],
             arrays["review_ids"],
@@ -1543,7 +1744,13 @@ def model_facing_capsule_schema() -> JsonObject:
     ]
 
     def version_schema(
-        version: int, *, include_plugins: bool, image_paths: bool = False, optional_plugins: bool = False
+        version: int,
+        *,
+        include_plugins: bool,
+        image_paths: bool = False,
+        optional_images: bool = False,
+        optional_plugins: bool = False,
+        runtime_fields: bool = False,
     ) -> JsonObject:
         properties: JsonObject = {"schema_version": {"type": "integer", "const": version}, **common_properties}
         required = list(common_required)
@@ -1559,7 +1766,8 @@ def model_facing_capsule_schema() -> JsonObject:
                     "pattern": r"^(?!/)(?![\s\S]*\u0000)(?=[\s\S]*\S)",
                 },
             }
-            required.append("local_image_paths")
+            if not optional_images:
+                required.append("local_image_paths")
         if include_plugins:
             properties["plugin_requirements"] = {
                 "type": "array",
@@ -1570,12 +1778,132 @@ def model_facing_capsule_schema() -> JsonObject:
             }
             if not optional_plugins:
                 required.append("plugin_requirements")
-        return {
+        if runtime_fields:
+            properties.update(
+                {
+                    "outcome_kind": {"type": "string", "enum": [item.value for item in ProgramOutcomeKind]},
+                    "integration_mode": {"type": "string", "enum": [item.value for item in ProgramIntegrationMode]},
+                    "runtime_artifact_paths": {
+                        "type": "array",
+                        "maxItems": _MAX_ITEMS,
+                        "uniqueItems": True,
+                        "items": {**text, "maxLength": 4096, "pattern": r"^(?!/)(?![\s\S]*\u0000)(?=[\s\S]*\S)"},
+                    },
+                    "runtime_artifact_max_files": {
+                        "oneOf": [
+                            {"type": "integer", "minimum": 1, "maximum": 128},
+                            {"type": "null"},
+                        ]
+                    },
+                    "runtime_artifact_max_bytes": {
+                        "oneOf": [
+                            {"type": "integer", "minimum": 1, "maximum": 2_147_483_647},
+                            {"type": "null"},
+                        ]
+                    },
+                    "approval_gates": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "gate_id",
+                                "prerequisite_milestone_ids",
+                                "protected_milestone_ids",
+                                "scope_description",
+                            ],
+                            "properties": {
+                                "gate_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 256,
+                                    "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$",
+                                },
+                                "prerequisite_milestone_ids": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 128,
+                                    "uniqueItems": True,
+                                    "items": text,
+                                },
+                                "protected_milestone_ids": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 128,
+                                    "uniqueItems": True,
+                                    "items": text,
+                                },
+                                "scope_description": {**text, "maxLength": 4096},
+                            },
+                        },
+                    },
+                }
+            )
+            required.extend(
+                [
+                    "outcome_kind",
+                    "integration_mode",
+                    "runtime_artifact_paths",
+                    "runtime_artifact_max_files",
+                    "runtime_artifact_max_bytes",
+                    "approval_gates",
+                ]
+            )
+        result: JsonObject = {
             "type": "object",
             "additionalProperties": False,
             "required": required,
             "properties": properties,
         }
+        if runtime_fields:
+            # The local schema authority intentionally supports closed
+            # discriminated ``oneOf`` records, not general JSON-Schema
+            # conditionals.  Keep the two valid outcome products explicit so
+            # a schema-4 commit capsule can retain null runtime fields while a
+            # runtime-evidence capsule must declare its bounded artifacts.
+            commit_properties = dict(properties)
+            commit_properties.update(
+                {
+                    "outcome_kind": {"const": ProgramOutcomeKind.COMMIT.value},
+                    "integration_mode": {
+                        "type": "string",
+                        "enum": [
+                            ProgramIntegrationMode.GIT.value,
+                            ProgramIntegrationMode.ALREADY_INTEGRATED.value,
+                        ],
+                    },
+                    "runtime_artifact_paths": {
+                        "type": "array",
+                        "maxItems": 0,
+                        "uniqueItems": True,
+                        "items": properties["runtime_artifact_paths"]["items"],  # type: ignore[index]
+                    },
+                    "runtime_artifact_max_files": {"type": "null"},
+                    "runtime_artifact_max_bytes": {"type": "null"},
+                }
+            )
+            runtime_properties = dict(properties)
+            runtime_properties.update(
+                {
+                    "outcome_kind": {"const": ProgramOutcomeKind.RUNTIME_EVIDENCE.value},
+                    "integration_mode": {"const": ProgramIntegrationMode.NO_INTEGRATION.value},
+                    "runtime_artifact_paths": {
+                        **properties["runtime_artifact_paths"],  # type: ignore[typeddict-item]
+                        "minItems": 1,
+                    },
+                    "runtime_artifact_max_files": {"type": "integer", "minimum": 1, "maximum": 128},
+                    "runtime_artifact_max_bytes": {"type": "integer", "minimum": 1, "maximum": 2_147_483_647},
+                }
+            )
+            result = {
+                "oneOf": [
+                    {**result, "properties": commit_properties},
+                    {**result, "properties": runtime_properties},
+                ]
+            }
+        return result
 
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1585,6 +1913,14 @@ def model_facing_capsule_schema() -> JsonObject:
             version_schema(1, include_plugins=False),
             version_schema(2, include_plugins=True),
             version_schema(3, include_plugins=True, image_paths=True, optional_plugins=True),
+            version_schema(
+                4,
+                include_plugins=True,
+                image_paths=True,
+                optional_images=True,
+                optional_plugins=True,
+                runtime_fields=True,
+            ),
         ],
     }
 
@@ -1593,6 +1929,7 @@ def model_facing_program_controller_action_schema() -> JsonObject:
     """Return the closed schema for one program-controller generation."""
 
     sha = {"type": "string", "pattern": r"^[0-9a-f]{40}$"}
+    evidence_sha = {"type": "string", "pattern": r"^[0-9a-f]{64}$"}
     ids = {
         "type": "array",
         "maxItems": 128,
@@ -1612,79 +1949,105 @@ def model_facing_program_controller_action_schema() -> JsonObject:
     # Keep the union itself as the sole keyword at this node.  Each branch is
     # independently closed, so both the local validator and the provider
     # projection can preserve the discriminated action authority.
-    action = {
-        "oneOf": [
-            action_branch(
-                ["kind", "milestone_ids"],
-                {
-                    "kind": {"const": "start_ready_milestones"},
-                    "milestone_ids": ids,
-                },
-            ),
-            action_branch(
-                ["kind", "milestone_id", "candidate_sha", "review_roles"],
-                {
-                    "kind": {"const": "start_reviews"},
-                    "milestone_id": {"type": "string"},
-                    "candidate_sha": sha,
-                    "review_roles": ids,
-                },
-            ),
-            action_branch(
-                ["kind", "milestone_id", "candidate_sha", "finding_ids"],
-                {
-                    "kind": {"const": "request_repair"},
-                    "milestone_id": {"type": "string"},
-                    "candidate_sha": sha,
-                    "finding_ids": ids,
-                },
-            ),
-            action_branch(
-                ["kind", "milestone_id", "candidate_sha", "blocker_gate_id", "blocker_resolution"],
-                {
-                    "kind": {"const": "resolve_candidate_blocker"},
-                    "milestone_id": {"type": "string"},
-                    "candidate_sha": sha,
-                    "blocker_gate_id": {"type": "string", "minLength": 1, "maxLength": 256},
-                    "blocker_resolution": {"type": "string", "enum": ["resolve", "supersede"]},
-                },
-            ),
-            action_branch(
-                ["kind", "milestone_id", "candidate_sha", "review_ids"],
-                {
-                    "kind": {"const": "promote_candidate"},
-                    "milestone_id": {"type": "string"},
-                    "candidate_sha": sha,
-                    "review_ids": ids,
-                },
-            ),
-            action_branch(
-                ["kind", "milestone_id", "candidate_sha", "expected_trunk_head", "integration_strategy"],
-                {
-                    "kind": {"const": "integrate_candidate"},
-                    "milestone_id": {"type": "string"},
-                    "candidate_sha": sha,
-                    "expected_trunk_head": sha,
-                    "integration_strategy": {"type": "string", "enum": ["merge", "fast_forward", "cherry_pick"]},
-                },
-            ),
-            action_branch(
-                ["kind", "reason"],
-                {
-                    "kind": {"const": "require_replan"},
-                    "reason": reason,
-                },
-            ),
-            action_branch(
-                ["kind", "reason"],
-                {
-                    "kind": {"const": "require_human_attention"},
-                    "reason": reason,
-                },
-            ),
-            action_branch(["kind"], {"kind": {"const": "acknowledge_only"}}),
-        ],
-    }
+    action_branches: list[JsonObject] = [
+        action_branch(
+            ["kind", "milestone_ids"],
+            {
+                "kind": {"const": "start_ready_milestones"},
+                "milestone_ids": ids,
+            },
+        ),
+        action_branch(
+            ["kind", "milestone_id", "candidate_sha", "review_roles"],
+            {
+                "kind": {"const": "start_reviews"},
+                "milestone_id": {"type": "string"},
+                "candidate_sha": sha,
+                "review_roles": ids,
+            },
+        ),
+        action_branch(
+            ["kind", "milestone_id", "evidence_sha256", "review_roles"],
+            {
+                "kind": {"const": "start_reviews"},
+                "milestone_id": {"type": "string"},
+                "evidence_sha256": evidence_sha,
+                "review_roles": ids,
+            },
+        ),
+        action_branch(
+            ["kind", "milestone_id", "candidate_sha", "finding_ids"],
+            {
+                "kind": {"const": "request_repair"},
+                "milestone_id": {"type": "string"},
+                "candidate_sha": sha,
+                "finding_ids": ids,
+            },
+        ),
+        action_branch(
+            ["kind", "milestone_id", "evidence_sha256", "finding_ids"],
+            {
+                "kind": {"const": "request_repair"},
+                "milestone_id": {"type": "string"},
+                "evidence_sha256": evidence_sha,
+                "finding_ids": ids,
+            },
+        ),
+        action_branch(
+            ["kind", "milestone_id", "candidate_sha", "blocker_gate_id", "blocker_resolution"],
+            {
+                "kind": {"const": "resolve_candidate_blocker"},
+                "milestone_id": {"type": "string"},
+                "candidate_sha": sha,
+                "blocker_gate_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                "blocker_resolution": {"type": "string", "enum": ["resolve", "supersede"]},
+            },
+        ),
+        action_branch(
+            ["kind", "milestone_id", "candidate_sha", "review_ids"],
+            {
+                "kind": {"const": "promote_candidate"},
+                "milestone_id": {"type": "string"},
+                "candidate_sha": sha,
+                "review_ids": ids,
+            },
+        ),
+        action_branch(
+            ["kind", "milestone_id", "evidence_sha256", "review_ids"],
+            {
+                "kind": {"const": "promote_candidate"},
+                "milestone_id": {"type": "string"},
+                "evidence_sha256": evidence_sha,
+                "review_ids": ids,
+            },
+        ),
+        action_branch(
+            ["kind", "milestone_id", "candidate_sha", "expected_trunk_head", "integration_strategy"],
+            {
+                "kind": {"const": "integrate_candidate"},
+                "milestone_id": {"type": "string"},
+                "candidate_sha": sha,
+                "expected_trunk_head": sha,
+                "integration_strategy": {"type": "string", "enum": ["merge", "fast_forward", "cherry_pick"]},
+            },
+        ),
+        action_branch(
+            ["kind", "reason"],
+            {
+                "kind": {"const": "require_replan"},
+                "reason": reason,
+            },
+        ),
+        action_branch(
+            ["kind", "reason"],
+            {
+                "kind": {"const": "require_human_attention"},
+                "reason": reason,
+            },
+        ),
+        action_branch(["kind"], {"kind": {"const": "acknowledge_only"}}),
+    ]
+    action = {"oneOf": action_branches}
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://personal-workflow-skills.invalid/schemas/program-controller-action.schema.json",
@@ -1831,10 +2194,83 @@ def model_facing_controller_action_schema() -> JsonObject:
     }
 
 
-def model_facing_result_schema() -> JsonObject:
-    """Return the closed JSON schema used when serializing a result."""
+def model_facing_result_schema(schema_version: int = 1) -> JsonObject:
+    """Return one closed result schema.
+
+    Schema 1 is the historical commit-result contract.  Schema 2 is an
+    additive runtime-evidence contract whose artifact reference is required
+    on the wire but nullable for failed/incomplete attempts.  Keeping each
+    version as a single closed object (rather than a root union) preserves the
+    provider subset and the local schema validator's single authority.
+    """
+
+    if isinstance(schema_version, bool) or schema_version not in {1, 2}:
+        raise ValueError("unsupported model-facing result schema version")
 
     text = {"type": "string", "minLength": 1, "maxLength": _MAX_TEXT, "pattern": _TEXT_PATTERN}
+    common = {
+        "status": {"type": "string", "enum": [status.value for status in ModelResultStatus]},
+        "summary": text,
+        "changed_surfaces": {"type": "array", "maxItems": _MAX_ITEMS, "uniqueItems": True, "items": text},
+        "validations": {
+            "type": "array",
+            "maxItems": _MAX_ITEMS,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "passed", "evidence"],
+                "properties": {
+                    "name": {**text, "maxLength": 256},
+                    "passed": {"type": "boolean"},
+                    "evidence": {**text, "maxLength": 512},
+                },
+            },
+        },
+        "durable_status": {**text, "maxLength": 128},
+        "next_action": {"type": ["string", "null"], "minLength": 1, "maxLength": _MAX_TEXT, "pattern": _TEXT_PATTERN},
+        "blocker": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["gate_id", "kind", "scope", "promotion_blocking", "required_action"],
+                    "properties": {
+                        "gate_id": {**text, "maxLength": 256},
+                        "kind": {"type": "string", "enum": [item.value for item in BlockerKind]},
+                        "scope": {"type": "string", "enum": [item.value for item in BlockerScope]},
+                        "promotion_blocking": {"type": "boolean"},
+                        "required_action": {**text, "maxLength": 512},
+                    },
+                },
+                {"type": "null"},
+            ]
+        },
+    }
+    properties: JsonObject = {"schema_version": {"type": "integer", "const": schema_version}, **common}
+    if schema_version == 2:
+        properties["runtime_artifact_paths"] = {
+            "oneOf": [
+                {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": _MAX_ITEMS,
+                    "uniqueItems": True,
+                    "items": {**text, "maxLength": 4096, "pattern": r"^(?!/)(?![\s\S]*\u0000)(?=[\s\S]*\S)"},
+                },
+                {"type": "null"},
+            ],
+        }
+    required = [
+        "schema_version",
+        "status",
+        "summary",
+        "changed_surfaces",
+        "validations",
+        "durable_status",
+        "next_action",
+    ]
+    if schema_version == 2:
+        required.append("runtime_artifact_paths")
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://personal-workflow-skills.invalid/schemas/result.schema.json",
@@ -1842,67 +2278,16 @@ def model_facing_result_schema() -> JsonObject:
         "description": "The closed durable result projection emitted at the model boundary.",
         "type": "object",
         "additionalProperties": False,
-        "required": [
-            "schema_version",
-            "status",
-            "summary",
-            "changed_surfaces",
-            "validations",
-            "durable_status",
-            "next_action",
-        ],
-        "properties": {
-            "schema_version": {"type": "integer", "const": 1},
-            "status": {"type": "string", "enum": [status.value for status in ModelResultStatus]},
-            "summary": text,
-            "changed_surfaces": {"type": "array", "maxItems": _MAX_ITEMS, "uniqueItems": True, "items": text},
-            "validations": {
-                "type": "array",
-                "maxItems": _MAX_ITEMS,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["name", "passed", "evidence"],
-                    "properties": {
-                        "name": {**text, "maxLength": 256},
-                        "passed": {"type": "boolean"},
-                        "evidence": {**text, "maxLength": 512},
-                    },
-                },
-            },
-            "durable_status": {**text, "maxLength": 128},
-            "next_action": {
-                "type": ["string", "null"],
-                "minLength": 1,
-                "maxLength": _MAX_TEXT,
-                "pattern": _TEXT_PATTERN,
-            },
-            "blocker": {
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["gate_id", "kind", "scope", "promotion_blocking", "required_action"],
-                        "properties": {
-                            "gate_id": {**text, "maxLength": 256},
-                            "kind": {"type": "string", "enum": [item.value for item in BlockerKind]},
-                            "scope": {"type": "string", "enum": [item.value for item in BlockerScope]},
-                            "promotion_blocking": {"type": "boolean"},
-                            "required_action": {**text, "maxLength": 512},
-                        },
-                    },
-                    {"type": "null"},
-                ]
-            },
-        },
+        "required": required,
+        "properties": properties,
     }
 
 
-def model_facing_result_schema_sha256() -> str:
+def model_facing_result_schema_sha256(schema_version: int = 1) -> str:
     """Return the digest bound into new App-native host actions."""
 
     encoded = json.dumps(
-        model_facing_result_schema(),
+        model_facing_result_schema(schema_version),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -1959,6 +2344,9 @@ __all__ = [
     "PluginCapabilitySnapshot",
     "PluginReadiness",
     "PluginRequirement",
+    "ProgramApprovalGate",
+    "ProgramIntegrationMode",
+    "ProgramOutcomeKind",
     "format_model_facing_result_prompt",
     "legacy_model_facing_result_schema_sha256",
     "model_facing_capsule_schema",

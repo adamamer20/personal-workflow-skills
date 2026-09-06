@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from .contracts import ModelAuthority, ModelFacingCapsule, PluginRequirement
-from .domain import AcceptanceMode, ProgramId, RoleId
+from .domain import (
+    AcceptanceMode,
+    ProgramApprovalGate,
+    ProgramId,
+    ProgramIntegrationMode,
+    ProgramOutcomeKind,
+    RoleId,
+)
 
 if TYPE_CHECKING:
     from .domain import ProgramGraph
@@ -51,6 +58,8 @@ class CompiledProgramNode:
     milestone_id: str
     capsule: CompiledPlanCapsule
     dependencies: tuple[str, ...] = ()
+    review_base_sha: str | None = None
+    adopted_candidate_sha: str | None = None
 
     def __post_init__(self) -> None:
         from .domain import MilestoneId
@@ -64,6 +73,11 @@ class CompiledProgramNode:
         for dependency in dependencies:
             MilestoneId(dependency)
         object.__setattr__(self, "dependencies", dependencies)
+        if (self.review_base_sha is None) != (self.adopted_candidate_sha is None):
+            raise PlanCapsuleError("adopted node bindings require candidate and review base")
+        for label, value in (("review base", self.review_base_sha), ("adopted candidate", self.adopted_candidate_sha)):
+            if value is not None and re.fullmatch(r"[0-9a-f]{40}", value) is None:
+                raise PlanCapsuleError(f"adopted node {label} is not a lowercase Git SHA")
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +162,8 @@ class CompiledProgramGraph:
                         milestone_id=MilestoneId(node.milestone_id),
                     ),
                     tuple(MilestoneId(item) for item in node.dependencies),
+                    node.review_base_sha,
+                    node.adopted_candidate_sha,
                 )
             )
         return ProgramGraph(
@@ -193,8 +209,27 @@ def _literal(node: ast.AST) -> object:
             return AcceptanceMode[node.attr]
         except KeyError as exc:
             raise PlanCapsuleError("plan uses an unsupported acceptance mode") from exc
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id
+        in {
+            "ProgramOutcomeKind",
+            "ProgramIntegrationMode",
+        }
+    ):
+        enum_type = ProgramOutcomeKind if node.value.id == "ProgramOutcomeKind" else ProgramIntegrationMode
+        try:
+            return enum_type[node.attr]
+        except KeyError as exc:
+            raise PlanCapsuleError("plan uses an unsupported program outcome value") from exc
     if isinstance(node, ast.Call):
-        if not isinstance(node.func, ast.Name) or node.func.id not in {"RoleId", "ModelAuthority", "PluginRequirement"}:
+        if not isinstance(node.func, ast.Name) or node.func.id not in {
+            "RoleId",
+            "ModelAuthority",
+            "PluginRequirement",
+            "ProgramApprovalGate",
+        }:
             raise PlanCapsuleError("plan capsule contains an unsupported constructor")
         if any(keyword.arg is None for keyword in node.keywords):
             raise PlanCapsuleError("plan capsule does not allow expanded constructor arguments")
@@ -207,7 +242,9 @@ def _literal(node: ast.AST) -> object:
                 return RoleId(*args, **keywords)
             if node.func.id == "ModelAuthority":
                 return ModelAuthority(*args, **keywords)
-            return PluginRequirement(*args, **keywords)
+            if node.func.id == "PluginRequirement":
+                return PluginRequirement(*args, **keywords)
+            return ProgramApprovalGate(*args, **keywords)
         except (TypeError, ValueError) as exc:
             raise PlanCapsuleError("plan capsule contains an invalid typed constructor") from exc
     raise PlanCapsuleError("plan capsule contains a non-literal expression")
@@ -296,6 +333,7 @@ def compile_program_graph(
     program_id: str,
     milestone_ids: tuple[str, ...] | list[str] | None = None,
     dependencies: dict[str, tuple[str, ...]] | None = None,
+    adopted_nodes: dict[str, tuple[str, str]] | None = None,
 ) -> CompiledProgramGraph:
     """Compile a bounded set of canonical plan capsules into one closed DAG.
 
@@ -309,11 +347,16 @@ def compile_program_graph(
     if not selected:
         raise PlanCapsuleError("program graph requires at least one milestone")
     edge_map = dependencies or {}
+    adopted = adopted_nodes or {}
+    if any(node_id not in selected for node_id in adopted):
+        raise PlanCapsuleError("adopted node binding is not part of the selected graph")
     nodes = tuple(
         CompiledProgramNode(
             milestone_id,
             compile_canonical_plan(path, milestone_id),
             tuple(edge_map.get(milestone_id, ())),
+            (adopted[milestone_id][1], adopted[milestone_id][0]) if milestone_id in adopted else None,
+            adopted[milestone_id][0] if milestone_id in adopted else None,
         )
         for milestone_id in selected
     )

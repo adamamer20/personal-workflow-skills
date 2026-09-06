@@ -103,8 +103,10 @@ from .domain import (
     ProgramEventKind,
     ProgramGraph,
     ProgramId,
+    ProgramIntegrationMode,
     ProgramNodeSpec,
     ProgramNodeStatus,
+    ProgramOutcomeKind,
     ProgramState,
     ProgramStatus,
     ReasonCode,
@@ -116,9 +118,11 @@ from .domain import (
     RetryBudgetChange,
     RetryFailureClass,
     ReviewRejected,
+    ReviewSubject,
     RoleId,
     RunId,
     RunRecord,
+    RuntimeEvidenceManifest,
     SchemaVersion,
     TerminalFailureAfterIdentity,
     TerminalOutcome,
@@ -135,12 +139,14 @@ from .domain import (
     blocker_applies_to,
     coerce_state,
     is_transition_allowed,
+    program_node_closure_satisfied,
     redact_control_text,
     redact_diagnostic_text,
     strict_json_loads,
+    validate_program_outcome_pair,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(20)
+CURRENT_SCHEMA_VERSION = SchemaVersion(21)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -162,6 +168,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(17),
         SchemaVersion(18),
         SchemaVersion(19),
+        SchemaVersion(20),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -1135,6 +1142,29 @@ _V20_TABLE_DDL = {
     "dispatch_terminal_integrity": _DISPATCH_TERMINAL_INTEGRITY_DDL,
 }
 
+_PROGRAM_OUTCOMES_DDL = """CREATE TABLE program_outcomes (
+    outcome_id TEXT PRIMARY KEY NOT NULL CHECK(length(outcome_id) BETWEEN 1 AND 512),
+    program_id TEXT NOT NULL,
+    milestone_id TEXT NOT NULL,
+    subject_kind TEXT NOT NULL CHECK(subject_kind IN ('commit', 'runtime_evidence')),
+    subject_digest TEXT NOT NULL CHECK(length(subject_digest) IN (40, 64)),
+    outcome_kind TEXT NOT NULL CHECK(outcome_kind IN ('commit', 'runtime_evidence')),
+    integration_mode TEXT NOT NULL CHECK(integration_mode IN ('git', 'already_integrated', 'no_integration')),
+    manifest_json TEXT NOT NULL CHECK(length(manifest_json) > 0),
+    outcome_digest TEXT NOT NULL CHECK(length(outcome_digest) = 64),
+    acceptance_generation INTEGER NOT NULL CHECK(acceptance_generation >= 0),
+    closure_generation INTEGER NOT NULL CHECK(closure_generation >= 0),
+    created_at TEXT NOT NULL,
+    UNIQUE(program_id, milestone_id, subject_kind, subject_digest),
+    FOREIGN KEY(program_id, milestone_id) REFERENCES milestones(run_id, milestone_id) ON DELETE CASCADE,
+    CHECK((subject_kind = 'commit' AND length(subject_digest) = 40 AND outcome_kind = 'commit' AND integration_mode IN ('git', 'already_integrated'))
+       OR (subject_kind = 'runtime_evidence' AND length(subject_digest) = 64 AND outcome_kind = 'runtime_evidence' AND integration_mode = 'no_integration'))
+)"""
+_V21_TABLE_DDL = {
+    **_V20_TABLE_DDL,
+    "program_outcomes": _PROGRAM_OUTCOMES_DDL,
+}
+
 
 def _canonical_ddl(sql: str) -> str:
     """Return exact SQLite DDL modulo whitespace outside quoted values."""
@@ -1238,6 +1268,7 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(18): "codex_flow_event_driven_program_controller_v18",
     SchemaVersion(19): "codex_flow_harness_candidate_retention_v19",
     SchemaVersion(20): "codex_flow_dispatch_terminal_integrity_v20",
+    SchemaVersion(21): "codex_flow_program_outcomes_v21",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -1838,7 +1869,7 @@ class Ledger:
             return
         current_version = str(version[0])
         if (
-            current_version not in {"19", "20"}
+            current_version not in {"19", "20", "21"}
             or str(identity[0]) != _SCHEMA_IDENTITIES[SchemaVersion(int(current_version))]
         ):
             raise CorruptSchemaError("failed migration opener reached an unknown schema identity")
@@ -1854,7 +1885,11 @@ class Ledger:
         if supervisor_exists is not None or harness_exists is None or authority is None or int(authority[0]) != 1:
             raise CorruptSchemaError("failed migration opener cannot prove the fenced v19 authority")
         with self._transaction(validate_authority=False):
+            if current_version == "21":
+                connection.execute("DROP TABLE program_outcomes")
             if current_version == "20":
+                connection.execute("DROP TABLE dispatch_terminal_integrity")
+            elif current_version == "21":
                 connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
             connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
@@ -1932,11 +1967,12 @@ class Ledger:
             "milestone_dependencies",
             "integration_outbox",
             "dispatch_terminal_integrity",
+            "program_outcomes",
         ],
     ) -> tuple[str, ...]:
         """Expose a narrow, immutable schema diagnostic without the raw connection."""
 
-        if table not in _V20_TABLE_DDL:
+        if table not in _V21_TABLE_DDL:
             raise ValueError(f"unknown owned table: {table!r}")
         return tuple(str(row[1]) for row in self._db().execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -2069,7 +2105,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V20_TABLE_DDL.values():
+                for statement in _V21_TABLE_DDL.values():
                     self._db().execute(statement)
                 for _name, (_table, statement) in _V15_INDEX_DDL.items():
                     self._db().execute(statement)
@@ -2131,6 +2167,14 @@ class Ledger:
             decision_columns
         )
 
+    def _has_program_outcomes_table(self) -> bool:
+        return (
+            self._db()
+            .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'program_outcomes'")
+            .fetchone()
+            is not None
+        )
+
     def _validate_shape(self, version: SchemaVersion, *, allow_program_residue: bool = False) -> None:
         if _schema_inventory(self._db(), temporary=True):
             raise CorruptSchemaError("ledger connection has unexpected temporary schema objects")
@@ -2155,6 +2199,7 @@ class Ledger:
             SchemaVersion(18): _V18_TABLE_DDL,
             SchemaVersion(19): _V19_TABLE_DDL,
             SchemaVersion(20): _V20_TABLE_DDL,
+            SchemaVersion(21): _V21_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -2170,6 +2215,21 @@ class Ledger:
         if version == SchemaVersion(1) or version >= SchemaVersion(18):
             actual_inventory = _canonical_inventory(actual_inventory)
             expected_inventory = _canonical_inventory(expected_inventory)
+        # A schema-v21 table may remain when a recovery fixture deliberately
+        # lowers the marker to an older predecessor.  Accept only the exact
+        # canonical outcome table as forward residue; any other shape still
+        # fails closed through the normal inventory check.
+        if version < SchemaVersion(21):
+            outcome_actual = next(
+                (item for item in actual_inventory if item[0] == "table" and item[1] == "program_outcomes"),
+                None,
+            )
+            if outcome_actual is not None:
+                if outcome_actual[3] is None or _canonical_ddl(str(outcome_actual[3])) != _canonical_ddl(
+                    _PROGRAM_OUTCOMES_DDL
+                ):
+                    raise CorruptSchemaError("program_outcomes residue is not the canonical schema-v21 table")
+                actual_inventory = tuple(item for item in actual_inventory if item != outcome_actual)
         program_tables = {"milestone_dependencies", "integration_outbox"}
         program_columns = {
             "program_digest",
@@ -2741,6 +2801,21 @@ class Ledger:
                 "protected_paths_sha256": ("TEXT", 1, 0),
                 "captured_at": ("TEXT", 1, 0),
             }
+        if version >= SchemaVersion(21):
+            expected["program_outcomes"] = {
+                "outcome_id": ("TEXT", 1, 1),
+                "program_id": ("TEXT", 1, 0),
+                "milestone_id": ("TEXT", 1, 0),
+                "subject_kind": ("TEXT", 1, 0),
+                "subject_digest": ("TEXT", 1, 0),
+                "outcome_kind": ("TEXT", 1, 0),
+                "integration_mode": ("TEXT", 1, 0),
+                "manifest_json": ("TEXT", 1, 0),
+                "outcome_digest": ("TEXT", 1, 0),
+                "acceptance_generation": ("INTEGER", 1, 0),
+                "closure_generation": ("INTEGER", 1, 0),
+                "created_at": ("TEXT", 1, 0),
+            }
         for table, expected_columns in expected.items():
             actual_table = table
             if table == "supervisor_authority":
@@ -3004,6 +3079,17 @@ class Ledger:
             self._require_foreign_keys(
                 "dispatch_terminal_integrity", (("dispatch_queue", "dispatch_id", "dispatch_id", "CASCADE"),)
             )
+        if version >= SchemaVersion(21):
+            self._require_unique_index(
+                "program_outcomes", ("program_id", "milestone_id", "subject_kind", "subject_digest")
+            )
+            self._require_foreign_keys(
+                "program_outcomes",
+                (
+                    ("milestones", "program_id", "run_id", "CASCADE"),
+                    ("milestones", "milestone_id", "milestone_id", "CASCADE"),
+                ),
+            )
         foreign_keys = self._db().execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or int(foreign_keys[0]) != 1:
             raise CorruptSchemaError("foreign-key enforcement is disabled")
@@ -3038,6 +3124,7 @@ class Ledger:
         has_dispatch_terminal_integrity = any(
             item[1] == "dispatch_terminal_integrity" for item in _schema_inventory(self._db())
         )
+        has_program_outcomes = any(item[1] == "program_outcomes" for item in _schema_inventory(self._db()))
         has_queue_bindings = any(item[1] == "queue_bindings" for item in _schema_inventory(self._db()))
         has_recovery_state = any(item[1] == "recovery_state" for item in _schema_inventory(self._db()))
         has_live_control = any(item[1] == "diagnostic_ring" for item in _schema_inventory(self._db()))
@@ -3073,6 +3160,29 @@ class Ledger:
                 "SELECT COUNT(*) FROM execution_integrity i LEFT JOIN executions x "
                 "ON x.run_id = i.run_id AND x.milestone_id = i.milestone_id WHERE x.run_id IS NULL"
             )
+        if has_program_outcomes:
+            orphan_queries.append(
+                "SELECT COUNT(*) FROM program_outcomes o LEFT JOIN milestones m "
+                "ON m.run_id = o.program_id AND m.milestone_id = o.milestone_id WHERE m.run_id IS NULL"
+            )
+            for outcome in self._db().execute("SELECT * FROM program_outcomes ORDER BY outcome_id").fetchall():
+                try:
+                    kind = ProgramOutcomeKind(str(outcome["outcome_kind"]))
+                    integration = ProgramIntegrationMode(str(outcome["integration_mode"]))
+                    validate_program_outcome_pair(kind, integration)
+                    subject_kind = ProgramOutcomeKind(str(outcome["subject_kind"]))
+                    digest = str(outcome["subject_digest"])
+                    if subject_kind is ProgramOutcomeKind.COMMIT:
+                        _git_sha(digest, field_name="program outcome commit subject")
+                    else:
+                        _sha256(digest, field_name="program outcome evidence subject")
+                    manifest = strict_json_loads(str(outcome["manifest_json"]), max_bytes=2_000_000)
+                    if not isinstance(manifest, Mapping) or hashlib.sha256(
+                        _encode_json(manifest).encode("utf-8")
+                    ).hexdigest() != str(outcome["outcome_digest"]):
+                        raise CorruptSchemaError("program outcome manifest digest is invalid")
+                except (TypeError, ValueError) as exc:
+                    raise CorruptSchemaError("program outcome row is malformed") from exc
         if has_app_native:
             orphan_queries.extend(
                 (
@@ -4884,6 +4994,9 @@ class Ledger:
                 raise CorruptSchemaError("program controller action receipt is inconsistent")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(20):
+            self._migrate_v20_to_v21()
+            return
         if version == SchemaVersion(19):
             self._migrate_v19_to_v20()
             return
@@ -4978,6 +5091,28 @@ class Ledger:
             raise CorruptSchemaError("migrated ledger violates the canonical foreign-key contract")
         self._migrate_v2_to_v3()
 
+    def _migrate_v20_to_v21(self) -> None:
+        """Add the append-only program outcome subject store without backfill."""
+
+        self._validate_schema_metadata(SchemaVersion(20))
+        self._validate_shape(SchemaVersion(20))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            existing = (
+                self._db()
+                .execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'program_outcomes'")
+                .fetchone()
+            )
+            if existing is None:
+                self._db().execute(_PROGRAM_OUTCOMES_DDL)
+            self._db().execute("UPDATE schema_meta SET value = '21' WHERE key = 'schema_version'")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(21)],),
+            )
+            self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+            self._fault("after_migration")
+
     def _migrate_v19_to_v20(self) -> None:
         """Add immutable terminal authority for ordinary-control repairs."""
 
@@ -4993,6 +5128,7 @@ class Ledger:
             )
             self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
             self._fault("after_migration")
+        self._migrate_v20_to_v21()
 
     def _migrate_v18_to_v19(self) -> None:
         """Rename the live supervisor authority in one forward migration.
@@ -8440,7 +8576,7 @@ class Ledger:
         if row is None:
             raise RecordNotFound(f"queue dispatch does not exist: {dispatch_id}")
         contract = str(row["result_contract_sha256"])
-        if contract == model_facing_result_schema_sha256():
+        if contract in {model_facing_result_schema_sha256(), model_facing_result_schema_sha256(2)}:
             return ModelFacingResult.from_agent_message(raw_result)
         if contract == legacy_model_facing_result_schema_sha256():
             # v18 queue rows predate the additive typed blocker projection.
@@ -11051,6 +11187,8 @@ class Ledger:
                     "milestone_id": str(node.milestone_id),
                     "dependencies": [str(item) for item in node.dependencies],
                     "mutable_surfaces": list(node.mutable_surfaces),
+                    "review_base_sha": node.review_base_sha,
+                    "adopted_candidate_sha": node.adopted_candidate_sha,
                     "capsule": capsule_json(node.capsule),
                 }
                 for node in program.nodes
@@ -11082,8 +11220,51 @@ class Ledger:
                 or any(not isinstance(item, str) for item in surfaces)
             ):
                 raise CorruptSchemaError("program graph node ownership facts are invalid")
+            adoption_fields = {"review_base_sha", "adopted_candidate_sha"}
+            present_adoption_fields = set(raw) & adoption_fields
+            if present_adoption_fields not in (set(), adoption_fields):
+                raise CorruptSchemaError("program graph node adoption facts are incomplete")
             nodes[node_id] = raw
         return nodes
+
+    def _refresh_program_completion_in_transaction(
+        self,
+        program_id: ProgramId,
+        *,
+        now: str | None = None,
+        advance_revision: bool = True,
+    ) -> None:
+        """Recompute program completion from the shared node closure policy."""
+
+        row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program_id),)).fetchone()
+        if row is None:
+            raise RecordNotFound(f"program does not exist: {program_id}")
+        status = self._program_status_from_row(row)
+        complete = all(program_node_closure_satisfied(node) for node in status.nodes)
+        current_state = ProgramState(str(row["program_state"]))
+        current_closed_at = row["closed_at"]
+        timestamp = now or utc_now()
+        if complete:
+            if current_state is ProgramState.COMPLETED and current_closed_at is not None:
+                return
+            revision = int(row["program_revision"]) + (1 if advance_revision else 0)
+            self._db().execute(
+                "UPDATE runs SET program_state = 'completed', program_revision = ?, "
+                "closed_at = COALESCE(closed_at, ?) WHERE run_id = ?",
+                (revision, timestamp, str(program_id)),
+            )
+            return
+        if current_state is ProgramState.COMPLETED:
+            raise CorruptSchemaError("completed program has an unsatisfied node closure")
+        if not advance_revision:
+            if current_state is ProgramState.REGISTERED:
+                self._db().execute("UPDATE runs SET program_state = 'running' WHERE run_id = ?", (str(program_id),))
+            return
+        next_state = ProgramState.RUNNING if current_state is ProgramState.REGISTERED else current_state
+        self._db().execute(
+            "UPDATE runs SET program_state = ?, program_revision = program_revision + 1 WHERE run_id = ?",
+            (next_state.value, str(program_id)),
+        )
 
     def _program_status_from_row(self, row: sqlite3.Row) -> ProgramStatus:
         if row["program_digest"] is None or row["program_graph_json"] is None or row["trunk_head"] is None:
@@ -11096,6 +11277,8 @@ class Ledger:
             raise CorruptSchemaError("program graph projection is not an object")
         nodes = self._program_node_payloads(graph_value)
         statuses: list[ProgramNodeStatus] = []
+        from .controller import capsule_from_json
+
         for milestone_id, payload in sorted(nodes.items()):
             milestone = (
                 self._db()
@@ -11113,6 +11296,7 @@ class Ledger:
             candidate: str | None = None
             candidate_disposition: CandidateDisposition | None = None
             blocker: TypedBlocker | None = None
+            evidence_sha256: str | None = None
             for fact in self.review_lifecycle(row["run_id"], milestone_id):
                 value = fact.data
                 if isinstance(value.get("candidate_sha"), str):
@@ -11123,6 +11307,10 @@ class Ledger:
                         blocker = None
                     candidate = str(value["candidate_sha"])
                     candidate_disposition = CandidateDisposition.VERIFIED_COMMIT
+                if isinstance(value.get("evidence_sha256"), str):
+                    if evidence_sha256 != value["evidence_sha256"]:
+                        blocker = None
+                    evidence_sha256 = str(value["evidence_sha256"])
                 raw_disposition = value.get("candidate_disposition")
                 if isinstance(raw_disposition, str):
                     try:
@@ -11130,7 +11318,12 @@ class Ledger:
                     except ValueError as exc:
                         raise CorruptSchemaError("program candidate disposition is invalid") from exc
                 raw_blocker = value.get("blocker")
-                if raw_blocker is not None and value.get("candidate_sha") == candidate:
+                subject_matches = (
+                    value.get("candidate_sha") == candidate
+                    if candidate is not None
+                    else value.get("evidence_sha256") == evidence_sha256
+                )
+                if raw_blocker is not None and subject_matches:
                     if not isinstance(raw_blocker, Mapping):
                         raise CorruptSchemaError("program blocker projection is invalid")
                     try:
@@ -11166,6 +11359,48 @@ class Ledger:
             integrated = integration is not None and str(integration["state"]) == "applied"
             if integration is not None and candidate is None:
                 candidate = str(integration["candidate_sha"])
+            try:
+                capsule = capsule_from_json(payload["capsule"])  # type: ignore[arg-type]
+            except (TypeError, ValueError) as exc:
+                raise CorruptSchemaError("program graph capsule projection is invalid") from exc
+            outcome_kind = capsule.outcome_kind
+            integration_mode = capsule.integration_mode
+            unsatisfied_gate_ids = tuple(gate.gate_id for gate in capsule.approval_gates)
+            subject_digest = candidate if outcome_kind is ProgramOutcomeKind.COMMIT else evidence_sha256
+            outcome = (
+                self._db()
+                .execute(
+                    "SELECT subject_digest, closure_generation FROM program_outcomes "
+                    "WHERE program_id = ? AND milestone_id = ? AND subject_kind = ? AND subject_digest = ? "
+                    "ORDER BY created_at DESC, outcome_id DESC LIMIT 1",
+                    (
+                        str(row["run_id"]),
+                        milestone_id,
+                        outcome_kind.value,
+                        subject_digest or "",
+                    ),
+                )
+                .fetchone()
+                if self._has_program_outcomes_table() and subject_digest is not None
+                else None
+            )
+            outcome_closed = bool(outcome is not None and int(outcome["closure_generation"]) > 0)
+            if outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE and evidence_sha256 is None and outcome is not None:
+                evidence_sha256 = str(outcome["subject_digest"])
+            if outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+                integrated = False
+            elif integration_mode is ProgramIntegrationMode.ALREADY_INTEGRATED:
+                integrated = outcome_closed
+            closure_satisfied = program_node_closure_satisfied(
+                outcome_kind,
+                integration_mode,
+                candidate_sha=candidate,
+                evidence_sha256=evidence_sha256,
+                reviews_accepted=True,
+                integrated=integrated,
+                adopted=outcome_closed,
+                blocker=blocker,
+            ) and (outcome_closed or (integration_mode is ProgramIntegrationMode.GIT and integrated))
             statuses.append(
                 ProgramNodeStatus(
                     MilestoneId(milestone_id),
@@ -11177,6 +11412,11 @@ class Ledger:
                     integrated,
                     candidate_disposition,
                     blocker,
+                    outcome_kind,
+                    integration_mode,
+                    evidence_sha256,
+                    closure_satisfied,
+                    unsatisfied_gate_ids,
                 )
             )
         try:
@@ -11197,6 +11437,8 @@ class Ledger:
 
         if not isinstance(program, ProgramGraph):
             raise TypeError("program must be a typed ProgramGraph")
+        if any(node.capsule.approval_gates for node in program.nodes):
+            raise StaleWriter("approval_capability_unavailable")
         projection = self._program_graph_projection(program)
         encoded = _encode_json(projection)
         # The canonical plan is the static intent authority.  The graph bytes
@@ -11311,6 +11553,11 @@ class Ledger:
                     node.milestone_id in ready,
                     status_by_id[node.milestone_id].candidate_disposition,
                     status_by_id[node.milestone_id].blocker,
+                    status_by_id[node.milestone_id].outcome_kind,
+                    status_by_id[node.milestone_id].integration_mode,
+                    status_by_id[node.milestone_id].evidence_sha256,
+                    status_by_id[node.milestone_id].closure_satisfied,
+                    status_by_id[node.milestone_id].unsatisfied_gate_ids,
                 )
                 for node in graph.nodes
             )
@@ -11346,6 +11593,8 @@ class Ledger:
                     MilestoneId(milestone_id),
                     capsule_from_json(payload["capsule"]),  # type: ignore[arg-type]
                     tuple(MilestoneId(item) for item in payload["dependencies"]),
+                    payload.get("review_base_sha"),  # type: ignore[arg-type]
+                    payload.get("adopted_candidate_sha"),  # type: ignore[arg-type]
                 )
                 for milestone_id, payload in sorted(raw_nodes.items())
             )
@@ -12046,6 +12295,91 @@ class Ledger:
             )
             return fact
 
+    def _validate_adoption_receipt_in_transaction(
+        self,
+        program: sqlite3.Row,
+        node: ProgramNodeSpec,
+        candidate: CandidateRecord,
+        receipt: Mapping[str, object],
+    ) -> JsonObject:
+        """Validate the closed, controller-authored existing-trunk receipt."""
+
+        required = {
+            "schema",
+            "program_id",
+            "milestone_id",
+            "repository_root",
+            "workspace_path",
+            "branch",
+            "graph_digest",
+            "review_base_sha",
+            "candidate_sha",
+            "candidate_tree",
+            "candidate_parents",
+            "changed_paths",
+            "changed_paths_sha256",
+            "protected_paths_sha256",
+            "observed_trunk_head",
+        }
+        if set(receipt) != required:
+            raise StaleWriter("already-integrated adoption receipt has an unsupported shape")
+        values = {key: receipt[key] for key in required}
+        if values["schema"] != "codex-flow/already-integrated-adoption/v1":
+            raise StaleWriter("already-integrated adoption receipt schema is unsupported")
+        expected_text = {
+            "program_id": str(program["run_id"]),
+            "milestone_id": str(node.milestone_id),
+            "repository_root": str(node.capsule.repository_root),
+            "workspace_path": str(node.capsule.workspace_path),
+            "branch": node.capsule.branch,
+            "graph_digest": str(program["program_digest"]),
+            "review_base_sha": node.review_base_sha,
+            "candidate_sha": candidate.commit_sha,
+            "observed_trunk_head": str(program["trunk_head"]),
+        }
+        if any(values[key] != expected for key, expected in expected_text.items()):
+            raise StaleWriter("already-integrated adoption receipt identity is stale")
+        candidate_tree = values["candidate_tree"]
+        if not isinstance(candidate_tree, str) or re.fullmatch(r"[0-9a-f]{40}", candidate_tree) is None:
+            raise StaleWriter("already-integrated adoption receipt tree is invalid")
+        parents = values["candidate_parents"]
+        if (
+            not isinstance(parents, list)
+            or parents != [node.review_base_sha]
+            or any(not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{40}", item) is None for item in parents)
+        ):
+            raise StaleWriter("already-integrated adoption receipt parents are invalid")
+        changed_paths = values["changed_paths"]
+        if (
+            not isinstance(changed_paths, list)
+            or any(
+                not isinstance(item, str)
+                or not item
+                or Path(item).is_absolute()
+                or ".." in Path(item).parts
+                or Path(item).as_posix() != item
+                for item in changed_paths
+            )
+            or changed_paths != sorted(set(changed_paths))
+        ):
+            raise StaleWriter("already-integrated adoption receipt paths are invalid")
+        mutable = tuple(Path(item) for item in node.capsule.mutable_paths)
+        protected = tuple(Path(item) for item in node.capsule.protected_paths)
+        for changed in map(Path, changed_paths):
+            if any(changed == item or item in changed.parents for item in protected) or not any(
+                changed == item or item in changed.parents for item in mutable
+            ):
+                raise StaleWriter("already-integrated adoption receipt changes an unauthorized path")
+        changed_digest = hashlib.sha256(_encode_json(changed_paths).encode("utf-8")).hexdigest()
+        if values["changed_paths_sha256"] != changed_digest:
+            raise StaleWriter("already-integrated adoption receipt path digest is invalid")
+        protected_digest = values["protected_paths_sha256"]
+        if not isinstance(protected_digest, str) or re.fullmatch(r"[0-9a-f]{64}", protected_digest) is None:
+            raise StaleWriter("already-integrated adoption receipt protected digest is invalid")
+        if candidate.workspace_digest != hashlib.sha256(candidate_tree.encode("ascii")).hexdigest():
+            raise StaleWriter("already-integrated adoption receipt tree conflicts with the candidate")
+        return cast(JsonObject, dict(receipt))
+
     def adopt_program_candidate(
         self,
         program_id: ProgramId | str,
@@ -12055,6 +12389,7 @@ class Ledger:
         dispatch_id: DispatchId | str | None = None,
         terminal_status: str | None = None,
         blocker: TypedBlocker | None = None,
+        adoption_receipt: Mapping[str, object] | None = None,
     ) -> ProgramStatus:
         """Register one independently verified existing candidate for review."""
 
@@ -12088,6 +12423,16 @@ class Ledger:
             )
             if row is None or row["program_digest"] is None or milestone_row is None:
                 raise RecordNotFound(f"program candidate does not exist: {program}/{milestone}")
+            node = self.program_graph(program).node(milestone)
+            already_integrated = node.capsule.integration_mode is ProgramIntegrationMode.ALREADY_INTEGRATED
+            if already_integrated:
+                if candidate.commit_sha != node.adopted_candidate_sha or node.review_base_sha is None:
+                    raise StaleWriter("already-integrated adoption candidate is not the registered candidate")
+                if adoption_receipt is None or not isinstance(adoption_receipt, Mapping):
+                    raise ValueError("already-integrated adoption requires its exact receipt")
+                receipt_value = self._validate_adoption_receipt_in_transaction(row, node, candidate, adoption_receipt)
+            elif adoption_receipt is not None:
+                raise ValueError("ordinary commit adoption cannot carry an already-integrated receipt")
             facts = self.review_lifecycle(program, milestone)
             inherited_status = terminal_status
             if inherited_status is None:
@@ -12134,7 +12479,9 @@ class Ledger:
                     raise StaleWriter("program candidate adoption is not a successor generation")
                 predecessor_sha = existing
             target_state = (
-                WorkflowState.BLOCKED
+                WorkflowState.COMPLETED
+                if already_integrated and inherited_status in {None, "completed"}
+                else WorkflowState.BLOCKED
                 if inherited_status == "external_blocked"
                 or (
                     blocker is not None
@@ -12143,6 +12490,35 @@ class Ledger:
                 )
                 else WorkflowState.REPAIR_REQUIRED
             )
+            if already_integrated and target_state is WorkflowState.COMPLETED:
+                if current is WorkflowState.PLANNED:
+                    self._transition_program_state_in_transaction(
+                        program,
+                        milestone,
+                        WorkflowState.STARTING,
+                        expected_state=WorkflowState.PLANNED,
+                        reason=ReasonCode.TERMINAL_OUTCOME,
+                    )
+                    current = WorkflowState.STARTING
+                if current is WorkflowState.STARTING:
+                    self._transition_program_state_in_transaction(
+                        program,
+                        milestone,
+                        WorkflowState.RUNNING,
+                        expected_state=WorkflowState.STARTING,
+                        reason=ReasonCode.TERMINAL_OUTCOME,
+                    )
+                    current = WorkflowState.RUNNING
+                if current is WorkflowState.RUNNING:
+                    self._transition_program_state_in_transaction(
+                        program,
+                        milestone,
+                        WorkflowState.COMPLETED,
+                        expected_state=WorkflowState.RUNNING,
+                        reason=ReasonCode.TERMINAL_OUTCOME,
+                    )
+                elif current is not WorkflowState.COMPLETED:
+                    raise StaleWriter("already-integrated adoption requires a launchable milestone")
             if (
                 current
                 in {
@@ -12176,8 +12552,37 @@ class Ledger:
                     "dispatch_id": dispatch_value,
                     "terminal_status": inherited_status,
                     "blocker": blocker.to_json() if blocker is not None else None,
+                    "adoption_receipt": receipt_value if already_integrated else None,
                 },
             )
+            if already_integrated:
+                receipt_json = _encode_json(receipt_value)
+                receipt_digest = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
+                existing_outcome = self._program_outcome_row(
+                    program,
+                    milestone,
+                    ReviewSubject(ProgramOutcomeKind.COMMIT, candidate.commit_sha),
+                )
+                if existing_outcome is None:
+                    self._db().execute(
+                        "INSERT INTO program_outcomes(outcome_id, program_id, milestone_id, subject_kind, subject_digest, "
+                        "outcome_kind, integration_mode, manifest_json, outcome_digest, acceptance_generation, "
+                        "closure_generation, created_at) VALUES (?, ?, ?, 'commit', ?, 'commit', 'already_integrated', ?, ?, 0, 0, ?)",
+                        (
+                            f"outcome/{program}/{milestone}/{candidate.commit_sha}",
+                            str(program),
+                            str(milestone),
+                            candidate.commit_sha,
+                            receipt_json,
+                            receipt_digest,
+                            utc_now(),
+                        ),
+                    )
+                elif (
+                    str(existing_outcome["manifest_json"]) != receipt_json
+                    or str(existing_outcome["outcome_digest"]) != receipt_digest
+                ):
+                    raise StaleWriter("already-integrated adoption receipt conflicts with its durable outcome")
             if predecessor_sha is not None:
                 self._record_program_fact_in_transaction(
                     program,
@@ -12200,6 +12605,552 @@ class Ledger:
             assert refreshed is not None
             return self._program_status_from_row(refreshed)
 
+    def _program_node_capsule(self, program_id: ProgramId, milestone_id: MilestoneId) -> ExecutionCapsule:
+        """Return the immutable capsule for one registered program node."""
+
+        try:
+            return self.program_graph(program_id).node(milestone_id).capsule
+        except KeyError as exc:
+            raise RecordNotFound(f"program milestone does not exist: {program_id}/{milestone_id}") from exc
+
+    @staticmethod
+    def _fact_subject_wire(data: Mapping[str, object]) -> str | None:
+        candidate = data.get("candidate_sha")
+        if isinstance(candidate, str):
+            return candidate
+        evidence = data.get("evidence_sha256")
+        if isinstance(evidence, str):
+            return f"runtime_evidence:{evidence}"
+        return None
+
+    def _program_subject(self, program_id: ProgramId, milestone_id: MilestoneId) -> ReviewSubject | None:
+        """Return the latest exact commit or runtime-evidence subject."""
+
+        for fact in reversed(self.review_lifecycle(program_id, milestone_id)):
+            subject = self._fact_subject_wire(fact.data)
+            if subject is None:
+                continue
+            try:
+                if subject.startswith("runtime_evidence:"):
+                    return ReviewSubject(ProgramOutcomeKind.RUNTIME_EVIDENCE, subject.removeprefix("runtime_evidence:"))
+                return ReviewSubject(ProgramOutcomeKind.COMMIT, subject)
+            except ValueError as exc:
+                raise CorruptSchemaError("program lifecycle subject is malformed") from exc
+        return None
+
+    @staticmethod
+    def _review_subject_from_wire(value: str) -> ReviewSubject:
+        """Decode the one closed subject wire form used by program actions."""
+
+        try:
+            if value.startswith("runtime_evidence:"):
+                return ReviewSubject(ProgramOutcomeKind.RUNTIME_EVIDENCE, value.removeprefix("runtime_evidence:"))
+            return ReviewSubject(ProgramOutcomeKind.COMMIT, value)
+        except ValueError as exc:
+            raise StaleWriter("program action subject is malformed") from exc
+
+    def _program_outcome_row(
+        self, program_id: ProgramId, milestone_id: MilestoneId, subject: ReviewSubject
+    ) -> sqlite3.Row | None:
+        if not self._has_program_outcomes_table():
+            return None
+        return (
+            self._db()
+            .execute(
+                "SELECT * FROM program_outcomes WHERE program_id = ? AND milestone_id = ? "
+                "AND subject_kind = ? AND subject_digest = ?",
+                (str(program_id), str(milestone_id), subject.kind.value, subject.digest),
+            )
+            .fetchone()
+        )
+
+    def runtime_evidence_manifest(
+        self, program_id: ProgramId | str, milestone_id: MilestoneId | str, evidence_sha256: str
+    ) -> RuntimeEvidenceManifest:
+        """Read and validate one retained runtime manifest for rehashing."""
+
+        subject = ReviewSubject(ProgramOutcomeKind.RUNTIME_EVIDENCE, evidence_sha256)
+        row = self._program_outcome_row(ProgramId(str(program_id)), MilestoneId(str(milestone_id)), subject)
+        if row is None or str(row["outcome_kind"]) != ProgramOutcomeKind.RUNTIME_EVIDENCE.value:
+            raise RecordNotFound("runtime evidence outcome does not exist")
+        try:
+            value = strict_json_loads(str(row["manifest_json"]), max_bytes=2_000_000)
+            if not isinstance(value, Mapping):
+                raise ValueError("manifest is not an object")
+            manifest = RuntimeEvidenceManifest.from_json(value)
+        except (TypeError, ValueError) as exc:
+            raise CorruptSchemaError("runtime evidence manifest is malformed") from exc
+        if manifest.sha256 != subject.digest or str(row["outcome_digest"]) != subject.digest:
+            raise CorruptSchemaError("runtime evidence manifest identity is invalid")
+        return manifest
+
+    def _validate_program_review_set_in_transaction(
+        self,
+        program_id: ProgramId,
+        milestone_id: MilestoneId,
+        subject: ReviewSubject,
+        review_ids: Sequence[str],
+    ) -> None:
+        """Require every declared authority to accept one exact subject."""
+
+        node = self.program_graph(program_id).node(milestone_id)
+        role_by_mode = {
+            AcceptanceMode.OBJECTIVE: "code-reviewer",
+            AcceptanceMode.VISUAL: "visual-reviewer",
+            AcceptanceMode.ARCHITECTURE: "architecture-reviewer",
+        }
+        expected_roles = {role_by_mode[mode] for mode in node.capsule.acceptance_modes}
+        subject_wire = subject.wire_value
+        facts = self.review_lifecycle(program_id, milestone_id)
+        matching = [fact for fact in facts if self._fact_subject_wire(fact.data) == subject_wire]
+        accepted = {
+            str(fact.data.get("review_id"))
+            for fact in matching
+            if fact.kind == "review_completed" and fact.data.get("accepted") is True
+        }
+        accepted_roles = {
+            str(fact.data.get("reviewer_role"))
+            for fact in matching
+            if fact.kind == "review_completed" and fact.data.get("accepted") is True
+        }
+        if set(review_ids) != accepted or not accepted or accepted_roles != expected_roles:
+            raise StaleWriter("program closure requires every exact accepted review")
+        if any(
+            fact.kind == "review_completed"
+            and self._fact_subject_wire(fact.data) == subject_wire
+            and fact.data.get("promotion_blocking") is True
+            for fact in facts
+        ):
+            raise StaleWriter("program closure has a promotion-blocking review finding")
+
+    def record_runtime_evidence(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        manifest: RuntimeEvidenceManifest,
+        terminal_status: str,
+        dispatch_id: DispatchId | str,
+        result_sha256: str | None = None,
+        blocker: TypedBlocker | None = None,
+    ) -> ProgramStatus:
+        """Record one controller-authored runtime manifest atomically.
+
+        Files are captured and rehashed by ``runtime_evidence`` before this
+        method is called.  SQLite records only the immutable manifest and the
+        lifecycle identity; it never treats a worker assertion as a snapshot
+        or as a successful closure.
+        """
+
+        if not isinstance(manifest, RuntimeEvidenceManifest):
+            raise TypeError("runtime evidence must use a typed manifest")
+        if terminal_status not in {"completed", "failed", "external_blocked", "needs_decision"}:
+            raise ValueError("runtime evidence terminal status is unsupported")
+        dispatch = DispatchId(str(dispatch_id))
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        if dispatch.parts[0] != program or dispatch.parts[1] != milestone or dispatch.parts[2] != RoleId("executor"):
+            raise StaleWriter("runtime evidence dispatch does not match its program node")
+        if manifest.program_id != program or manifest.milestone_id != milestone or manifest.dispatch_id != dispatch:
+            raise StaleWriter("runtime evidence manifest identity is not bound to its dispatch")
+        if manifest.terminal_outcome != terminal_status:
+            raise StaleWriter("runtime evidence terminal outcome does not match its dispatch")
+        if result_sha256 is not None:
+            _sha256(result_sha256, field_name="runtime evidence result digest")
+        if blocker is not None and not isinstance(blocker, TypedBlocker):
+            raise TypeError("runtime evidence blocker must be typed")
+        normalized_blocker = _normalize_terminal_blocker(terminal_status, blocker)
+        manifest_json = manifest.canonical_bytes().decode("utf-8")
+        outcome_digest = manifest.sha256
+        subject = ReviewSubject(ProgramOutcomeKind.RUNTIME_EVIDENCE, outcome_digest)
+        terminal_fact: JsonObject = {
+            "dispatch_id": str(dispatch),
+            "terminal_status": terminal_status,
+            "candidate_sha": None,
+            "candidate_disposition": CandidateDisposition.NO_CANDIDATE.value,
+            "candidate_workspace_path": None,
+            "candidate_workspace_head": None,
+            "candidate_workspace_digest": None,
+            "candidate_dirty": False,
+            "candidate_reason": None,
+            "result_sha256": result_sha256,
+            "evidence_sha256": outcome_digest,
+            "blocker": normalized_blocker.to_json() if normalized_blocker is not None else None,
+        }
+        with self._transaction():
+            row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            milestone_row = (
+                self._db()
+                .execute(
+                    "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                    (str(program), str(milestone)),
+                )
+                .fetchone()
+            )
+            if row is None or row["program_digest"] is None or milestone_row is None:
+                raise RecordNotFound(f"runtime evidence program node does not exist: {program}/{milestone}")
+            capsule = self._program_node_capsule(program, milestone)
+            if (
+                capsule.outcome_kind is not ProgramOutcomeKind.RUNTIME_EVIDENCE
+                or capsule.integration_mode is not ProgramIntegrationMode.NO_INTEGRATION
+            ):
+                raise StaleWriter("runtime evidence does not match the program node outcome mode")
+            if (
+                capsule.runtime_artifact_max_files is not None
+                and len(manifest.files) > capsule.runtime_artifact_max_files
+            ):
+                raise StaleWriter("runtime evidence exceeds its registered file limit")
+            if (
+                capsule.runtime_artifact_max_bytes is not None
+                and sum(item.size_bytes for item in manifest.files) > capsule.runtime_artifact_max_bytes
+            ):
+                raise StaleWriter("runtime evidence exceeds its registered byte limit")
+            if (
+                capsule.acceptance_criteria_sha256 is not None
+                and manifest.acceptance_criteria_sha256 != capsule.acceptance_criteria_sha256
+            ):
+                raise StaleWriter("runtime evidence acceptance criteria identity is stale")
+            queue = (
+                self._db()
+                .execute(
+                    "SELECT generation, attempt, raw_result_sha256, capsule_json FROM dispatch_queue WHERE dispatch_id = ?",
+                    (str(dispatch),),
+                )
+                .fetchone()
+            )
+            if queue is not None:
+                if int(queue["generation"]) != manifest.generation or int(queue["attempt"]) != manifest.attempt:
+                    raise StaleWriter("runtime evidence attempt identity is stale")
+                if queue["raw_result_sha256"] is not None and result_sha256 != str(queue["raw_result_sha256"]):
+                    raise StaleWriter("runtime evidence result identity is stale")
+                if hashlib.sha256(str(queue["capsule_json"]).encode("utf-8")).hexdigest() != manifest.capsule_sha256:
+                    raise StaleWriter("runtime evidence capsule identity is stale")
+                binding = (
+                    self._db()
+                    .execute("SELECT plan_revision_sha256 FROM queue_bindings WHERE dispatch_id = ?", (str(dispatch),))
+                    .fetchone()
+                )
+                if binding is not None and str(binding["plan_revision_sha256"]) != manifest.plan_revision_sha256:
+                    raise StaleWriter("runtime evidence plan identity is stale")
+            existing = self._program_outcome_row(program, milestone, subject)
+            if existing is not None:
+                if str(existing["manifest_json"]) != manifest_json or str(existing["outcome_digest"]) != outcome_digest:
+                    raise StaleWriter("runtime evidence subject already names different bytes")
+            else:
+                self._db().execute(
+                    "INSERT INTO program_outcomes(outcome_id, program_id, milestone_id, subject_kind, subject_digest, "
+                    "outcome_kind, integration_mode, manifest_json, outcome_digest, acceptance_generation, "
+                    "closure_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)",
+                    (
+                        f"outcome/{program}/{milestone}/{subject.wire_value}",
+                        str(program),
+                        str(milestone),
+                        subject.kind.value,
+                        subject.digest,
+                        ProgramOutcomeKind.RUNTIME_EVIDENCE.value,
+                        ProgramIntegrationMode.NO_INTEGRATION.value,
+                        manifest_json,
+                        outcome_digest,
+                        utc_now(),
+                    ),
+                )
+            facts = self.review_lifecycle(program, milestone)
+            for fact in facts:
+                if fact.kind == "executor_terminal" and fact.data.get("dispatch_id") == str(dispatch):
+                    if fact.data != terminal_fact:
+                        raise StaleWriter("runtime evidence terminal replay conflicts with its durable result")
+                    refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+                    assert refreshed is not None
+                    return self._program_status_from_row(refreshed)
+            current = WorkflowState(str(milestone_row["current_state"]))
+            target_state = (
+                WorkflowState.COMPLETED
+                if terminal_status == "completed"
+                else (
+                    WorkflowState.BLOCKED
+                    if terminal_status == "external_blocked"
+                    else WorkflowState.NEEDS_DECISION
+                    if terminal_status == "needs_decision"
+                    else WorkflowState.FAILED
+                )
+            )
+            if current is WorkflowState.STARTING:
+                self._transition_program_state_in_transaction(
+                    program,
+                    milestone,
+                    WorkflowState.RUNNING,
+                    expected_state=WorkflowState.STARTING,
+                    reason=ReasonCode.EXECUTION_FAILURE,
+                )
+                current = WorkflowState.RUNNING
+            if current is WorkflowState.REPAIR_REQUIRED and target_state is WorkflowState.COMPLETED:
+                self._transition_program_state_in_transaction(
+                    program,
+                    milestone,
+                    WorkflowState.RUNNING,
+                    expected_state=WorkflowState.REPAIR_REQUIRED,
+                    reason=ReasonCode.EXECUTION_FAILURE,
+                )
+                current = WorkflowState.RUNNING
+            if current is WorkflowState.RUNNING:
+                self._transition_program_state_in_transaction(
+                    program,
+                    milestone,
+                    target_state,
+                    expected_state=WorkflowState.RUNNING,
+                    reason=ReasonCode.TERMINAL_OUTCOME
+                    if target_state is WorkflowState.COMPLETED
+                    else ReasonCode.EXECUTION_FAILURE,
+                )
+            elif current is not target_state:
+                raise StaleWriter(f"runtime evidence result conflicts with milestone state {current.value}")
+            self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.EXECUTION,
+                kind="evidence_recorded",
+                data={"evidence_sha256": outcome_digest, "manifest_sha256": outcome_digest},
+            )
+            self._record_program_fact_in_transaction(
+                program, milestone, phase=LifecyclePhase.EXECUTION, kind="executor_terminal", data=terminal_fact
+            )
+            if terminal_status == "completed":
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.IMPLEMENTATION_COMPLETED,
+                    event_key=f"milestone/{milestone}/evidence/{outcome_digest}",
+                    payload={"milestone_id": str(milestone), "evidence_sha256": outcome_digest},
+                )
+            else:
+                program_state = (
+                    ProgramState.NEEDS_DECISION.value
+                    if terminal_status == "needs_decision"
+                    else ProgramState.EXTERNAL_BLOCKED.value
+                    if terminal_status == "external_blocked"
+                    else ProgramState.FAILED.value
+                )
+                self._db().execute(
+                    "UPDATE runs SET program_state = ?, program_revision = program_revision + 1 WHERE run_id = ?",
+                    (program_state, str(program)),
+                )
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                    event_key=f"executor/{milestone}/{dispatch}/{terminal_status}",
+                    payload={
+                        "milestone_id": str(milestone),
+                        "evidence_sha256": outcome_digest,
+                        "blocker": normalized_blocker.to_json() if normalized_blocker else None,
+                    },
+                )
+            refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            assert refreshed is not None
+            return self._program_status_from_row(refreshed)
+
+    def _close_program_node_in_transaction(
+        self,
+        program: ProgramId,
+        milestone: MilestoneId,
+        subject: ReviewSubject,
+        review_ids: Sequence[str],
+        *,
+        receipt: Mapping[str, object] | None = None,
+        now: str | None = None,
+        advance_program_revision: bool = True,
+    ) -> None:
+        """Close an accepted no-integration or already-integrated subject."""
+
+        node = self.program_graph(program).node(milestone)
+        expected_outcome, expected_integration = validate_program_outcome_pair(
+            node.capsule.outcome_kind, node.capsule.integration_mode
+        )
+        if subject.kind is not expected_outcome:
+            raise StaleWriter("program closure subject kind does not match the node")
+        if expected_integration is ProgramIntegrationMode.GIT:
+            raise StaleWriter("Git-integrated nodes close through their integration receipt")
+        self._validate_program_review_set_in_transaction(program, milestone, subject, review_ids)
+        outcome = self._program_outcome_row(program, milestone, subject)
+        facts = self.review_lifecycle(program, milestone)
+        promotion_exists = any(
+            fact.kind == "promotion_accepted" and self._fact_subject_wire(fact.data) == subject.wire_value
+            for fact in facts
+        )
+        if promotion_exists and outcome is not None and int(outcome["closure_generation"]) == 1:
+            if self.current_state(program, milestone) is not WorkflowState.ACCEPTED:
+                raise CorruptSchemaError("closed program outcome does not have an accepted milestone")
+            return
+        if outcome is None:
+            if expected_integration is ProgramIntegrationMode.NO_INTEGRATION:
+                raise StaleWriter("runtime evidence subject is not recorded")
+            payload: Mapping[str, object] | None = receipt if isinstance(receipt, Mapping) else None
+            if payload is None:
+                for fact in reversed(facts):
+                    candidate_payload = fact.data.get("adoption_receipt")
+                    if (
+                        fact.kind == "candidate_adopted"
+                        and self._fact_subject_wire(fact.data) == subject.wire_value
+                        and isinstance(candidate_payload, Mapping)
+                    ):
+                        payload = candidate_payload
+                        break
+            if payload is None:
+                raise ValueError("already-integrated closure requires its adoption receipt")
+            node = self.program_graph(program).node(milestone)
+            candidate_record = CandidateRecord(
+                CandidateDisposition.VERIFIED_COMMIT,
+                node.capsule.workspace_path,
+                commit_sha=subject.digest,
+                workspace_head=subject.digest,
+                workspace_digest=str(payload.get("candidate_tree_digest", "")) or None,
+            )
+            # The adoption path normally creates this row before review.  This
+            # fallback is for a retained pre-row fact and still validates the
+            # receipt before accepting the logical closure.
+            if candidate_record.workspace_digest is None:
+                candidate_tree = payload.get("candidate_tree")
+                if isinstance(candidate_tree, str) and re.fullmatch(r"[0-9a-f]{40}", candidate_tree):
+                    candidate_record = CandidateRecord(
+                        CandidateDisposition.VERIFIED_COMMIT,
+                        node.capsule.workspace_path,
+                        commit_sha=subject.digest,
+                        workspace_head=subject.digest,
+                        workspace_digest=hashlib.sha256(candidate_tree.encode("ascii")).hexdigest(),
+                    )
+            payload = self._validate_adoption_receipt_in_transaction(
+                self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone(),
+                node,
+                candidate_record,
+                payload,
+            )
+            encoded = _encode_json(payload)
+            digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            self._db().execute(
+                "INSERT INTO program_outcomes(outcome_id, program_id, milestone_id, subject_kind, subject_digest, "
+                "outcome_kind, integration_mode, manifest_json, outcome_digest, acceptance_generation, closure_generation, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)",
+                (
+                    f"outcome/{program}/{milestone}/{subject.wire_value}",
+                    str(program),
+                    str(milestone),
+                    subject.kind.value,
+                    subject.digest,
+                    expected_outcome.value,
+                    expected_integration.value,
+                    encoded,
+                    digest,
+                    now or utc_now(),
+                ),
+            )
+        else:
+            if (
+                str(outcome["outcome_kind"]) != expected_outcome.value
+                or str(outcome["integration_mode"]) != expected_integration.value
+            ):
+                raise CorruptSchemaError("program outcome mode conflicts with the node")
+            if (
+                expected_integration is ProgramIntegrationMode.NO_INTEGRATION
+                and str(outcome["outcome_digest"]) != subject.digest
+            ):
+                raise CorruptSchemaError("runtime evidence outcome digest is invalid")
+            if expected_integration is ProgramIntegrationMode.ALREADY_INTEGRATED:
+                try:
+                    stored_receipt = strict_json_loads(str(outcome["manifest_json"]), max_bytes=2_000_000)
+                except ValueError as exc:
+                    raise CorruptSchemaError("already-integrated adoption receipt is malformed") from exc
+                if not isinstance(stored_receipt, Mapping):
+                    raise CorruptSchemaError("already-integrated adoption receipt is malformed")
+                node = self.program_graph(program).node(milestone)
+                candidate_tree = stored_receipt.get("candidate_tree")
+                if not isinstance(candidate_tree, str) or re.fullmatch(r"[0-9a-f]{40}", candidate_tree) is None:
+                    raise CorruptSchemaError("already-integrated adoption receipt tree is malformed")
+                candidate_record = CandidateRecord(
+                    CandidateDisposition.VERIFIED_COMMIT,
+                    node.capsule.workspace_path,
+                    commit_sha=subject.digest,
+                    workspace_head=subject.digest,
+                    workspace_digest=hashlib.sha256(candidate_tree.encode("ascii")).hexdigest(),
+                )
+                run_row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+                assert run_row is not None
+                validated = self._validate_adoption_receipt_in_transaction(
+                    run_row, node, candidate_record, stored_receipt
+                )
+                if _encode_json(validated) != str(outcome["manifest_json"]):
+                    raise CorruptSchemaError("already-integrated adoption receipt bytes changed")
+                if receipt is not None and _encode_json(dict(receipt)) != str(outcome["manifest_json"]):
+                    raise StaleWriter("already-integrated closure receipt conflicts with adoption")
+            if int(outcome["closure_generation"]) == 0:
+                self._db().execute(
+                    "UPDATE program_outcomes SET acceptance_generation = 1, closure_generation = 1 WHERE outcome_id = ?",
+                    (str(outcome["outcome_id"]),),
+                )
+            elif int(outcome["closure_generation"]) != 1:
+                raise CorruptSchemaError("program outcome closure generation is invalid")
+        promotion_data: JsonObject = (
+            {
+                "evidence_sha256": subject.digest,
+                "review_ids": sorted(review_ids),
+            }
+            if subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE
+            else {
+                "candidate_sha": subject.digest,
+                "review_ids": sorted(review_ids),
+            }
+        )
+        if not any(
+            fact.kind == "promotion_accepted" and self._fact_subject_wire(fact.data) == subject.wire_value
+            for fact in facts
+        ):
+            self._record_program_fact_in_transaction(
+                program, milestone, phase=LifecyclePhase.ACCEPTANCE, kind="promotion_accepted", data=promotion_data
+            )
+        current = self.current_state(program, milestone)
+        if current is WorkflowState.REVIEWING:
+            self._transition_program_state_in_transaction(
+                program,
+                milestone,
+                WorkflowState.ACCEPTED,
+                expected_state=WorkflowState.REVIEWING,
+                reason=ReasonCode.TERMINAL_OUTCOME,
+            )
+        elif current is not WorkflowState.ACCEPTED:
+            raise StaleWriter(f"program closure requires a reviewing milestone, found {current.value}")
+        self._refresh_program_completion_in_transaction(
+            program,
+            now=now,
+            advance_revision=advance_program_revision,
+        )
+
+    def close_program_node(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId | str,
+        *,
+        subject: ReviewSubject | str,
+        review_ids: Sequence[str],
+        receipt: Mapping[str, object] | None = None,
+        now: str | None = None,
+    ) -> ProgramStatus:
+        """Atomically mark one independently accepted node closure."""
+
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        if isinstance(subject, ReviewSubject):
+            typed_subject = subject
+        elif isinstance(subject, str) and subject.startswith("runtime_evidence:"):
+            typed_subject = ReviewSubject(
+                ProgramOutcomeKind.RUNTIME_EVIDENCE, subject.removeprefix("runtime_evidence:")
+            )
+        else:
+            typed_subject = ReviewSubject(ProgramOutcomeKind.COMMIT, str(subject))
+        with self._transaction():
+            self._close_program_node_in_transaction(
+                program, milestone, typed_subject, review_ids, receipt=receipt, now=now
+            )
+            refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            assert refreshed is not None
+            return self._program_status_from_row(refreshed)
+
     def record_program_review(
         self, program_id: ProgramId | str, milestone_id: MilestoneId | str, result: object
     ) -> LifecycleRecord:
@@ -12209,22 +13160,45 @@ class Ledger:
             raise TypeError("program review must be a typed ReviewResult")
         program = ProgramId(str(program_id))
         milestone = MilestoneId(str(milestone_id))
-        candidate = self._program_candidate_sha(program, milestone)
-        if candidate is None or result.reviewed_revision != candidate or not result.fresh or not result.read_only:
-            raise StaleWriter("review does not cover the exact current candidate")
+        if not result.fresh or not result.read_only:
+            raise StaleWriter("review does not declare fresh read-only evidence")
+        reviewed = result.reviewed_revision
+        try:
+            subject = (
+                ReviewSubject(ProgramOutcomeKind.RUNTIME_EVIDENCE, reviewed.removeprefix("runtime_evidence:"))
+                if reviewed.startswith("runtime_evidence:")
+                else ReviewSubject(ProgramOutcomeKind.COMMIT, reviewed)
+            )
+        except ValueError as exc:
+            raise StaleWriter("review subject is malformed") from exc
         with self._transaction():
-            for fact in reversed(self.review_lifecycle(program, milestone)):
-                if fact.kind == "review_completed" and fact.data.get("review_id") == result.review_id:
-                    return fact
-            data = {
+            node = self.program_graph(program).node(milestone)
+            if subject.kind is not node.capsule.outcome_kind or self._program_subject(program, milestone) != subject:
+                raise StaleWriter("review does not cover the exact current program subject")
+            expected_role = {
+                AcceptanceMode.OBJECTIVE: RoleId("code-reviewer"),
+                AcceptanceMode.VISUAL: RoleId("visual-reviewer"),
+                AcceptanceMode.ARCHITECTURE: RoleId("architecture-reviewer"),
+            }[result.acceptance_mode]
+            if result.reviewer_role != expected_role:
+                raise StaleWriter("review role does not match its declared acceptance mode")
+            data: JsonObject = {
                 "review_id": result.review_id,
                 "reviewer_role": str(result.reviewer_role),
                 "acceptance_mode": result.acceptance_mode.value,
                 "accepted": result.accepted,
-                "candidate_sha": candidate,
                 "finding_ids": [item.finding_id for item in result.findings],
                 "promotion_blocking": (not result.accepted) or any(item.promotion_blocking for item in result.findings),
             }
+            if subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+                data["evidence_sha256"] = subject.digest
+            else:
+                data["candidate_sha"] = subject.digest
+            for fact in reversed(self.review_lifecycle(program, milestone)):
+                if fact.kind == "review_completed" and fact.data.get("review_id") == result.review_id:
+                    if fact.data != data:
+                        raise StaleWriter("program review replay conflicts with its durable result")
+                    return fact
             fact = self._record_program_fact_in_transaction(
                 program,
                 milestone,
@@ -12232,55 +13206,39 @@ class Ledger:
                 kind="review_completed",
                 data=data,
             )
-            graph_value = strict_json_loads(
-                str(
-                    self._db()
-                    .execute("SELECT program_graph_json FROM runs WHERE run_id = ?", (str(program),))
-                    .fetchone()[0]
-                ),
-                max_bytes=2_000_000,
-            )
-            if not isinstance(graph_value, dict):
-                raise CorruptSchemaError("program graph projection is invalid")
-            nodes = self._program_node_payloads(graph_value)
-            capsule = nodes.get(str(milestone), {}).get("capsule")
-            raw_modes = capsule.get("acceptance_modes", []) if isinstance(capsule, dict) else []
+            review_facts = self.review_lifecycle(program, milestone)
             role_by_mode = {
-                "objective": "code-reviewer",
-                "visual": "visual-reviewer",
-                "architecture": "architecture-reviewer",
+                AcceptanceMode.OBJECTIVE: "code-reviewer",
+                AcceptanceMode.VISUAL: "visual-reviewer",
+                AcceptanceMode.ARCHITECTURE: "architecture-reviewer",
             }
-            expected_roles = {
-                role_by_mode[mode] for mode in raw_modes if isinstance(mode, str) and mode in role_by_mode
-            }
-            completed = {
-                str(item.data.get("reviewer_role"))
-                for item in self.review_lifecycle(program, milestone)
-                if item.kind == "review_completed" and item.data.get("candidate_sha") == candidate
-            }
-            if expected_roles and expected_roles.issubset(completed):
-                review_ids = sorted(
-                    str(item.data["review_id"])
-                    for item in self.review_lifecycle(program, milestone)
-                    if item.kind == "review_completed" and item.data.get("candidate_sha") == candidate
-                )
+            expected_roles = {role_by_mode[mode] for mode in node.capsule.acceptance_modes}
+            matching = [item for item in review_facts if self._fact_subject_wire(item.data) == subject.wire_value]
+            completed = {str(item.data.get("reviewer_role")) for item in matching if item.kind == "review_completed"}
+            if expected_roles == completed and all(
+                item.data.get("accepted") is True for item in matching if item.kind == "review_completed"
+            ):
+                review_ids = sorted(str(item.data["review_id"]) for item in matching if item.kind == "review_completed")
                 review_digest = hashlib.sha256(_encode_json(review_ids).encode("utf-8")).hexdigest()[:16]
                 blockers = any(
                     item.kind == "review_completed"
-                    and item.data.get("candidate_sha") == candidate
+                    and self._fact_subject_wire(item.data) == subject.wire_value
                     and item.data.get("promotion_blocking") is True
-                    for item in self.review_lifecycle(program, milestone)
+                    for item in review_facts
                 )
+                payload: JsonObject = {
+                    "milestone_id": str(milestone),
+                    "review_ids": review_ids,
+                    "promotion_blocking": blockers,
+                }
+                payload[
+                    "evidence_sha256" if subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE else "candidate_sha"
+                ] = subject.digest
                 self._ensure_program_decision_in_transaction(
                     program,
                     event_kind=ProgramEventKind.REVIEW_COMPLETED,
                     event_key=f"milestone/{milestone}/reviews/{review_digest}",
-                    payload={
-                        "milestone_id": str(milestone),
-                        "candidate_sha": candidate,
-                        "review_ids": review_ids,
-                        "promotion_blocking": blockers,
-                    },
+                    payload=payload,
                 )
             return fact
 
@@ -12756,6 +13714,11 @@ class Ledger:
         if not isinstance(graph_value, dict):
             raise CorruptSchemaError("program graph projection is invalid")
         nodes = self._program_node_payloads(graph_value)
+        if any(
+            isinstance(payload.get("capsule"), Mapping) and bool(payload["capsule"].get("approval_gates"))  # type: ignore[union-attr]
+            for payload in nodes.values()
+        ):
+            raise StaleWriter("approval_capability_unavailable")
         effects: list[str] = []
         role_by_mode = {
             "objective": "code-reviewer",
@@ -12797,10 +13760,15 @@ class Ledger:
                         raise StaleWriter("program start action would duplicate an executor START")
                 effects.append(f"start:{','.join(selected)}")
             elif action.kind is ProgramControllerActionKind.START_REVIEWS:
-                if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
-                    bundle.program_id, action.milestone_id
+                if action.milestone_id not in nodes or action.subject_wire is None:
+                    raise StaleWriter("program review action is incomplete")
+                subject = self._review_subject_from_wire(action.subject_wire)
+                node = self._program_node_capsule(bundle.program_id, MilestoneId(action.milestone_id))
+                if (
+                    subject.kind is not node.outcome_kind
+                    or self._program_subject(bundle.program_id, MilestoneId(action.milestone_id)) != subject
                 ):
-                    raise StaleWriter("program review action does not target the exact candidate")
+                    raise StaleWriter("program review action does not target the exact program subject")
                 if (
                     self._program_applicable_blocker(
                         bundle.program_id,
@@ -12850,10 +13818,15 @@ class Ledger:
                     raise StaleWriter("program review action requires a completed or reviewing milestone")
                 effects.append(f"review:{action.milestone_id}")
             elif action.kind is ProgramControllerActionKind.REQUEST_REPAIR:
-                if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
-                    bundle.program_id, action.milestone_id
+                if action.milestone_id not in nodes or action.subject_wire is None:
+                    raise StaleWriter("program repair action is incomplete")
+                subject = self._review_subject_from_wire(action.subject_wire)
+                node = self._program_node_capsule(bundle.program_id, MilestoneId(action.milestone_id))
+                if (
+                    subject.kind is not node.outcome_kind
+                    or self._program_subject(bundle.program_id, MilestoneId(action.milestone_id)) != subject
                 ):
-                    raise StaleWriter("program repair action does not target the exact candidate")
+                    raise StaleWriter("program repair action does not target the exact program subject")
                 if not action.finding_ids:
                     raise StaleWriter("program repair action has no concrete findings")
                 facts = self.review_lifecycle(bundle.program_id, action.milestone_id)
@@ -12861,7 +13834,7 @@ class Ledger:
                     finding_id
                     for item in facts
                     if item.kind == "review_completed"
-                    and item.data.get("candidate_sha") == action.candidate_sha
+                    and self._fact_subject_wire(item.data) == subject.wire_value
                     and item.data.get("promotion_blocking") is True
                     for finding_id in item.data.get("finding_ids", [])
                     if isinstance(finding_id, str)
@@ -12927,17 +13900,22 @@ class Ledger:
                 )
                 effects.append(f"resolve-blocker:{action.milestone_id}:{action.blocker_gate_id}")
             elif action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE:
-                if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
-                    bundle.program_id, action.milestone_id
+                if action.milestone_id not in nodes or action.subject_wire is None:
+                    raise StaleWriter("program promotion action is incomplete")
+                subject = self._review_subject_from_wire(action.subject_wire)
+                node = self._program_node_capsule(bundle.program_id, MilestoneId(action.milestone_id))
+                if (
+                    subject.kind is not node.outcome_kind
+                    or self._program_subject(bundle.program_id, MilestoneId(action.milestone_id)) != subject
                 ):
-                    raise StaleWriter("program promotion action does not target the exact candidate")
+                    raise StaleWriter("program promotion action does not target the exact program subject")
                 facts = self.review_lifecycle(bundle.program_id, action.milestone_id)
                 accepted = {
                     str(item.data.get("review_id"))
                     for item in facts
                     if item.kind == "review_completed"
                     and item.data.get("accepted") is True
-                    and item.data.get("candidate_sha") == action.candidate_sha
+                    and self._fact_subject_wire(item.data) == subject.wire_value
                 }
                 capsule = nodes[action.milestone_id].get("capsule")
                 modes = capsule.get("acceptance_modes", []) if isinstance(capsule, dict) else []
@@ -12949,13 +13927,13 @@ class Ledger:
                     for item in facts
                     if item.kind == "review_completed"
                     and item.data.get("accepted") is True
-                    and item.data.get("candidate_sha") == action.candidate_sha
+                    and self._fact_subject_wire(item.data) == subject.wire_value
                 }
                 if set(action.review_ids) != accepted or not accepted or accepted_roles != expected_roles:
                     raise StaleWriter("program promotion requires every exact accepted review")
                 if any(
                     item.kind == "review_completed"
-                    and item.data.get("candidate_sha") == action.candidate_sha
+                    and self._fact_subject_wire(item.data) == subject.wire_value
                     and item.data.get("promotion_blocking") is True
                     for item in facts
                 ):
@@ -12968,27 +13946,38 @@ class Ledger:
                 if terminal_blocker is not None:
                     raise StaleWriter("program promotion has a promotion-blocking terminal blocker")
                 if not any(
-                    item.kind == "promotion_accepted" and item.data.get("candidate_sha") == action.candidate_sha
+                    item.kind == "promotion_accepted" and self._fact_subject_wire(item.data) == subject.wire_value
                     for item in facts
                 ):
-                    self._record_program_fact_in_transaction(
-                        bundle.program_id,
-                        action.milestone_id,
-                        phase=LifecyclePhase.ACCEPTANCE,
-                        kind="promotion_accepted",
-                        data={"candidate_sha": action.candidate_sha, "review_ids": list(action.review_ids)},
-                    )
+                    if node.integration_mode is ProgramIntegrationMode.GIT:
+                        self._record_program_fact_in_transaction(
+                            bundle.program_id,
+                            action.milestone_id,
+                            phase=LifecyclePhase.ACCEPTANCE,
+                            kind="promotion_accepted",
+                            data={"candidate_sha": subject.digest, "review_ids": list(action.review_ids)},
+                        )
                 state = self.current_state(bundle.program_id, action.milestone_id)
-                if state is WorkflowState.REVIEWING:
-                    self._transition_program_state_in_transaction(
+                if node.integration_mode is ProgramIntegrationMode.GIT:
+                    if state is WorkflowState.REVIEWING:
+                        self._transition_program_state_in_transaction(
+                            bundle.program_id,
+                            MilestoneId(action.milestone_id),
+                            WorkflowState.ACCEPTED,
+                            expected_state=WorkflowState.REVIEWING,
+                            reason=ReasonCode.TERMINAL_OUTCOME,
+                        )
+                    elif state is not WorkflowState.ACCEPTED:
+                        raise StaleWriter("program promotion requires a reviewing milestone")
+                else:
+                    self._close_program_node_in_transaction(
                         bundle.program_id,
                         MilestoneId(action.milestone_id),
-                        WorkflowState.ACCEPTED,
-                        expected_state=WorkflowState.REVIEWING,
-                        reason=ReasonCode.TERMINAL_OUTCOME,
+                        subject,
+                        action.review_ids,
+                        advance_program_revision=False,
+                        now=now,
                     )
-                elif state is not WorkflowState.ACCEPTED:
-                    raise StaleWriter("program promotion requires a reviewing milestone")
                 effects.append(f"promote:{action.milestone_id}")
             elif action.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
                 if action.milestone_id not in nodes or action.candidate_sha != self._program_candidate_sha(
@@ -12997,6 +13986,12 @@ class Ledger:
                     raise StaleWriter("program integration action does not target the exact candidate")
                 if action.expected_trunk_head != str(program["trunk_head"]):
                     raise StaleWriter("program integration trunk HEAD is stale")
+                node = self._program_node_capsule(bundle.program_id, MilestoneId(action.milestone_id))
+                if (
+                    node.outcome_kind is not ProgramOutcomeKind.COMMIT
+                    or node.integration_mode is not ProgramIntegrationMode.GIT
+                ):
+                    raise StaleWriter("program integration is unsupported for this node outcome")
                 facts = self.review_lifecycle(bundle.program_id, action.milestone_id)
                 if not any(
                     item.kind == "promotion_accepted" and item.data.get("candidate_sha") == action.candidate_sha
@@ -13346,7 +14341,9 @@ class Ledger:
             if str(pending["state"]) != "pending":
                 if str(pending["receipt_sha256"]) != hashlib.sha256(receipt_json.encode("utf-8")).hexdigest():
                     raise StaleWriter("program integration already has a different terminal receipt")
-                return self._program_status_from_row(program_row)
+                current_row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+                assert current_row is not None
+                return self._program_status_from_row(current_row)
             digest = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
             self._db().execute(
                 "UPDATE integration_outbox SET state = ?, receipt_json = ?, receipt_sha256 = ?, completed_at = ? "
@@ -13354,26 +14351,9 @@ class Ledger:
                 (state, receipt_json, digest, current, integration_id),
             )
             if state == "applied":
-                all_integrations = (
-                    self._db()
-                    .execute(
-                        "SELECT COUNT(*) FROM integration_outbox WHERE program_id = ? AND state = 'applied'",
-                        (str(program),),
-                    )
-                    .fetchone()
-                )
-                total_nodes = len(
-                    self._program_node_payloads(strict_json_loads(str(program_row["program_graph_json"])))
-                )
-                next_state = (
-                    ProgramState.COMPLETED.value
-                    if int(all_integrations[0]) == total_nodes
-                    else ProgramState.RUNNING.value
-                )
                 self._db().execute(
-                    "UPDATE runs SET trunk_head = ?, program_revision = program_revision + 1, program_state = ?, "
-                    "closed_at = CASE WHEN ? = 'completed' THEN COALESCE(closed_at, ?) ELSE closed_at END WHERE run_id = ?",
-                    (after, next_state, next_state, current, str(program)),
+                    "UPDATE runs SET trunk_head = ?, program_revision = program_revision + 1 WHERE run_id = ?",
+                    (after, str(program)),
                 )
                 self._record_program_fact_in_transaction(
                     program,
@@ -13393,6 +14373,7 @@ class Ledger:
                         "after_trunk_head": after,
                     },
                 )
+                self._refresh_program_completion_in_transaction(program, now=current, advance_revision=False)
             else:
                 self._db().execute(
                     "UPDATE runs SET program_state = ? WHERE run_id = ?",

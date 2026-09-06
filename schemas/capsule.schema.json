@@ -17,31 +17,86 @@
         "recovery_policy"
       ],
       "properties": {
-        "schema_version": {"type": "integer", "const": 1},
-        "objective": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "schema_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+        },
         "decomposition": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
-        },
-        "acceptance_criteria": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
-        },
-        "surfaces": {
-          "type": "object", "minProperties": 0, "maxProperties": 128,
-          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-          "additionalProperties": {"type": "string", "enum": ["mutable", "protected"]}
-        },
-        "acceptance": {
-          "type": "object", "minProperties": 1, "maxProperties": 3, "additionalProperties": false,
-          "properties": {
-            "objective": {"type": "string", "const": "code-reviewer"},
-            "visual": {"type": "string", "const": "visual-reviewer"},
-            "architecture": {"type": "string", "const": "architecture-reviewer"}
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
           }
         },
-        "prompt": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-        "recovery_policy": {"type": "string", "const": "completion_biased"}
+        "acceptance_criteria": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          }
+        },
+        "surfaces": {
+          "type": "object",
+          "minProperties": 0,
+          "maxProperties": 128,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "mutable",
+              "protected"
+            ]
+          }
+        },
+        "acceptance": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 3,
+          "additionalProperties": false,
+          "properties": {
+            "objective": {
+              "type": "string",
+              "const": "code-reviewer"
+            },
+            "visual": {
+              "type": "string",
+              "const": "visual-reviewer"
+            },
+            "architecture": {
+              "type": "string",
+              "const": "architecture-reviewer"
+            }
+          }
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+        },
+        "recovery_policy": {
+          "type": "string",
+          "const": "completion_biased"
+        }
       }
     },
     {
@@ -59,48 +114,146 @@
         "plugin_requirements"
       ],
       "properties": {
-        "schema_version": {"type": "integer", "const": 2},
-        "objective": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "schema_version": {
+          "type": "integer",
+          "const": 2
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+        },
         "decomposition": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
-        },
-        "acceptance_criteria": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
-        },
-        "surfaces": {
-          "type": "object", "minProperties": 0, "maxProperties": 128,
-          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-          "additionalProperties": {"type": "string", "enum": ["mutable", "protected"]}
-        },
-        "acceptance": {
-          "type": "object", "minProperties": 1, "maxProperties": 3, "additionalProperties": false,
-          "properties": {
-            "objective": {"type": "string", "const": "code-reviewer"},
-            "visual": {"type": "string", "const": "visual-reviewer"},
-            "architecture": {"type": "string", "const": "architecture-reviewer"}
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
           }
         },
-        "prompt": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-        "recovery_policy": {"type": "string", "const": "completion_biased"},
-        "plugin_requirements": {
-          "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+        "acceptance_criteria": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
           "items": {
-            "type": "object", "additionalProperties": false,
-            "required": ["canonical_id", "version", "source", "bundle_digest", "bundled_skill_ids", "mcp_connectors"],
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          }
+        },
+        "surfaces": {
+          "type": "object",
+          "minProperties": 0,
+          "maxProperties": 128,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "mutable",
+              "protected"
+            ]
+          }
+        },
+        "acceptance": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 3,
+          "additionalProperties": false,
+          "properties": {
+            "objective": {
+              "type": "string",
+              "const": "code-reviewer"
+            },
+            "visual": {
+              "type": "string",
+              "const": "visual-reviewer"
+            },
+            "architecture": {
+              "type": "string",
+              "const": "architecture-reviewer"
+            }
+          }
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+        },
+        "recovery_policy": {
+          "type": "string",
+          "const": "completion_biased"
+        },
+        "plugin_requirements": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "canonical_id",
+              "version",
+              "source",
+              "bundle_digest",
+              "bundled_skill_ids",
+              "mcp_connectors"
+            ],
             "properties": {
-              "canonical_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-              "version": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-              "source": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-              "bundle_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "canonical_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "bundle_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
               "bundled_skill_ids": {
-                "type": "array", "maxItems": 128, "uniqueItems": true,
-                "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16384,
+                  "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                }
               },
               "mcp_connectors": {
-                "type": "array", "maxItems": 128, "uniqueItems": true,
-                "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16384,
+                  "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                }
               }
             }
           }
@@ -122,57 +275,684 @@
         "local_image_paths"
       ],
       "properties": {
-        "schema_version": {"type": "integer", "const": 3},
-        "objective": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
+        "schema_version": {
+          "type": "integer",
+          "const": 3
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+        },
         "decomposition": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
-        },
-        "acceptance_criteria": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
-        },
-        "surfaces": {
-          "type": "object", "minProperties": 0, "maxProperties": 128,
-          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-          "additionalProperties": {"type": "string", "enum": ["mutable", "protected"]}
-        },
-        "acceptance": {
-          "type": "object", "minProperties": 1, "maxProperties": 3, "additionalProperties": false,
-          "properties": {
-            "objective": {"type": "string", "const": "code-reviewer"},
-            "visual": {"type": "string", "const": "visual-reviewer"},
-            "architecture": {"type": "string", "const": "architecture-reviewer"}
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
           }
         },
-        "prompt": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-        "recovery_policy": {"type": "string", "const": "completion_biased"},
+        "acceptance_criteria": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          }
+        },
+        "surfaces": {
+          "type": "object",
+          "minProperties": 0,
+          "maxProperties": 128,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "mutable",
+              "protected"
+            ]
+          }
+        },
+        "acceptance": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 3,
+          "additionalProperties": false,
+          "properties": {
+            "objective": {
+              "type": "string",
+              "const": "code-reviewer"
+            },
+            "visual": {
+              "type": "string",
+              "const": "visual-reviewer"
+            },
+            "architecture": {
+              "type": "string",
+              "const": "architecture-reviewer"
+            }
+          }
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+        },
+        "recovery_policy": {
+          "type": "string",
+          "const": "completion_biased"
+        },
         "local_image_paths": {
-          "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?!/)(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^(?!/)(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+          }
         },
         "plugin_requirements": {
-          "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
           "items": {
-            "type": "object", "additionalProperties": false,
-            "required": ["canonical_id", "version", "source", "bundle_digest", "bundled_skill_ids", "mcp_connectors"],
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "canonical_id",
+              "version",
+              "source",
+              "bundle_digest",
+              "bundled_skill_ids",
+              "mcp_connectors"
+            ],
             "properties": {
-              "canonical_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-              "version": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-              "source": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"},
-              "bundle_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "canonical_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "bundle_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
               "bundled_skill_ids": {
-                "type": "array", "maxItems": 128, "uniqueItems": true,
-                "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16384,
+                  "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                }
               },
               "mcp_connectors": {
-                "type": "array", "maxItems": 128, "uniqueItems": true,
-                "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"}
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16384,
+                  "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                }
               }
             }
           }
         }
       }
+    },
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "objective",
+            "decomposition",
+            "acceptance_criteria",
+            "surfaces",
+            "acceptance",
+            "prompt",
+            "recovery_policy",
+            "outcome_kind",
+            "integration_mode",
+            "runtime_artifact_paths",
+            "runtime_artifact_max_files",
+            "runtime_artifact_max_bytes",
+            "approval_gates"
+          ],
+          "properties": {
+            "schema_version": {
+              "type": "integer",
+              "const": 4
+            },
+            "objective": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384,
+              "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+            },
+            "decomposition": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              }
+            },
+            "acceptance_criteria": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              }
+            },
+            "surfaces": {
+              "type": "object",
+              "minProperties": 0,
+              "maxProperties": 128,
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "enum": [
+                  "mutable",
+                  "protected"
+                ]
+              }
+            },
+            "acceptance": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 3,
+              "additionalProperties": false,
+              "properties": {
+                "objective": {
+                  "type": "string",
+                  "const": "code-reviewer"
+                },
+                "visual": {
+                  "type": "string",
+                  "const": "visual-reviewer"
+                },
+                "architecture": {
+                  "type": "string",
+                  "const": "architecture-reviewer"
+                }
+              }
+            },
+            "prompt": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384,
+              "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+            },
+            "recovery_policy": {
+              "type": "string",
+              "const": "completion_biased"
+            },
+            "local_image_paths": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^(?!/)(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              }
+            },
+            "plugin_requirements": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "canonical_id",
+                  "version",
+                  "source",
+                  "bundle_digest",
+                  "bundled_skill_ids",
+                  "mcp_connectors"
+                ],
+                "properties": {
+                  "canonical_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                  },
+                  "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                  },
+                  "bundle_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "bundled_skill_ids": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16384,
+                      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                    }
+                  },
+                  "mcp_connectors": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16384,
+                      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                    }
+                  }
+                }
+              }
+            },
+            "outcome_kind": {
+              "const": "commit"
+            },
+            "integration_mode": {
+              "type": "string",
+              "enum": [
+                "git",
+                "already_integrated"
+              ]
+            },
+            "runtime_artifact_paths": {
+              "type": "array",
+              "maxItems": 0,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^(?!/)(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              }
+            },
+            "runtime_artifact_max_files": {
+              "type": "null"
+            },
+            "runtime_artifact_max_bytes": {
+              "type": "null"
+            },
+            "approval_gates": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "gate_id",
+                  "prerequisite_milestone_ids",
+                  "protected_milestone_ids",
+                  "scope_description"
+                ],
+                "properties": {
+                  "gate_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$"
+                  },
+                  "prerequisite_milestone_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16384,
+                      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                    }
+                  },
+                  "protected_milestone_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16384,
+                      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                    }
+                  },
+                  "scope_description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "objective",
+            "decomposition",
+            "acceptance_criteria",
+            "surfaces",
+            "acceptance",
+            "prompt",
+            "recovery_policy",
+            "outcome_kind",
+            "integration_mode",
+            "runtime_artifact_paths",
+            "runtime_artifact_max_files",
+            "runtime_artifact_max_bytes",
+            "approval_gates"
+          ],
+          "properties": {
+            "schema_version": {
+              "type": "integer",
+              "const": 4
+            },
+            "objective": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384,
+              "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+            },
+            "decomposition": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              }
+            },
+            "acceptance_criteria": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              }
+            },
+            "surfaces": {
+              "type": "object",
+              "minProperties": 0,
+              "maxProperties": 128,
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384,
+                "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "enum": [
+                  "mutable",
+                  "protected"
+                ]
+              }
+            },
+            "acceptance": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 3,
+              "additionalProperties": false,
+              "properties": {
+                "objective": {
+                  "type": "string",
+                  "const": "code-reviewer"
+                },
+                "visual": {
+                  "type": "string",
+                  "const": "visual-reviewer"
+                },
+                "architecture": {
+                  "type": "string",
+                  "const": "architecture-reviewer"
+                }
+              }
+            },
+            "prompt": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384,
+              "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+            },
+            "recovery_policy": {
+              "type": "string",
+              "const": "completion_biased"
+            },
+            "local_image_paths": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^(?!/)(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              }
+            },
+            "plugin_requirements": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "canonical_id",
+                  "version",
+                  "source",
+                  "bundle_digest",
+                  "bundled_skill_ids",
+                  "mcp_connectors"
+                ],
+                "properties": {
+                  "canonical_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                  },
+                  "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                  },
+                  "bundle_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "bundled_skill_ids": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16384,
+                      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                    }
+                  },
+                  "mcp_connectors": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16384,
+                      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                    }
+                  }
+                }
+              }
+            },
+            "outcome_kind": {
+              "const": "runtime_evidence"
+            },
+            "integration_mode": {
+              "const": "no_integration"
+            },
+            "runtime_artifact_paths": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^(?!/)(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+              },
+              "minItems": 1
+            },
+            "runtime_artifact_max_files": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128
+            },
+            "runtime_artifact_max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            "approval_gates": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "gate_id",
+                  "prerequisite_milestone_ids",
+                  "protected_milestone_ids",
+                  "scope_description"
+                ],
+                "properties": {
+                  "gate_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$"
+                  },
+                  "prerequisite_milestone_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16384,
+                      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                    }
+                  },
+                  "protected_milestone_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16384,
+                      "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                    }
+                  },
+                  "scope_description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?![\\s\\S]*\\u0000)(?=[\\s\\S]*\\S)"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   ]
 }

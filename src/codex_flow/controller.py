@@ -57,8 +57,11 @@ from .domain import (
     MilestoneId,
     NativePermissionAuthority,
     NativePermissionMode,
+    ProgramApprovalGate,
     ProgramGraph,
     ProgramId,
+    ProgramIntegrationMode,
+    ProgramOutcomeKind,
     ProgramStatus,
     ReasonCode,
     ReasoningEffort,
@@ -407,6 +410,21 @@ def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
         value["plugin_requirements"] = [dict(item) for item in capsule.plugin_requirements]
     if capsule.local_image_paths:
         value["local_image_paths"] = list(capsule.local_image_paths)
+    if (
+        capsule.outcome_kind is not ProgramOutcomeKind.COMMIT
+        or capsule.integration_mode is not ProgramIntegrationMode.GIT
+        or capsule.approval_gates
+    ):
+        value.update(
+            {
+                "outcome_kind": capsule.outcome_kind.value,
+                "integration_mode": capsule.integration_mode.value,
+                "runtime_artifact_paths": list(capsule.runtime_artifact_paths),
+                "runtime_artifact_max_files": capsule.runtime_artifact_max_files,
+                "runtime_artifact_max_bytes": capsule.runtime_artifact_max_bytes,
+                "approval_gates": [item.to_json() for item in capsule.approval_gates],
+            }
+        )
     return value
 
 
@@ -432,6 +450,14 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
     }
     optional = {"acceptance_modes", "plugin_requirements"}
     image_optional = {"local_image_paths"}
+    outcome_optional = {
+        "outcome_kind",
+        "integration_mode",
+        "runtime_artifact_paths",
+        "runtime_artifact_max_files",
+        "runtime_artifact_max_bytes",
+        "approval_gates",
+    }
     accepted_keys = (
         expected,
         expected | {"acceptance_modes"},
@@ -440,6 +466,13 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         expected | image_optional | {"acceptance_modes"},
         expected | image_optional | {"plugin_requirements"},
         expected | image_optional | optional,
+        expected | outcome_optional,
+        expected | outcome_optional | {"acceptance_modes"},
+        expected | outcome_optional | {"plugin_requirements"},
+        expected | outcome_optional | image_optional,
+        expected | outcome_optional | image_optional | {"acceptance_modes"},
+        expected | outcome_optional | image_optional | {"plugin_requirements"},
+        expected | outcome_optional | image_optional | optional,
     )
     if not any(set(value) == keys for keys in accepted_keys):
         raise ValueError("capsule keys do not match the closed execution schema")
@@ -495,6 +528,12 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
     raw_images = value.get("local_image_paths", [])
     if not isinstance(raw_images, list) or any(not isinstance(item, str) for item in raw_images):
         raise ValueError("capsule local_image_paths must be an array of strings")
+    raw_artifacts = value.get("runtime_artifact_paths", [])
+    raw_gates = value.get("approval_gates", [])
+    if not isinstance(raw_artifacts, list) or any(not isinstance(item, str) for item in raw_artifacts):
+        raise ValueError("capsule runtime_artifact_paths must be an array of strings")
+    if not isinstance(raw_gates, list) or any(not isinstance(item, Mapping) for item in raw_gates):
+        raise ValueError("capsule approval_gates must be an array of objects")
     return ExecutionCapsule(
         version,
         RunId(run_id),
@@ -516,6 +555,12 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         tuple(AcceptanceMode(item) for item in raw_modes),
         tuple(dict(item) for item in raw_requirements),
         tuple(raw_images),
+        ProgramOutcomeKind(value.get("outcome_kind", ProgramOutcomeKind.COMMIT.value)),
+        ProgramIntegrationMode(value.get("integration_mode", ProgramIntegrationMode.GIT.value)),
+        tuple(raw_artifacts),
+        value.get("runtime_artifact_max_files"),  # type: ignore[arg-type]
+        value.get("runtime_artifact_max_bytes"),  # type: ignore[arg-type]
+        tuple(ProgramApprovalGate.from_json(item) for item in raw_gates),
     )
 
 
@@ -692,6 +737,8 @@ class Controller:
                 graph = program
             else:
                 raise TypeError("program must be a typed compiled or executable graph")
+            if any(node.capsule.approval_gates for node in graph.nodes):
+                raise ControllerError("approval_capability_unavailable")
             for node in graph.nodes:
                 if node.capsule.run_id != RunId(str(graph.program_id)):
                     raise ControllerError("program node capsule run identity does not match its graph")
@@ -902,7 +949,13 @@ class Controller:
                 ),
             }
             queue_projection = capsule_json(capsule)
-            result_contract_sha256 = model_facing_result_schema_sha256()
+            result_schema_version = 2 if capsule.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE else 1
+            if (
+                capsule.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE
+                and capsule.output_schema != model_facing_result_schema(2)
+            ):
+                raise ControllerError("runtime evidence dispatch requires the schema-2 result contract")
+            result_contract_sha256 = model_facing_result_schema_sha256(result_schema_version)
             if role_value != RoleId("executor"):
                 # Reviewers receive a separate closed result contract and a
                 # controller-authored candidate binding.  Their queue route

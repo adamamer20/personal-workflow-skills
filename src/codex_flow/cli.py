@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Mapping
 from dataclasses import replace
@@ -251,6 +252,11 @@ def _program_status_payload(status: object) -> dict[str, object]:
                 "integrated": node.integrated,
                 "candidate_disposition": node.candidate_disposition.value if node.candidate_disposition else None,
                 "blocker": node.blocker.to_json() if node.blocker else None,
+                "outcome_kind": node.outcome_kind.value,
+                "integration_mode": node.integration_mode.value,
+                "evidence_sha256": node.evidence_sha256,
+                "closure_satisfied": node.closure_satisfied,
+                "unsatisfied_gate_ids": list(node.unsatisfied_gate_ids),
             }
             for node in status.nodes
         ],
@@ -363,6 +369,22 @@ def _parse_program_dependencies(values: list[str] | None) -> dict[str, tuple[str
     return parsed
 
 
+def _parse_program_adoptions(values: list[str] | None) -> dict[str, tuple[str, str]]:
+    """Parse repeated ``milestone=candidate,review_base`` bindings."""
+
+    parsed: dict[str, tuple[str, str]] = {}
+    for value in values or []:
+        milestone, separator, identities = value.partition("=")
+        parts = identities.split(",") if separator else []
+        if not separator or not milestone or len(parts) != 2 or not all(parts) or milestone in parsed:
+            raise ValueError("--adopted-node must be milestone=candidate,review_base")
+        candidate, review_base = parts
+        if re.fullmatch(r"[0-9a-f]{40}", candidate) is None or re.fullmatch(r"[0-9a-f]{40}", review_base) is None:
+            raise ValueError("--adopted-node identities must be lowercase Git SHAs")
+        parsed[milestone] = (candidate, review_base)
+    return parsed
+
+
 def _emit_program_payload(payload: object, *, as_json: bool) -> None:
     if as_json:
         typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False))
@@ -387,6 +409,13 @@ def program_register(
             help="Dependency edge as milestone=dependency[,dependency]; repeat for each dependent milestone.",
         ),
     ] = None,
+    adopted_nodes: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--adopted-node",
+            help="Already-integrated binding as milestone=candidate,review_base; repeat per node.",
+        ),
+    ] = None,
     trunk_head: Annotated[
         str | None, typer.Option(help="Expected trunk commit; default is the current Git HEAD.")
     ] = None,
@@ -405,6 +434,7 @@ def program_register(
             program_id,
             tuple(milestone_ids) if milestone_ids is not None else None,
             _parse_program_dependencies(dependencies),
+            _parse_program_adoptions(adopted_nodes),
         )
         graph = compiled.to_program_graph(state_root.resolve(), trunk_head=trunk_head)
         graph = replace(graph, integration_strategy=integration_strategy)

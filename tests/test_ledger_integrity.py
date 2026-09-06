@@ -803,7 +803,7 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
             migrated.close()
 
-    def test_schema_v19_to_v20_migration_adds_one_empty_terminal_integrity_table(self) -> None:
+    def test_schema_v19_to_v21_migration_adds_empty_terminal_integrity_and_outcome_tables(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "workflow.db"
             ledger = Ledger(path)
@@ -820,7 +820,7 @@ class LedgerTests(unittest.TestCase):
 
             migrated = Ledger(path, migrate=True)
             try:
-                self.assertEqual(migrated.schema_version, SchemaVersion(20))
+                self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
                 self.assertEqual(
                     migrated.schema_columns("dispatch_terminal_integrity"),
                     (
@@ -837,6 +837,24 @@ class LedgerTests(unittest.TestCase):
                 self.assertEqual(
                     migrated._db().execute("SELECT COUNT(*) FROM dispatch_terminal_integrity").fetchone()[0], 0
                 )
+                self.assertEqual(
+                    migrated.schema_columns("program_outcomes"),
+                    (
+                        "outcome_id",
+                        "program_id",
+                        "milestone_id",
+                        "subject_kind",
+                        "subject_digest",
+                        "outcome_kind",
+                        "integration_mode",
+                        "manifest_json",
+                        "outcome_digest",
+                        "acceptance_generation",
+                        "closure_generation",
+                        "created_at",
+                    ),
+                )
+                self.assertEqual(migrated._db().execute("SELECT COUNT(*) FROM program_outcomes").fetchone()[0], 0)
             finally:
                 migrated.close()
 

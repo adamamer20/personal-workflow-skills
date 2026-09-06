@@ -1993,7 +1993,10 @@ def test_program_action_schema_is_locally_closed_and_provider_projectable() -> N
     assert isinstance(items, dict)
     branches = items["anyOf"]
     assert isinstance(branches, list)
-    assert len(branches) == len(ProgramControllerActionKind)
+    assert len(branches) == 12
+    assert {branch["properties"]["kind"]["enum"][0] for branch in branches} == {
+        item.value for item in ProgramControllerActionKind
+    }
     assert all(branch["additionalProperties"] is False for branch in branches)
 
     status = _runner_status()

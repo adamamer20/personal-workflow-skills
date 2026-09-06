@@ -241,8 +241,14 @@ def test_v1_capsule_remains_readable_and_v2_binds_explicit_plugin_requirements()
     assert payload["plugin_requirements"] == [requirement.to_json()]
     assert ModelFacingCapsule.from_json(payload) == v2
     schema = model_facing_capsule_schema()
-    assert len(schema["oneOf"]) == 3
-    assert [branch["properties"]["schema_version"]["const"] for branch in schema["oneOf"]] == [1, 2, 3]
+    assert len(schema["oneOf"]) == 4
+    assert [branch["properties"]["schema_version"]["const"] for branch in schema["oneOf"][:3]] == [1, 2, 3]
+    schema_v4 = schema["oneOf"][3]
+    assert [branch["properties"]["schema_version"]["const"] for branch in schema_v4["oneOf"]] == [4, 4]
+    assert [branch["properties"]["outcome_kind"]["const"] for branch in schema_v4["oneOf"]] == [
+        "commit",
+        "runtime_evidence",
+    ]
 
 
 def test_projected_plugin_requirements_stay_typed_and_do_not_change_prompt_bytes() -> None:

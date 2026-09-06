@@ -1960,29 +1960,57 @@ def _validate_model_projection_closure() -> None:
         "blocker",
     }
     branches = capsule_schema.get("oneOf")
-    if not isinstance(branches, list) or len(branches) != 3 or any(not isinstance(item, dict) for item in branches):
-        fail(f"{capsule_path}: oneOf must contain exactly the closed v1, v2 and v3 branches")
-    branch_properties = [item.get("properties") for item in branches]
+    if not isinstance(branches, list) or len(branches) != 4 or any(not isinstance(item, dict) for item in branches):
+        fail(f"{capsule_path}: oneOf must contain exactly the closed v1, v2, v3 and v4 branches")
+    branch_properties = [item.get("properties") for item in branches[:3]]
     if any(not isinstance(item, dict) for item in branch_properties):
-        fail(f"{capsule_path}: oneOf branches must contain closed properties")
+        fail(f"{capsule_path}: v1-v3 branches must contain closed properties")
+    schema_v4 = branches[3]
+    v4_branches = schema_v4.get("oneOf")
+    if not isinstance(v4_branches, list) or len(v4_branches) != 2 or any(
+        not isinstance(item, dict) for item in v4_branches
+    ):
+        fail(f"{capsule_path}: v4 must contain exactly the closed commit and runtime-evidence branches")
+    v4_properties = [item.get("properties") for item in v4_branches]
+    if any(not isinstance(item, dict) for item in v4_properties):
+        fail(f"{capsule_path}: v4 branches must contain closed properties")
     if set(branch_properties[0]) != expected_capsule_keys - {"plugin_requirements"}:
         fail(f"{capsule_path}: v1 properties must be the exact historical projection")
     if set(branch_properties[1]) != expected_capsule_keys:
         fail(f"{capsule_path}: v2 properties must be the exact plugin projection")
     if set(branch_properties[2]) != expected_capsule_keys | {"local_image_paths"}:
         fail(f"{capsule_path}: v3 properties must be the exact local-image projection")
+    expected_v4_keys = expected_capsule_keys | {
+        "local_image_paths",
+        "outcome_kind",
+        "integration_mode",
+        "runtime_artifact_paths",
+        "runtime_artifact_max_files",
+        "runtime_artifact_max_bytes",
+        "approval_gates",
+    }
+    if any(set(item) != expected_v4_keys for item in v4_properties):
+        fail(f"{capsule_path}: v4 properties must be the exact runtime projection")
     if not isinstance(result_properties, dict) or set(result_properties) != expected_result_keys:
         fail(f"{result_path}: properties must be the exact ModelFacingResult projection")
     if "anyOf" in capsule_schema or "$defs" in capsule_schema:
-        fail(f"{capsule_path}: only the bounded v1/v2/v3 oneOf authority is permitted")
-    if any("oneOf" in node for branch in branches for node in _walk_schema_nodes(branch)):
-        fail(f"{capsule_path}: nested schema branches are not permitted")
-    if [item["properties"].get("schema_version") for item in branches] != [
+        fail(f"{capsule_path}: only the bounded v1/v2/v3/v4 oneOf authority is permitted")
+    if [item["properties"].get("schema_version") for item in branches[:3]] != [
         {"type": "integer", "const": 1},
         {"type": "integer", "const": 2},
         {"type": "integer", "const": 3},
     ]:
         fail(f"{capsule_path}: schema versions must be the closed integer constants 1, 2 and 3")
+    if [item["properties"].get("schema_version") for item in v4_branches] != [
+        {"type": "integer", "const": 4},
+        {"type": "integer", "const": 4},
+    ]:
+        fail(f"{capsule_path}: schema-v4 branches must use the integer constant 4")
+    if [item["properties"].get("outcome_kind") for item in v4_branches] != [
+        {"const": "commit"},
+        {"const": "runtime_evidence"},
+    ]:
+        fail(f"{capsule_path}: schema-v4 outcome branches are invalid")
     if "anyOf" in result_schema or "oneOf" in result_schema or "$defs" in result_schema:
         fail(f"{result_path}: alternate model-facing schema branches are not permitted")
     if result_schema["properties"].get("schema_version") != {"type": "integer", "const": 1}:
