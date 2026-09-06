@@ -524,7 +524,7 @@ class WorkflowHarness:
     def _controller_model_and_effort(_row: dict[str, object]) -> tuple[str, str]:
         """Return the repository-owned controller route, never the worker route."""
 
-        return "gpt-5.6-sol", ReasoningEffort.MEDIUM.value
+        return "gpt-6-astra", ReasoningEffort.MEDIUM.value
 
     def _spawn_controller_generation(self, status: object, *, recovery: bool = False) -> bool:
         """Start one private controller-generation service process.

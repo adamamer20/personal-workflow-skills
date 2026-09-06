@@ -13,6 +13,10 @@ plan; executor owns one capsule.
 Inspect instructions, plan, code/tests, and worktree. Ask only about unresolved
 intent, contracts, safety, ownership, scope, or acceptance.
 
+Use existing decisions for routine choices. Detail the next executable milestone;
+outline later readiness and dependencies. Cutover prerequisites block cutover,
+not independently verifiable implementation.
+
 Keep exactly one active plan at the repository path. It must state:
 
 - outcome and non-goals;
@@ -35,12 +39,10 @@ dependency edge, or durable artifact requires a bounded plan update.
 
 ## Budget semantic vocabulary
 
-Record a semantic delta: new domain concepts/invariants, classes or public
-boundaries, new compatibility paths, repeated semantic patterns compressed,
-and concepts collapsed/deleted. New
-vocabulary must carry an invariant, domain distinction, policy,
-lifecycle/identity, boundary validation, genuine substitution, or reusable
-algorithm; explicitness, forwarding, tests, or style alone do not justify it.
+Record a semantic delta: new domain concepts, boundaries and new compatibility paths;
+repeated semantic patterns compressed; concepts collapsed/deleted. New vocabulary
+must carry an invariant, policy, identity, boundary validation, substitution or
+algorithm; forwarding, tests or style alone do not justify it.
 
 Use functions and direct composition by default. A class needs state, identity,
 lifecycle, or policy; a one-implementation protocol needs a real independently
@@ -106,6 +108,10 @@ Acceptance authorities are distinct by mode. `objective` uses a code authority,
 boundary/security authority. A mixed milestone must satisfy every declared
 mode; passing one authority never implies another.
 
+Substantial code milestones need independent objective review plus self-review.
+Add architecture acceptance for ownership, public/persisted contracts, trust
+boundaries or a named integration risk, not merely a prior architecture phase.
+
 ## Proportional validation
 
 Use discriminating checks during execution and every affected partition and
@@ -136,8 +142,6 @@ gate, or turn an implementation difficulty into a user question.
 
 ## Close
 
-Before ending, verify one owner per mutable surface, no mutable/protected
-overlap, explicit modes/authorities, bounded capsule, observable gates,
-architecture map, artifact and semantic-vocabulary budgets, semantic delta,
-semantic names/exceptions, and a successor.
-Keep historical evidence beside the plan.
+Before ending, check ownership, surfaces, acceptance, architecture map,
+semantic-vocabulary budgets and next readiness. Keep historical evidence
+beside the plan.

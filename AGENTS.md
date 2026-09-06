@@ -144,7 +144,7 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   remains blocked until the plan records a safe separation.
 - A fresh Codex thread or model context does not imply a fresh Git worktree. A
   worktree is an isolated mutable workspace owned by a program or execution
-  lane, not by Luna, Sol, a reviewer, or a thread id.
+  lane, not by Luna, Astra, a reviewer, or a thread id.
 - Reuse the same execution workspace across sequential milestones, context
   rollover, repair, recovery, model changes, and read-only review while mutable
   ownership remains singular. Allocate another worktree only for concurrent
@@ -191,7 +191,7 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 
 ## Controller routing and recovery semantics
 
-- For substantial or architecturally uncertain work, Sol Medium owns a distinct
+- For substantial or architecturally uncertain work, Astra Medium owns a distinct
   architecture phase before implementation. It writes a detailed design into
   the single canonical plan: boundaries, contracts, mutable ownership, state
   transitions, failure and recovery behavior, migration, non-goals,
@@ -206,7 +206,7 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   are explicit; and every new durable artifact is justified against a bounded
   file/module budget. Luna may split private helpers inside an owned module but
   may not invent another production module, public class, registry, runner,
-  schema or entrypoint without a bounded Sol plan update first.
+  schema or entrypoint without a bounded Astra plan update first.
 - After freezing that architecture map, planning must attempt to factor the
   program into independently closable vertical milestones with disjoint
   mutable surfaces. Record the milestone dependency DAG and current readiness;
@@ -227,20 +227,20 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 - After that design is accepted, Luna XHigh implements it as the single mutable
   owner. Luna may resolve local mechanical details but returns any material
   boundary, public or persisted contract, ownership, security/privacy, cost,
-  destructive-behavior, or scope change to Sol Medium for a bounded plan update.
-- Luna XHigh is the normal objective/code reviewer. Sol Medium is the normal
-  architecture-conformance authority when that mode is declared. Sol High is
+  destructive-behavior, or scope change to Astra Medium for a bounded plan update.
+- Luna XHigh is the normal objective/code reviewer. Astra Medium is the normal
+  architecture-conformance authority when that mode is declared. Astra High is
   reserved for critical security, irreversible or system-wide decisions, or an
-  explicit escalation after Sol Medium cannot close a material blocker. Use one
+  explicit escalation after Astra Medium cannot close a material blocker. Use one
   review per declared authority by default and at most one bounded repair for
   concrete promotion blockers; do not run repeated broad review waves.
 - Model milestones with explicit `objective`, `visual`, and `architecture`
   acceptance modes. Derive implementation and independent review authorities
   per mode; never infer them from file extension or repository area.
 - Objective/code review uses Luna. Visual-judgment implementation and rendered-
-  quality review use Sol, with a separate objective reviewer when both modes
-  apply. Architecture design/review and ordinary recovery diagnosis use Sol
-  Medium; the critical exceptions above use Sol High.
+  quality review use Astra, with a separate objective reviewer when both modes
+  apply. Architecture design/review and ordinary recovery diagnosis use Astra
+  Medium; the critical exceptions above use Astra High.
 - Non-convergence changes authority or approach; it does not terminate work.
   The recovery authority may finish locally, replace the implementation
   strategy, or update an implementation-level architecture assumption and

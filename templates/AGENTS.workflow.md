@@ -75,9 +75,11 @@
 
 - The milestone owner implements, validates, debugs ordinary failures,
   self-reviews, and repairs valid findings in the assigned workspace.
-- A normal milestone uses focused validation plus self-review. Require an
-  independent review only when the plan names a material risk or promotion
-  gate.
+- A substantial code milestone requires focused validation, self-review and
+  at least one independent objective review. Add architecture review when
+  ownership, public/persisted contracts, trust boundaries or a named integration
+  risk changes. Require visual review for visual acceptance. Small local work
+  uses proportional checks unless the project names another gate.
 - Review is one general workflow; the selected lens changes its evidence, not
   its ownership or transport boundary.
 - Every review invocation names exactly one lens (`spec`, `correctness`,

@@ -1944,7 +1944,7 @@ def program_controller_generation_service(
     decision_id: Annotated[str, typer.Option(help="Exact durable program decision identity.")],
     state_root: Annotated[Path, typer.Option(help="Checkout that owns .codex-flow state.")] = _DEFAULT_STATE_ROOT,
     cwd: Annotated[Path | None, typer.Option(help="Repository cwd selected by the harness.")] = None,
-    model: Annotated[str, typer.Option(help="Explicit ephemeral controller model.")] = "gpt-5.6-sol",
+    model: Annotated[str, typer.Option(help="Explicit ephemeral controller model.")] = "gpt-6-astra",
     reasoning_effort: Annotated[str, typer.Option(help="Explicit controller reasoning effort.")] = "medium",
     recover: Annotated[bool, typer.Option("--recover", help="Inspect the persisted generation once.")] = False,
     effective_permission_json: Annotated[str | None, typer.Option("--effective-permission-json", hidden=True)] = None,

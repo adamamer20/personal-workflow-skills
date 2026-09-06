@@ -72,6 +72,10 @@ semantic partition and named packaging/integration/promotion gate. Shared
 contracts, collection, or packaging require the full repository gate. Tests and
 metadata support, but do not replace, observable outcome evidence.
 
+Reuse green checks for unchanged code/environment; repeat only for changed
+dependencies, failures or unresolved risks. Complete explicit closure gates and
+report pending independent acceptance separately.
+
 Separate severity from promotion impact. P0 is presumptively blocking; P1
 blocks accepted guarantees, contracts, boundaries, production reachability, or
 integrity. Deferrals name owner and `defer_to`; close with none blocking.

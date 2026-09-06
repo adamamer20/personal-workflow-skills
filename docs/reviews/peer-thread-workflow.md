@@ -1,5 +1,62 @@
 # Plan: Deterministic Codex workflow controller
 
+## Authorized workflow routing update — Astra and Luna
+
+The user authorized migrating shared instructions, cognitive skill guidance and
+new default routes to GPT-6 Astra with Luna, then updating the global plugin.
+This policy update is separate from the pending acceptance review of runtime
+repair `94389ea125e05e7478cb070d067e6867b2041582`.
+
+Use Astra Medium for planning, controller decisions, architecture conformance,
+ordinary recovery and visual implementation; Astra High for visual promotion,
+critical security and explicit escalation. Keep Luna High for bounded work and
+Luna XHigh for substantial implementation and independent objective review.
+These defaults apply to future work; historical capsules/evidence and already
+persisted routes remain immutable. Previously recorded Sol role assignments are
+historical; a newly dispatched continuation uses these authorized defaults.
+
+The current integration owner owns this bounded update: AGENTS.md, README.md,
+templates/AGENTS.md, templates/AGENTS.workflow.md, workflow.toml,
+config/workflow.toml.example, the plan/execute/recover/review skill instructions,
+plugin and marketplace version manifests, the installer's version constant,
+the CLI and harness controller model defaults, routing validation and tests.
+The user also authorizes merging the shared policy into ~/.codex/AGENTS.md and
+using the existing plugin-only installation commands. Preserve unrelated global
+instructions. Runtime installation, real ledger migration, service refresh,
+provider calls and historical evidence changes are outside this policy update.
+
+Acceptance: exact native model IDs and supported effort values; model-independent
+cognitive skills; one owner per surface; incremental planning and proportional
+validation; independent objective acceptance for substantial work and additional
+lenses only for named risks; plugin version/source/enabled and installed-byte
+parity. Run routing, workflow-asset and plugin gates and the required repository
+gate. Reuse existing successful outcome evidence only for unchanged behavior.
+
+Sources fetched for this migration:
+- https://developers.openai.com/api/docs/guides/latest-model
+- https://developers.openai.com/api/docs/models/gpt-6-astra
+- https://developers.openai.com/codex/guides/agents-md/
+
+Validation disposition for this policy/plugin-only update: independent objective
+review accepted the 18-path source diff with no P0/P1 findings; routing and plugin
+checks passed (72 tests, one explicitly excluded combined-installer fixture), and
+the validator passed. Full `make check` is **not green**: 916 tests passed and two
+failed. The active-native-profile test reads global configuration now missing
+`model_catalog_json`; the combined-installer fence fixture reads the real ignored
+v19 ledger without mocking compatibility and rejects `allow_legacy` in its fake.
+Neither failing path was changed by this migration or is exercised by the
+plugin-only CLI installation. Explicitly defer these runtime/environment and
+combined-installer test repairs to runtime activation; they remain unresolved,
+not waived for runtime promotion. Proceed only with the authorized plugin-only
+update and verify installed version, enabled state, source and byte parity.
+
+Plugin-only activation completed at `0.1.8+codex.20260906000000`, enabled from
+the canonical local marketplace and plugin source. Recursive installed-cache
+comparison matched the source bundle exactly. Global instructions were merged
+with backup retained; global plus repository instructions total 32,515 bytes.
+No runtime installation, service refresh, ledger migration or provider call was
+performed. New tasks load the updated guidance; existing tasks retain context.
+
 ## Goal
 
 Replace model-owned peer-thread transport and callback bookkeeping with a small,

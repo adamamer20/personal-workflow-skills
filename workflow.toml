@@ -1,7 +1,7 @@
 version = 1
 
 [roles.planner]
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 reasoning_effort = "medium"
 
 [roles.executor]
@@ -13,19 +13,19 @@ model = "gpt-5.6-luna"
 reasoning_effort = "xhigh"
 
 [roles.visual-reviewer]
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 reasoning_effort = "high"
 
 [roles.architecture-reviewer]
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 reasoning_effort = "medium"
 
 [roles.recovery]
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 reasoning_effort = "medium"
 
 [roles.decision]
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 reasoning_effort = "medium"
 
 [limits]

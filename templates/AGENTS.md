@@ -1,5 +1,32 @@
 ## Personal Workflow Skills
 
+### Follow-through and instruction scope
+
+- Carry the user's accepted objective through implementation, required review,
+  repair and handoff. A status question or correction steers the same task.
+- Reuse authorization already given. Resolve routine implementation choices
+  from context and continue useful work before asking about a material decision.
+  If a skill causes a pause, cite its exact instruction and explain the missing
+  authority; do not treat a procedural preference as a new approval gate.
+- Plan the next executable milestone in detail. Record later milestones and
+  dependencies at the detail needed now; defer live cutover and deployment
+  prerequisites until the milestone that actually needs them.
+- Delegate ready independent lanes when it saves time or improves evidence.
+  Keep one mutable owner per surface and one lifecycle controller. Small tasks
+  stay direct; delegation is not a mandatory extra layer.
+- Require at least one independent objective review for a substantial code
+  milestone. Add architecture review for changed ownership, public/persisted
+  contracts, trust boundaries or a named integration risk. Visual acceptance
+  requires rendered inspection. Self-review alone does not replace these gates.
+- Reuse successful checks for unchanged bytes and environments. Broaden or
+  repeat checks only for a changed dependency, new failure or unresolved risk.
+- Keep updates concise and concrete. Put the result first, use plain language,
+  and distinguish work delivered, independently accepted and installed.
+- Keep global instructions reusable and repository instructions local. Put
+  detailed procedures in the relevant skill; avoid copying whole guides into
+  every AGENTS.md. Model routing belongs in configuration and this policy,
+  while cognitive skill bodies remain model-independent.
+
 ### Controller boundary
 
 - The focused reusable baseline is available in `templates/AGENTS.workflow.md`;
@@ -79,7 +106,7 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   Avoid tests that pin helper decomposition, forwarding methods, or field
   assignment.
 
-- For a new substantial or architecturally uncertain program, start with a Sol
+- For a new substantial or architecturally uncertain program, start with a Astra
   Medium architecture thread and use `$plan-work`. Update the single project-owned
   canonical plan under `docs/reviews/` by default, or at the path defined by
   repository instructions. Write a detailed decision-ready design covering
@@ -102,23 +129,23 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   `$workflow-control`, or use it as the normal execution path.
 - Substantial milestones normally use Luna XHigh with `$execute-milestone`;
   bounded or mechanical work may use Luna High directly.
-- After Sol Medium freezes the architecture, Luna XHigh becomes the single
+- After Astra Medium freezes the architecture, Luna XHigh becomes the single
   mutable implementation owner. Luna resolves mechanical details but returns
   material boundary, contract, ownership, security/privacy, cost, destructive-
-  behavior, or scope changes to Sol Medium for a bounded plan update.
+  behavior, or scope changes to Astra Medium for a bounded plan update.
 - Every milestone declares one or more acceptance modes: `objective`, `visual`,
   and `architecture`. Route by the judgment required for acceptance, not by file
   type. Objective code review uses Luna XHigh. Visual-judgment implementation
-  uses Sol Medium and independent visual-quality promotion review uses Sol High.
-  Architecture-conformance review uses Sol Medium. Sol High is reserved for
+  uses Astra Medium and independent visual-quality promotion review uses Astra High.
+  Architecture-conformance review uses Astra Medium. Astra High is reserved for
   critical security, irreversible/system-wide decisions, or explicit
-  escalation after Sol Medium cannot close a material blocker. When objective and visual modes
+  escalation after Astra Medium cannot close a material blocker. When objective and visual modes
   both apply, require both authorities; passing code tests never implies that a
   rendered result is good. Luna is appropriate for visually adjacent work only
   after the target is frozen and the remaining execution is mechanical and
   objectively verifiable.
 - When an owner stops converging, preserve the diff, evidence, findings,
-  accepted intent, and remaining gap for a Sol diagnostic continuation. Sol
+  accepted intent, and remaining gap for a Astra diagnostic continuation. Astra
   finishes a bounded repair, changes implementation strategy, or replans and
   continues when outcome, public/persisted contracts, security boundary,
   material cost, destructive behavior, and scope remain within accepted intent.
@@ -132,9 +159,9 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   legacy peer route: when a fresh peer is created, the handoff must pass the exact pair
   `model=gpt-5.6-luna, thinking=xhigh` for a substantial milestone or
   independent objective/code review, `model=gpt-5.6-luna, thinking=high` for
-  bounded/mechanical work, `model=gpt-5.6-sol, thinking=medium` for architecture
+  bounded/mechanical work, `model=gpt-6-astra, thinking=medium` for architecture
   planning/conformance, visual-judgment or ordinary recovery work, and
-  `model=gpt-5.6-sol, thinking=high` only for visual-quality promotion, critical
+  `model=gpt-6-astra, thinking=high` only for visual-quality promotion, critical
   security/system-wide decisions, or explicit escalation. The most specific
   applicable user instruction wins. Every Luna task uses `speed=fast` by
   default, including implementation and review, unless a more specific user

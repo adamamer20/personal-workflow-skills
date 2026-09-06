@@ -20,7 +20,7 @@ from codex_flow.ledger import HarnessRefreshBlocked, Ledger, LedgerError, ledger
 
 PLUGIN_NAME = "personal-workflow-skills"
 MARKETPLACE_NAME = "adam-workflows"
-PLUGIN_VERSION = "0.1.7+codex.20260831000000"
+PLUGIN_VERSION = "0.1.8+codex.20260906000000"
 CONTROLLER_VERSION = "0.2.0"
 SDK_DISTRIBUTION = "openai-codex"
 SDK_VERSION = "0.147.0"

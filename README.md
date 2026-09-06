@@ -206,15 +206,25 @@ for instruction precedence.
 
 Authorized native routing defaults:
 
+The Astra migration follows the official [model guidance](https://developers.openai.com/api/docs/guides/latest-model):
+preserve effective reasoning effort initially, make existing authorization clear,
+use incremental plans, and repeat verification only when new evidence warrants it.
+The [model page](https://developers.openai.com/api/docs/models/gpt-6-astra) documents
+image input, tool calling and structured outputs. Runtime capability proof remains
+separate from changing a configured model name. Existing tasks retain their pinned
+routes; these defaults apply to newly dispatched work.
+
 | Situation | Task context | Native `model` | Native `thinking` |
 | --- | --- | --- | --- |
 | Small/local change | direct execution | `gpt-5.6-luna` | `high` |
 | Decision-ready substantial milestone | fresh execution | `gpt-5.6-luna` | `xhigh` |
-| Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents) | fresh execution | `gpt-5.6-sol` | `medium` |
-| Recovery implementation after demonstrated non-convergence | fresh execution | `gpt-5.6-sol` | `medium` |
-| Independent visual-quality promotion review | fresh peer | `gpt-5.6-sol` | `high` |
-| First-time large or uncertain program | planning | `gpt-5.6-sol` | `high` |
-| Architecture, security, or recovery diagnosis | fresh peer or planning | `gpt-5.6-sol` | `high` |
+| Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents) | fresh execution | `gpt-6-astra` | `medium` |
+| Recovery implementation after demonstrated non-convergence | fresh execution | `gpt-6-astra` | `medium` |
+| Independent visual-quality promotion review | fresh peer | `gpt-6-astra` | `high` |
+| First-time large or uncertain program | planning | `gpt-6-astra` | `medium` |
+| Architecture conformance or recovery diagnosis | fresh peer or planning | `gpt-6-astra` | `medium` |
+| Controller decisions | ephemeral controller turn | `gpt-6-astra` | `medium` |
+| Critical security or explicit escalation | fresh peer or planning | `gpt-6-astra` | `high` |
 | Mechanical repair after a precise finding | fresh/current execution | `gpt-5.6-luna` | `high` |
 | Independent objective/code review | fresh peer | `gpt-5.6-luna` | `xhigh` |
 
@@ -222,7 +232,7 @@ Classify every milestone by one or more acceptance modes: `objective`, `visual`,
 and `architecture`. Derive implementation and review authorities for each mode,
 not from file type alone. Objective code review uses Luna XHigh. When success
 depends on composition, hierarchy, responsive behavior, rendered inspection, or
-other subjective visual judgment, Sol Medium implements and Sol High performs
+other subjective visual judgment, Astra Medium implements and Astra High performs
 the independent visual-quality review. A mixed objective/visual milestone must
 pass both gates. Luna remains appropriate when the visual target is frozen and
 the remaining work is mechanical and objectively verifiable, such as bounded
@@ -230,7 +240,7 @@ wiring, copy replacement, asset processing, export, or a precisely identified
 CSS repair.
 
 Non-convergence triggers diagnosis and a change of authority or approach, not a
-terminal condition. A Sol recovery owner receives the current diff,
+terminal condition. An Astra recovery owner receives the current diff,
 validation evidence, findings, accepted intent, and remaining gap. It finishes a
 bounded repair, replaces a failed implementation strategy, or replans and
 continues when outcome, public/persisted contracts, security/privacy boundary,

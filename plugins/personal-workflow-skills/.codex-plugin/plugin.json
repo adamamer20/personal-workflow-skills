@@ -1,6 +1,6 @@
 {
   "name": "personal-workflow-skills",
-  "version": "0.1.7+codex.20260831000000",
+  "version": "0.1.8+codex.20260906000000",
   "description": "Cross-project planning, typed milestone execution, controller-backed workflow control, legacy handoff, and code-audit workflows.",
   "author": {
     "name": "Adam Amer"

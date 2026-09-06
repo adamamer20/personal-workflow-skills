@@ -186,6 +186,11 @@ Ask:
 Review deeply enough to establish safe promotion. Do not search indefinitely for
 theoretical completeness.
 
+Reuse accepted evidence for unchanged behavior and spend new verification on
+the changed causal path. Do not expand a milestone's gate to future deployment
+work that is not required for its accepted outcome. When two lenses identify
+the same cause, preserve both finding IDs but request one coherent repair.
+
 ## Re-review policy
 
 One independent review is the normal promotion check.

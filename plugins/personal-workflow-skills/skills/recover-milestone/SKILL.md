@@ -120,6 +120,13 @@ and existing decisions do not determine the choice.
 
 Implementation difficulty alone is not a reason to ask the user.
 
+Check the user's existing decisions before requesting permission again. An
+implementation-level plan correction within accepted intent should continue
+through the planning owner. If an instruction prevents that continuation, quote
+the exact instruction and identify the material decision or authority missing.
+Preserve the partial candidate and report the recovery outcome to its owner even
+when the repair cannot close; never leave a silent completed-looking task.
+
 ## Act on the diagnosis
 
 ### Near completion
