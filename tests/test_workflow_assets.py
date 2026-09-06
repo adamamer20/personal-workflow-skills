@@ -345,6 +345,8 @@ def test_template_and_config_assets_resolve() -> None:
     assert "Controller and skill ownership" in template
     config = tomllib.loads((ROOT / "config" / "workflow.toml.example").read_text(encoding="utf-8"))
     assert config["roles"]["execute_substantial"]["model"] == "gpt-5.6-luna"
+    assert config["roles"]["execute_bounded"]["thinking"] == "xhigh"
+    assert config["roles"]["review_visual"]["thinking"] == "low"
     for _role_name, route in config["roles"].items():
         if route["model"] == "gpt-5.6-luna":
             assert route["speed"] == "fast"
@@ -354,20 +356,23 @@ def test_template_and_config_assets_resolve() -> None:
     assert set(partitions["partitions"]) == set(PARTITION_NAMES)
 
 
-def test_astra_luna_default_routes_preserve_role_and_effort_boundaries() -> None:
+def test_default_routes_preserve_role_and_effort_boundaries() -> None:
     from codex_flow.config import load_workflow_config
     from codex_flow.harness import WorkflowHarness
 
     config = load_workflow_config(ROOT / "workflow.toml")
-    for role in ("planner", "architecture-reviewer", "recovery", "decision"):
+    for role in ("planner", "recovery"):
         route = config.route(role)
         assert (route.model, route.reasoning_effort.value) == ("gpt-6-astra", "medium")
+    for role in ("architecture-reviewer", "decision"):
+        route = config.route(role)
+        assert (route.model, route.reasoning_effort.value) == ("gpt-5.6-sol", "medium")
     for role in ("executor", "code-reviewer"):
         route = config.route(role)
         assert (route.model, route.reasoning_effort.value) == ("gpt-5.6-luna", "xhigh")
     visual = config.route("visual-reviewer")
-    assert (visual.model, visual.reasoning_effort.value) == ("gpt-6-astra", "high")
-    assert WorkflowHarness._controller_model_and_effort({}) == ("gpt-6-astra", "medium")
+    assert (visual.model, visual.reasoning_effort.value) == ("gpt-6-astra", "low")
+    assert WorkflowHarness._controller_model_and_effort({}) == ("gpt-5.6-sol", "medium")
 
 
 @pytest.mark.parametrize(

@@ -127,8 +127,9 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   capsule. `$codex-thread-handoff` is only an explicit legacy compatibility or
   deliberate comparison route: never select it silently, combine it with
   `$workflow-control`, or use it as the normal execution path.
-- Substantial milestones normally use Luna XHigh with `$execute-milestone`;
-  bounded or mechanical work may use Luna High directly.
+- Substantial milestones use Luna XHigh with `$execute-milestone`; bounded or
+  mechanical work follows the same objective route unless the controller
+  explicitly escalates.
 - After Astra Medium freezes the architecture, Luna XHigh becomes the single
   mutable implementation owner. Luna resolves mechanical details but returns
   material boundary, contract, ownership, security/privacy, cost, destructive-
@@ -136,17 +137,18 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
 - Every milestone declares one or more acceptance modes: `objective`, `visual`,
   and `architecture`. Route by the judgment required for acceptance, not by file
   type. Objective code review uses Luna XHigh. Visual-judgment implementation
-  uses Astra Medium and independent visual-quality promotion review uses Astra High.
-  Architecture-conformance review uses Astra Medium, including named security
-  and trust-boundary checks in that same review. Do not add a separate security
-  reviewer by default. Astra High requires explicit escalation. When objective and visual modes
-  both apply, require both authorities; passing code tests never implies that a
-  rendered result is good. Luna is appropriate for visually adjacent work only
-  after the target is frozen and the remaining execution is mechanical and
-  objectively verifiable.
+  uses Astra Medium and independent visual-quality promotion review uses Astra Low.
+  Architecture-conformance review uses Sol Medium. When architecture and
+  security boundaries are materially ambiguous, the combined review escalates to
+  Astra Medium; do not add a separate security reviewer. High is an explicit
+  exceptional escalation only. When objective and visual modes both apply,
+  require both authorities; passing code tests never implies that a rendered
+  result is good. Visual ambiguity escalates to Astra Medium. Luna is
+  appropriate for visually adjacent work only after the target is frozen and
+  the remaining execution is mechanical and objectively verifiable.
 - When an owner stops converging, preserve the diff, evidence, findings,
-  accepted intent, and remaining gap for a Astra diagnostic continuation. Astra
-  finishes a bounded repair, changes implementation strategy, or replans and
+  accepted intent, and remaining gap for an Astra Medium diagnostic continuation.
+  Astra Medium finishes a bounded repair, changes implementation strategy, or replans and
   continues when outcome, public/persisted contracts, security boundary,
   material cost, destructive behavior, and scope remain within accepted intent.
   A change of authority or approach is not a terminal condition. Escalate to the
@@ -156,14 +158,15 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   `FAILED` only when the goal is not reasonably achievable under accepted
   constraints. `CONTINUE_WITH_REPLAN` is internal and nonterminal.
 - These defaults are user-owned routing authorization for an explicitly selected
-  legacy peer route: when a fresh peer is created, the handoff must pass the exact pair
-  `model=gpt-5.6-luna, thinking=xhigh` for a substantial milestone or
-  independent objective/code review, `model=gpt-5.6-luna, thinking=high` for
-  bounded/mechanical work, `model=gpt-6-astra, thinking=medium` for architecture
-  planning/conformance with security, visual-judgment or ordinary recovery work, and
-  `model=gpt-6-astra, thinking=high` only for visual-quality promotion or
-  explicit escalation. The most specific
-  applicable user instruction wins. Every Luna task uses `speed=fast` by
+  legacy peer route: when a fresh peer is created, the handoff must pass the exact
+  pair `model=gpt-5.6-luna, thinking=xhigh` for execution or independent
+  objective/code review, `model=gpt-5.6-sol, thinking=medium` for semantic
+  orchestration/decision or architecture conformance, `model=gpt-6-astra,
+  thinking=medium` for planning, visual implementation or recovery, and
+  `model=gpt-6-astra, thinking=low` for visual-quality review. The pair
+  `model=gpt-6-astra, thinking=high` is an explicit exceptional escalation only.
+  Escalations are explicit controller decisions; no automatic escalation engine
+  is introduced. The most specific applicable user instruction wins. Every Luna task uses `speed=fast` by
   default, including implementation and review, unless a more specific user
   instruction selects another speed. If the native schema advertises `speed`,
   pass `speed=fast`; otherwise rely on the app's configured fast speed and do

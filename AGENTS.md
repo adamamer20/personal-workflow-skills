@@ -224,28 +224,24 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   and each peer is started exactly once. This per-milestone rule does not relax
   idempotency: serial dependencies or shared mutable ownership still require
   one START to wait for the relevant predecessor.
-- After that design is accepted, Luna XHigh implements it as the single mutable
-  owner. Luna may resolve local mechanical details but returns any material
-  boundary, public or persisted contract, ownership, security/privacy, cost,
-  destructive-behavior, or scope change to Astra Medium for a bounded plan update.
-- Luna XHigh is the normal objective/code reviewer. Astra Medium is the normal
-  combined architecture/security authority when that mode is declared. Do not
-  split security into another default review. Astra High is reserved for visual
-  promotion or explicit escalation. Use one
-  review per declared authority by default and at most one bounded repair for
-  concrete promotion blockers; do not run repeated broad review waves.
+- After that design is accepted, Luna XHigh is the single mutable implementation
+  owner and normal objective/code reviewer. Return material boundary, public or
+  persisted contract, ownership, security/privacy, cost, destructive-behavior,
+  or scope changes to Astra Medium for a bounded plan update.
 - Model milestones with explicit `objective`, `visual`, and `architecture`
   acceptance modes. Derive implementation and independent review authorities
   per mode; never infer them from file extension or repository area.
-- Objective/code review uses Luna. Visual-judgment implementation and rendered-
-  quality review use Astra, with a separate objective reviewer when both modes
-  apply. Architecture design/review and ordinary recovery diagnosis use Astra
-  Medium; explicit escalations use Astra High.
+- Visual-judgment implementation uses Astra Medium and visual-quality promotion
+  review uses Astra Low. Semantic orchestration and normal architecture
+  conformance use Sol Medium. A combined architecture/security review escalates
+  to Astra Medium for significant or ambiguous boundaries; do not add a separate
+  security review. High is an explicit exceptional escalation only. Preserve all
+  declared authorities and run distinct objective/architecture reviews in
+  parallel when ready; passing code tests never implies visual acceptance.
 - Non-convergence changes authority or approach; it does not terminate work.
-  The recovery authority may finish locally, replace the implementation
-  strategy, or update an implementation-level architecture assumption and
-  continue when accepted outcome, public/persisted contracts, security/privacy
-  boundary, material cost, destructive behavior, and scope remain unchanged.
+  Astra Medium may finish bounded recovery or replan while accepted outcome,
+  public/persisted contracts, security/privacy boundary, cost, destructive
+  behavior, and scope remain unchanged.
 - `CONTINUE_WITH_REPLAN` is internal and nonterminal. `NEEDS_DECISION` is only
   for genuinely underdetermined user intent or missing user authority.
   `EXTERNAL_BLOCKED` is only for missing credentials, permission, service,

@@ -7,9 +7,10 @@ description: "Independently review a fixed change or artifact through one explic
 
 Review one fixed artifact through one named lens.
 
-One review is the default. Additional independent review contexts are a
-controller decision only when they cover materially distinct risks with
-different evidence. One reviewer does not invoke another reviewer.
+One review is the default for a single declared authority. When a capsule
+declares distinct objective and architecture authorities, the controller may
+run those independent reviews in parallel; each remains required for
+promotion and uses separate evidence. One reviewer does not invoke another.
 
 Do not review everything by default.
 

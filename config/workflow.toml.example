@@ -6,7 +6,7 @@ thinking = "medium"
 
 [roles.execute_bounded]
 model = "gpt-5.6-luna"
-thinking = "high"
+thinking = "xhigh"
 speed = "fast"
 
 [roles.execute_substantial]
@@ -30,7 +30,7 @@ speed = "fast"
 
 [roles.review_visual]
 model = "gpt-6-astra"
-thinking = "high"
+thinking = "low"
 
 [roles.recover_local]
 model = "gpt-6-astra"

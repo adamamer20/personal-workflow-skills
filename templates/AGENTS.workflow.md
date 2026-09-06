@@ -91,8 +91,9 @@
   its ownership or transport boundary.
 - Every review invocation names exactly one lens (`spec`, `correctness`,
   `standards`, `contract-risk`, `security`, or `visual`). The default is one
-  review context; the controller may run parallel contexts only for materially
-  distinct, plan-justified lenses with separate evidence.
+  review context; when a capsule declares distinct objective and architecture
+  authorities, the controller may run those independent reviews in parallel.
+  Every declared authority remains required, with separate evidence.
 - Findings record severity separately from promotion impact. P0 is normally
   blocking; P1 blocks when it invalidates the outcome, a protected boundary,
   or safe successor work. A non-blocking finding records its owner and
