@@ -1,5 +1,117 @@
 # Plan: Deterministic Codex workflow controller
 
+## Current executable repair — reviewer wire contract
+
+The fresh SDK worker produced candidate
+`14ef9e39c7d710964026f275ca26f2a7b64c431f`, but live acceptance is NOT complete.
+Both reviewer dispatches failed before their turns: the reviewer output schema's
+`findings.items.properties.evidence = {type: object}` is rejected by the strict
+local output-schema validator. `start_turn` evaluates that projection before
+calling the SDK turn, then misclassifies its ValueError as an unknown SDK error.
+An arbitrary bounded map is also unsupported by the provider projection; do not
+weaken either validator to accept open object keys.
+
+Read-only Astra diagnosis from native task
+`01a075ef-b6ed-7d30-aa2b-05a66289a8ee` froze the bounded map below. It also found
+the source task cannot be deserialized by the installed pinned SDK because of
+a stored subagent-completed item with variant `completed`. That is a separate
+notification compatibility blocker. The exhausted source wake was not replayed.
+Reviewer thread-read returns 'thread not loaded', which does not establish
+absence of persisted history or authorize replacement. Preserve their identities,
+v1 contract digests, failed dispatches, candidate and attention records unchanged.
+
+The workspace SDK environment contained a 2558-byte historical test fixture
+(30 hard links; SHA-256 5c9068cfb4eed227a283c8fac11b0e3523eed235ad98ad98efac5bd824b00883).
+The controller retained its bytes under the predecessor archive as
+`contaminated-test-sdk-init.py`, then ran `uv sync --python 3.12
+--reinstall-package openai-codex --no-cache --link-mode copy`. The real pinned
+SDK's wheel RECORD now verifies and its init has one link. The review projection
+failure reproduces with the restored real SDK. Previous test successes are not
+proof of SDK compatibility; the shared-contract repair requires a new full gate
+on this verified environment. No global configuration or installed tool changed.
+
+### Frozen map and ownership
+
+One native Luna XHigh implementation task owns only:
+
+- Modify `src/codex_flow/contracts.py`: explicitly version the reviewer wire
+  projection as schema_version=2. Replace each wire finding's open `evidence`
+  with `evidence_json`, a bounded JSON-object string. Keep domain
+  `ReviewFinding.evidence` and `ReviewResult` unchanged. Use existing
+  review_result_to_json/from_json/from_agent_message and schema/digest functions;
+  encode sorted compact JSON with ensure_ascii=False and allow_nan=False;
+  enforce 16,384 UTF-8 bytes per evidence object on encode and decode. Decode
+  once with strict_json_loads, require object root and retain existing domain
+  validation. Preserve nested semantic keys/maps/arrays and scalar distinctions.
+  Preserve the existing 65,536-byte raw-result bound. Reject duplicate keys,
+  BOM/invalid Unicode, nonfinite numbers, non-object roots and oversized data.
+  No implicit v1 compatibility, queue digest rewriting or new schema file.
+- Modify `src/codex_flow/backends/codex_sdk.py`: prepare and validate the output
+  projection outside generic SDK-error classification. Local invalid schemas
+  must call no raw SDK turn and raise an existing precise local/terminal contract
+  error with safe bounded detail. Do not broadly reclassify provider ValueError
+  or weaken failure/retry authority. Preserve transport, permissions and auth.
+- Modify existing tests only in `tests/test_codex_sdk_adapter.py`,
+  `tests/test_program_controller.py`, `tests/test_review_lifecycle.py`,
+  `tests/test_multi_authority_review.py`, `tests/test_harness_recovery.py`, and
+  `tests/test_plan_compilation.py`, when needed for the changed wire boundary.
+  Add no production module, public class, test file, schema, dependency or
+  durable artifact family. Return any other required path to planning first.
+
+The controller owns this plan and runtime operations. Same existing program
+workspace and branch; exact implementation base is the planning commit handed
+to the native task. No subagents, peers, independent reviews or successor work
+inside the implementation task. The prior fixture commit stays retained and
+unpromoted; advancing implementation HEAD is not adoption or rebaselining of that
+candidate. No live reconciliation may compare it to the later runtime checkout
+as though terminal bytes were unchanged.
+
+### Gates and subsequent readiness
+
+Required provider-free checks: every production output schema validates and
+projects; fake SDK captures the actual reviewer output_schema; invalid local
+schema produces zero raw turn calls and the precise error; nonempty semantic
+findings roundtrip through response decoding, ReviewResult and durable review
+events; malformed/oversize evidence matrix; accepted/rejected reviews, exact
+candidate mismatch, preserved evidence and all-authority acceptance. Verify
+real SDK RECORD before/after gates. Run affected partitions and a fresh full
+make check, self-review, owned staging/diff checks and a coherent local commit.
+Independent native Luna XHigh objective and Astra Medium architecture reviews
+must accept that exact candidate before installation. No live provider calls,
+turn resume/start, service/install/ledger/global mutations in this task.
+
+DAG: wire repair is ready; source-notification compatibility is a separate
+read-only diagnosis/design prerequisite for reliable wake, not permission for
+an SDK upgrade or replay. Live acceptance/recovery remains deferred until both
+are resolved. The controller will then select one explicit new-run or preserved-
+candidate recovery route. Neither generic retry with old digests, synthetic
+executor generation 2 nor an ad-hoc replacement queue transition is authorized.
+Do not build backward-compatibility machinery speculatively. The user withdrew
+historical compatibility; any recovery must serve the actual fresh-run outcome.
+
+## Next execution — reviewer-wire-contract-repair
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective="Make reviewer output provider-projectable while preserving structured evidence and precise local contract failures.",
+    decomposition=("Implement the explicit v2 review wire codec at the existing contracts boundary.", "Separate local schema projection failures from SDK turn failures.", "Prove real-schema projection, semantic finding roundtrips and all affected gates in the restored SDK environment."),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Every production output schema projects without open dynamic object keys; v2 evidence_json roundtrips semantic JSON losslessly under strict per-evidence and total result bounds.",
+        "Invalid local schema calls no raw SDK turn and returns a precise safe local/terminal error rather than unknown SDK failure.",
+        "Required malformed evidence, durable review and exact-candidate authority tests pass; real SDK RECORD remains valid and full make check passes.",
+        "Only owned paths are committed; old candidate/queue/identities and all real runtime/global state remain unchanged; independent objective and architecture acceptance remain controller-owned."
+    ),
+    mutable_surfaces=("src/codex_flow/contracts.py", "src/codex_flow/backends/codex_sdk.py", "tests/test_codex_sdk_adapter.py", "tests/test_program_controller.py", "tests/test_review_lifecycle.py", "tests/test_multi_authority_review.py", "tests/test_harness_recovery.py", "tests/test_plan_compilation.py"),
+    protected_surfaces=("docs/reviews/peer-thread-workflow.md", "AGENTS.md", "src/codex_flow/domain.py", "src/codex_flow/ledger.py", "src/codex_flow/harness.py", "src/codex_flow/controller.py", "src/codex_flow/worker.py", "schemas", "workflow.toml", "real state, providers, services, installer, global configuration/authentication and historical evidence"),
+    authorities=(ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")), ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))),
+    prompt="Implement only Current executable repair — reviewer wire contract and its frozen map. Use execute-milestone as one Luna XHigh native leaf. Do not launch subagents/peers/reviews or workflow-control. Preserve current failed reviewer identities and digests; do not retry, reconcile or install. Verify the restored SDK environment, run provider-free gates and commit only owned changes. Return exact candidate/checks with independent acceptance pending to the supplied controller callback.",
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
 ## Fresh self-hosted closure — ready after installation
 
 Installed code matches all 33 source Python modules at accepted candidate
