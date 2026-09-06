@@ -10541,7 +10541,7 @@ ModelFacingCapsule(
         "create, validate and re-review a distinct successor without weakening restart adoption."
     ),
     decomposition=(
-        "Remove the historical-adoption bypass and compare the exact retained candidate, terminal workspace, Git authority and protected identity facts.",
+        "Verify the exact retained candidate, terminal workspace, Git authority and protected identity facts at the historical commit, then verify the separately authorized schema-v20 successor transformation without comparing old and new snapshots as if their HEAD and bytes were identical.",
         "Separate generation-1 executor terminal authority from generation-2 repair terminal authority while binding the repair to its immutable predecessor and finding context.",
         "Capture generation-2 workspace, Git-authority and protected-path identities on the authenticated turn/completed boundary, then bind the result digest to that immutable dispatch-owned record during result ingress.",
         "Allow the accepted completed-execution review and one-repair states without permitting arbitrary candidate replacement or a second repair.",
@@ -10550,7 +10550,7 @@ ModelFacingCapsule(
     ),
     acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
     acceptance_criteria=(
-        "Historical 47a8fa3d -> 977d8f5c adoption succeeds only with exact retained terminal workspace, Git-authority and protected-path identities; later schema-v20 test adaptations are accepted only through their exact authorized blob/patch identity, while placeholders, conflicting facts and non-allowlisted drift fail closed.",
+        "Historical 47a8fa3d -> 977d8f5c adoption revalidates the stored terminal workspace, Git-authority and protected-path facts against the actual retained commit rather than facts synthesized from the current checkout; the later schema-v20 test adaptation is verified as a separate exact authorized blob/patch transformation, while historical rebaseline, placeholders, conflicting facts and non-allowlisted drift fail closed.",
         "A production-shaped completed execution reaches REVIEWING, records one repair request, accepts one direct clean successor with its own exact terminal facts, invalidates prior reviews and queues every fresh authority.",
         "One dispatch_terminal_integrity row captures HEAD, workspace, Git authority and protected digest on authenticated turn/completed; result ingress atomically binds its digest without recapture, and all facts remain exact before candidate recording, each fresh review and promotion.",
         "Persisted-thread result recovery without the pre-existing completed-turn snapshot fails closed and never manufactures terminal authority after worker exit.",
@@ -10561,17 +10561,12 @@ ModelFacingCapsule(
     ),
     mutable_surfaces=(
         "src/codex_flow/harness.py",
-        "src/codex_flow/ledger.py",
-        "tests/test_controller_execution.py",
         "tests/test_harness_recovery.py",
-        "tests/test_ledger_integrity.py",
-        "tests/test_service_lifecycle.py",
-        "tests/test_plan_compilation.py",
-        "config/test-partitions.toml only if current test membership requires it"
+        "tests/test_plan_compilation.py"
     ),
     protected_surfaces=(
         "docs/reviews/peer-thread-workflow.md and AGENTS.md after this planning commit",
-        "CLI, Controller implementation, domain, contracts, plan compiler, worktree manager, program controller, workflow configuration and every schema/migration except the one ledger.py v19-to-v20 migration",
+        "src/codex_flow/ledger.py, tests/test_controller_execution.py, tests/test_ledger_integrity.py, tests/test_service_lifecycle.py, config/test-partitions.toml, CLI, Controller implementation, domain, contracts, plan compiler, worktree manager, program controller, workflow configuration and every schema/migration",
         "SDK adapter, profile/authentication, service/IPC framing, TUI/live-keyframe behavior and reusable workflow policy surfaces",
         "all evidence including docs/reviews/evidence/safe-refresh-and-control-list-paging.json",
         "real services, providers, App/global Codex state, remotes, history rewrite, discard, implicit cleanup and unrelated worktree bytes",
@@ -10582,7 +10577,7 @@ ModelFacingCapsule(
         ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
     ),
     prompt=(
-        "Use recover-milestone as one Sol Medium mutable recovery owner for only ARCH-CONFORMANCE-HISTORICAL-ADOPTION-004 and ARCH-CONFORMANCE-PREINGESTION-PROOF-005 at exact predecessor b23ed62816926933933c30ddbbef2dad3b2520d3 in the existing python-sdk-controller integration worktree. Both independent reviews agree the one-table v20 authority is sound after ingestion, but the historical adoption check is broader than immutable provenance and recovered persisted-thread results capture too late. Modify only harness.py, ledger.py and the five named tests. Revise the unpromoted schema-v20 dispatch_terminal_integrity table in place, without v21: authenticated generation-2 turn/completed inserts the immutable terminal HEAD/workspace/Git/protected snapshot with an unbound result; submit_result atomically binds the exact result digest and queue terminal row without recapturing workspace authority. A recovered persisted-thread result may bind only an already-captured matching snapshot; otherwise require human attention and never capture after exit. Retain the necessary schema-v20 adaptations in tests/test_service_lifecycle.py and replace only the overbroad post-historical no-diff condition with an exact allowlisted blob/patch identity check for those authorized successor adaptations. The retained 47a8fa3d -> 977d8f5c candidate facts remain exact and immutable; any placeholder, conflicting identity or non-allowlisted successor drift fails closed. Add production-shaped Git, workspace and protected drift between completed-turn capture and result ingress, plus missing-capture recovery, post-ingestion review/promotion drift, restart idempotency and exact success. Preserve one repair only, dispatch-context checks, review invalidation/requeue, SQLite and WorkflowHarness authority and program-controller separation. Add no second table, schema version, type, module, public option, transport or lifecycle owner; do not call providers, App connectors, services or installers. Run focused tests, ledger migration and affected partitions, the exact historical adoption test, plan compilation and full make check in a clean disposable checkout; stage only owned paths, inspect the staged diff, run git diff --cached --check, create one coherent recovery commit and return one terminal result with fresh objective and architecture re-reviews pending."
+        "Use recover-milestone as one Sol Medium mutable recovery owner for only CONTROL-HISTORICAL-ADOPTION-001 and ARCH-CONFORMANCE-HISTORICAL-SNAPSHOT-006 at exact predecessor af7e4edc89df3451480060db248ea4505896b3e2 in the existing clean python-sdk-controller integration worktree. Both fresh reviews agree the pre-ingestion schema-v20 repair is correct and identify one shared remaining cause: the historical allowlist recognizes the authorized service-test blob/patch but _assert_control_terminal_authority still compares the actual retained terminal workspace and Git digest to the later checkout, while the positive regression fabricates old terminal facts from that current checkout. Modify only src/codex_flow/harness.py, tests/test_harness_recovery.py and the plan-compilation hash assertion. Preserve the exact retained 47a8fa3d -> 977d8f5c terminal candidate. Revalidate its stored terminal workspace, Git-authority and protected facts against bytes and identity reconstructed from the actual retained commit/ref, never from the current checkout. Then validate the later schema-v20 adaptation as a separate exact authorized old-blob to new-blob and binary-patch transition with exact ancestry; every other historical mutable/protected fact and every non-allowlisted successor drift remains rejected. Do not restore an early-return bypass, rebaseline persisted historical facts, hardcode a new current candidate, weaken ordinary post-terminal equality, or change the accepted pre-ingestion capture/binding implementation. Replace the synthetic positive regression with a production-shaped test that captures real facts from the retained 977d8f5c checkout, advances to the authorized adapted checkout and exercises reconcile_control_execution; prove exact success plus historical workspace, Git, protected, blob, patch, ancestry and unrelated-drift rejection. Add no schema/table/module/public type/option/transport/lifecycle owner and do not call providers, App connectors, services or installers. Run the focused historical/recovery tests, affected controller/integration partitions, plan compilation and full make check in a clean disposable checkout; stage only the three owned paths, inspect the staged diff, run git diff --cached --check, create one coherent successor commit and return one terminal result with fresh objective and architecture re-reviews pending."
     ),
     recovery_policy="completion_biased",
     prompt_budget_bytes=12_000
