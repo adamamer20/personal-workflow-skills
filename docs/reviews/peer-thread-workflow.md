@@ -1,5 +1,120 @@
 # Plan: Deterministic Codex workflow controller
 
+## Routing closed — next App-originated runtime proof
+
+Economical routing is PROMOTED at a1f12099542041a02f28427d338a3ecd5efa9d12.
+Objective authority 01a076e2-7465-7b52-9bc1-549b4c980da6 accepted the focused
+successor repair with no findings; architecture authority
+01a076e2-bcd6-76a2-a3bb-fb93702ef17a accepted unchanged boundaries at c4cf98b.
+Full gate: 945 passed. Canonical installer completed successfully, plugin
+0.1.11+codex.20260906000000 and controller 0.2.0. All 33 installed Python
+modules and plugin cache bytes match source; service active/running, PID 2388572.
+Global instructions retain independently checked digest and 32443 combined bytes.
+
+User authorizes the next real App flow after this closure. Use one fresh native
+Astra Medium source controller in this existing checkout, invoking workflow-control
+once for the existing `reviewed-sdk-runtime-proof` capsule below. Its worker fixture
+has not yet been created. This source task is the App-facing planning entrypoint;
+the harness owns Sol Medium lifecycle decisions, SDK Luna implementation, parallel
+Luna objective and Sol architecture conformance reviews, promotion and source wake.
+No native worker/reviewer dispatch or nested controllers. The source task must
+exit its launch turn after the durable start response; no open-turn supervision,
+repeated status reads or poll loops. Harness terminal/checkpoint continuation must
+supply its own evidence. Return a final callback to this parent after a genuine
+terminal proof or material failure, keeping dispatch versus acceptance explicit.
+
+This instruction explicitly supersedes ALL source-read prerequisites in historical
+sections below: do not read/resume the App source through SDK before START. Prove
+worker/review/promotion through the harness independently of source wake. A failed
+wake cannot be claimed delivered and must be recorded separately. Full unattended
+App-flow success additionally requires the actual source continuation receipt;
+a successful launch or worker alone is insufficient. Stop at first genuine live
+failure, preserve original errors and durable identities, no retries, fallback,
+old-row adoption or SDK derivative. No UI work, dependencies, permissions,
+services, global state or production-code edits in this proof. The controller
+may record compact terminal evidence in this plan after all worker ownership ends.
+Use the plan commit containing this note as the exact initial workspace base.
+
+## Current bounded repair — public routing consistency
+
+Candidate c4cf98b41a7299e24d6bb742e98168adcf085c09 received architecture/security
+ACCEPT from 01a076e2-bcd6-76a2-a3bb-fb93702ef17a. Objective reviewer
+01a076e2-7465-7b52-9bc1-549b4c980da6 returned CR-ROUTING-README-001:
+README public routes still contradict accepted Sol Medium/Astra Low defaults.
+Promotion and installation remain pending.
+
+Same Luna implementation owner 01a076d1-3dc9-70f2-8ac1-d98335040003 owns one
+bounded successor repair. Extend frozen map to modify README.md routing table
+and adjacent routing prose, scripts/validate.py exact route consistency checks,
+and existing tests/test_workflow_assets.py for the reported regression if needed.
+No change to accepted model choices, runtime scheduling, dependencies, global
+instructions or plugin version is needed. Preserve the valid Luna High bounded
+and mechanical routes; those are not contradictions. Distinguish normal
+architecture conformance Sol Medium from significant boundary/security reasoning
+and recovery Astra Medium; never automatically select High for security.
+Use existing config as authority where practical instead of a second route
+registry. Full make check is the already named configuration gate. Commit only
+repair-owned surfaces without amending the reviewed commit; preserve dirty plan.
+Objective reviewer rechecks this finding and changed causal surface; reuse
+architecture acceptance for unchanged runtime/policy boundaries. If repair
+changes those boundaries, request focused architecture re-review too.
+Controller owns promotion, installation and subsequent App live proof.
+
+## Accepted direction — economical routing and parallel review
+
+Supersedes prior routing and the App-source-read prerequisite below. User on
+2026-09-06 approves global instruction updates: Astra Medium planning and
+recovery; Sol Medium semantic orchestration and architecture conformance;
+Luna XHigh execution and objective review; Astra Low rendered visual review.
+One combined architecture/security authority escalates to Astra Medium for
+new/ambiguous ownership, persistence, public contracts or security/privacy
+boundaries. Bounded implementation may escalate to Astra Low, then Medium
+for conceptual recovery; visual ambiguity escalates to Medium. High is an
+explicit exceptional escalation only. Preserve every declared acceptance mode.
+Escalations are explicit controller decisions, never silent fallback.
+
+Next milestone `economical-routing` is READY in the existing
+program checkout /home/adam/personal-workflow-skills.worktrees/python-sdk-controller,
+branch agent/python-sdk-controller, base 8139f235842d2a3f8fd5a670ee75a502cfb1acd9.
+The controller owns this plan. One native Luna XHigh leaf owns implementation,
+using the explicitly selected native compatibility route while SDK end-to-end
+closure remains unproven. No second dispatch through workflow-control.
+
+Frozen implementation map (modify only): global /home/adam/.codex/AGENTS.md,
+root AGENTS.md, templates/AGENTS.md, templates/AGENTS.workflow.md (consistent
+routing/leaf policy); workflow.toml and config/workflow.toml.example
+(role defaults); src/codex_flow/harness.py (existing controller model/effort route only; preserve review scheduling); existing affected tests under
+tests/ (routing expectations only); scripts/validate.py
+(policy validation); plugin skill bodies only where contradictory routing or
+review-order statements exist, keeping cognition model-independent; plugin
+manifest, marketplace manifest and installer PLUGIN_VERSION for one version bump.
+No new production module, public type, schema, transport, dependency or durable
+artifact. Preserve SDK, ledger schema and existing durable queue/results,
+primary checkout, authentication, service and all unrelated files.
+
+Review state contract: retain concurrent independent objective and combined
+architecture/security reviews of the same candidate. All declared authorities
+remain required for promotion. User explicitly accepted keeping this existing
+behavior; do not introduce correctness-first scheduling or change lifecycle.
+No automatic escalation engine is introduced in this bounded milestone.
+
+Acceptance: full make check (configuration/package change), verified exact
+routing defaults, unchanged leaf/authority guarantees, inspect staged diff and
+commit owned repository surfaces. Independent Luna objective and one Astra
+Medium combined architecture/security review may run in parallel.
+Controller installs only after promotion and verifies source/cache parity and
+preserved runtime state. Worker does not install or dispatch reviews.
+Global instruction file is explicitly user-authorized; keep combined loaded
+instructions within 32 KiB without dropping guarantees.
+
+DAG: routing acceptance -> installation (acceptance dependency) -> fresh
+SDK milestone closure (installed entrypoint dependency). Source notification
+is a separate proof: SDK inability to decode App source history must not be
+used as a prerequisite for harness-owned worker/review/promotion proof. Preserve
+all historical failed rows. A maintained derivative SDK and a new web UI are
+not authorized by this milestone. CLI resume is an inspection/continuation
+candidate, not yet proven passive attachment to a running SDK worker.
+
 ## Latest user direction — matched SDK update and combined boundary review
 
 The user requests updating the Python SDK to the latest version through a
