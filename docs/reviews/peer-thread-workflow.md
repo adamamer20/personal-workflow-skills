@@ -1,5 +1,68 @@
 # Plan: Deterministic Codex workflow controller
 
+## Fresh self-hosted closure — ready after installation
+
+Installed code matches all 33 source Python modules at accepted candidate
+`693a29a`; canonical installer returned ready for codex-flow 0.2.0 and plugin
+0.1.9. The exact service is active/running with PID 2479625; fresh ledger is
+schema v20, compatible, migration_required=false, initially zero dispatches and
+zero decisions. Retained predecessor archive:
+`/home/adam/.local/state/codex-flow/retained/python-sdk-controller/20260906T080006Z`
+(1786 inventoried file/symlink records). No historical work was replayed.
+
+The next small observable milestone is ready and uses the installed codex-flow
+plan-driven SDK-headless route exactly once. It has one mutable output file and
+no production code. The existing executor route is Luna XHigh; the harness
+queues objective Luna XHigh and architecture Astra Medium reviews. The second
+lens verifies the declared no-delegation/protected-boundary proof for this
+controller integration, not visual quality. The worker only writes/checks/
+commits the assigned fixture and submits its raw result; the harness owns
+reviews, one bounded repair if findings require it, promotion and terminal wake.
+The source controller does not poll or manually create duplicate reviewers.
+
+Architecture map: create only
+`docs/reviews/evidence/fresh-runtime-worker-output.txt`, a one-line worker
+output fixture; preserve every production module, shared contract, schema,
+instruction, test and configuration. New durable output budget: one text
+fixture, whose bytes are not a promotion receipt. Durable dispatch/result,
+review and acceptance records are the existing harness evidence. Run exact byte
+verification and Git diff hygiene; no new test module or broad repository test
+is warranted for this fixture. Review must verify the exact committed fixture
+and path scope. Real closure requires fresh SDK identity, committed output,
+both accepted reviews bound to the same candidate, and harness promotion. Stop
+at the first genuine provider/runtime failure, retain its identity and repair
+provider-free before any authorized retry. Never use historical state for this
+run or claim accepted repair behavior solely from a clean no-repair live run.
+
+## Next execution — fresh-self-hosted-closure
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective="Demonstrate fresh SDK worker output and harness-owned independent review through exact-candidate acceptance.",
+    decomposition=(
+        "Write the one assigned text fixture, verify its exact bytes and commit only that file.",
+        "Submit one raw typed result to the harness; let the controller queue independent reviews and handle any bounded repair."
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "docs/reviews/evidence/fresh-runtime-worker-output.txt contains exactly fresh SDK worker completed followed by one LF, committed as the sole changed path.",
+        "Worker makes no peer/subagent/review dispatch, provider call of its own, service/global/ledger mutation or historical adoption; all protected tracked surfaces are unchanged.",
+        "Implementation returns a valid typed result with exact commit and byte-check evidence; it explicitly leaves independent acceptance to the harness.",
+        "Harness independently obtains both objective and architecture reviews bound to the exact candidate before promotion; if a concrete finding requires repair, one direct successor invalidates prior reviews and requires both fresh authorities."
+    ),
+    mutable_surfaces=("docs/reviews/evidence/fresh-runtime-worker-output.txt",),
+    protected_surfaces=("src", "tests", "scripts", "plugins", "schemas", "templates", "AGENTS.md", "workflow.toml", "pyproject.toml", "uv.lock", "docs/reviews/peer-thread-workflow.md"),
+    authorities=(
+        ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),
+        ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))
+    ),
+    prompt="Implement only the assigned one-line fixture: exact UTF-8 bytes fresh SDK worker completed plus LF. Verify bytes with a local assertion, inspect the scoped diff, git diff --cached --check and commit only this file. Do not create tests or modify any other tracked file. You are an SDK leaf: do not invoke workflow-control, create workers/subagents, launch reviews, send peer callbacks, change service/global state or access the real ledger. Submit the requested raw typed result with commit and validation evidence. Your delivery is not promotion; controller/harness owns independent reviews and successors.",
+    recovery_policy="completion_biased",
+    prompt_budget_bytes=12_000
+)
+```
+
 ## Fresh runtime activation — accepted candidate and retained predecessor
 
 Candidate `693a29a01d236c1006ebe1f45c4278fa90dbfa0d` is independently accepted:
