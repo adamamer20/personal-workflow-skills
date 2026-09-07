@@ -1,5 +1,52 @@
 # Plan: Deterministic Codex workflow controller
 
+## Current installation blocker — predecessor refresh fence
+
+`economical-visual-recovery-routing` is independently accepted at exact commit
+`95ac631872568fc73dadd085963984746f681225`: objective reviewer
+`01a07b89-15fb-7da3-b0b3-b15753ef672d` and Sol Medium architecture reviewer
+`01a07b89-7699-7113-951b-7df78ea9458e` both returned ACCEPT with P0=0/P1=0.
+The canonical installer then stopped after preflight before modifying the shared
+tool: `harness refresh fence could not be armed`.
+
+The retained cause is exact and provider-free. The active ledger is schema v20,
+the candidate runtime is v21, and `ledger_schema_compatibility` correctly reports
+an explicit migration. The installer opens the predecessor with `allow_legacy`
+and calls `arm_predecessor_refresh_fence`, but that method accepts only schema v18
+and only `supervisor_authority`. Migration fencing already selects
+`harness_authority` for every supported predecessor newer than v18, so v20 cannot
+be fenced even though its active harness authority is healthy. The failed
+installation changed no tool, plugin, service or ledger state.
+
+Next READY milestone `supported-predecessor-refresh-fence` is one bounded Luna
+XHigh compatibility repair. Modify only `src/codex_flow/ledger.py`,
+`tests/test_ledger_integrity.py`, and `tests/test_plugin_installation.py`; modify
+`scripts/install_personal_workflow_skills.py` only if a focused test proves its
+existing compatibility dispatch is insufficient. Generalize the existing
+predecessor fence/read method to all supported legacy schemas requiring a fence:
+schema v18 uses `supervisor_authority`, schemas v19 and v20 use
+`harness_authority`. Preserve active-child rejection, typed row validation,
+single transaction, requested-shutdown idempotency, exact migration authority and
+all unsupported/corrupt-schema failures. Do not migrate in the fencing opener or
+weaken `_assert_migration_fenced`.
+
+Acceptance: disposable v18, v19 and v20 ledgers arm the correct table and migrate
+exactly once to v21; an active child blocks before mutation; absent authority is
+reported honestly; normal current-schema refresh remains unchanged; the installer
+selects predecessor fencing when compatibility reports migration and never
+installs before a failed fence. Run focused ledger/installer tests and full
+`make check`, inspect/stage the exact allowlist and commit one successor. Require
+independent Luna objective review; architecture conformance may be Sol Medium
+because this is an existing migration boundary with no new gradation of authority.
+Only after both accept may the controller retry the canonical installer, migrate
+the current ledger and verify source/cache/runtime parity. Preserve app-load state,
+historical runs, untracked conversational-TUI files and every downstream surface.
+
+No new schema/table/module/public command, provider/SDK call, routing change,
+service operation or approval capability belongs to this repair. The user-approved
+visual/recovery Astra Low routing remains accepted at `95ac631` and becomes
+installed only after this blocker closes.
+
 ## Evidence/adoption promoted — economical recovery routing next
 
 `program-evidence-and-adoption` is PROMOTED at exact candidate
