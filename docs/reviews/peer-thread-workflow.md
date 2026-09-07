@@ -1,5 +1,349 @@
 # Plan: Deterministic Codex workflow controller
 
+## Evidence/adoption promoted — economical recovery routing next
+
+`program-evidence-and-adoption` is PROMOTED at exact candidate
+`4541afb8ea3919f2a7f4f08a0c843c76a77b6e17`. Independent objective authority
+`01a07b22-6c3e-7b11-9f77-4f749bff1750` returned ACCEPT for E-OBJ-001/002;
+combined architecture/security authority
+`01a07b26-1d2e-7a01-99df-2e654ff04880` returned ACCEPT for
+E-ARCH-EFFECT-FENCE, E-ARCH-ADOPTION and E-ARCH-RECOVERED-SUBMISSION while
+preserving the five previously accepted boundaries. Both report P0=0, P1=0 and
+no deferred findings. Worker full gate: 967 passed; objective focused gate: 91
+passed; architecture independently exercised public transitive corruption,
+late pre-Popen corruption, adoption and recovered-submission paths. This is code
+promotion, not installation or downstream activation. Historical rejected
+candidates and review evidence remain immutable.
+
+The next READY milestone is `economical-visual-recovery-routing`. It records the
+user's latest explicit routing authorization without changing cognitive role
+bodies or runtime lifecycle:
+
+- planning stays `gpt-6-astra` medium;
+- ordinary code execution and objective review stay `gpt-5.6-luna` xhigh;
+- semantic decision/orchestration and normal architecture conformance stay
+  `gpt-5.6-sol` medium;
+- visual implementation changes from Astra Medium to Astra Low by default;
+- ordinary recovery changes from Astra Medium to Astra Low by default;
+- visual ambiguity, non-convergence or material recovery complexity explicitly
+  escalates to Astra Medium;
+- Astra High remains an explicit exceptional escalation only.
+
+One Luna XHigh leaf owns the bounded consistency update. Modify only
+`workflow.toml`, `config/workflow.toml.example`, root `AGENTS.md`, global
+`/home/adam/.codex/AGENTS.md`, `templates/AGENTS.md`,
+`templates/AGENTS.workflow.md`, `README.md`, `scripts/validate.py`, existing
+`tests/test_workflow_assets.py`, and contradictory routing prose in the existing
+plugin `review-work`/`recover-milestone` skills if present. Bump the plugin
+manifest, marketplace manifest and installer `PLUGIN_VERSION` exactly once only
+if plugin bytes change. No production controller logic, schema, ledger,
+dependency, SDK, service, TUI or downstream changes. Preserve the accepted
+runtime-evidence code and all untracked conversational-TUI artifacts.
+
+Acceptance is exact semantic agreement across configuration, README, root/global
+instructions and templates; global+root instructions remain within 32 KiB;
+validators reject the retired Astra-Medium defaults for ordinary visual
+implementation/recovery; leaf/controller and parallel-review guarantees remain
+unchanged. Run the affected workflow-assets tests and full `make check`, inspect
+the staged allowlist and create one local commit. Independent objective review is
+required; add Sol Medium architecture conformance because routing authority spans
+global, repository and installed-plugin boundaries. Installation follows both
+ACCEPT receipts and must verify source/cache/runtime parity while preserving the
+active v21 ledger and historical runs. `program-user-approval` remains WAITING on
+this routing acceptance and installation dependency.
+
+## Current recovery — dependency evidence and recovered submission
+
+This recovery supersedes the prior repair/next-action sections. Fixed inspected
+candidate: 68b3ee55e580fc329a38ca6a4ce95f11992979ef, descendant of rejected
+c38355b87470c4b7a08481d3ac30348b0375c9a0, on agent/python-sdk-controller in
+/home/adam/personal-workflow-skills.worktrees/python-sdk-controller. The only
+tracked dirty path at inspection is this canonical plan; untracked
+conversational-tui artifacts remain protected. No implementation bytes or commits
+were changed by this read-only recovery/planning leaf.
+
+Diagnosis: architecture_replan, remaining work medium and bounded. The outcome,
+public/persisted contracts, permissions and chosen lifecycle owners are sound;
+the failed assumption is that action-explicit evidence covers every effect's
+preconditions. A START_READY action has no evidence field even when readiness
+rests on accepted predecessor evidence. Another failed ordering assumption asks
+for an action outbox before recovery has committed that action. Increasing review
+intensity or adding isolated rehash calls will not repair those two boundaries.
+The adoption compiler defect is near_completion within this bounded replan.
+No guarantee narrowing, new user authority or user decision is required.
+
+Architecture re-review facts supplied by the parent: criteria preservation,
+runtime provenance, descriptor confinement, atomic publication and portions of
+adoption projection are verified closed. Preserve those accepted mechanisms and
+reuse unchanged checks; do not reopen their implementation. Remaining P1 causal
+IDs: E-ARCH-EFFECT-FENCE, E-ARCH-ADOPTION and E-ARCH-RECOVERED-SUBMISSION.
+Objective E-OBJ-001/E-OBJ-002 acceptance has not arrived; it remains independent
+and cannot be inferred from this architecture diagnosis. No promotion is claimed.
+
+### Inspected causes and replacement boundaries
+
+- harness._assert_program_action_effect_eligible currently rehashes only explicit
+  action.evidence_sha256. _enqueue_program_worker checks unsupported gates but
+  does not resolve runtime evidence from dependencies. The final
+  _issue_and_spawn_verified_worker boundary validates runtime-node provenance,
+  then reaches Popen without revalidating predecessor evidence for ordinary or
+  review/repair workers. This leaves accepted corrupt predecessors effective.
+- compile_program_graph passes (review_base, candidate) as the review_base_sha
+  argument although CompiledProgramNode requires a scalar SHA. Keep the existing
+  field contract; pass the exact tuple elements separately with named arguments.
+  No new adoption type, relaxed validator or synthesized base is needed.
+- public program_submit_recovered_actions searches program_action_outboxes before
+  calling Ledger.submit_recovered_program_controller_actions. The ledger method
+  already validates inspection_completed_at/outcome, persisted bundle JSON/digest,
+  current generation and claimant. A legitimate completed inspected bundle can
+  exist before an outbox, so the public path rejects a valid recovery.
+
+Keep one harness eligibility boundary, extending the existing helper rather than
+adding another fence service or registry. Introduce private
+WorkflowHarness._assert_program_worker_effect_eligible(program_id, milestone_id,
+role, generation, action_context) for the worker-shaped invocation; it shares
+one private evidence-subject resolver with _assert_program_action_effect_eligible.
+The resolver reads ProgramGraph, current ProgramStatus and existing review/action
+context from Ledger, never from model-supplied evidence lists. It returns existing
+ReviewSubject values associated with their milestone IDs; use a typed tuple,
+not a new public wrapper. No new production module/schema/table/transport.
+
+For START_READY targets, walk the registered dependency DAG transitively. Resolve
+each runtime predecessor's current accepted subject from durable outcome/review
+facts and verify closure/current acceptance before hashing. A commit intermediary
+does not sever the dependency on an earlier runtime subject. Missing/stale subject,
+changed accepted revision or missing required closure rejects; do not silently
+skip it because there is no SHA in the start action. Visit once per node and
+deduplicate subjects. Never use all historical evidence as current authority.
+For review, repair and promotion, also resolve the target's exact current subject
+from its durable queued review/repair action context and check its identity against
+current ledger facts. A repair may target a rejected subject; do not require that
+subject to have been promoted, but require its registered predecessor closures
+and the integrity of the specific evidence it is meant to inspect. Explicit action
+subjects still must match the durable subject; they cannot override it.
+
+Use that same resolver/rehash/invalidation mechanism at normal and recovered
+submission before action commit; at action outbox application/replay; immediately
+before enqueue; and again at the final worker launch boundary immediately before
+Popen. The queue may outlive the action revision: launch must derive current
+required subjects from its exact durable dispatch identity/role/generation and
+stored action context, not reuse a cached earlier successful check. Apply to
+executor, reviewer, repair and recovery-continuation launches for registered
+programs. Ordinary standalone dispatches retain existing behavior; absence of a
+registered program is not corruption, while a missing graph for an identified
+program dispatch is a failure, never fallback to standalone semantics.
+
+The existing verifier and Ledger.invalidate_runtime_evidence remain the sole
+integrity-invalidating mechanism. On failure, persist the exact subject's
+invalidation/attention idempotently before returning rejection; effective closure
+must be false and unstarted descendants must be ineligible in durable status,
+readiness and restart. Preserve historical success/review/closure receipts. If
+persisting invalidation fails, stop the effect and report that failure rather than
+proceeding or claiming durable invalidation. Cancel/fail queued launch through the
+existing failure path with no SDK process/thread creation. Do not delete evidence,
+rerun workloads, create replacement owners or claim rollback of started work.
+
+Revalidate graph/current-subject/closure facts around the filesystem rehash against
+the existing program revision and queue/claim authority. Reuse existing CAS and
+single harness ownership; a changed required subject or program revision during
+validation fails before effect. Do not hold a DB transaction across Popen, invent
+an OS-adversary lock protocol or claim immunity to arbitrary post-check same-account
+writes. The required observable guarantee is fresh dependency-aware validation at
+both enqueue and launch, with restart/replay and stale durable state rejection.
+
+### Recovered precommit bundle authority
+
+Add one read-only Ledger.recovered_program_controller_bundle(decision_id) returning
+the existing ModelFacingProgramControllerActionBundle. Extract/reuse the existing
+persisted inspection validation from submit_recovered_program_controller_actions;
+no duplicate parser, private SQL in harness or model-provided replacement bundle.
+Validate exact decision/program/generation/claimant, completed inspection and raw
+canonical digest identity; reject incomplete/mismatched/stale/corrupt facts.
+The public endpoint reads that validated bundle, applies the common eligibility
+fence, then calls the existing ledger submit method. The submit transaction must
+revalidate that the retained bundle/current authority matches what was inspected
+before committing; keep existing allow_recovered proof restrictions. This is
+precommit inspection authority, never authority to execute an uncommitted action.
+
+After commit, apply only the exact persisted outbox through the same fence, then
+reuse normal acknowledgement. Crash before commit leaves no effects and can reuse
+the same inspected bundle; crash after commit uses the exact matching outbox.
+Already committed action replay must validate its immutable bundle/identity via
+existing committed receipt semantics without falsely requiring the old precommit
+program revision to remain current. Terminal applied/failed effects remain
+idempotent and never re-execute. Conflicting outbox/inspection digests, stale
+inspection generations and changed required evidence reject. The read-only getter
+and submit share the decoder/identity rules; no new recovery lifecycle or token
+bypass is authorized. All tests enter public program_submit_recovered_actions,
+not only ledger.submit_recovered_program_controller_actions.
+
+### Exact continuation ownership and falsification checkpoints
+
+Same Luna XHigh mutable implementation owner, same worktree, successor commit
+from exact 68b3ee55e580fc329a38ca6a4ce95f11992979ef. No reviewed commit amend.
+Only the following paths may change in this continuation:
+
+| Path | Responsibility and permitted change |
+| --- | --- |
+| src/codex_flow/harness.py | Shared dependency-aware eligibility/resolver, enqueue/final launch checks, public recovered submission ordering; depends on existing ledger/domain/verifier |
+| src/codex_flow/ledger.py | Read-only recovered bundle accessor and shared validation; existing invalidation/closure/readiness/CAS corrections only if discriminating tests show need |
+| src/codex_flow/plan_capsule.py | Scalar adopted-node binding with existing closed validation |
+| tests/test_runtime_evidence.py | Dependency corruption before enqueue/after enqueue and transitive/review cases through public effects, durable invalidation and no-launch proof |
+| tests/test_program_controller.py | Full compiler/CLI/harness adoption and public recovered-submit/restart/replay regressions |
+| tests/test_plan_compilation.py | Scalar review-base/candidate boundary and invalid pairs; no widening |
+| tests/test_harness_recovery.py | Final worker-launch and recovered/public crash-boundary checks using fake spawn/provider seams |
+
+Preserve every other implementation path, notably runtime_evidence.py,
+contracts.py, domain.py, controller.py, projection.py, worktrees.py and their
+accepted fixes. Preserve schemas/capsule.schema.json, scripts/validate.py,
+tests/test_service_lifecycle.py and config/test-partitions.toml; no schema or test
+collection change is planned. Preserve plan/TUI artifacts, approval milestone,
+SDK/service/IPC framing, global/auth/provider/real-ledger/downstream surfaces.
+This plan is planner-owned, never staged by the implementation owner. New durable
+artifact budget zero; evidence is the existing test output and commit/terminal
+result. New public vocabulary budget exactly one ledger read method; private
+helpers encode the repeated dependency eligibility decision, not forwarding layers.
+
+First falsification checkpoint, before broad repair: build a disposable graph
+runtime predecessor -> commit intermediary -> successor; accept the predecessor,
+corrupt its retained snapshot, and use START_READY through the public action path.
+Show no enqueue, durable false effective closure and one attention event. Then
+repeat with corruption only after valid enqueue and before intercepted Popen;
+show no process/thread creation, same durable invalidation and blocked restart.
+The fixture must actually create/accept evidence using the retained production
+boundaries, not manually assert an already-blocked status. Add a control where
+unchanged evidence allows exactly one launch. If the common resolver cannot make
+both traces pass, stop expanding tests and return that exact architectural
+counterexample to parent; do not retry the old action-only hypothesis.
+
+Second checkpoint: public canonical-plan compilation and program register with
+--adopted-node reaches adopt-candidate, independent-review receipt ingestion and
+already-integrated closure. Repeating the same accepted operation returns its
+existing receipt/disposition without new Git effects. Stale HEAD, wrong parent,
+dirty checkout and conflicting tuple fail. Compare refs/index/worktree bytes
+before/after; mocked private node construction is not compiler-path proof.
+
+Third checkpoint: persist a legitimate inspected completed bundle without an
+outbox, call public program_submit_recovered_actions and prove exact action
+commit/effect. Restart at before-action-commit and after-action-commit boundaries
+and replay the same request with no duplicate enqueue/integration. Corrupt required
+predecessor evidence between inspection/submission or enqueue/launch and reject
+through the same fence. Cover mismatched digest/generation and legitimate already
+committed receipt replay. No provider or real SDK is used.
+
+These are ordered discriminating checkpoints, not three mutable lanes. After
+they pass, run affected controller/integration, evidence and recovery partitions,
+plan compilation and full make check once at the final candidate. Reuse unchanged
+successful checks, broadening only for a new failure or changed dependency. Inspect
+full/staged diff and git diff --cached --check, then one coherent allowed-path
+successor commit. Fresh architecture causal re-review must close all three IDs;
+objective E-OBJ-001/E-OBJ-002 still require independent receipt reconciliation and
+any resulting findings must be addressed. Promotion requires both authorities,
+P0/P1=0 and no open promotion blockers, never just green focused tests.
+
+### Routing reconciliation and next readiness
+
+Latest user routing controls this plan: planning Astra Medium; ordinary code
+implementation/review Luna XHigh; visual implementation and recovery default Astra
+Low, Astra Medium only as escalation. This recovery is an explicitly requested
+Astra Medium escalation after a causal finding persisted. It does not raise all
+future recovery work to Medium. Older routing prose below is historical where it
+conflicts. Configuration/global/plugin updates are a SEPARATE controller-owned
+step after candidate review, outside this repair; this leaf changes none of them.
+
+Next owner is the same Luna XHigh implementation owner for the capsule below.
+Parent controller 01a076b2-e4c5-7bc0-b5b1-d6ca5a7be818 host local owns dispatch,
+reviews and subsequent routing reconciliation. program-user-approval remains
+serially blocked on evidence/adoption promotion; activation/downstream/TUI remain
+blocked/paused as already recorded. Recovery outcome CONTINUE, user decision no.
+
+## Next execution — program-effect-boundary-repair
+
+```python
+ModelFacingCapsule(
+    schema_version=1,
+    objective="Close E-ARCH-EFFECT-FENCE, E-ARCH-ADOPTION and E-ARCH-RECOVERED-SUBMISSION at successor 68b3ee55e580fc329a38ca6a4ce95f11992979ef with dependency-aware enqueue/launch eligibility, scalar canonical adoption binding and valid precommit recovered submission.",
+    decomposition=(
+        "Use one dependency/current-review subject resolver and existing evidence verifier/invalidation for normal/recovered submission, outbox replay, enqueue and final worker launch.",
+        "Fix scalar review-base/candidate compiler binding without changing its contract; prove complete public registration/adoption/review/closure and no Git mutation.",
+        "Extract the existing ledger inspected-bundle validation into one typed read accessor; fence before recovered commit, then apply only the committed outbox idempotently.",
+        "Pass the three ordered falsification checkpoints, affected partitions and full make check; stage only seven allowed paths, self-review and create one successor commit.",
+    ),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+    acceptance_criteria=(
+        "Corrupt accepted transitive predecessor evidence blocks START_READY before enqueue and queued successors immediately before Popen; durable invalidation clears effective closure, emits attention and survives restart.",
+        "Current durable review/repair subjects and registered dependencies govern eligibility; explicit action evidence cannot omit required proofs or select stale subjects; valid unchanged evidence allows exactly one effect.",
+        "Public canonical compiler/register/adopt/review/closure succeeds for the exact already-integrated tuple, replay is idempotent, stale HEAD/parent/dirty cases reject and refs/index/worktree remain unchanged.",
+        "Public recovered submission accepts a valid completed inspected bundle before its outbox exists, revalidates authority before commit, applies through the same fence and restarts/replays without duplicate effects.",
+        "Five reported closed fixes and all protected bytes are preserved; affected gates and full make check pass; one exact successor commit is delivered with independent objective and causal architecture acceptance pending.",
+    ),
+    mutable_surfaces=(
+        "src/codex_flow/harness.py", "src/codex_flow/ledger.py", "src/codex_flow/plan_capsule.py",
+        "tests/test_runtime_evidence.py", "tests/test_program_controller.py", "tests/test_plan_compilation.py", "tests/test_harness_recovery.py",
+    ),
+    protected_surfaces=(
+        "docs/reviews/peer-thread-workflow.md", "docs/reviews/conversational-tui", "src/codex_flow/runtime_evidence.py",
+        "src/codex_flow/contracts.py", "src/codex_flow/domain.py", "src/codex_flow/controller.py", "src/codex_flow/projection.py",
+        "src/codex_flow/worktrees.py", "schemas/capsule.schema.json", "scripts/validate.py", "tests/test_service_lifecycle.py",
+        "config/test-partitions.toml", "src/codex_flow/backends", "src/codex_flow/service.py", "src/codex_flow/ipc.py",
+    ),
+    authorities=(ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")), ModelAuthority(AcceptanceMode.ARCHITECTURE, RoleId("architecture-reviewer"))),
+    prompt="Continue as the same Luna XHigh leaf owner at exact 68b3ee55e580fc329a38ca6a4ce95f11992979ef in the existing program worktree. Follow Current recovery in the canonical plan and use execute-milestone. Repair only the three named causes on seven allowed paths. Preserve accepted criteria/provenance/confinement/publication mechanisms; do not broaden schemas, modules, approval or routing. Derive transitive runtime dependencies/current review subject from durable graph/context and use the same integrity/invalidation boundary before submission/enqueue/replay and immediately before worker Popen. Fix adopted-node scalar compiler binding. Reuse ledger inspected-bundle validation for public crash-before-outbox recovery, preserving committed replay identity. Pass each short falsification checkpoint before broadening; return its counterexample if the approach fails. No provider/real SDK/install/service/global/auth/real-ledger/downstream mutation, workload replay, subagents, peers, review launch, workflow-control or dispatch. Preserve dirty plan and TUI artifacts. Run affected partitions/full make check, self-review, stage only allowed paths, inspect diff/git diff --cached --check and make one successor commit without amending reviewed history. Return exact candidate and evidence with objective E-OBJ-001/002 and three causal architecture reviews pending; parent owns lifecycle.",
+    recovery_policy="completion_biased",
+)
+```
+
+## Historical repair request — runtime evidence and integrated adoption
+
+Candidate `c38355b87470c4b7a08481d3ac30348b0375c9a0` is delivered but
+not promoted. The combined architecture/security authority returned
+`REPAIR_REQUIRED` with six promotion-blocking P1 findings; objective review
+remains independent and its result must also be reconciled. The same Luna
+XHigh implementation owner retains the mutable E surfaces and produces one
+successor commit without amending the reviewed candidate. Conversational TUI
+artifacts remain protected and paused. Program user approval remains the next
+serial milestone and is not implemented by this repair.
+
+The repair must close these exact causal gaps:
+
+1. `E-ARCH-CRITERIA`: preserve `acceptance_criteria_sha256` through the closed,
+   version-compatible capsule codec and prove identical durable plan replay for
+   projected commit and runtime-evidence capsules. Review identity must bind the
+   registered criteria and exact evidence snapshot.
+2. `E-ARCH-EFFECT-FENCE`: centralize current evidence and unsupported-gate
+   eligibility in the existing harness effect boundary, including outbox replay
+   and immediately before worker creation. Corrupt evidence invalidates effective
+   closure, blocks unstarted descendants and emits durable attention while
+   preserving historical receipts.
+3. `E-ARCH-RUNTIME-PROVENANCE`: bind runtime evidence to retained pre-execution
+   source/protected, command, capability and declared non-secret target facts.
+   Fail closed when those observations are missing or drift. Hashes remain byte
+   proof; domain assertions remain independent review work.
+4. `E-ARCH-ARTIFACT-CONFINEMENT`: anchor every source and snapshot traversal to
+   no-follow directory descriptors, verifying stable ancestor and file identity
+   through each read. Prove an ancestor-swap cannot capture outside bytes.
+5. `E-ARCH-PUBLICATION`: publish one complete staged directory atomically with
+   required fsyncs and idempotently reconcile the identical retained attempt after
+   interruption, without replaying workload or overwriting accepted snapshots.
+6. `E-ARCH-ADOPTION`: bind the operator milestone/candidate/review-base triple as
+   scalar values, project the historical base into the node capsule, and rerun the
+   exact registered/current physical trunk verifier at promotion/closure. Prove
+   full CLI/harness adoption plus stale HEAD, parent and dirty rejection with no
+   ref/index/worktree mutation.
+
+Reconcile the implementation map to include the already changed and required
+auxiliary schema surfaces `schemas/capsule.schema.json`, `scripts/validate.py`
+and `tests/test_service_lifecycle.py`; these support the same schema/migration
+contract and add no new capability. The owner may modify only the original E
+surfaces plus those three auxiliary paths and focused existing E tests. No new
+production module, public transport, registry, approval mechanism, provider
+operation, downstream registration or TUI change is authorized. Update the
+existing runtime-evidence/adoption tests with the six behavioral regressions,
+run affected partitions and full `make check`, inspect/stage the exact owned
+diff, and create one coherent successor commit. Both independent authorities
+must re-review the successor; prior architecture rejection cannot be reused as
+acceptance.
+
 ## Priority accepted work — program outcome and approval authority
 
 This section supersedes every historical next-action instruction below. The user
@@ -489,7 +833,7 @@ final integrated gates. Repairs create successor commits and causal re-reviews.
 File budgets cannot remove mandatory proof; request bounded map update if needed.
 No visual acceptance or production claim applies.
 
-## Next execution — program-evidence-and-adoption
+## Superseded capsule — program-evidence-and-adoption
 
 ```python
 ModelFacingCapsule(
