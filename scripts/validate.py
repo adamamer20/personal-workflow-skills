@@ -1092,7 +1092,9 @@ def validate_native_routing_contract() -> None:
         "Visual-judgment implementation",
         "acceptance modes: `objective`, `visual`, and `architecture`",
         "Objective code review uses Luna XHigh",
-        "Astra Medium implements and Astra Low performs",
+        "visual implementation defaults to Astra Low",
+        "Ordinary recovery defaults to Astra Low",
+        "Visual ambiguity, non-convergence, or material recovery complexity explicitly escalates to Astra Medium",
         "Normal architecture conformance and semantic orchestration use Sol Medium",
         "combined architecture/security review",
         "High is an explicit exceptional escalation only",
@@ -1151,6 +1153,42 @@ def _configured_route_pair(path: Path, role: str, *, effort_key: str) -> tuple[s
     return model, effort
 
 
+def _validate_authorized_routing_defaults(workflow_path: Path, example_path: Path) -> None:
+    """Reject drift from the user-authorized role boundaries."""
+
+    workflow_expected = {
+        "planner": ("gpt-6-astra", "medium"),
+        "executor": ("gpt-5.6-luna", "xhigh"),
+        "code-reviewer": ("gpt-5.6-luna", "xhigh"),
+        "visual-reviewer": ("gpt-6-astra", "low"),
+        "architecture-reviewer": ("gpt-5.6-sol", "medium"),
+        # Recovery diagnosis is the explicit Medium escalation; ordinary
+        # recovery implementation is recover_local below.
+        "recovery": ("gpt-6-astra", "medium"),
+        "decision": ("gpt-5.6-sol", "medium"),
+    }
+    for role, expected in workflow_expected.items():
+        actual = _configured_route_pair(workflow_path, role, effort_key="reasoning_effort")
+        if actual != expected:
+            fail(f"{workflow_path}: authorized route for {role!r} drifted; expected={expected}, actual={actual}")
+
+    example_expected = {
+        "plan": ("gpt-6-astra", "medium"),
+        "execute_bounded": ("gpt-5.6-luna", "xhigh"),
+        "execute_substantial": ("gpt-5.6-luna", "xhigh"),
+        "execute_visual": ("gpt-6-astra", "low"),
+        "review": ("gpt-5.6-luna", "xhigh"),
+        "review_implementation": ("gpt-5.6-luna", "xhigh"),
+        "review_visual": ("gpt-6-astra", "low"),
+        "recover_local": ("gpt-6-astra", "low"),
+        "recover_architecture": ("gpt-6-astra", "medium"),
+    }
+    for role, expected in example_expected.items():
+        actual = _configured_route_pair(example_path, role, effort_key="thinking")
+        if actual != expected:
+            fail(f"{example_path}: authorized route for {role!r} drifted; expected={expected}, actual={actual}")
+
+
 def _readme_route_rows(path: Path) -> dict[str, tuple[str, str]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -1188,6 +1226,7 @@ def validate_readme_routing_table(path: Path | None = None) -> None:
     """Keep public route rows bound to the existing controller configurations."""
 
     readme_path = ROOT / "README.md" if path is None else path
+    _validate_authorized_routing_defaults(ROOT / "workflow.toml", ROOT / "config" / "workflow.toml.example")
     rows = _readme_route_rows(readme_path)
     workflow_path = ROOT / "workflow.toml"
     example_path = ROOT / "config" / "workflow.toml.example"
@@ -1205,7 +1244,7 @@ def validate_readme_routing_table(path: Path | None = None) -> None:
         "Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents)": example_roles[
             "execute_visual"
         ],
-        "Recovery implementation after demonstrated non-convergence": example_roles["recover_local"],
+        "Ordinary recovery implementation": example_roles["recover_local"],
         "Independent visual-quality promotion review": example_roles["review_visual"],
         "First-time large or uncertain program": example_roles["plan"],
         "Architecture conformance": workflow_roles["architecture-reviewer"],
@@ -1303,6 +1342,15 @@ def validate_global_agents_template() -> None:
     for stale in stale_normal_routes:
         if stale in normalized_text:
             fail(f"{GLOBAL_AGENTS_PATH}: legacy handoff cannot be the normal execution route: {stale}")
+
+    stale_routing = (
+        "Visual-judgment implementation uses Astra Medium",
+        "thinking=medium for planning, visual implementation or recovery",
+        "Astra Medium diagnostic continuation",
+    )
+    for stale in stale_routing:
+        if stale in normalized_text:
+            fail(f"{GLOBAL_AGENTS_PATH}: stale routing contract: {stale}")
 
     legacy_route = "$codex-thread-handoff` is only an explicit legacy compatibility or deliberate comparison route"
     if legacy_route not in normalized_text:
@@ -2186,6 +2234,7 @@ def validate_workflow_assets() -> None:
     if not isinstance(workflow_config.get("roles"), dict) or not workflow_config["roles"]:
         fail("workflow.toml.example must define role-class routing")
     _validate_workflow_routing_speeds(workflow_config)
+    _validate_authorized_routing_defaults(ROOT / "workflow.toml", ROOT / "config" / "workflow.toml.example")
     validate_partition_manifest()
 
 

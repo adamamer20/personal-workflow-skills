@@ -347,7 +347,10 @@ def test_template_and_config_assets_resolve() -> None:
     config = tomllib.loads((ROOT / "config" / "workflow.toml.example").read_text(encoding="utf-8"))
     assert config["roles"]["execute_substantial"]["model"] == "gpt-5.6-luna"
     assert config["roles"]["execute_bounded"]["thinking"] == "xhigh"
+    assert config["roles"]["execute_visual"]["thinking"] == "low"
     assert config["roles"]["review_visual"]["thinking"] == "low"
+    assert config["roles"]["recover_local"]["thinking"] == "low"
+    assert config["roles"]["recover_architecture"]["thinking"] == "medium"
     for _role_name, route in config["roles"].items():
         if route["model"] == "gpt-5.6-luna":
             assert route["speed"] == "fast"
@@ -374,6 +377,25 @@ def test_default_routes_preserve_role_and_effort_boundaries() -> None:
     visual = config.route("visual-reviewer")
     assert (visual.model, visual.reasoning_effort.value) == ("gpt-6-astra", "low")
     assert WorkflowHarness._controller_model_and_effort({}) == ("gpt-5.6-sol", "medium")
+
+
+def test_authorized_routing_validator_rejects_retired_visual_and_recovery_defaults(tmp_path: Path) -> None:
+    example = tmp_path / "workflow.toml.example"
+    example.write_text(
+        (ROOT / "config" / "workflow.toml.example")
+        .read_text(encoding="utf-8")
+        .replace(
+            '[roles.execute_visual]\nmodel = "gpt-6-astra"\nthinking = "low"',
+            '[roles.execute_visual]\nmodel = "gpt-6-astra"\nthinking = "medium"',
+        )
+        .replace(
+            '[roles.recover_local]\nmodel = "gpt-6-astra"\nthinking = "low"',
+            '[roles.recover_local]\nmodel = "gpt-6-astra"\nthinking = "medium"',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="execute_visual"):
+        _VALIDATOR._validate_authorized_routing_defaults(ROOT / "workflow.toml", example)
 
 
 def test_readme_routing_table_rejects_stale_visual_review_route(tmp_path: Path) -> None:

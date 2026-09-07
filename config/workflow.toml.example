@@ -16,7 +16,7 @@ speed = "fast"
 
 [roles.execute_visual]
 model = "gpt-6-astra"
-thinking = "medium"
+thinking = "low"
 
 [roles.review]
 model = "gpt-5.6-luna"
@@ -34,7 +34,7 @@ thinking = "low"
 
 [roles.recover_local]
 model = "gpt-6-astra"
-thinking = "medium"
+thinking = "low"
 
 [roles.recover_architecture]
 model = "gpt-6-astra"

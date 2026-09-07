@@ -218,8 +218,8 @@ routes; these defaults apply to newly dispatched work.
 | --- | --- | --- | --- |
 | Small/local change | direct execution | `gpt-5.6-luna` | `high` |
 | Decision-ready substantial milestone | fresh execution | `gpt-5.6-luna` | `xhigh` |
-| Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents) | fresh execution | `gpt-6-astra` | `medium` |
-| Recovery implementation after demonstrated non-convergence | fresh execution | `gpt-6-astra` | `medium` |
+| Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents) | fresh execution | `gpt-6-astra` | `low` |
+| Ordinary recovery implementation | fresh execution | `gpt-6-astra` | `low` |
 | Independent visual-quality promotion review | fresh peer | `gpt-6-astra` | `low` |
 | First-time large or uncertain program | planning | `gpt-6-astra` | `medium` |
 | Architecture conformance | fresh peer or planning | `gpt-5.6-sol` | `medium` |
@@ -233,13 +233,15 @@ Classify every milestone by one or more acceptance modes: `objective`, `visual`,
 and `architecture`. Derive implementation and review authorities for each mode,
 not from file type alone. Objective code review uses Luna XHigh. When success
 depends on composition, hierarchy, responsive behavior, rendered inspection, or
-other subjective visual judgment, Astra Medium implements and Astra Low performs
-the independent visual-quality review. Normal architecture conformance and
-semantic orchestration use Sol Medium. A combined architecture/security review
-escalates to Astra Medium for significant or ambiguous boundaries; High is an
-explicit exceptional escalation only. A mixed objective/visual milestone must
-pass both gates. Luna remains appropriate when the visual target is frozen and
-the remaining work is mechanical and objectively verifiable, such as bounded
+other subjective visual judgment, visual implementation defaults to Astra Low,
+which also performs the independent visual-quality review. Ordinary recovery
+defaults to Astra Low. Visual ambiguity, non-convergence, or material recovery
+complexity explicitly escalates to Astra Medium. Normal architecture conformance
+and semantic orchestration use Sol Medium. A combined architecture/security
+review escalates to Astra Medium for significant or ambiguous boundaries; High
+is an explicit exceptional escalation only. A mixed objective/visual milestone
+must pass both gates. Luna remains appropriate when the visual target is frozen
+and the remaining work is mechanical and objectively verifiable, such as bounded
 wiring, copy replacement, asset processing, export, or a precisely identified
 CSS repair.
 

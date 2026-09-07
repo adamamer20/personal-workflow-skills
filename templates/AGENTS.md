@@ -137,20 +137,20 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
 - Every milestone declares one or more acceptance modes: `objective`, `visual`,
   and `architecture`. Route by the judgment required for acceptance, not by file
   type. Objective code review uses Luna XHigh. Visual-judgment implementation
-  uses Astra Medium and independent visual-quality promotion review uses Astra Low.
-  Architecture-conformance review uses Sol Medium. When architecture and
-  security boundaries are materially ambiguous, the combined review escalates to
-  Astra Medium; do not add a separate security reviewer. High is an explicit
-  exceptional escalation only. When objective and visual modes both apply,
-  require both authorities; passing code tests never implies that a rendered
-  result is good. Visual ambiguity escalates to Astra Medium. Luna is
-  appropriate for visually adjacent work only after the target is frozen and
+  defaults to Astra Low; independent visual-quality promotion review uses Astra Low.
+  Architecture-conformance review uses Sol Medium. Visual ambiguity,
+  non-convergence, or material recovery complexity escalates to Astra Medium;
+  a combined review escalates to Astra Medium for significant or ambiguous
+  boundaries; High is an explicit exceptional escalation only. When objective and visual
+  modes both apply, require both authorities; passing code tests never implies
+  that a rendered result is good. Ordinary recovery defaults to Astra Low. Luna
+  is appropriate for visually adjacent work only after the target is frozen and
   the remaining execution is mechanical and objectively verifiable.
 - When an owner stops converging, preserve the diff, evidence, findings,
-  accepted intent, and remaining gap for an Astra Medium diagnostic continuation.
-  Astra Medium finishes a bounded repair, changes implementation strategy, or replans and
-  continues when outcome, public/persisted contracts, security boundary,
-  material cost, destructive behavior, and scope remain within accepted intent.
+  accepted intent, and remaining gap for the selected recovery route. Astra
+  Medium may finish a bounded repair, change implementation strategy, or replan
+  while outcome, contracts, security boundary, cost, destructive behavior, and
+  scope remain within accepted intent.
   A change of authority or approach is not a terminal condition. Escalate to the
   user only as `NEEDS_DECISION` when intent is genuinely underdetermined or new
   authority is required. Use `EXTERNAL_BLOCKED` only for missing credentials,
@@ -162,7 +162,8 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   pair `model=gpt-5.6-luna, thinking=xhigh` for execution or independent
   objective/code review, `model=gpt-5.6-sol, thinking=medium` for semantic
   orchestration/decision or architecture conformance, `model=gpt-6-astra,
-  thinking=medium` for planning, visual implementation or recovery, and
+  thinking=medium` for planning and explicit visual/recovery escalation, with
+  `model=gpt-6-astra, thinking=low` for visual implementation and ordinary recovery, and
   `model=gpt-6-astra, thinking=low` for visual-quality review. The pair
   `model=gpt-6-astra, thinking=high` is an explicit exceptional escalation only.
   Escalations are explicit controller decisions; no automatic escalation engine

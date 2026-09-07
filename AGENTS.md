@@ -231,17 +231,15 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 - Model milestones with explicit `objective`, `visual`, and `architecture`
   acceptance modes. Derive implementation and independent review authorities
   per mode; never infer them from file extension or repository area.
-- Visual-judgment implementation uses Astra Medium and visual-quality promotion
-  review uses Astra Low. Semantic orchestration and normal architecture
-  conformance use Sol Medium. A combined architecture/security review escalates
-  to Astra Medium for significant or ambiguous boundaries; do not add a separate
-  security review. High is an explicit exceptional escalation only. Preserve all
-  declared authorities and run distinct objective/architecture reviews in
-  parallel when ready; passing code tests never implies visual acceptance.
-- Non-convergence changes authority or approach; it does not terminate work.
-  Astra Medium may finish bounded recovery or replan while accepted outcome,
-  public/persisted contracts, security/privacy boundary, cost, destructive
-  behavior, and scope remain unchanged.
+- Visual-judgment implementation and visual-quality promotion review default to
+  Astra Low. Semantic orchestration and normal architecture conformance use Sol
+  Medium. Visual ambiguity, non-convergence, or material recovery complexity
+  escalates to Astra Medium; High is exceptional only. Preserve all declared
+  authorities and run distinct objective/architecture reviews in parallel when
+  ready; passing code tests never implies visual acceptance.
+- Ordinary recovery defaults to Astra Low. Astra Medium may finish bounded
+  recovery or replan while accepted outcome, contracts, security/privacy
+  boundary, cost, destructive behavior, and scope remain unchanged.
 - `CONTINUE_WITH_REPLAN` is internal and nonterminal. `NEEDS_DECISION` is only
   for genuinely underdetermined user intent or missing user authority.
   `EXTERNAL_BLOCKED` is only for missing credentials, permission, service,
