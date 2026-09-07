@@ -8,6 +8,9 @@
   from context and continue useful work before asking about a material decision.
   If a skill causes a pause, cite its exact instruction and explain the missing
   authority; do not treat a procedural preference as a new approval gate.
+- Keep the canonical plan lightweight and current; keep closed/superseded
+  decisions and evidence in a separate history document. Link retained designs
+  explicitly, preserve identities, and never treat history as an execution queue.
 - Plan the next executable milestone in detail. Record later milestones and
   dependencies at the detail needed now; defer live cutover and deployment
   prerequisites until the milestone that actually needs them.
@@ -20,9 +23,10 @@
   security/privacy exposure, migration or irreversible effect, unresolved
   integration uncertainty, prior non-convergence/finding, explicit user request,
   or visual acceptance that needs independent rendered judgment. A small bounded
-  reversible change with discriminating tests and none of those triggers closes
-  with validation and self-review. Do not launch a reviewer merely because code
-  changed, a milestone completed, or a reviewer role exists.
+  reversible change with no trigger closes by validation/self-review only on
+  the direct path outside workflow-control. Controller capsules require every
+  declared review authority. On the direct path: Do not launch a reviewer merely
+  because code changed, a milestone completed, or a reviewer role exists.
 - Reuse successful checks for unchanged bytes and environments. Broaden or
   repeat checks only for a changed dependency, new failure or unresolved risk.
 - Keep updates concise and concrete. Put the result first, use plain language,
@@ -47,6 +51,24 @@
 - Native task creation, callback delivery, polling, retry, successor
   scheduling, worktree invention, and ledger mutation belong to the controller,
   never to a cognitive skill.
+
+### Discovery before architecture
+
+- Plan the learning before the system: name the material assumptions and use
+  existing evidence or a bounded discovery spike to resolve them. Start with
+  the first feasible complete production vertical; any prerequisite foundation
+  names its concrete blocker and smallest removal. A known small repair stays
+  direct. Test the oracle with valid alternatives when its assumptions matter.
+- Freeze one deliverable and non-goals. New ambition goes to successors; defects
+  that invalidate the accepted outcome remain in scope. Keep evidence compact
+  (outcome, candidate, key checks, contract changes, blocker, remainder), with
+  required domain proof linked. Challenge expensive guarantees by naming the
+  threat/outcome, boundary, cost and simpler alternative before adopting them;
+  do not weaken existing explicit safety gates.
+- Use the controller for semantic decisions, not repeated supervision. It owns
+  deterministic transitions, callbacks and any helper assignment; leaf workers
+  do not gain nested orchestration authority. Independent read-only scouts and
+  ready disjoint owners may help under that single controller.
 
 ### Architecture-first milestone graph
 
@@ -81,43 +103,28 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
 
 ### Semantic density
 
-- Optimize for semantic compression, not abstraction count. Under-abstraction
-  is also a defect when a repeated domain decision, relationship, transition,
-  or validation remains manually distributed. A useful abstraction makes that
-  repeated semantic pattern disappear from call sites.
-- Prefer the smallest representation that makes the invariant obvious. New
-  vocabulary is more expensive than new lines. Extend an existing domain
-  concept before adding another named abstraction.
-- A class, protocol, model, enum, wrapper, manager, adapter, service, or
-  result/config/state/context type must encode a distinct invariant, domain
-  distinction, policy, lifecycle/identity, boundary validation, genuine
-  substitution seam, or reusable algorithm. Explicitness, forwarding, test
-  convenience, and stylistic cleanliness alone do not justify it.
-- Keep strict edges and boring interiors. Parse, validate, and normalize once
-  at the earliest honest boundary into one trusted domain representation; do
-  not repeat validation or conversions that add no meaning.
-- Functions are the default. Classes require persistent state, identity,
-  lifecycle, or policy composition. A one-implementation protocol requires a
-  real independently owned and replaceable architectural boundary; tests alone
-  are not sufficient justification.
-- Prefer pure policy functions/reducers, declarative specifications, small
-  relationship types, and typed boundary codecs when they compress repeated
-  decisions or eliminate downstream defensive code. Do not unify incidental
-  syntax or genuinely different mechanics merely to reduce line count.
-- Keep behavior beside the invariant, split modules by coherent reason to
-  change rather than line count, remove pass-through layers, and collapse
-  config/state/result families a domain reader would not distinguish.
-- Tests express observable guarantees, transitions, and forbidden transitions.
-  Avoid tests that pin helper decomposition, forwarding methods, or field
-  assignment.
+- Optimize semantic compression, not abstraction count; under-abstraction also
+  matters when repeated decisions fail to disappear from call sites. Use the
+  smallest representation that makes the invariant obvious. New vocabulary is
+  more expensive than new lines: an abstraction needs an invariant, identity,
+  policy, boundary or algorithm, not style/test convenience.
+- Keep strict edges and boring interiors: validate once at the honest boundary,
+  keep behavior beside invariants, remove pass-through layers. Functions are the
+  default; classes need state/lifecycle/policy. A one-implementation protocol needs
+  a real replaceable boundary; tests alone do not justify it. Use typed boundary
+  codecs or pure policies for domain repetition, not incidental syntax.
+- Tests express observable guarantees and forbidden transitions, not helper
+  decomposition or field assignment. Repository standards own detailed mechanics.
 
 - For a new substantial or architecturally uncertain program, start with a Astra
   Medium architecture thread and use `$plan-work`. Update the single project-owned
   canonical plan under `docs/reviews/` by default, or at the path defined by
-  repository instructions. Write a detailed decision-ready design covering
-  boundaries, contracts, ownership, state transitions, failure and recovery,
-  migration, non-goals, acceptance, and unresolved decisions before execution.
-  Freeze an implementation architecture map too: exact expected paths marked
+  repository instructions. First resolve material unknowns through evidence or
+  bounded experiments. Then write the detailed decision-ready design for the
+  next ready milestone, covering boundaries, contracts, ownership, state
+  transitions, failure and recovery, migration, non-goals and acceptance.
+  Later milestones keep readiness and prerequisites without speculative detail.
+  Freeze that ready milestone's implementation architecture map too: exact expected paths marked
   create/modify/preserve/remove, one responsibility per module, allowed
   dependency direction, named primary classes/protocols/public or persisted
   types/entrypoints, explicit state/error/serialization boundaries, and a
@@ -140,9 +147,9 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   material boundary, contract, ownership, security/privacy, cost, destructive-
   behavior, or scope changes to Astra Medium for a bounded plan update.
 - Every milestone declares one or more acceptance modes: `objective`, `visual`,
-  and `architecture`. Acceptance modes name the evidence needed; they do not by
-  themselves require a reviewer task. Route a review only when a recorded risk
-  trigger needs independent judgment, and select the smallest sufficient lens.
+  and `architecture`. Acceptance modes name evidence and mandatory capsule
+  authorities. Select the smallest sufficient modes from risk before dispatch;
+  do not skip declared authorities or silently combine them afterwards.
   When selected, objective code review uses Luna XHigh. Visual-judgment implementation
   defaults to Astra Low; independent visual-quality promotion review uses Astra Low.
   When selected, bounded architecture-conformance review uses Sol Medium. Visual ambiguity,
@@ -150,12 +157,19 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   a combined review escalates to Astra Medium for significant or ambiguous
   boundaries or when Sol cannot close the question; High is an explicit
   exceptional escalation only. Do not duplicate objective and architecture
-  reviews when one focused review can resolve the recorded risk. Use distinct
-  authorities only when their evidence and judgments are materially independent.
+  reviews unnecessarily when selecting modes; every declared capsule authority
+  remains required. Select distinct authorities when their evidence and judgments
+  are materially independent.
   When objective and visual modes both apply, preserve both kinds of evidence;
   passing code tests never implies that a rendered result is good. Ordinary recovery defaults to Astra Low. Luna
   is appropriate for visually adjacent work only after the target is frozen and
   the remaining execution is mechanical and objectively verifiable.
+- After two attempts at the same failure without new causal evidence or
+  improvement in the same observable check, diagnose before another attempt.
+  Distinguish wrong oracle/outcome, oversized milestone, implementation and
+  environment. Prefer controller-owned rollover when work changes nature,
+  an architecture premise changes or compaction loses causal context; preserve
+  the workspace and candidate. Numeric context limits are backstops.
 - When an owner stops converging, preserve the diff, evidence, findings,
   accepted intent, and remaining gap for the selected recovery route. Astra
   Medium may finish a bounded repair, change implementation strategy, or replan
@@ -269,54 +283,22 @@ check; preserve the observable guarantee or replan.
 
 ## Execution Contract
 
-- Before substantial execution, state active scope, non-goals, acceptance and
-  promotion checks, owned and protected surfaces, and ownership of shared files
-  and contracts.
-- Give shared runners, registries, schemas, models, persisted/public contracts,
-  and canonical production entrypoints one implementation owner. Do not create
-  parallel scaffolding or duplicate production paths.
-- Each execution owner implements, tests, repairs, self-reviews, and may create
-  safe local commits for its milestone. Preserve unrelated changes and require
-  separate authorization for pushes, rebases, merges, stashes, discards, or
-  remote-history changes.
-- Close a milestone only when required outcome and safety gates pass, the
-  execution contract matches the result, and open P0/P1 findings are zero.
-  Requirements added after the first green gate are a newly scoped follow-up.
-
-## Planning and Evidence
-
-- Keep exactly one mutable active plan per program. The planning thread owns
-  decisions, milestone ordering, scope changes, plan updates, and program
-  closure; execution peers return compact evidence and terminal outcomes.
-- Keep the plan compact enough that an executor can find its owned action,
-  protected surfaces, non-goals, escalation conditions, and closure gate.
-- Distinguish outcome or promotion gates, safety or integrity gates, executable
-  prerequisites, and diagnostic evidence. Tests, manifests, counts, scores, and
-  status bookkeeping support but do not replace observable outcome proof.
-- Route every failed gate to one remediation or stop decision. A failed optional
-  branch blocks that branch, not the whole program when a safe route remains.
-- Escalate to the user only when intent is genuinely underdetermined or an
-  operation needs user authority. Difficulty, non-convergence, or a disproven
-  implementation plan triggers diagnosis and replanning, not user interruption.
+Before substantial execution, state outcome, owned/protected surfaces and gates.
+One owner controls shared contracts and production entrypoints. Preserve unrelated
+changes; follow the controller-owned commit/integration policy above. Delivery,
+independent acceptance, merge and live proof remain distinct. Close only when
+outcome/safety gates pass and open P0/P1 findings are zero. New ambitions go to
+successors; regressions invalidating the accepted outcome remain in scope.
 
 ## Universal Invariants
 
 - One mutable owner per surface and one canonical active plan per program.
-- Give every new or renamed durable path and code/contract identifier a stable,
-  descriptive semantic name based on capability, domain, responsibility, or
-  observable behavior. This includes files, modules, classes, functions,
-  methods, variables, constants, tests, fixtures, CLI commands, public exports,
-  evidence records, and generated artifacts. Never couple them to a temporary
-  milestone, task, thread, model, or sequence label such as `h6_*`, `s1_*`, or
-  `milestone-*`.
-- A published historical path or persisted protocol/schema identifier may keep
-  a numbered label only when compatibility or provenance requires it. Record
-  each exception with its exact identifier, reason, immutable/versioned status,
-  and compatibility check. Plan safe reference-preserving renames; never bulk
-  rename symbols, imports, packaging paths, commands, links, fixtures, or
-  evidence blindly.
-- One milestone normally equals one fresh execution context; use hard rollover
-  at two major compactions, or at 75M tokens or 500 calls when telemetry exists.
+- Name durable paths and identifiers by capability/domain/responsibility, never
+  temporary tasks or model names. Historical numbered identifiers need an exact
+  provenance/compatibility exception and reference-preserving migration.
+- One milestone normally equals one fresh execution context. Material changes
+  in work or causal context trigger rollover first; two major compactions or
+  75M tokens/500 calls, where telemetry exists, remain additional backstops.
 - Runtime reality outranks catalog presence: an abstraction is complete only
   when a real caller changes observable behavior through the production
   entrypoint and the path has integration or end-to-end proof.

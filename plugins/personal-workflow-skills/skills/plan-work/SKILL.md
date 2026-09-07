@@ -5,84 +5,108 @@ description: Turn substantial or architecturally uncertain work into one decisio
 
 # Plan Work
 
-Use for decomposition, acceptance, or ownership decisions. Planner owns the
-plan; executor owns one capsule.
+Inspect instructions, plan, evidence and dirty state. Planner owns intent;
+executor owns one capsule. Ask only about material uncertainty or authority.
 
-## Produce one decision-ready plan
+## Plan the learning before the system
 
-Inspect instructions, plan, code/tests, and worktree. Ask only about unresolved
-intent, contracts, safety, ownership, scope, or acceptance.
+Name one outcome, non-goals and material assumptions. Reuse evidence or select
+the smallest run-discovery-spike with a falsifying observation and stopping
+condition. Small known repairs stay direct; try the real path before a framework.
 
-Use existing decisions for routine choices. Detail the next executable milestone;
-outline later readiness and dependencies. Cutover prerequisites block cutover,
-not independently verifiable implementation.
+The first feasible milestone is a complete observable production vertical.
+A prerequisite foundation names its obstruction and smallest removal. Check
+that the oracle accepts valid alternatives and rejects wrong results where
+its assumptions matter. Provider-free success is not live proof; missing access
+blocks that proof, not unrelated work. Preserve permissions and safety gates.
 
-Keep exactly one active plan at the repository path. It must state:
+Freeze one deliverable. New ambitions go to successors; outcome-breaking defects
+stay in scope. Close ready cohorts independently when contracts permit. Refactor
+to remove a delivery bottleneck. Before an expensive guarantee, name outcome,
+threat, boundary, proof, cost and simpler alternative. Resolve inferred guarantees
+before implementation; explicit guarantees remain binding.
 
-- outcome and non-goals;
-- the decomposition into independently closable milestones;
-- one owner and protected surfaces for each milestone;
-- explicit acceptance modes: `objective`, `visual`, and/or `architecture`;
-- acceptance, non-negotiable validation gates, hard-cap conflict policies,
-  promotion gates, and residual risks; and
-- the next executable milestone as one capsule.
+## Keep exactly one active plan
+
+Keep outcome, risks, readiness, ownership, next milestone/gate at the repository
+plan path. Replace stale status; put closed/superseded decisions and evidence in
+separate history. History is not an execution queue. Preserve identities and
+explicitly link any retained active design. Read only needed history.
+
+State independently closable milestones, owner, protected surfaces, acceptance
+modes (`objective`, `visual`, `architecture`), mandatory gates, hard-cap conflict
+policy and next decision-ready capsule. Detail only the ready milestone; later
+nodes keep outcome, prerequisites, owner and readiness. Future cutover blockers
+do not block independent current work.
 
 ## Freeze the implementation architecture map
 
-Map each production path as `create`, `modify`, `preserve`, or `remove`; assign
-one responsibility/owner and dependency direction; name owned types,
-entrypoints, boundaries, and a reasoned new-artifact budget.
-
-Prefer an existing coherent module. Private helpers may remain inside it; a new
-production module, public class, registry, runner, schema, entrypoint,
-dependency edge, or durable artifact requires a bounded plan update.
+After discovery, map ready-milestone paths as create/modify/preserve/remove:
+one responsibility, owner, dependency direction, public/persisted types, entrypoints,
+state/error/serialization boundaries and new-artifact budget. Prefer existing modules.
+Private helpers stay owned; new modules, public classes, registries, runners,
+schemas, entrypoints, dependency edges or artifacts need a bounded plan update.
 
 ## Budget semantic vocabulary
 
-Record a semantic delta: new domain concepts, boundaries and new compatibility paths;
-repeated semantic patterns compressed; concepts collapsed/deleted. New vocabulary
-must carry an invariant, policy, identity, boundary validation, substitution or
-algorithm; forwarding, tests or style alone do not justify it.
+Record semantic delta: new domain concepts, boundaries, new compatibility paths;
+repeated semantic patterns compressed; concepts deleted. Vocabulary needs an
+invariant, policy, identity, validation, substitution or algorithm. Use functions
+and direct composition; classes need state/lifecycle/policy. A one-implementation
+protocol needs a replaceable boundary, not tests alone. Validate once at edges;
+keep behavior beside invariants, remove pass-through layers. Use policy/codecs
+so repeated decisions disappear from call sites, not incidental mechanical repetition.
 
-Use functions and direct composition by default. A class needs state, identity,
-lifecycle, or policy; a one-implementation protocol needs a real independently
-owned and replaceable boundary. Validate once at each untrusted edge into one
-trusted representation. Keep behavior beside its invariant, split by reason to
-change, and reject pass-through layers or synonym config/state/result families.
-Plan a pure reducer/policy, declarative spec, relationship type, or typed codec
-when it makes repeated decisions, relationships, transitions, or validation
-disappear from call sites; do not abstract incidental mechanical repetition.
+## Factor the dependency DAG
 
-## Factor an independently closable milestone DAG
+Attempt independently closable vertical milestones with disjoint mutable
+surfaces and current readiness. Freeze shared schemas, public/persisted
+contracts, state authority and production entrypoints before fan-out. Every
+serial edge names shared schema, state authority, entrypoint, migration order
+or acceptance dependency. Minimize the safe critical path, reject fake
+boundaries and nested swarm orchestration. Each milestone is single-owner;
+parallelize only ready milestones with disjoint work. Read-only scouts and
+independent acceptance evidence may overlap under the single controller.
 
-Record a dependency DAG and current readiness for independently closable
-vertical milestones with disjoint mutable surfaces. Freeze shared schemas,
-public/persisted contracts, state authority, and production entrypoints before
-fan-out. Each serial edge names its schema, authority, entrypoint, migration
-order, or acceptance dependency. Minimize the critical path; require single-owner
-milestones, reject fake boundaries and nested swarm/controller orchestration,
-and parallelize only ready milestones with disjoint work. Multiple STARTs are allowed only for
-such peers; serial dependencies remain serial.
+The controller owns the sole local integration trunk and workspace lifecycle.
+Before fan-out, record a verified owned commit as fan_out_base; separate unrelated
+dirty baseline bytes safely. Record each physical sibling worktree, semantic
+branch, exact base, owner and review commit/range; reuse it for sequential work.
+Workers never integrate the trunk. Mutable completion needs an owned local commit,
+staged inspection and git diff --cached --check; explicit no-commit/read-only
+work is exempt. Reviews bind commits; repairs add a successor commit. Integration
+requires blocking P0/P1=0, a merge commit for fan-out or recorded alternative,
+ancestry/extraneous-commit verification, conflict validation and new integrated tip.
+Retain recovery evidence. No push, rebase, history rewrite, discard, remote mutation
+or cleanup is authorized. Detailed topology/commands belong to controller policy.
 
-Keep one program worktree as the sole local integration trunk. Before mutable
-fan-out, require a verified authorized trunk commit and record its SHA as
-`fan_out_base`; unrelated dirty baseline bytes block fan-out until separated.
+## Acceptance, evidence and non-convergence
 
-For each parallel mutable milestone, record its physical sibling worktree path
-`<repo-parent>/<repo-name>.worktrees/<program-slug>-<lane-slug>`, branch
-`agent/<program-slug>-<lane-slug>`, exact base SHA, owned surfaces, review
-commit/range and integration edge. Lane workers never mutate or integrate the
-trunk. Mutable `COMPLETION` requires a coherent owned-surface local commit after
-staged-diff inspection and `git diff --cached --check`; only read-only work or
-an explicit no-commit contract is exempt.
+Controller capsules require every declared review authority. Each mode selects
+its required evidence/authority: objective code authority, render-aware visual
+authority or architecture boundary/security authority. Select the smallest
+sufficient modes from concrete risk before dispatch; do not skip a declared
+review or collapse distinct authorities afterwards. Small reversible changes
+with no review trigger may close by validation/self-review only on the direct
+path outside workflow-control. Review changed blocking findings, not unrelated
+surfaces. Visual acceptance requires independent rendered judgment. Capsule
+changes go through the controller, preserving mixed-mode evidence and identity.
 
-Promotion binds to exact commits; repairs add a successor commit. Only the
-integration owner integrates lanes after blocking P0/P1=0. Prefer a merge commit
-for fan-out; otherwise record why, perform ancestry/extraneous-commit
-verification, treat conflicts as new changes, and run integration gates. Advance
-from the new integrated tip and retain lanes until evidence is durable. Planned
-local commits/integration are authorized; push, rebase, history rewrite,
-discard, remote mutation, and implicit cleanup are not.
+Use focused checks during work, affected gates at closure, appropriate full gates
+before integration; shared contracts/collection/packaging need the full repository
+gate. Reuse unchanged evidence. Verify mergeability and the actual integrated
+candidate. Delivery, review, merge and live proof differ. Separate severity from
+promotion_blocking; deferrals name owner/defer_to. Close with none blocking.
+
+Report outcome, candidate, key checks, changed contracts, blocker and remainder;
+link domain proof. Record scope start, first vertical, mergeability, merge,
+known cost, waits and reopenings in history. No metrics platform or invented data.
+
+After two attempts at the same failure without new causal evidence or observable
+improvement, diagnose oracle/outcome, scope, implementation or environment before
+another attempt. The controller owns rollover when work changes nature, a premise
+changes or compaction loses causal context. Preserve candidate/workspace;
+numeric context limits are backstops, not targets or automatic model escalation.
 
 ## Outcome and evidence priority
 
@@ -96,52 +120,14 @@ Outcome and evidence are ordered and non-negotiable:
 A lower-priority item never authorizes weakening a higher-priority item.
 Numeric targets are secondary unless the accepted plan marks them hard external constraints. Even a hard cap never silently authorizes removing a required check: use proof-preserving replacement or return a bounded replan or genuine decision when it conflicts. Never report success merely because a proxy is exact.
 
-Name every new durable path and code/contract identifier from its capability,
-domain, responsibility, or observable behavior. Never use temporary
-milestone/task numbers in filenames, modules, classes, functions, methods,
-variables, constants, tests, fixtures, CLI commands, exports, evidence paths,
-or generated artifacts. A numbered published path/protocol needs a recorded
-compatibility or provenance exception and safe reference-preserving migration.
+Use semantic names; historical identifiers need provenance and safe migration.
 
-Acceptance authorities are distinct by mode. `objective` uses a code authority,
-`visual` uses a render-aware visual authority, and `architecture` uses a
-boundary/security authority. A mixed milestone must satisfy every declared
-mode; passing one authority never implies another.
+## Typed handoff and closure
 
-Substantial code milestones need independent objective review plus self-review.
-Add architecture acceptance for ownership, public/persisted contracts, trust
-boundaries or a named integration risk, not merely a prior architecture phase.
-
-## Proportional validation
-
-Use discriminating checks during execution and every affected partition and
-named closure gate. Tests/bookkeeping support observable proof; shared
-contracts, collection, or packaging require the full repository gate. Track
-severity separately from `promotion_blocking`; deferred findings name owner and
-`defer_to`, and closure has none open. Skills never dispatch, callback, route,
-retry, schedule successors, create worktrees, or mutate the ledger.
-
-## Typed capsule boundary
-
-Write the next typed `codex_flow.contracts.ModelFacingCapsule` with objective,
-decomposition, acceptance, surfaces, authorities, bounded prompt, and
-`completion-biased` recovery. JSON is controller projection only; reference the
-architecture map/budgets without a sidecar. The controller owns runtime facts.
-
-## Handoff to execution
-
-For implementation, hand the first executable capsule through the canonical
-plan path and exact milestone id. The executor must not copy sidecar JSON or
-author routing, identity, permission, delivery, or successor facts; planning
-does not implement the milestone. The executor returns one typed result and the
-planner decides readiness of the next milestone.
-
-If a requirement is genuinely underdetermined or needs new authority, record it
-as a decision request in the plan. Do not broaden scope, weaken an acceptance
-gate, or turn an implementation difficulty into a user question.
-
-## Close
-
-Before ending, check ownership, surfaces, acceptance, architecture map,
-semantic-vocabulary budgets and next readiness. Keep historical evidence
-beside the plan.
+Write codex_flow.contracts.ModelFacingCapsule: intent, acceptance, surfaces,
+authorities, prompt, completion-biased recovery. JSON is controller projection,
+not a sidecar. Pass canonical plan path and exact milestone id to workflow-control.
+Planning does not implement. Skills never own dispatch, callbacks, routing,
+retry, successors, worktrees or ledger mutation. Controller reasoning handles
+material decisions, not supervision. Update readiness from the typed result;
+planning-only work stops at decision-ready.

@@ -14,7 +14,7 @@ from codex_flow.plan_capsule import PlanCapsuleError, compile_canonical_plan, co
 
 
 def test_canonical_plan_compiler_accepts_only_the_requested_typed_block() -> None:
-    compiled = compile_canonical_plan(Path("docs/reviews/peer-thread-workflow.md"), "H6-E-W-R1")
+    compiled = compile_canonical_plan(Path("docs/reviews/peer-thread-workflow-history.md"), "H6-E-W-R1")
 
     assert compiled.capsule.schema_version == 1
     assert compiled.capsule.objective.startswith("Close H6-E-W")
@@ -23,7 +23,7 @@ def test_canonical_plan_compiler_accepts_only_the_requested_typed_block() -> Non
 
 
 def test_human_terminal_control_capsule_has_frozen_identity_and_surfaces() -> None:
-    plan = Path("docs/reviews/peer-thread-workflow.md")
+    plan = Path("docs/reviews/peer-thread-workflow-history.md")
     compiled = compile_canonical_plan(plan, "human-terminal-control-correctness-closure")
     assert compiled.source_block_sha256 == "65fb555193f21df60bbace155f945605e7767b2e8ba7e0c4a499773f8a519578"
     assert len(compiled.capsule.mutable_surfaces) == 8
@@ -117,19 +117,19 @@ def test_program_compiler_rejects_invalid_adopted_candidate_review_base_pairs(
 
 
 def test_active_controller_turn_recovery_correctness_closure_capsule_compiles_from_canonical_plan() -> None:
-    plan = Path("docs/reviews/peer-thread-workflow.md")
+    plan = Path("docs/reviews/peer-thread-workflow-history.md")
     with pytest.raises(PlanCapsuleError, match="exactly one active milestone heading"):
         compile_canonical_plan(plan, "controller-turn-recovery-correctness-closure")
 
 
 def test_active_native_profile_compatibility_capsule_compiles_from_canonical_plan() -> None:
-    plan = Path("docs/reviews/peer-thread-workflow.md")
+    plan = Path("docs/reviews/peer-thread-workflow-history.md")
     with pytest.raises(PlanCapsuleError, match="exactly one active milestone heading"):
         compile_canonical_plan(plan, "native-profile-runtime-compatibility-closure")
 
 
 def test_integrated_control_capsule_has_frozen_identity_and_ordered_ownership() -> None:
-    compiled = compile_canonical_plan(Path("docs/reviews/peer-thread-workflow.md"), "integrated-control")
+    compiled = compile_canonical_plan(Path("docs/reviews/peer-thread-workflow-history.md"), "integrated-control")
 
     assert compiled.source_block_sha256 == "3c552a43d63297721ba72d8099372ca591345c17a18b9bdf147153044a9b1905"
     assert compiled.capsule.mutable_surfaces == (
@@ -149,7 +149,7 @@ def test_integrated_control_capsule_has_frozen_identity_and_ordered_ownership() 
 
 def test_plugin_and_controller_installation_schema_compatible_capsule_is_frozen() -> None:
     compiled = compile_canonical_plan(
-        Path("docs/reviews/peer-thread-workflow.md"), "plugin-and-controller-installation-schema-compatible"
+        Path("docs/reviews/peer-thread-workflow-history.md"), "plugin-and-controller-installation-schema-compatible"
     )
 
     assert compiled.source_block_sha256 == "6da5536bf12b1ce906e5ffa0d8e0a6b1c238b8832f0473343f99f557d7d8f369"
@@ -159,7 +159,9 @@ def test_plugin_and_controller_installation_schema_compatible_capsule_is_frozen(
 
 
 def test_complete_conversation_history_capsule_is_the_frozen_mixed_mode_owner() -> None:
-    compiled = compile_canonical_plan(Path("docs/reviews/peer-thread-workflow.md"), "complete-conversation-history")
+    compiled = compile_canonical_plan(
+        Path("docs/reviews/peer-thread-workflow-history.md"), "complete-conversation-history"
+    )
 
     assert compiled.source_block_sha256 == "1c0f204fc94d3bd48d38b9b791f14c3a067447fffa8fd2530071fbd9d83e4d18"
     assert compiled.capsule.acceptance_modes == (
@@ -176,7 +178,9 @@ def test_complete_conversation_history_capsule_is_the_frozen_mixed_mode_owner() 
 
 
 def test_event_driven_program_controller_capsule_is_the_frozen_pre_tui_owner() -> None:
-    compiled = compile_canonical_plan(Path("docs/reviews/peer-thread-workflow.md"), "event-driven-program-controller")
+    compiled = compile_canonical_plan(
+        Path("docs/reviews/peer-thread-workflow-history.md"), "event-driven-program-controller"
+    )
 
     assert compiled.source_block_sha256 == "dea2dcc10ca25d7d9ffd99fa84901b7cf70d66c35c7f346cadb57052360b6842"
     assert compiled.capsule.acceptance_modes == (
@@ -195,7 +199,7 @@ def test_event_driven_program_controller_capsule_is_the_frozen_pre_tui_owner() -
 
 def test_acceptance_candidate_authority_recovery_compiles_the_exact_frozen_capsule() -> None:
     compiled = compile_canonical_plan(
-        Path("docs/reviews/peer-thread-workflow.md"), "single-milestone-acceptance-lifecycle"
+        Path("docs/reviews/peer-thread-workflow-history.md"), "single-milestone-acceptance-lifecycle"
     )
 
     assert compiled.source_block_sha256 == "e0a6b03d474c09d77213daad50c3370d31e1a82bd2c687ebfee09fc92be99670"
@@ -219,7 +223,7 @@ def test_acceptance_candidate_authority_recovery_compiles_the_exact_frozen_capsu
 
 
 def test_remaining_program_graph_is_serial_and_visual_review_stays_cancelled() -> None:
-    plan = Path("docs/reviews/peer-thread-workflow.md")
+    plan = Path("docs/reviews/peer-thread-workflow-history.md")
     milestones = (
         "live-coding-agent-terminal-ui",
         "terminal-candidate-retention-and-harness-cutover",
@@ -266,13 +270,13 @@ def test_remaining_program_graph_is_serial_and_visual_review_stays_cancelled() -
 
 def test_active_capsule_rejects_an_injected_non_python_fence(tmp_path: Path) -> None:
     plan_text = Path("docs/reviews/peer-thread-workflow.md").read_text(encoding="utf-8")
-    marker = "## Next execution — structured-output-runtime-and-naming-closure"
+    marker = "## Next execution — refresh-start-intent"
     poisoned = plan_text.replace(marker, marker + "\n\n```text\nnot a capsule\n```", 1)
     plan = tmp_path / "plan.md"
     plan.write_text(poisoned, encoding="utf-8")
 
     with pytest.raises(PlanCapsuleError):
-        compile_canonical_plan(plan, "structured-output-runtime-and-naming-closure")
+        compile_canonical_plan(plan, "refresh-start-intent")
 
 
 @pytest.mark.parametrize(
@@ -549,7 +553,7 @@ def test_wake_delivery_failure_keeps_one_bounded_retry_pending(tmp_path: Path) -
 
 def test_fresh_runtime_readiness_compiles_the_six_owned_surfaces() -> None:
     compiled = compile_canonical_plan(
-        Path("docs/reviews/peer-thread-workflow.md"), "fresh-runtime-acceptance-readiness"
+        Path("docs/reviews/peer-thread-workflow-history.md"), "fresh-runtime-acceptance-readiness"
     )
     assert compiled.capsule.acceptance_modes == (AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE)
     assert compiled.capsule.mutable_surfaces == (
@@ -562,3 +566,15 @@ def test_fresh_runtime_readiness_compiles_the_six_owned_surfaces() -> None:
     )
     assert "without historical execution adoption" in compiled.capsule.objective
     assert compiled.capsule.recovery_policy == "completion_biased"
+
+
+def test_current_plan_selects_recovery_without_reactivating_historical_work() -> None:
+    current = Path("docs/reviews/peer-thread-workflow.md")
+    history = Path("docs/reviews/peer-thread-workflow-history.md")
+    active = compile_canonical_plan(current, "refresh-start-intent")
+    retained = compile_canonical_plan(history, "refresh-start-intent")
+    assert active.source_block_sha256 == retained.source_block_sha256
+    with pytest.raises(PlanCapsuleError, match="exactly one active milestone heading"):
+        compile_canonical_plan(current, "evidence-led-delivery-instructions")
+    with pytest.raises(PlanCapsuleError, match="exactly one active milestone heading"):
+        compile_canonical_plan(current, "integrated-control")

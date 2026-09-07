@@ -56,6 +56,20 @@ already proven work.
 
 ## Diagnose before another fix
 
+Enter diagnosis after two attempts at the same causal failure without new
+evidence or improvement in the same observable check. Also reassess when work
+changes nature (implementation to redesign, oracle repair or hardening), a
+material architecture premise changes, or compaction loses the active causal
+context. The controller owns any fresh context, routing and resume; preserve
+the same workspace and candidate. Token/call thresholds are backstops, not the
+primary signal. Do not automatically select a stronger model.
+
+Before blaming execution capability, distinguish a wrong outcome/oracle, an
+oversized milestone containing several deliverables, a wrong implementation,
+and an environmental blocker. Use the existing causal classes below; do not
+create another recovery taxonomy or durable protocol.
+
+
 Classify the dominant cause:
 
 - `near_completion`: the approach is sound and remaining work is bounded;
@@ -75,8 +89,11 @@ Classify the dominant cause:
 - `infeasible`: the accepted outcome cannot reasonably be achieved under the
   accepted constraints.
 
-Run one discriminating check when evidence is insufficient. Do not try another
-full repair cycle merely to see what happens.
+Run one discriminating check when evidence is insufficient; name its expected
+observation and stopping condition. Use a valid alternative plus a genuinely
+invalid outcome when testing the oracle. Do not try another full repair cycle
+merely to see what happens. Escalate implementation complexity only after the
+target is sound; replan an invalid target or split an oversized milestone.
 
 ## Reassess the guarantee
 
@@ -107,104 +124,32 @@ Rules:
   policing.
 - Record every guarantee change in the canonical plan.
 
-## Recovery authority
+## Act within accepted authority
 
-Without asking the user, recovery may:
+Recovery may finish bounded work, replace an implementation strategy, simplify
+machinery, split an oversized milestone or return a decision-ready replan while
+preserving accepted outcome, contracts, safety, cost and destructive authority.
+The planning owner updates canonical intent; a leaf does not become the planner
+or dispatch its own continuation. Near completion means finish, not just report.
 
-- finish bounded remaining work;
-- replace a failed local implementation strategy;
-- simplify unnecessary machinery;
-- change helper structure and internal decomposition;
-- revise implementation architecture while preserving accepted behavior,
-  explicit contracts, named safety boundaries, authorized cost, and scope;
-- split or combine milestones when this improves convergence without changing
-  program intent;
-- remove or narrow an inferred, non-material guarantee;
-- update the canonical plan and continuation capsule;
-- continue in the same recovery context or hand back a decision-ready
-  continuation.
+For wrong hypotheses, test a new causal explanation. For wrong implementation,
+choose the simplest production-reachable mechanism and prove replacement parity
+before deletion. For architecture/oracle mismatch, return the changed premise
+and smallest sufficient plan delta. A stronger model does not repair a wrong
+target. Diagnose environment failures as environment failures.
 
-Recovery must request a user decision when continuing would change an explicit:
+Reuse user decisions. Ask only when a material product/public/persisted contract,
+security/privacy/integrity boundary, cost, authority, destructive effect or scope
+choice remains underdetermined. Quote an instruction only if it actually prevents
+continuation and identify the missing authority. Difficulty alone is not a reason
+to stop. Preserve partial work and report its actual state.
 
-- product behavior;
-- public or persisted contract;
-- security, privacy, or data-integrity boundary;
-- authority or cost;
-- destructive action;
-- major scope or compatibility promise;
-
-and existing decisions do not determine the choice.
-
-Implementation difficulty alone is not a reason to ask the user.
-
-Check the user's existing decisions before requesting permission again. An
-implementation-level plan correction within accepted intent should continue
-through the planning owner. If an instruction prevents that continuation, quote
-the exact instruction and identify the material decision or authority missing.
-Preserve the partial candidate and report the recovery outcome to its owner even
-when the repair cannot close; never leave a silent completed-looking task.
-
-## Act on the diagnosis
-
-### Near completion
-
-Finish the milestone in this context when safe. Do not stop merely to report
-that little work remains.
-
-### Wrong hypothesis
-
-Return to the failing boundary, form one new hypothesis, run one discriminating
-check, and repair the root cause.
-
-### Wrong implementation
-
-Choose the simplest production-reachable mechanism that satisfies the accepted
-guarantees. Remove superseded machinery only after replacement parity is
-proven.
-
-### Guarantee mismatch
-
-Update the plan with the minimum sufficient guarantee when authorized by the
-rules above, simplify the implementation, and continue.
-
-### Architecture replan
-
-Update the canonical plan, preserve already valid work, and continue or produce
-one decision-ready continuation. Do not repeat the same architecture with a
-stronger role.
-
-### Environment
-
-Repair or document the environment issue through real available tools. Do not
-misclassify it as product failure.
-
-### Material decision
-
-Return `NEEDS_DECISION` with evidence, a recommendation, and the smallest set of
-meaningfully different options.
-
-### External dependency
-
-Return `EXTERNAL_BLOCKED`.
-
-### Infeasible
-
-Return `FAILED` with the specific accepted constraint that makes the outcome
-unachievable and the closest feasible alternative.
-
-## Prevent another rabbit hole
-
-Before continuing, ask:
-
-- What did the previous loop optimize instead of the real outcome?
-- Which guarantee or assumption created the most complexity?
-- What evidence would falsify the new approach quickly?
-- What is the smallest integrated checkpoint?
-- What work can be deleted or avoided?
-- Does the new approach reduce total system complexity?
-
-Set a short falsification checkpoint for the new approach. Do not grant it an
-unbounded retry budget.
+Set one short falsification checkpoint: what observation would reject this new
+approach, what is the smallest integrated outcome, and what unnecessary work can
+be avoided? Do not grant an unbounded retry budget. A required external prerequisite
+returns EXTERNAL_BLOCKED; a truly infeasible accepted constraint returns FAILED
+with evidence. Material user choice returns NEEDS_DECISION. Changed strategy alone
+remains CONTINUE.
 
 ## Output and continuation
 

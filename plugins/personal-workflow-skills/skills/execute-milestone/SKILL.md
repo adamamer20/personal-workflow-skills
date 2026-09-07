@@ -18,7 +18,14 @@ and entrypoints.
 
 Implement the smallest coherent change within mutable surfaces and prove
 protected surfaces unchanged. Repair ordinary failures and self-review the
-diff. Acceptance is observable: rendered evidence for `visual`, boundary/safety
+diff. After two attempts at the same failure without new causal evidence or
+improvement in the same observable check, preserve the candidate and return a
+bounded diagnosis to the controller; do not make a third indistinguishable
+attempt. This trigger does not authorize an automatic retry or model change.
+Distinguish a wrong oracle/outcome, oversized milestone, implementation defect
+and environmental failure. New ambition goes to a successor; an outcome-breaking
+regression remains yours. Intermediate tests are chosen locally within the
+capsule; do not grow a benchmark or framework before the required vertical works. Acceptance is observable: rendered evidence for `visual`, boundary/safety
 evidence for `architecture`, deterministic evidence for `objective`; mixed
 capsules pass every mode.
 
@@ -29,29 +36,18 @@ together.
 
 ## Preserve semantic density
 
-Implement the planned semantic delta. New vocabulary must carry an invariant,
-domain distinction, policy, lifecycle/identity, boundary validation, genuine
-substitution, or reusable algorithm; explicitness, forwarding, tests, or style
-alone do not justify it. Use functions/direct composition by default. A class
-needs state, identity, lifecycle, or policy; a one-implementation protocol needs
-a real independently owned and replaceable boundary.
-
-Keep strict edges and boring interiors: validate once at the earliest honest
-boundary into one trusted representation. Keep behavior beside its invariant;
-reject pass-through layers and synonym lifecycle nouns. Tests describe
-observable guarantees and transitions, not helper decomposition. Self-review
-the actual semantic delta; any unplanned module, public type, protocol,
-registry, runner, schema, entrypoint, compatibility path, or layer returns to
-planning.
-
-Do not equate simplicity with fewer abstractions. Implement planned semantic
-compression when a pure policy/reducer, declarative spec, relationship type, or
-typed codec makes repeated decisions, state handling, or validation disappear
-from call sites. Do not unify incidental mechanical repetition.
-
-Honor the capsule's distinct code authority for `objective`, render-aware
-visual authority for `visual`, and boundary/security authority for
-`architecture`; do not substitute one authority for another.
+Implement the planned semantic delta. Vocabulary needs an invariant, policy,
+identity, validation, substitution or algorithm, not style or tests alone.
+Use functions/direct composition; classes need state/lifecycle/policy and a
+one-implementation protocol needs a real replaceable boundary.
+Keep strict edges and boring interiors: validate once at each untrusted edge,
+keep behavior beside invariants, remove pass-through layers and synonym types.
+Tests express observable guarantees. Semantic compression makes repeated domain
+decisions disappear from call sites; do not abstract incidental mechanical repetition.
+Return unplanned modules, public types, registries, schemas, entrypoints or
+boundaries to planning. Preserve every capsule acceptance mode: objective code authority, render-aware
+visual authority and architecture boundary/security authority. Passing one mode
+cannot substitute for another.
 
 ## Outcome and evidence priority
 
@@ -91,29 +87,18 @@ commit, push, rebase, rewrite history, discard changes or mutate a remote.
 Skills own cognition only. They do not own dispatch, callbacks, routing,
 retries, successor scheduling, worktree creation, or ledger mutation.
 
-## Controller boundary
+## Controller boundary and result
 
-The parent controller alone invokes `$workflow-control`/`codex-flow`, dispatches independent
-reviews, requests repairs and schedules successors. This task is a leaf: never
-spawn subagents or peer tasks, start reviews, invoke workflow-control or
-supervise workers. Implement, test and self-review only; report independent
-acceptance as pending. Delivery is not promotion.
+The parent alone invokes workflow-control/codex-flow and owns dispatch, reviews,
+repairs, successors and lifecycle. This task is a leaf: no subagents, peer tasks,
+review launches, controller calls or supervision. Implement, test, self-review
+and report pending acceptance. Use completion-biased recovery stays within accepted
+intent, contracts, safety, cost, destructive authority and scope; return material
+changes rather than weaken a gate.
 
-Recovery is completion-biased within the capsule: repair within accepted intent,
-contracts, safety, cost, destructive authority and scope. Return material changes
-to the controller. Never
-weaken a gate or expand scope to force completion.
-
-## Return one result
-
-For the SDK route, return one raw `codex_flow.contracts.ModelFacingResult` to the
-harness containing the
-terminal status, concise summary, changed surfaces, validation facts, durable
-controller status, and (when needed) one next action. JSON/JSONL is the
-controller serialization format, not the model-facing authoring language.
-
-For the explicit native route, send exactly one terminal callback to the supplied
-controller thread/host with the exact candidate, validation, residual risks and
-pending acceptance. Material escalations may return earlier; no routine progress
-callbacks. This delivery exception does not grant lifecycle authority. Stop after
-your assigned work; the controller owns independent acceptance and next actions.
+Return one raw codex_flow.contracts.ModelFacingResult for the SDK harness.
+JSON/JSONL is controller serialization. Keep outcome, exact candidate, key checks,
+contract changes, blocker and remainder concise; link required domain evidence.
+For an explicitly selected native route, send exactly one terminal callback to
+the supplied controller thread/host, or an earlier material escalation. No routine
+progress callbacks or lifecycle authority. Stop after assigned work.

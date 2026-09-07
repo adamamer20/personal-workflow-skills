@@ -22,8 +22,28 @@
 
 ### Planning and guarantees
 
-- Start substantial or uncertain work with one canonical plan and a thin,
-  production-reachable walking skeleton where feasible.
+- Keep one lightweight current plan and a separate history document. The plan
+  owns current outcome, risks, readiness, ownership and next gate; history
+  retains closed/superseded decisions and linked evidence. Replace stale status
+  instead of appending chronological overlays. Keep active contracts explicitly
+  selected and reachable; historical capsules never authorize new work.
+
+- Start from the outcome and material unknowns. Resolve them with existing
+  evidence or the smallest bounded experiment before speculative design. Make
+  the first feasible implementation milestone a complete production vertical;
+  a prerequisite foundation names the concrete obstruction and smallest remedy.
+  Verify the oracle accepts a valid alternative and rejects a wrong result when
+  its assumptions could invalidate the outcome. Freeze one deliverable and
+  non-goals; keep newly discovered ambitions in successors.
+- Detail architecture for the next ready milestone after discovery. Later nodes
+  retain outcome, prerequisite evidence, decision owner and readiness. Keep
+  evidence to observed outcome, exact candidate, important gates, changed
+  contracts, blocker and remainder; preserve domain-specific proof when needed.
+- Use controller reasoning for material decisions, not continuous supervision.
+  Existing deterministic runtime transitions remain harness-owned; these rules
+  add no automatic retry or new control plane. Controllers may assign bounded
+  read-only scouts or ready disjoint lanes; worker leaf capabilities do not
+  expand because a helper would be convenient.
 - Once the implementation architecture map is frozen, attempt a dependency
   DAG of independently closable vertical milestones with disjoint mutable
   surfaces and record current readiness. Freeze shared schemas, contracts,
@@ -49,45 +69,25 @@
 
 ### Semantic density
 
-- Optimize for semantic compression, not abstraction count. Under-abstraction
-  matters when repeated decisions, relationships, transitions, or validation
-  remain distributed. A useful abstraction makes that semantic pattern
-  disappear from call sites.
-- Prefer the smallest representation that makes the invariant obvious. A new
-  named abstraction must encode a distinct invariant, domain distinction,
-  policy, lifecycle/identity, boundary validation, genuine substitution seam,
-  or reusable algorithm. Explicitness, test convenience, forwarding, or
-  stylistic cleanliness alone is not enough.
-- Keep strict edges and boring interiors: parse/validate/normalize once at the
-  earliest honest boundary, then use one trusted domain representation inward.
-  Do not create conversion or wrapper chains unless each step changes meaning.
-- Functions are the default. Classes require persistent state, identity,
-  lifecycle, or policy composition. A one-implementation protocol requires a
-  real independently owned and replaceable boundary; tests alone do not justify
-  it.
-- Prefer pure policy functions/reducers, declarative specifications, small
-  relationship types, and typed boundary codecs when they eliminate repeated
-  decisions or downstream defensive code. Do not unify incidental syntax or
-  genuinely different mechanics merely to reduce line count.
-- Treat semantic vocabulary as a budget. Extend an existing domain concept
-  before adding another class, protocol, enum, config/state/result/context type,
-  manager, adapter, or service. Keep behavior beside its invariant, split by
-  reason to change rather than size, and remove pass-through layers.
-- Tests express observable guarantees, transitions, and forbidden transitions;
-  they do not pin private helper decomposition, forwarding, or field assignment.
+- Optimize semantic compression, not abstraction count. Under-abstraction matters
+  when repeated domain decisions do not disappear from call sites. Choose the
+  smallest representation that makes the invariant obvious; treat semantic
+  vocabulary as a budget requiring an invariant, identity, policy or algorithm.
+- Keep strict edges and boring interiors: validate once at boundaries, colocate
+  behavior/invariants, remove pass-through layers. Functions are the default;
+  classes need state/lifecycle/policy. A one-implementation protocol needs a real
+  replaceable boundary. Use typed boundary codecs for domain repetition, not
+  incidental syntax. Tests express observable guarantees, not helper structure.
 
 ### Execution, review, and recovery
 
 - The milestone owner implements, validates, debugs ordinary failures,
   self-reviews, and repairs valid findings in the assigned workspace.
-- Every code milestone requires proportional validation and self-review.
-  Independent review is risk-triggered, not automatic. Before dispatch, record
-  the unresolved risk and lens. Use review for changed public/persisted contracts,
-  ownership or trust boundaries, security/privacy exposure, migration or
-  irreversible effects, unresolved integration uncertainty, prior findings or
-  non-convergence, an explicit user request, or visual acceptance requiring
-  independent rendered judgment. A small bounded reversible change with
-  discriminating tests and no trigger closes without a reviewer task.
+- Every code milestone requires validation/self-review. Small reversible work
+  without a review trigger can close on the direct path outside workflow-control.
+  Controller capsules require every declared review authority. Select modes/lenses
+  before dispatch from contract, ownership, security/privacy, migration, integration,
+  prior-finding or visual risk. Do not skip a declared authority afterwards.
 - Review is one general workflow; the selected lens changes its evidence, not
   its ownership or transport boundary.
 - Every review invocation names exactly one lens (`spec`, `correctness`,
@@ -95,13 +95,24 @@
   focused review context. Use Sol Medium for bounded architecture conformance;
   escalate to Astra Medium only for a significant or ambiguous combined
   architecture/security boundary or when Sol cannot close the question. Do not
-  duplicate objective and architecture reviews when one lens resolves the
-  recorded risk. Distinct authorities run in parallel only when their evidence
-  and judgments are materially independent and the plan explicitly requires both.
+  duplicate objective and architecture reviews unnecessarily at mode selection;
+  all declared capsule authorities remain required. Parallel distinct authorities
+  require materially independent evidence and judgments, with both explicitly
+  required by the plan.
 - Findings record severity separately from promotion impact. P0 is normally
   blocking; P1 blocks when it invalidates the outcome, a protected boundary,
   or safe successor work. A non-blocking finding records its owner and
   hardening destination.
+- After two attempts at the same failure without new causal evidence or
+  observable improvement, diagnose before a third attempt. Distinguish oracle,
+  scope, implementation and environment. The controller considers context
+  rollover when work changes nature, a premise changes or compaction loses
+  causal context; reuse the workspace and preserve evidence. No automatic
+  stronger-model escalation follows.
+- Check mergeability against the intended base before declaring readiness;
+  relevant integration gates must pass on the actual integrated candidate.
+  Record scope start, first vertical, mergeability, merge, external waits,
+  known cost and reopenings in existing history; do not add a metrics platform.
 - Recovery diagnoses the causal failure and may finish or replan within the
   accepted outcome, contracts, safety boundaries, cost, and scope. It asks for
   a user decision only when those materially change or external authority is
@@ -112,39 +123,23 @@
 
 ### Workspace policy
 
-- Keep one program worktree as the sole local integration trunk until the
-  canonical plan closes. Before parallel mutable fan-out, freeze a coherent
-  verified local commit containing only authorized surfaces and record its SHA
-  as the DAG base. If unrelated dirty baseline bytes are not safely separable,
-  block fan-out until the plan defines that separation.
-- Reuse the recorded workspace for rollover, repair, review, recovery, model
-  changes, and sequential milestones.
-- Create a managed workspace only for concurrent mutable ownership, protected
-  dirty user state, or an explicitly isolated experiment.
-- Managed workspaces live at
-  `<repo-parent>/<repo-name>.worktrees/<semantic-lane-name>`; use semantic lane
-  names rather than model names, thread IDs, UUIDs, or bare milestone numbers.
-- Parallel mutable lanes are semantically children of the program and
-  physically sibling Git worktrees named
-  `<program-slug>-<lane-slug>`, with branch
-  `agent/<program-slug>-<lane-slug>`, created from the frozen integration SHA or
-  an exact integrated predecessor. Lane workers never modify or integrate the
-  trunk.
-- Every mutable milestone creates a coherent owned-surface local commit before
-  `COMPLETION`, after staged-diff inspection and
-  `git diff --cached --check`. Read-only planning, review/evidence work and an
-  explicit no-commit contract are the only exceptions. Reviews bind to exact
-  commit tips/ranges; repairs add successor commits rather than amending a
-  reviewed commit.
-- Only the integration owner merges promoted lane commits after blocking P0/P1
-  findings reach zero. Prefer a merge commit for true fan-out; record a reason
-  for cherry-pick or fast-forward, verify ancestry and absence of unrelated
-  commits, treat conflicts as new integration work, rerun integration gates,
-  and update readiness only after success. Successors start from the new
-  integrated tip.
-- Never remove a workspace while work is active or recoverable, the tree is
-  dirty, review is pending, or wanted commits are not integrated.
-- Retain lane branches/worktrees until commit, review, integration and recovery
-  evidence are durable. Local plan-required commits and integration are
-  authorized; push, rebase, history rewrite, discard, remote mutation and
-  implicit cleanup are not.
+- The program worktree is the sole local integration trunk. Before fan-out,
+  freeze a verified authorized commit as DAG base; separate unrelated dirty
+  baseline safely. Reuse the workspace across sequential work, rollover and
+  repair. New workspaces serve concurrent ownership, dirty-state protection
+  or explicitly isolated experiments.
+- Parallel lanes are physically sibling Git worktrees below
+  <repo-parent>/<repo-name>.worktrees/<program-slug>-<lane-slug>, branch
+  agent/<program-slug>-<lane-slug>, from the exact base/predecessor. Use semantic
+  names, not model/thread IDs. Workers never modify or integrate the trunk.
+- Mutable completion requires an owned coherent commit after staged inspection,
+  git diff --cached --check and gates; only read-only or explicit no-commit work
+  is exempt. Bind review to exact commit tips/ranges; repairs add successor commits,
+  never amend a reviewed commit.
+- Only the integration owner integrates after blocking P0/P1=0. Prefer a merge
+  commit for fan-out, record alternative strategy, verify ancestry and absence
+  of unrelated commits, validate conflicts as new work, and update readiness
+  from the new integrated tip. Retain branches/worktrees while work is active,
+  dirty, unaccepted or recoverable, until commit/review/integration evidence
+  is durable. Local planned operations do not authorize push, rebase, history
+  rewrite, discard, remote mutation or implicit cleanup.

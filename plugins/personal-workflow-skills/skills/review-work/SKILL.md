@@ -171,7 +171,11 @@ user_impact_or_dependency_risk:
 required_action:
 ```
 
-No evidence means no finding.
+No evidence means no finding. A blocking finding connects a violated accepted
+contract to concrete user/dependency harm and a reproduction or decisive causal
+proof. Diagnostic polish, hypothetical extensibility and an unstated fixture
+preference do not become product requirements. Check that the oracle accepts a
+legitimate alternative when its assumptions are the source of the failure.
 
 ### Severity is not identical to promotion impact
 

@@ -78,22 +78,37 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow controller-recovery-sentinel \
 ## Lifecycle
 
 ```text
-new substantial program
+intent and bounded outcome
         ↓
-$plan-work
+$plan-work: material risks → smallest discovery proof
         ↓
-one typed decision-ready capsule
+first feasible production vertical → observe → justified architecture
         ↓
-$execute-milestone
+one ready milestone → $workflow-control → $execute-milestone
         ↓
-$workflow-control
+compact result → risk-triggered promotion review → integration
         ↓
-durable controller result
-        ↓
-planning thread
+controller decision only when needed
 
 explicit compatibility comparison only → $codex-thread-handoff
 ```
+
+Resolve material uncertainty before designing the whole system. A prerequisite
+foundation must name the concrete obstacle to a complete first vertical. Freeze
+one deliverable and non-goals; a valid alternative output must not fail merely
+because the benchmark expects its favorite fixture. Required safety remains
+binding; challenge an expensive new guarantee against its threat and boundary.
+
+After two attempts without new causal evidence or observable improvement, diagnose
+oracle, scope, implementation or environment before another repair. The controller
+owns any rollover/model decision, reusing the workspace; work/context changes
+matter before numeric thresholds. Keep results to outcome, candidate, important
+checks, changed contracts, blocker and remainder, with required evidence linked.
+Review is proportional to concrete risk and re-review targets changed findings.
+Focused checks guide implementation; affected gates close a milestone and the
+appropriate full gate validates the integrated candidate before merge. Reuse
+successful unchanged checks. Track first vertical, mergeability, merge, waits,
+known cost and reopenings in history without another measurement platform.
 
 The planner owns intent, decomposition, acceptance, and protected surfaces. The
 executor owns implementation inside one capsule and writes one typed result.
@@ -115,6 +130,11 @@ Managed worktrees for `<parent>/<repo>` live at
 numbers are not workspace identities. `plan-work` chooses the topology;
 `codex-thread-handoff` only launches into the exact selected workspace and fails
 closed when the native API cannot address it.
+
+Keep a lightweight current plan and a separate history document. The current
+plan selects outcome, risks, readiness, ownership and next gate. History retains
+closed decisions and evidence; it never authorizes dispatch. Link any retained
+design that still governs current work, preserving capsule identities.
 
 Project-specific composition remains in each project's `AGENTS.md`. Repository
 instructions name the canonical plan path, gates, protected surfaces, and any
@@ -230,16 +250,13 @@ routes; these defaults apply to newly dispatched work.
 | Independent objective/code review, when risk-triggered | fresh peer | `gpt-5.6-luna` | `xhigh` |
 
 Classify every milestone by one or more acceptance modes: `objective`, `visual`,
-and `architecture`. Acceptance modes name required evidence; they do not
-automatically create reviewer tasks. Before dispatch, the controller records one
-concrete unresolved risk and the smallest sufficient lens. Review is appropriate
-for public or persisted contract changes, ownership or trust/security/privacy
-boundaries, migrations or irreversible effects, unresolved integration risk,
-prior findings or non-convergence, an explicit user request, or visual acceptance
-that needs independent rendered judgment. Small bounded reversible changes with
-discriminating tests and none of those triggers close with validation and
-self-review. A changed file, completed milestone, or configured reviewer role is
-not by itself a review trigger.
+and `architecture`. Controller capsules require every declared review authority.
+Select the smallest sufficient modes/lenses from concrete contract, ownership,
+security/privacy, migration, integration, prior-finding or visual risk before
+dispatch; do not skip declared authorities or combine them silently afterwards.
+Only small reversible work on the direct path outside workflow-control can close
+by validation/self-review without a reviewer when no risk trigger applies. A changed
+file or configured role is not by itself a review trigger for that direct path.
 
 When selected, objective code review uses Luna XHigh. When success
 depends on composition, hierarchy, responsive behavior, rendered inspection, or
@@ -250,8 +267,9 @@ complexity explicitly escalates to Astra Medium. Normal architecture conformance
 and semantic orchestration use Sol Medium. A combined architecture/security
 review escalates to Astra Medium only for significant or ambiguous boundaries or
 when Sol cannot close the question; High is an explicit exceptional escalation
-only. Do not duplicate objective and architecture reviews when one focused lens
-resolves the recorded risk. Use distinct authorities only for materially
+only. Do not duplicate objective and architecture reviews unnecessarily when
+selecting modes; every declared capsule authority remains required. Use one focused lens
+when it resolves the recorded risk. Use distinct authorities only for materially
 independent evidence. A mixed objective/visual milestone must preserve both kinds
 of evidence. Luna remains appropriate when the visual target is frozen
 and the remaining work is mechanical and objectively verifiable, such as bounded

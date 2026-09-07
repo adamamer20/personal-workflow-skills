@@ -81,7 +81,14 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-compatibility-sentinel \
 The single active program plan is
 `docs/reviews/peer-thread-workflow.md`. Read its current milestone, mutable
 ownership, protected surfaces, acceptance, and promotion gate before changing
-code. The planning task owns architecture, scope changes, milestone ordering,
+code. Keep this plan lightweight: current outcome, risks, readiness, ownership and
+next gate. Retain closed/superseded decisions and evidence in
+`docs/reviews/peer-thread-workflow-history.md`; history is not an execution queue.
+Preserve exact capsule identities and references, and explicitly link any
+retained design that still governs selected work. Replace stale current status
+rather than accumulating chronological overlays.
+
+The planning task owns architecture, scope changes, milestone ordering,
 the plan, and this instruction file. Each execution task owns exactly one
 decision-ready milestone and may not expand into a later milestone.
 
@@ -191,13 +198,21 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 
 ## Controller routing and recovery semantics
 
-- For substantial or architecturally uncertain work, Astra Medium owns a distinct
-  architecture phase before implementation. It writes a detailed design into
-  the single canonical plan: boundaries, contracts, mutable ownership, state
-  transitions, failure and recovery behavior, migration, non-goals,
-  acceptance, and unresolved decisions. The design must be decision-ready
-  enough that the implementation capsule does not ask its executor to invent
-  architecture.
+- For substantial or architecturally uncertain work, Astra Medium first
+  identifies the material assumptions and resolves them through existing evidence
+  or a bounded discovery experiment. Make the earliest feasible implementation
+  milestone a complete production vertical; a foundation names its concrete
+  obstruction and smallest removal. A known small repair stays direct.
+- Freeze one deliverable, non-goals and causal acceptance per milestone. Check
+  that the oracle accepts valid alternatives when its assumptions matter. New
+  ambitions go to successors; defects invalidating the outcome remain in scope.
+  Before adopting an expensive guarantee, name the prevented failure/threat,
+  observable boundary, cost and simpler sufficient alternative. Existing explicit
+  safety guarantees remain binding.
+- After discovery, write a decision-ready design for the next ready milestone:
+  boundaries, contracts, mutable ownership, state transitions, failure/recovery,
+  migration, non-goals and acceptance. Later nodes retain prerequisite evidence,
+  decision owner and readiness without speculative module-level design.
 - The design also freezes an implementation architecture map before handoff:
   every expected production module/path is labelled `create`, `modify`,
   `preserve` or `remove`; each module has one responsibility and allowed
@@ -228,14 +243,13 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   owner and normal objective/code reviewer. Return material boundary, public or
   persisted contract, ownership, security/privacy, cost, destructive-behavior,
   or scope changes to Astra Medium for a bounded plan update.
-- Model milestones with explicit `objective`, `visual`, and `architecture`
-  acceptance modes. These modes name required evidence and do not automatically
-  create reviewer tasks. Before dispatching a review, record the concrete
-  unresolved risk and smallest sufficient lens. Small bounded reversible changes
-  with discriminating tests close through validation and self-review when they do
-  not change public/persisted contracts, ownership, trust/security/privacy
-  boundaries, migrations or irreversible behavior and have no unresolved
-  integration risk, prior finding/non-convergence or explicit review request.
+- Model milestones with explicit objective, visual and architecture acceptance
+  modes. Controller capsules require every declared review authority. Select
+  required modes from concrete risk before dispatch; never skip a declared
+  authority afterwards. Small reversible changes with discriminating checks
+  and no review trigger may close directly outside workflow-control by
+  validation/self-review. Boundary, integration, prior-finding and visual risks
+  retain independent acceptance; capsule changes preserve identity and evidence.
 - Visual-judgment implementation and visual-quality promotion review default to
   Astra Low. Semantic orchestration and normal architecture conformance use Sol
   Medium. Visual ambiguity, non-convergence, or material recovery complexity
@@ -243,9 +257,20 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   use one focused Sol Medium architecture review by default. Escalate a combined
   architecture/security review to Astra Medium only for a significant or
   ambiguous boundary or when Sol cannot close it. Do not duplicate objective and
-  architecture reviews when one review resolves the recorded risk; use distinct
-  authorities only for materially independent evidence. Passing code tests never
+  architecture reviews unnecessarily at mode selection; declared capsule
+  authorities remain required. Use distinct authorities for independent evidence. Passing code tests never
   implies visual acceptance.
+- Keep results compact: observed outcome, exact candidate, discriminating checks,
+  changed contracts, blocker and remainder; link required domain evidence. Record
+  scope start, first vertical, mergeable candidate, merge, known cost, external
+  waits and reopenings in existing history without another metrics platform.
+  Verify mergeability against the intended base and gates on the actual integrated
+  candidate before claiming integration.
+- After two attempts at the same failure without new causal evidence or
+  observable improvement, diagnose before another attempt. Distinguish oracle,
+  oversized scope, implementation and environment. The controller owns rollover
+  when work changes nature, a premise changes or compaction loses causal context;
+  preserve the same workspace and candidate. Do not automatically upgrade models.
 - Ordinary recovery defaults to Astra Low. Astra Medium may finish bounded
   recovery or replan while accepted outcome, contracts, security/privacy
   boundary, cost, destructive behavior, and scope remain unchanged.
