@@ -1091,14 +1091,18 @@ def validate_native_routing_contract() -> None:
         "Authorized native routing defaults:",
         "Visual-judgment implementation",
         "acceptance modes: `objective`, `visual`, and `architecture`",
-        "Objective code review uses Luna XHigh",
+        "Acceptance modes name required evidence; they do not automatically create reviewer tasks",
+        "not by itself a review trigger",
+        "When selected, objective code review uses Luna XHigh",
         "visual implementation defaults to Astra Low",
         "Ordinary recovery defaults to Astra Low",
         "Visual ambiguity, non-convergence, or material recovery complexity explicitly escalates to Astra Medium",
         "Normal architecture conformance and semantic orchestration use Sol Medium",
         "combined architecture/security review",
+        "when Sol cannot close the question",
+        "Do not duplicate objective and architecture reviews",
         "High is an explicit exceptional escalation only",
-        "A mixed objective/visual milestone must pass both gates",
+        "A mixed objective/visual milestone must preserve both kinds of evidence",
         "Non-convergence triggers diagnosis and a change of authority or approach",
         "`CONTINUE_WITH_REPLAN` is internal and nonterminal",
         "`NEEDS_DECISION` only when user intent is genuinely underdetermined",
@@ -1245,14 +1249,14 @@ def validate_readme_routing_table(path: Path | None = None) -> None:
             "execute_visual"
         ],
         "Ordinary recovery implementation": example_roles["recover_local"],
-        "Independent visual-quality promotion review": example_roles["review_visual"],
+        "Independent visual-quality promotion review, when required": example_roles["review_visual"],
         "First-time large or uncertain program": example_roles["plan"],
-        "Architecture conformance": workflow_roles["architecture-reviewer"],
+        "Architecture conformance, when risk-triggered": workflow_roles["architecture-reviewer"],
         "Recovery diagnosis": workflow_roles["recovery"],
         "Controller decisions": workflow_roles["decision"],
-        "Significant/ambiguous architecture or security boundary": workflow_roles["planner"],
+        "Significant/ambiguous architecture or security escalation": workflow_roles["planner"],
         "Mechanical repair after a precise finding": ("gpt-5.6-luna", "high"),
-        "Independent objective/code review": example_roles["review"],
+        "Independent objective/code review, when risk-triggered": example_roles["review"],
     }
     if set(rows) != set(expected):
         missing = sorted(set(expected) - set(rows))
@@ -1295,12 +1299,15 @@ def validate_global_agents_template() -> None:
         "app's configured fast speed",
         "do not claim that speed enforcement occurred",
         "Every milestone declares one or more acceptance modes",
-        "Route by the judgment required for acceptance, not by file type",
-        "Objective code review uses Luna XHigh",
-        "Architecture-conformance review uses Sol Medium",
+        "Acceptance modes name the evidence needed; they do not by themselves require a reviewer task",
+        "Do not launch a reviewer merely because code changed",
+        "When selected, objective code review uses Luna XHigh",
+        "When selected, bounded architecture-conformance review uses Sol Medium",
+        "Do not duplicate objective and architecture reviews",
+        "evidence and judgments are materially independent",
         "single mutable implementation owner",
         "independent visual-quality promotion review uses Astra Low",
-        "combined review escalates to Astra Medium",
+        "combined review escalates to Astra Medium for significant or ambiguous",
         "High is an explicit exceptional escalation only",
         "passing code tests never implies that a rendered result is good",
         "When an owner stops converging",
@@ -1351,6 +1358,14 @@ def validate_global_agents_template() -> None:
     for stale in stale_routing:
         if stale in normalized_text:
             fail(f"{GLOBAL_AGENTS_PATH}: stale routing contract: {stale}")
+
+    stale_review_policy = (
+        "Require at least one independent objective review for a substantial code milestone",
+        "Every declared authority remains required, with separate evidence",
+    )
+    for stale in stale_review_policy:
+        if stale in normalized_text:
+            fail(f"{GLOBAL_AGENTS_PATH}: review dispatch must be risk-triggered: {stale}")
 
     legacy_route = "$codex-thread-handoff` is only an explicit legacy compatibility or deliberate comparison route"
     if legacy_route not in normalized_text:
@@ -2015,8 +2030,10 @@ def _validate_model_projection_closure() -> None:
         fail(f"{capsule_path}: v1-v3 branches must contain closed properties")
     schema_v4 = branches[3]
     v4_branches = schema_v4.get("oneOf")
-    if not isinstance(v4_branches, list) or len(v4_branches) != 2 or any(
-        not isinstance(item, dict) for item in v4_branches
+    if (
+        not isinstance(v4_branches, list)
+        or len(v4_branches) != 2
+        or any(not isinstance(item, dict) for item in v4_branches)
     ):
         fail(f"{capsule_path}: v4 must contain exactly the closed commit and runtime-evidence branches")
     v4_properties = [item.get("properties") for item in v4_branches]

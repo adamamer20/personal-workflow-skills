@@ -14,10 +14,15 @@
 - Controllers delegate ready independent lanes when useful.
   Keep one mutable owner per surface and one lifecycle controller. Small tasks
   stay direct; delegation is not a mandatory extra layer.
-- Require at least one independent objective review for a substantial code
-  milestone. Add architecture review for changed ownership, public/persisted
-  contracts, trust boundaries or a named integration risk. Visual acceptance
-  requires rendered inspection. Self-review alone does not replace these gates.
+- Select independent review from concrete risk, not milestone size or habit.
+  Before dispatch, record the exact unresolved risk and review lens. Review is
+  justified for a changed public/persisted contract, ownership or trust boundary,
+  security/privacy exposure, migration or irreversible effect, unresolved
+  integration uncertainty, prior non-convergence/finding, explicit user request,
+  or visual acceptance that needs independent rendered judgment. A small bounded
+  reversible change with discriminating tests and none of those triggers closes
+  with validation and self-review. Do not launch a reviewer merely because code
+  changed, a milestone completed, or a reviewer role exists.
 - Reuse successful checks for unchanged bytes and environments. Broaden or
   repeat checks only for a changed dependency, new failure or unresolved risk.
 - Keep updates concise and concrete. Put the result first, use plain language,
@@ -135,15 +140,20 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   material boundary, contract, ownership, security/privacy, cost, destructive-
   behavior, or scope changes to Astra Medium for a bounded plan update.
 - Every milestone declares one or more acceptance modes: `objective`, `visual`,
-  and `architecture`. Route by the judgment required for acceptance, not by file
-  type. Objective code review uses Luna XHigh. Visual-judgment implementation
+  and `architecture`. Acceptance modes name the evidence needed; they do not by
+  themselves require a reviewer task. Route a review only when a recorded risk
+  trigger needs independent judgment, and select the smallest sufficient lens.
+  When selected, objective code review uses Luna XHigh. Visual-judgment implementation
   defaults to Astra Low; independent visual-quality promotion review uses Astra Low.
-  Architecture-conformance review uses Sol Medium. Visual ambiguity,
+  When selected, bounded architecture-conformance review uses Sol Medium. Visual ambiguity,
   non-convergence, or material recovery complexity escalates to Astra Medium;
   a combined review escalates to Astra Medium for significant or ambiguous
-  boundaries; High is an explicit exceptional escalation only. When objective and visual
-  modes both apply, require both authorities; passing code tests never implies
-  that a rendered result is good. Ordinary recovery defaults to Astra Low. Luna
+  boundaries or when Sol cannot close the question; High is an explicit
+  exceptional escalation only. Do not duplicate objective and architecture
+  reviews when one focused review can resolve the recorded risk. Use distinct
+  authorities only when their evidence and judgments are materially independent.
+  When objective and visual modes both apply, preserve both kinds of evidence;
+  passing code tests never implies that a rendered result is good. Ordinary recovery defaults to Astra Low. Luna
   is appropriate for visually adjacent work only after the target is frozen and
   the remaining execution is mechanical and objectively verifiable.
 - When an owner stops converging, preserve the diff, evidence, findings,

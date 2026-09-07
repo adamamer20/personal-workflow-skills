@@ -80,20 +80,24 @@
 
 - The milestone owner implements, validates, debugs ordinary failures,
   self-reviews, and repairs valid findings in the assigned workspace.
-- A substantial code milestone requires focused validation, self-review and
-  at least one independent objective review. Add architecture review when
-  ownership, public/persisted contracts, trust boundaries or a named integration
-  risk changes. Include the named security boundaries in that same architecture
-  review; do not create a separate security review by default. Require visual
-  review for visual acceptance. Small local work
-  uses proportional checks unless the project names another gate.
+- Every code milestone requires proportional validation and self-review.
+  Independent review is risk-triggered, not automatic. Before dispatch, record
+  the unresolved risk and lens. Use review for changed public/persisted contracts,
+  ownership or trust boundaries, security/privacy exposure, migration or
+  irreversible effects, unresolved integration uncertainty, prior findings or
+  non-convergence, an explicit user request, or visual acceptance requiring
+  independent rendered judgment. A small bounded reversible change with
+  discriminating tests and no trigger closes without a reviewer task.
 - Review is one general workflow; the selected lens changes its evidence, not
   its ownership or transport boundary.
 - Every review invocation names exactly one lens (`spec`, `correctness`,
   `standards`, `contract-risk`, `security`, or `visual`). The default is one
-  review context; when a capsule declares distinct objective and architecture
-  authorities, the controller may run those independent reviews in parallel.
-  Every declared authority remains required, with separate evidence.
+  focused review context. Use Sol Medium for bounded architecture conformance;
+  escalate to Astra Medium only for a significant or ambiguous combined
+  architecture/security boundary or when Sol cannot close the question. Do not
+  duplicate objective and architecture reviews when one lens resolves the
+  recorded risk. Distinct authorities run in parallel only when their evidence
+  and judgments are materially independent and the plan explicitly requires both.
 - Findings record severity separately from promotion impact. P0 is normally
   blocking; P1 blocks when it invalidates the outcome, a protected boundary,
   or safe successor work. A non-blocking finding records its owner and

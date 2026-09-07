@@ -401,14 +401,28 @@ def test_authorized_routing_validator_rejects_retired_visual_and_recovery_defaul
 def test_readme_routing_table_rejects_stale_visual_review_route(tmp_path: Path) -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     stale = readme.replace(
-        "| Independent visual-quality promotion review | fresh peer | `gpt-6-astra` | `low` |",
-        "| Independent visual-quality promotion review | fresh peer | `gpt-6-astra` | `high` |",
+        "| Independent visual-quality promotion review, when required | fresh peer | `gpt-6-astra` | `low` |",
+        "| Independent visual-quality promotion review, when required | fresh peer | `gpt-6-astra` | `high` |",
         1,
     )
     candidate = tmp_path / "README.md"
     candidate.write_text(stale, encoding="utf-8")
-    with pytest.raises(ValueError, match="Independent visual-quality promotion review"):
+    with pytest.raises(ValueError, match="Independent visual-quality promotion review, when required"):
         validate_readme_routing_table(candidate)
+
+
+def test_validator_rejects_automatic_review_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    template = (ROOT / "templates" / "AGENTS.md").read_text(encoding="utf-8")
+    conflicting = template.replace(
+        "Select independent review from concrete risk, not milestone size or habit.",
+        "Require at least one independent objective review for a substantial code milestone.",
+        1,
+    )
+    candidate = tmp_path / "AGENTS.md"
+    candidate.write_text(conflicting, encoding="utf-8")
+    monkeypatch.setattr(_VALIDATOR, "GLOBAL_AGENTS_PATH", candidate)
+    with pytest.raises(ValueError, match="review dispatch must be risk-triggered"):
+        _VALIDATOR.validate_global_agents_template()
 
 
 @pytest.mark.parametrize(

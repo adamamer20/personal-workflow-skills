@@ -229,14 +229,23 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   persisted contract, ownership, security/privacy, cost, destructive-behavior,
   or scope changes to Astra Medium for a bounded plan update.
 - Model milestones with explicit `objective`, `visual`, and `architecture`
-  acceptance modes. Derive implementation and independent review authorities
-  per mode; never infer them from file extension or repository area.
+  acceptance modes. These modes name required evidence and do not automatically
+  create reviewer tasks. Before dispatching a review, record the concrete
+  unresolved risk and smallest sufficient lens. Small bounded reversible changes
+  with discriminating tests close through validation and self-review when they do
+  not change public/persisted contracts, ownership, trust/security/privacy
+  boundaries, migrations or irreversible behavior and have no unresolved
+  integration risk, prior finding/non-convergence or explicit review request.
 - Visual-judgment implementation and visual-quality promotion review default to
   Astra Low. Semantic orchestration and normal architecture conformance use Sol
   Medium. Visual ambiguity, non-convergence, or material recovery complexity
-  escalates to Astra Medium; High is exceptional only. Preserve all declared
-  authorities and run distinct objective/architecture reviews in parallel when
-  ready; passing code tests never implies visual acceptance.
+  escalates to Astra Medium; High is exceptional only. When review is justified,
+  use one focused Sol Medium architecture review by default. Escalate a combined
+  architecture/security review to Astra Medium only for a significant or
+  ambiguous boundary or when Sol cannot close it. Do not duplicate objective and
+  architecture reviews when one review resolves the recorded risk; use distinct
+  authorities only for materially independent evidence. Passing code tests never
+  implies visual acceptance.
 - Ordinary recovery defaults to Astra Low. Astra Medium may finish bounded
   recovery or replan while accepted outcome, contracts, security/privacy
   boundary, cost, destructive behavior, and scope remain unchanged.
