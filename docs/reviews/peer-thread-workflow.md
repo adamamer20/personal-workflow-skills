@@ -14,9 +14,9 @@ working on that milestone; do not reload all history into every task.
 | Work | Current state / dependency | Next gate |
 | --- | --- | --- |
 | refresh-start-intent | Existing uncommitted recovery candidate, single original owner; acceptance unverified here | Required checks, successor commit, one focused Sol Medium review of ROTATION-START-REENTRY-DOUBLE-START |
-| evidence-led-delivery-instructions | User-directed instruction maintenance implemented locally; no worker dispatch | Focused consistency review and instruction/plugin validation |
-| Current plan/history separation | Direct planner-owned reference migration requested by user | Historical capsule identity and active-plan compilation checks |
-| Instruction plugin installation | Plugin-only 0.1.12+codex.20260907000000; documented CLI route avoids publishing dirty runtime | Plugin version, enabled state and byte parity |
+| evidence-led-delivery-instructions | Accepted and committed as aad46cd | Closed; see history installation record |
+| Current plan/history separation | Accepted; snapshot and active capsule identity preserved | Closed |
+| Instruction plugin installation | 0.1.12+codex.20260907000000 installed/enabled; global instructions synchronized | Closed; 42-file byte parity verified |
 | Controller runtime installation | Depends on accepted refresh-start-intent; canonical installer packages all checkout bytes | Original controller retains cutover authority |
 | Other prior program successors | Deferred, not selected by historical headings | Reassess prerequisites after the above close |
 
@@ -73,7 +73,8 @@ causal diagnosis/rollover, mergeability and lightweight events are incorporated.
 Duplicate semantic/workspace/recovery prose is consolidated. Existing configured
 models and worker leaf authority remain unchanged; optional free-subagent runtime
 experiments from the supplied analyses are not silently enabled by prompt edits.
-The remaining independent risk is consistency without loss of protected guarantees.
+Independent consistency review accepted the update with no open blocking findings.
+[Closure and installation evidence](peer-thread-workflow-history.md#evidence-led-instruction-update--installed).
 
 Retain the bounded [six-surface instruction design](peer-thread-workflow-history.md#instruction-update--evidence-led-delivery),
 with the following user-requested refinement: current plan contains outcome,

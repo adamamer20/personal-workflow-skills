@@ -6,7 +6,7 @@ select work or explicitly retain a named design as its active contract. Old
 `Next execution` headings are preserved for provenance and compiler fixtures;
 they do not authorize dispatch. Existing relative links keep the same directory.
 
-Snapshot SHA-256 (the content after the separator): `7405477d11661fc193e0a18cfdfd0bf03a1f7d9376eb2087dcd2301e4c9f04eb`.
+Snapshot SHA-256 (the initial 949,187 UTF-8 bytes after the separator): `7405477d11661fc193e0a18cfdfd0bf03a1f7d9376eb2087dcd2301e4c9f04eb`.
 
 ---
 
@@ -13725,3 +13725,24 @@ ModelFacingCapsule(
     prompt_budget_bytes=12_000
 )
 ```
+
+## Evidence-led instruction update — installed
+
+2026-09-07: user requested workflow refactoring, separate history and reinstall.
+Candidate commit: aad46cd. Risk discovery/first vertical, bounded delivery,
+compact evidence, guarantee challenge, causal recovery/rollover and proportional
+acceptance replace conflicting or duplicate guidance. Current planning/history
+are separate; original recovery capsule and historical evidence are preserved.
+
+Independent architecture review ACCEPT; INSTR-REVIEW-CONTRACT-001 closed at
+scoped digest 7fb2e4eb9c972abe0054abf136020b1d468156ce9bc37fd80ab1e9e9d3a7d06a.
+Controller capsules retain every declared authority; only small direct work can
+close without review. Full suite: 1,265 passed; after the focused wording repair,
+121 workflow-assets and 40 compilation/control tests, validator and hooks passed.
+
+Plugin 0.1.12+codex.20260907000000 installed/enabled through the documented
+plugin-only CLI; all 42 installed files match source bytes. Global instructions
+match the reviewed candidate, SHA-256
+051cbcd891ca0a889ae2bc7bb01957f6dfb92d904479c27c35ecd4344e00dfb4.
+Runtime service/ledger recovery was not installed or changed by this update;
+its original owner and acceptance/cutover requirements remain in force.
