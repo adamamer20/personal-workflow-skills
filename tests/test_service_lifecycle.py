@@ -70,6 +70,7 @@ def test_credential_handoff_passes_only_key_name_and_cleans_up_on_start_failure(
         class Result:
             def __init__(self, returncode: int) -> None:
                 self.returncode = returncode
+                self.stdout = ""
 
         def runner(argv: tuple[str, ...], **_: object) -> Result:
             calls.append(argv)
@@ -145,6 +146,7 @@ def test_credential_handoff_cleans_up_after_unexpected_runner_failure(failure: B
 
         class Result:
             returncode = 0
+            stdout = ""
 
         def runner(argv: tuple[str, ...], **_: object) -> Result:
             calls.append(argv)
@@ -178,6 +180,7 @@ def test_credential_handoff_preserves_original_failure_when_cleanup_raises_basee
 
         class Result:
             returncode = 0
+            stdout = ""
 
         def runner(argv: tuple[str, ...], **_: object) -> Result:
             calls.append(argv)
@@ -264,8 +267,9 @@ def test_credential_handoff_refuses_profile_identity_drift_before_import() -> No
 
 
 class _SystemctlResult:
-    def __init__(self, returncode: int) -> None:
+    def __init__(self, returncode: int, stdout: str = "") -> None:
         self.returncode = returncode
+        self.stdout = stdout
 
 
 def _write_python_launcher(path: Path) -> None:
@@ -434,10 +438,17 @@ def test_refresh_migrates_v19_v20_through_current_harness_topology(
     class Result:
         def __init__(self, returncode: int) -> None:
             self.returncode = returncode
+            self.stdout = ""
 
     def runner(argv: tuple[str, ...], **_: object) -> Result:
         operation = argv[2]
         events.append(operation)
+        if operation == "show":
+            result = Result(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return Result(0 if service_state["active"] else 3)
         if operation == "start":
@@ -586,6 +597,12 @@ def test_v20_migration_failure_keeps_current_topology_forward_only(
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         return _SystemctlResult(0)
@@ -639,6 +656,12 @@ def test_v20_committed_migration_failure_retries_forward_without_shutdown_or_dow
     def first_runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         first_calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         return _SystemctlResult(0)
@@ -664,6 +687,12 @@ def test_v20_committed_migration_failure_retries_forward_without_shutdown_or_dow
     def retry_runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         retry_calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
@@ -705,6 +734,12 @@ def test_v20_uncertain_start_retains_current_unit_and_fence_without_rollback(tmp
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
@@ -763,6 +798,12 @@ def test_refresh_rejects_replacement_identity_mismatch(
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
@@ -824,7 +865,14 @@ def test_refresh_rejects_malformed_launcher_before_fencing(tmp_path: Path) -> No
                 unit,
                 config_home=tmp_path / "config",
                 environment={"OPENAI_API_KEY": "secret"},
-                runner=lambda argv, **_: calls.append(argv) or _SystemctlResult(3),
+                runner=lambda argv, **_: (
+                    calls.append(argv)
+                    or (
+                        _SystemctlResult(0, "ActiveState=inactive\nMainPID=0\n")
+                        if argv[2] == "show"
+                        else _SystemctlResult(3)
+                    )
+                ),
                 ledger=ledger,
                 process_is_live=lambda _pid, _birth: True,
                 shutdown_sender=lambda *_args: pytest.fail("malformed launcher must fail before shutdown"),
@@ -843,6 +891,12 @@ def test_refresh_rejects_launcher_drift_after_capture(tmp_path: Path) -> None:
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
@@ -896,6 +950,8 @@ def test_refresh_rejects_predecessor_authority_drift_before_migration(tmp_path: 
 
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         operation = argv[2]
+        if operation == "show":
+            return _SystemctlResult(0, "ActiveState=inactive\nMainPID=0\n")
         return _SystemctlResult(0 if operation == "is-active" and service_state["active"] else 3)
 
     def shutdown(_socket_path: Path, _timeout: float) -> dict[str, object]:
@@ -949,6 +1005,8 @@ def test_refresh_rejects_authority_drift_between_legacy_close_and_migration_open
 
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         operation = argv[2]
+        if operation == "show":
+            return _SystemctlResult(0, "ActiveState=inactive\nMainPID=0\n")
         return _SystemctlResult(0 if operation == "is-active" and service_state["active"] else 3)
 
     def shutdown(_socket_path: Path, _timeout: float) -> dict[str, object]:
@@ -1009,7 +1067,14 @@ def test_current_schema_reentry_rejects_any_retained_socket_entry(
                 unit,
                 config_home=config_home,
                 environment={"OPENAI_API_KEY": "secret"},
-                runner=lambda argv, **_: calls.append(argv) or _SystemctlResult(3),
+                runner=lambda argv, **_: (
+                    calls.append(argv)
+                    or (
+                        _SystemctlResult(0, "ActiveState=inactive\nMainPID=0\n")
+                        if argv[2] == "show"
+                        else _SystemctlResult(3)
+                    )
+                ),
                 process_is_live=lambda pid, birth: processes.get((pid, birth), False),
             )
         assert "start" not in [call[2] for call in calls]
@@ -1037,6 +1102,12 @@ def test_current_unhealthy_replacement_retains_current_unit_and_fresh_retry_succ
     def first_runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         first_calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
@@ -1091,6 +1162,12 @@ def test_current_unhealthy_replacement_retains_current_unit_and_fresh_retry_succ
     def retry_runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         nonlocal retry_started
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
@@ -1144,6 +1221,10 @@ def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hi
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = "ActiveState=inactive\nMainPID=0\n"
+            return result
         if operation == "is-active":
             return _SystemctlResult(3)
         if operation == failure_stage:
@@ -1173,7 +1254,7 @@ def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hi
     assert stat.S_IMODE(installed_path.stat().st_mode) == before_mode == 0o600
     metadata = installed_path.lstat()
     assert stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
-    assert [call[2] for call in calls][:1] == ["is-active"]
+    assert [call[2] for call in calls][:1] == ["show"]
     connection = sqlite3.connect(ledger_path)
     try:
         assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "21"
@@ -1189,6 +1270,12 @@ def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hi
     def retry_runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         nonlocal replacement_started
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if replacement_started else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if replacement_started else 3)
         if operation == "start":
@@ -1235,7 +1322,14 @@ def test_interrupted_v19_refresh_rejects_arbitrary_legacy_unit_drift_before_mana
             unit,
             config_home=config_home,
             environment={"OPENAI_API_KEY": "secret"},
-            runner=lambda argv, **_: calls.append(argv) or _SystemctlResult(3),
+            runner=lambda argv, **_: (
+                calls.append(argv)
+                or (
+                    _SystemctlResult(0, "ActiveState=inactive\nMainPID=0\n")
+                    if argv[2] == "show"
+                    else _SystemctlResult(3)
+                )
+            ),
             process_is_live=lambda _pid, _birth: False,
             shutdown_sender=lambda *_args: pytest.fail("unit drift must fail before shutdown"),
         )
@@ -1291,11 +1385,16 @@ def test_interrupted_v19_refresh_keeps_harness_bytes_for_post_start_uncertainty(
     class Result:
         def __init__(self, returncode: int) -> None:
             self.returncode = returncode
+            self.stdout = ""
 
     def runner(argv: tuple[str, ...], **_: object) -> Result:
         nonlocal started, service_active
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = Result(0)
+            result.stdout = "ActiveState=active\nMainPID=1\n" if service_active else "ActiveState=inactive\nMainPID=0\n"
+            return result
         if operation == "is-active":
             return Result(0 if service_active else 3)
         if operation == "start":
@@ -1349,10 +1448,17 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
     class Result:
         def __init__(self, returncode: int) -> None:
             self.returncode = returncode
+            self.stdout = ""
 
     def runner(argv: tuple[str, ...], **_: object) -> Result:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = Result(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_active["value"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return Result(0 if service_active["value"] else 3)
         if operation == "start":
@@ -1395,16 +1501,17 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
 
     assert replacement["started"] is True
     assert [call[2] for call in calls] == [
+        "show",
         "is-active",
-        "is-active",
-        "is-active",
+        "show",
         "daemon-reload",
         "import-environment",
-        "is-active",
+        "show",
         "start",
         "is-active",
         "stop",
         "is-active",
+        "show",
         "unset-environment",
     ]
     assert fence_calls == 1
@@ -1425,6 +1532,12 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
 
     def retry_runner(argv: tuple[str, ...], **_: object) -> Result:
         operation = argv[2]
+        if operation == "show":
+            result = Result(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if retry_started["value"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return Result(0 if retry_started["value"] else 3)
         if operation == "start":
@@ -1486,10 +1599,17 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
     class Result:
         def __init__(self, returncode: int) -> None:
             self.returncode = returncode
+            self.stdout = ""
 
     def runner(argv: tuple[str, ...], **_: object) -> Result:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = Result(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_active["value"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return Result(0 if service_active["value"] else 3)
         if operation == "start":
@@ -1534,29 +1654,31 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
     assert installed_path.read_bytes() == before_bytes
     assert [call[2] for call in calls] == (
         [
+            "show",
             "is-active",
-            "is-active",
-            "is-active",
+            "show",
             "daemon-reload",
             "import-environment",
-            "is-active",
+            "show",
             "start",
             "is-active",
             "stop",
             "is-active",
+            "show",
             "unset-environment",
         ]
         if requested_shutdown == 0
         else [
+            "show",
             "is-active",
-            "is-active",
-            "is-active",
+            "show",
             "daemon-reload",
             "import-environment",
-            "is-active",
+            "show",
             "start",
             "stop",
             "is-active",
+            "show",
             "unset-environment",
         ]
     )
@@ -1574,9 +1696,14 @@ def test_refresh_positive_predecessor_absence_proof_restores_only_after_three_sp
     class Result:
         def __init__(self, returncode: int) -> None:
             self.returncode = returncode
+            self.stdout = ""
 
     def runner(argv: tuple[str, ...], **_: object) -> Result:
         operation = argv[2]
+        if operation == "show":
+            result = Result(0)
+            result.stdout = "ActiveState=inactive\nMainPID=0\n"
+            return result
         if operation == "is-active":
             return Result(3)
         if operation == "start":
@@ -1647,6 +1774,12 @@ def test_refresh_accepts_legitimate_replacement_after_predecessor_wait_observati
 
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_active["value"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_active["value"] else 3)
         if operation == "start":
@@ -1686,6 +1819,12 @@ def test_refresh_rejects_replacement_to_different_replacement_identity_drift(tmp
 
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_active["value"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_active["value"] else 3)
         if operation == "start":
@@ -1743,7 +1882,18 @@ def test_refresh_rejects_replacement_to_different_replacement_identity_drift(tmp
     assert installed_path.read_text(encoding="utf-8") == unit.text
 
 
-def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "stopped_response",
+    [
+        "ActiveState=inactive\nMainPID=0\n",
+        "MainPID=0\nActiveState=inactive\n",
+        "ActiveState=inactive\nMainPID=0",
+        "MainPID=0\nActiveState=inactive",
+    ],
+)
+def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(
+    tmp_path: Path, stopped_response: str
+) -> None:
     _repository, unit, ledger, processes, service_state = _refresh_fixture(tmp_path)
     calls: list[tuple[str, ...]] = []
     shutdowns: list[tuple[Path, float]] = []
@@ -1751,6 +1901,10 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = _SystemctlResult(0)
+            result.stdout = "ActiveState=active\nMainPID=1\n" if service_state["active"] else stopped_response
+            return result
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
@@ -1795,10 +1949,10 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
         assert shutdowns[0][0] == unit.state_root / ".codex-flow" / "runtime" / "harness.sock"
         assert [call[2] for call in calls] == [
             "is-active",
-            "is-active",
+            "show",
             "daemon-reload",
             "import-environment",
-            "is-active",
+            "show",
             "start",
             "is-active",
         ]
@@ -1900,6 +2054,12 @@ def test_refresh_timeout_is_explicit_and_leaves_fence_armed(tmp_path: Path) -> N
 
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
         calls.append(argv)
+        if argv[2] == "show":
+            result = _SystemctlResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if argv[2] == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if argv[2] == "start":
@@ -1975,10 +2135,17 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     class Result:
         def __init__(self, returncode: int) -> None:
             self.returncode = returncode
+            self.stdout = ""
 
     def runner(argv: tuple[str, ...], **_: object) -> Result:
         calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = Result(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_state["active"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return Result(0 if service_state["active"] else 3)
         if operation == "start":
@@ -2023,10 +2190,10 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     assert exec_lines == [f"ExecStart={executable} harness run --foreground --state-root {repository}"]
     assert [call[2] for call in calls] == [
         "is-active",
-        "is-active",
+        "show",
         "daemon-reload",
         "import-environment",
-        "is-active",
+        "show",
         "start",
         "is-active",
     ]
@@ -2079,11 +2246,16 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
 
     class Result:
         returncode = 0
+        stdout = ""
 
     def runner(argv: tuple[str, ...], **_: object) -> Result:
         calls.append(argv)
+        if argv[2] == "show":
+            result = Result()
+            result.stdout = "ActiveState=inactive\nMainPID=0\n"
+            return result
         if argv[2] == "is-active":
-            return type("InactiveResult", (), {"returncode": 3})()
+            return type("InactiveResult", (), {"returncode": 3, "stdout": ""})()
         return Result()
 
     def fail_install(*_args: object, **_kwargs: object) -> Path:
@@ -2108,7 +2280,7 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
         )
     finally:
         check.close()
-    assert [call[2] for call in calls] == ["is-active", "is-active"]
+    assert [call[2] for call in calls] == ["is-active", "show"]
 
 
 @pytest.mark.parametrize("failure_stage", ["before_commit", "after_commit", "rollback_failure"])
@@ -2154,9 +2326,14 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     class Result:
         def __init__(self, returncode: int) -> None:
             self.returncode = returncode
+            self.stdout = ""
 
     def runner(argv: tuple[str, ...], **_: object) -> Result:
         calls.append(argv)
+        if argv[2] == "show":
+            result = Result(0)
+            result.stdout = "ActiveState=inactive\nMainPID=0\n"
+            return result
         if argv[2] == "is-active":
             return Result(3)
         return Result(0)
@@ -2205,7 +2382,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     else:
         assert installed_path.read_bytes() == before_bytes
         assert stat.S_IMODE(installed_path.stat().st_mode) == before_mode
-    assert [call[2] for call in calls] == ["is-active", "is-active"]
+    assert [call[2] for call in calls] == ["is-active", "show"]
     check = sqlite3.connect(ledger_path)
     try:
         expected_version = "21" if failure_stage == "rollback_failure" else "18"
@@ -2238,6 +2415,12 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     def retry_runner(argv: tuple[str, ...], **_: object) -> Result:
         retry_calls.append(argv)
         operation = argv[2]
+        if operation == "show":
+            result = Result(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if replacement["started"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return Result(0 if replacement["started"] else 3)
         if operation == "start":
@@ -2273,10 +2456,10 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     assert replacement["started"] is True
     assert [call[2] for call in retry_calls] == [
         "is-active",
-        "is-active",
+        "show",
         "daemon-reload",
         "import-environment",
-        "is-active",
+        "show",
         "start",
         "is-active",
     ]
@@ -2313,6 +2496,7 @@ def test_v18_refresh_rejects_dangling_or_new_socket_symlink_before_start(tmp_pat
 
     class Result:
         returncode = 3
+        stdout = ""
 
     with pytest.raises(ServiceRefreshFailed, match="must not be a symlink"):
         refresh_with_credential(
@@ -2326,3 +2510,236 @@ def test_v18_refresh_rejects_dangling_or_new_socket_symlink_before_start(tmp_pat
     assert [call[2] for call in calls] == []
     assert processes[(500, "old-birth")] is True
     assert service_state["active"] is True
+
+
+def test_refresh_manager_live_pid_unproven(tmp_path: Path) -> None:
+    _repository, unit, ledger, processes, service_state = _refresh_fixture(tmp_path)
+    calls: list[str] = []
+
+    class Result:
+        returncode = 0
+        stdout = f"ActiveState=inactive\nMainPID={os.getpid()}\n"
+
+    def runner(argv: tuple[str, ...], **_: object) -> object:
+        calls.append(argv[2])
+        if argv[2] == "is-active":
+            return _SystemctlResult(3)
+        return Result()
+
+    processes[(500, "old-birth")] = False
+    service_state["active"] = False
+    try:
+        with pytest.raises(ServiceRefreshDeferred, match="stopped"):
+            refresh_with_credential(
+                unit,
+                ledger=ledger,
+                config_home=tmp_path / "config",
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=runner,
+                process_is_live=lambda *_: False,
+                clock=lambda: 0.0,
+                sleeper=lambda _: pytest.fail("must reject before waiting or starting"),
+            )
+        assert "start" not in calls
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    "response, returncode",
+    [
+        ("", 0),
+        ("ActiveState=inactive\n", 0),
+        ("MainPID=0\n", 0),
+        ("ActiveState=inactive\nActiveState=inactive\n", 0),
+        ("MainPID=0\nMainPID=0\n", 0),
+        ("ActiveState=inactive\nOther=0\n", 0),
+        ("ActiveState=inactive\nMainPID=0\nExtra=0", 0),
+        ("ActiveState=inactive\nMainPID=0\n\n", 0),
+        ("ActiveState=inactive\r\nMainPID=0\n", 0),
+        (" ActiveState=inactive\nMainPID=0", 0),
+        ("ActiveState=inactive \nMainPID=0", 0),
+        ("ActiveState=inactive\nMainPID=+0", 0),
+        ("ActiveState=inactive\nMainPID=-1", 0),
+        ("ActiveState=inactive\nMainPID=00", 0),
+        ("ActiveState=inactive\nMainPID=0.0", 0),
+        ("ActiveState=inactive\nMainPID=\u0660", 0),
+        ("ActiveState=inactive\nMainPID=10000000000", 0),
+        ("ActiveState=inactive\nMainPID=0=0", 0),
+        ("ActiveState=" + "a" * 256 + "\nMainPID=0", 0),
+        ("ActiveState=failed\nMainPID=0", 0),
+        ("ActiveState=deactivating\nMainPID=0", 0),
+        ("ActiveState=activating\nMainPID=0", 0),
+        ("ActiveState=reloading\nMainPID=0", 0),
+        ("ActiveState=unknown\nMainPID=0", 0),
+        (f"ActiveState=inactive\nMainPID={os.getpid()}", 0),
+        ("ActiveState=inactive\nMainPID=0", 3),
+        ("ActiveState=inactive\nMainPID=0", True),
+        ("ActiveState=inactive\nMainPID=0", "0"),
+        (b"ActiveState=inactive\nMainPID=0", 0),
+        (None, 0),
+    ],
+)
+@pytest.mark.parametrize("topology", ["current", "predecessor", "interrupted"])
+def test_refresh_rejects_unproven_manager_before_any_effect(
+    tmp_path: Path,
+    response: object,
+    returncode: object,
+    topology: str,
+) -> None:
+    from types import SimpleNamespace
+
+    if topology == "interrupted":
+        _repository, unit, ledger_path, config_home, installed = _interrupted_refresh_fixture(tmp_path)
+    else:
+        _repository, unit, ledger_path, config_home, _executable, _processes, _state = _same_topology_refresh_fixture(
+            tmp_path,
+            21 if topology == "current" else 19,
+            fenced=True,
+        )
+        installed = unit_path(repository_root=unit.repository_root, config_home=config_home)
+    before = installed.read_bytes()
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], **kwargs: object) -> object:
+        calls.append(argv)
+        assert kwargs == {"check": False, "capture_output": True, "text": True}
+        if argv[2] == "show":
+            assert argv == (
+                "systemctl",
+                "--user",
+                "show",
+                unit.unit_name,
+                "--property=ActiveState",
+                "--property=MainPID",
+                "--no-pager",
+            )
+            return SimpleNamespace(returncode=returncode, stdout=response)
+        assert argv[2] == "is-active"
+        return _SystemctlResult(3)
+
+    with pytest.raises(ServiceError):
+        refresh_with_credential(
+            unit,
+            config_home=config_home,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda *_: False,
+            sleeper=lambda _: pytest.fail("malformed/final proof must not wait"),
+        )
+    assert [call[2] for call in calls].count("show") == 1
+    assert installed.read_bytes() == before
+    with sqlite3.connect(ledger_path) as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == (
+            "19" if topology == "predecessor" else "21"
+        )
+        assert connection.execute("SELECT requested_shutdown FROM harness_authority").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("proof_number", [1, 2])
+def test_refresh_final_manager_observation_blocks_changed_main_pid(tmp_path: Path, proof_number: int) -> None:
+    _repository, unit, ledger, _processes, _state = _refresh_fixture(tmp_path)
+    shows = 0
+    effects: list[str] = []
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        nonlocal shows
+        operation = argv[2]
+        effects.append(operation)
+        if operation == "show":
+            shows += 1
+            pid = os.getpid() if shows == proof_number else 0
+            return _SystemctlResult(0, f"ActiveState=inactive\nMainPID={pid}\n")
+        return _SystemctlResult(3 if operation == "is-active" else 0)
+
+    try:
+        with pytest.raises(ServiceRefreshDeferred, match="stopped"):
+            refresh_with_credential(
+                unit,
+                ledger=ledger,
+                config_home=tmp_path / "config",
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=runner,
+                process_is_live=lambda *_: False,
+            )
+        assert shows == proof_number
+        assert "start" not in effects
+        assert ledger.harness_refresh_fenced()
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("missing", ["stdout", "returncode"])
+def test_refresh_manager_structural_result_requires_both_properties(tmp_path: Path, missing: str) -> None:
+    from types import SimpleNamespace
+
+    _repository, unit, ledger, _processes, _state = _refresh_fixture(tmp_path)
+    result = (
+        SimpleNamespace(stdout="ActiveState=inactive\nMainPID=0")
+        if missing == "returncode"
+        else SimpleNamespace(returncode=0)
+    )
+    try:
+        with pytest.raises(ServiceRefreshFailed):
+            refresh_with_credential(
+                unit,
+                ledger=ledger,
+                config_home=tmp_path / "config",
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=lambda *_args, **_kwargs: result,
+                process_is_live=lambda *_: False,
+            )
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("topology", ["current", "interrupted"])
+def test_refresh_rollback_cannot_restore_with_unproven_manager_pid(tmp_path: Path, topology: str) -> None:
+    if topology == "current":
+        _repository, unit, ledger, _processes, _state = _refresh_fixture(tmp_path)
+        config_home = tmp_path / "config"
+    else:
+        _repository, unit, ledger_path, config_home, _installed = _interrupted_refresh_fixture(tmp_path)
+        ledger = Ledger(ledger_path)
+    started = False
+    stopped = False
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        nonlocal started, stopped
+        operation = argv[2]
+        if operation == "show":
+            return _SystemctlResult(0, f"ActiveState=inactive\nMainPID={os.getpid() if stopped else 0}\n")
+        if operation == "is-active":
+            return _SystemctlResult(0 if started and not stopped else 3)
+        if operation == "start":
+            started = True
+            ledger.acquire_harness(
+                repository_root=unit.repository_root,
+                state_root=unit.state_root,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest="f" * 64,
+                version=unit.version,
+                owner_nonce_sha256="d" * 64,
+            )
+        if operation == "stop":
+            stopped = True
+        return _SystemctlResult(0)
+
+    try:
+        with pytest.raises(ServiceError):
+            refresh_with_credential(
+                unit,
+                ledger=ledger,
+                config_home=config_home,
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=runner,
+                process_is_live=lambda pid, _birth: started and not stopped and pid == _TEST_REPLACEMENT_PID,
+                sleeper=lambda _: pytest.fail("rollback must reject its final manager proof"),
+            )
+        assert started and stopped
+        assert ledger.harness_refresh_fenced()
+        # The failed replacement remains fenced under the current unit; no legacy restoration is safe.
+        assert unit_path(repository_root=unit.repository_root, config_home=config_home).read_text() == unit.text
+    finally:
+        ledger.close()

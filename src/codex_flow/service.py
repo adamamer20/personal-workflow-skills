@@ -40,6 +40,7 @@ class ServiceRefreshFailed(ServiceError):
 @runtime_checkable
 class _CommandResult(Protocol):
     returncode: int
+    stdout: str
 
 
 RefreshShutdown = Callable[[Path, float], dict[str, object]]
@@ -74,28 +75,64 @@ def _manager_returncode(result: object, *, operation: str) -> int:
     return result.returncode
 
 
-def _run_manager(
+def _manager_result(
     arguments: tuple[str, ...],
     *,
     runner: Callable[..., object],
-) -> int:
+) -> _CommandResult:
     try:
         result = runner(("systemctl", "--user", *arguments), check=False, capture_output=True, text=True)
     except OSError as exc:
         operation = arguments[0] if arguments else "operation"
         raise ServiceRefreshFailed(f"user service {operation} command failed") from exc
     operation = arguments[0] if arguments else "operation"
-    return _manager_returncode(result, operation=operation)
+    _manager_returncode(result, operation=operation)
+    if not isinstance(result, _CommandResult) or not isinstance(result.stdout, str):
+        raise ServiceRefreshFailed(f"user service {operation} returned no valid output")
+    return result
+
+
+def _run_manager(arguments: tuple[str, ...], *, runner: Callable[..., object]) -> int:
+    return _manager_result(arguments, runner=runner).returncode
+
+
+def _assert_unit_stopped(unit: ServiceUnit, *, runner: Callable[..., object]) -> None:
+    result = _manager_result(
+        ("show", unit.unit_name, "--property=ActiveState", "--property=MainPID", "--no-pager"), runner=runner
+    )
+    if result.returncode != 0:
+        raise ServiceRefreshFailed("user service stopped-state query failed")
+    raw = result.stdout
+    if not raw.isascii() or len(raw) > 256:
+        raise ServiceRefreshFailed("user service stopped-state response is malformed")
+    lines = raw.removesuffix("\n").split("\n")
+    properties: dict[str, str] = {}
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if (
+            separator != "="
+            or key not in {"ActiveState", "MainPID"}
+            or key in properties
+            or not value
+            or not value.isascii()
+            or not all(character.isalnum() or character == "-" for character in value)
+        ):
+            raise ServiceRefreshFailed("user service stopped-state response is malformed")
+        properties[key] = value
+    if len(lines) != 2 or properties.keys() != {"ActiveState", "MainPID"}:
+        raise ServiceRefreshFailed("user service stopped-state response is malformed")
+    if re.fullmatch(r"(?:0|[1-9][0-9]{0,9})", properties["MainPID"]) is None:
+        raise ServiceRefreshFailed("user service stopped-state PID is malformed")
+    if properties["ActiveState"] != "inactive" or properties["MainPID"] != "0":
+        raise ServiceRefreshDeferred("user service is not proven stopped")
 
 
 def _unit_is_active(unit: ServiceUnit, *, runner: Callable[..., object]) -> bool:
     status = _run_manager(("is-active", "--quiet", unit.unit_name), runner=runner)
     if status == 0:
         return True
-    # systemctl's documented inactive result is the only non-zero status that
-    # proves the unit is gone/inactive.  Treat manager errors and unknown-unit
-    # responses as lifecycle failures instead of allowing refresh to proceed on
-    # an unproven service boundary.
+    # Negative activity is only a wait hint. Stopped-owner effects require the
+    # joint ActiveState/MainPID observation in _assert_unit_stopped.
     if status == 3:
         return False
     raise ServiceRefreshFailed("user service activity check failed")
@@ -328,8 +365,7 @@ def _prove_stopped_current_owner(
     old_pid, old_birth_identity, _old_epoch = _authority_identity(authority_value)
     if process_is_live(old_pid, old_birth_identity):
         raise ServiceRefreshDeferred("harness predecessor process is still live")
-    if _unit_is_active(unit, runner=runner):
-        raise ServiceRefreshDeferred("harness predecessor unit is still active")
+    _assert_unit_stopped(unit, runner=runner)
     _validate_installed_unit(
         unit,
         config_home=config_home,
@@ -864,8 +900,7 @@ def refresh_with_credential(
             old_pid, old_birth_identity, old_epoch = _authority_identity(authority_value)
             if live_checker(old_pid, old_birth_identity):
                 raise ServiceRefreshDeferred("interrupted refresh predecessor process is still live")
-            if _unit_is_active(_legacy_supervisor_unit(unit), runner=runner):
-                raise ServiceRefreshDeferred("interrupted refresh predecessor unit is still active")
+            _assert_unit_stopped(_legacy_supervisor_unit(unit), runner=runner)
             runtime = unit.state_root / ".codex-flow" / "runtime"
             for socket_name in ("supervisor.sock", "harness.sock"):
                 if os.path.lexists(runtime / socket_name):
@@ -1019,6 +1054,7 @@ def refresh_with_credential(
                 break
             sleeper(min(0.05, remaining()))
 
+        _assert_unit_stopped(unit, runner=runner)
         current = owned_ledger.harness_authority()
         if not isinstance(current, Mapping):
             raise ServiceRefreshFailed("replacement harness authority disappeared after stop")
@@ -1091,7 +1127,11 @@ def refresh_with_credential(
                 return False
             if dict(current) != dict(expected_authority):
                 return False
-            if _unit_is_active(unit, runner=runner) or live_checker(old_pid, old_birth_identity):
+            try:
+                _assert_unit_stopped(unit, runner=runner)
+            except ServiceRefreshDeferred:
+                return False
+            if live_checker(old_pid, old_birth_identity):
                 return False
             runtime = unit.state_root / ".codex-flow" / "runtime"
             if any(os.path.lexists(runtime / socket_name) for socket_name in ("supervisor.sock", "harness.sock")):
@@ -1117,7 +1157,11 @@ def refresh_with_credential(
             return False
         if dict(final) != dict(expected_authority):
             return False
-        if _unit_is_active(unit, runner=runner) or live_checker(old_pid, old_birth_identity):
+        try:
+            _assert_unit_stopped(unit, runner=runner)
+        except ServiceRefreshDeferred:
+            return False
+        if live_checker(old_pid, old_birth_identity):
             return False
         runtime = unit.state_root / ".codex-flow" / "runtime"
         return not any(os.path.lexists(runtime / socket_name) for socket_name in ("supervisor.sock", "harness.sock"))

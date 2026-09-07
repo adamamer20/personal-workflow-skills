@@ -379,10 +379,17 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
     class ServiceResult:
         def __init__(self, returncode: int) -> None:
             self.returncode = returncode
+            self.stdout = ""
 
     def service_runner(argv: tuple[str, ...], **_: object) -> ServiceResult:
         operation = argv[2]
         service_events.append(operation)
+        if operation == "show":
+            result = ServiceResult(0)
+            result.stdout = (
+                "ActiveState=active\nMainPID=1\n" if service_active["value"] else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return result
         if operation == "is-active":
             return ServiceResult(0 if service_active["value"] else 3)
         if operation == "daemon-reload" and not refresh_succeeds:

@@ -17736,10 +17736,16 @@ class Ledger:
     def _live_controller_claim_count_in_transaction(self, now: str) -> int:
         """Validate and count live human/model decision claims in one snapshot."""
 
+        # Reuse the authoritative state/action/inspection audit rules before
+        # distinguishing retained history from an effective claim lease.
+        self._validate_rows()
+        current = datetime.fromisoformat(now)
+        if current.tzinfo is None:
+            raise CorruptSchemaError("refresh observation time must be timezone-aware")
         rows = (
             self._db()
             .execute(
-                "SELECT claimant_kind, claimant_id, claim_token_sha256, claim_started_at, claim_lease_expires_at "
+                "SELECT state, claimant_kind, claimant_id, claim_token_sha256, claim_started_at, claim_lease_expires_at "
                 "FROM controller_decisions"
             )
             .fetchall()
@@ -17752,7 +17758,14 @@ class Ledger:
             lease = row["claim_lease_expires_at"]
             if all(value is None for value in claim_fields) and lease is None:
                 continue
-            if any(value is None for value in claim_fields) or lease is None:
+            if lease is None or ControllerDecisionState(str(row["state"])) in {
+                ControllerDecisionState.ACKNOWLEDGED,
+                ControllerDecisionState.SUPERSEDED,
+                ControllerDecisionState.LEGACY_CLOSED,
+            }:
+                # The lifecycle validator has proved this is legitimate history.
+                continue
+            if any(value is None for value in claim_fields):
                 raise CorruptSchemaError("controller claim or lease facts are incomplete")
             try:
                 ControllerClaimantKind(str(row["claimant_kind"]))
@@ -17771,7 +17784,7 @@ class Ledger:
                     raise CorruptSchemaError(f"controller {field} is not a valid timestamp") from exc
                 if parsed.tzinfo is None:
                     raise CorruptSchemaError(f"controller {field} must be timezone-aware")
-            if str(lease) > now:
+            if parsed > current:
                 live += 1
         return live
 

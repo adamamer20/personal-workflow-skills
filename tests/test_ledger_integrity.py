@@ -11,6 +11,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 
+import pytest
+
 import codex_flow
 import codex_flow.artifacts as artifacts_module
 import codex_flow.domain as domain_module
@@ -1880,3 +1882,189 @@ class ArtifactTests(unittest.TestCase):
             ArtifactProjector(root, fault_injector=swap).rebuild(ledger, "r")
             self.assertTrue((Path(directory) / "repo-real" / ".codex-flow" / "runs" / "r" / "run.json").is_file())
             self.assertFalse((outside / ".codex-flow" / "runs" / "r" / "run.json").exists())
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        ModelFacingControllerAction(ControllerActionKind.ACKNOWLEDGE_ONLY),
+        ModelFacingControllerAction(ControllerActionKind.REQUIRE_HUMAN_ATTENTION, reason="operator review"),
+    ],
+)
+def test_refresh_claim_history_after_public_acknowledgement(
+    tmp_path: Path, action: ModelFacingControllerAction
+) -> None:
+    from tests.test_controller_turn_recovery import _queue
+
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        dispatch = _queue(ledger, tmp_path)
+        decision = ledger.create_controller_decision(dispatch, kind="checkpoint", source_thread_id="source-thread")
+        claim = ledger.claim_controller_decision(
+            decision.decision_id,
+            claimant_kind=ControllerClaimantKind.HUMAN,
+            claimant_id="operator",
+            expected_revision=decision.revision,
+        )
+        bundle = ModelFacingControllerActionBundle(
+            1,
+            decision.decision_id,
+            claim.generation,
+            "refresh-history",
+            claim.revision,
+            (),
+            (action,),
+            "close",
+        )
+        receipt = ledger.submit_controller_actions(bundle, claimant_id="operator", token=str(claim.token))
+        assert ledger.refresh_state_inspection()["live_controller_claims"] == 0
+        ledger.arm_harness_refresh_fence()
+        ledger.acknowledge_controller_action(
+            decision.decision_id,
+            action_id=bundle.action_id,
+            bundle_sha256=bundle.sha256,
+            committed_revision=receipt.expected_revision + 1,
+            claimant_id="operator",
+            token=str(claim.token),
+        )
+        assert ledger.refresh_state_inspection()["live_controller_claims"] == 0
+        ledger.arm_harness_refresh_fence()
+    finally:
+        ledger.close()
+
+
+def test_refresh_claim_time_ordering_future_negative_offset(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from tests.test_controller_turn_recovery import _queue
+
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        decision = ledger.create_controller_decision(
+            _queue(ledger, tmp_path), kind="checkpoint", source_thread_id="source-thread"
+        )
+        ledger.claim_controller_decision(
+            decision.decision_id,
+            claimant_kind=ControllerClaimantKind.HUMAN,
+            claimant_id="operator",
+            expected_revision=decision.revision,
+        )
+        ledger._db().execute(
+            "UPDATE controller_decisions SET claim_lease_expires_at = ?", ("2026-09-07T10:30:00-02:00",)
+        )
+        with patch.object(ledger_module, "utc_now", return_value="2026-09-07T12:00:00+00:00"):
+            assert ledger.refresh_state_inspection()["live_controller_claims"] == 1
+    finally:
+        ledger.close()
+
+
+def test_refresh_claim_history_after_completed_inspection(tmp_path: Path) -> None:
+    from tests.test_controller_turn_recovery import _delivered_decision, _prepare_failed_generation
+
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        decision = _delivered_decision(ledger, tmp_path)
+        claim = _prepare_failed_generation(
+            ledger, decision, claim_now="2025-01-01T00:00:00Z", terminal_now="2025-01-01T00:00:02Z"
+        )
+        inspection = ledger.reserve_controller_recovery_inspection(decision.decision_id, now="2025-01-01T00:00:02Z")
+        bundle = ModelFacingControllerActionBundle(
+            1,
+            decision.decision_id,
+            claim.generation,
+            "refresh-inspection",
+            claim.revision,
+            (),
+            (ModelFacingControllerAction(ControllerActionKind.ACKNOWLEDGE_ONLY),),
+            "close",
+        )
+        ledger.complete_controller_recovery_inspection(
+            decision.decision_id,
+            inspection_outcome="completed",
+            claim=inspection,
+            bundle=bundle,
+            now="2025-01-01T00:00:02Z",
+        )
+        ledger.reap_controller_claim(decision.decision_id, now="2025-01-01T00:00:03Z")
+        assert ledger.refresh_state_inspection()["live_controller_claims"] == 0
+        ledger.arm_harness_refresh_fence()
+        # Removing the receipt makes the retained claimant invalid history.
+        ledger._db().execute(
+            "UPDATE controller_decision_generations SET inspection_bundle_sha256 = NULL, inspection_bundle_json = NULL"
+        )
+        with pytest.raises(CorruptSchemaError):
+            ledger.refresh_state_inspection()
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    "lease, live",
+    [
+        ("2026-09-07T10:30:00-02:00", True),
+        ("2026-09-07T14:30:00+02:00", True),
+        ("2026-09-07T13:30:00+02:00", False),
+        ("2026-09-07T09:30:00-02:00", False),
+        ("2026-09-07T14:00:00+02:00", False),
+        ("2026-09-07T10:00:00-02:00", False),
+        ("2026-09-07T12:00:00Z", False),
+        ("2026-09-07T12:00:00.000000+00:00", False),
+        ("2026-09-07T12:00:00.000001Z", True),
+        ("2026-09-07T12:00:00", None),
+        ("malformed", None),
+        (None, None),
+    ],
+)
+@pytest.mark.parametrize("version", [18, 19, 20, 21])
+def test_refresh_claim_instants_at_fence_and_inspection(
+    tmp_path: Path, lease: str | None, live: bool | None, version: int
+) -> None:
+    from unittest.mock import patch
+
+    from tests.test_controller_turn_recovery import _queue
+
+    path = tmp_path / "workflow.db"
+    ledger = Ledger(path)
+    decision = ledger.create_controller_decision(
+        _queue(ledger, tmp_path), kind="checkpoint", source_thread_id="source-thread"
+    )
+    ledger.claim_controller_decision(
+        decision.decision_id,
+        claimant_kind=ControllerClaimantKind.HUMAN,
+        claimant_id="operator",
+        expected_revision=decision.revision,
+    )
+    ledger.close()
+    if version < 21:
+        with sqlite3.connect(path) as connection:
+            connection.execute("DROP TABLE program_outcomes")
+            if version < 20:
+                connection.execute("DROP TABLE dispatch_terminal_integrity")
+            if version == 18:
+                connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+            connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (str(version),))
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(version)],),
+            )
+    ledger = Ledger(path, allow_legacy=version < 21)
+    try:
+        ledger._db().execute("UPDATE controller_decisions SET claim_lease_expires_at = ?", (lease,))
+        fence = ledger.arm_predecessor_refresh_fence if version < 21 else ledger.arm_harness_refresh_fence
+        with patch.object(ledger_module, "utc_now", return_value="2026-09-07T12:00:00+00:00") as now:
+            if live is None:
+                with pytest.raises(CorruptSchemaError):
+                    ledger.refresh_state_inspection()
+                with pytest.raises(CorruptSchemaError):
+                    fence()
+            else:
+                assert ledger.refresh_state_inspection()["live_controller_claims"] == int(live)
+                assert now.call_count == 1
+                if live:
+                    with pytest.raises(HarnessRefreshBlocked):
+                        fence()
+                else:
+                    fence()
+                assert now.call_count == 2
+    finally:
+        ledger.close()
