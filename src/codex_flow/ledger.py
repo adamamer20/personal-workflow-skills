@@ -1273,6 +1273,14 @@ _SCHEMA_IDENTITIES = {
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
 
+def _predecessor_refresh_authority_table(version: SchemaVersion) -> str | None:
+    if version == SchemaVersion(18):
+        return "supervisor_authority"
+    if version in {SchemaVersion(19), SchemaVersion(20)}:
+        return "harness_authority"
+    return None
+
+
 def ledger_schema_compatibility(path: Path) -> JsonObject:
     """Inspect migration compatibility without creating or migrating a ledger."""
 
@@ -2058,9 +2066,9 @@ class Ledger:
     def _assert_migration_fenced(self, version: SchemaVersion) -> None:
         """Require the predecessor owner to be durably fenced before upgrade."""
 
-        if version < SchemaVersion(18):
+        authority_table = _predecessor_refresh_authority_table(version)
+        if authority_table is None:
             return
-        authority_table = "supervisor_authority" if version == SchemaVersion(18) else "harness_authority"
         row = self._db().execute(f"SELECT requested_shutdown FROM {authority_table} WHERE singleton = 1").fetchone()
         if row is not None and int(row["requested_shutdown"]) != 1:
             raise MigrationRequired(
@@ -17746,34 +17754,52 @@ class Ledger:
             return self._queue_row(row)
 
     def arm_predecessor_refresh_fence(self) -> JsonObject | None:
-        """Fence a v18 supervisor before an explicit v18 -> v19 migration.
+        """Fence a supported legacy authority before explicit migration.
 
         This method is available only on an ``allow_legacy`` opener.  It is
         intentionally narrower than the normal harness fence: no current
-        schema validation or migration is performed, and the caller must
-        stop the fenced predecessor before opening a migrating Ledger.
+        schema validation or migration is performed, and the caller must stop
+        the fenced predecessor before opening a migrating Ledger.  Schema v18
+        stores the predecessor authority as ``supervisor_authority``; v19 and
+        v20 retain it as ``harness_authority``.
         """
 
-        if self._legacy_schema_version != SchemaVersion(18):
-            raise MigrationRequired("predecessor refresh fencing requires a legacy schema-v18 opener")
+        version = self._legacy_schema_version
+        authority_table = _predecessor_refresh_authority_table(version) if version is not None else None
+        if authority_table is None:
+            raise MigrationRequired("predecessor refresh fencing requires a supported legacy schema-v18-v20 opener")
         with self._transaction(validate_authority=False):
             self._raise_if_active_harness_children_in_transaction()
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            row = self._db().execute(f"SELECT * FROM {authority_table} WHERE singleton = 1").fetchone()
             if row is None:
                 return None
-            if int(row["requested_shutdown"]) not in {0, 1}:
-                raise CorruptSchemaError("supervisor authority shutdown fence is malformed")
-            self._db().execute("UPDATE supervisor_authority SET requested_shutdown = 1 WHERE singleton = 1")
-            row = self._db().execute("SELECT * FROM supervisor_authority WHERE singleton = 1").fetchone()
+            try:
+                requested_shutdown = int(row["requested_shutdown"])
+            except (TypeError, ValueError) as exc:
+                raise CorruptSchemaError(f"{authority_table} shutdown fence is malformed") from exc
+            if requested_shutdown not in {0, 1}:
+                raise CorruptSchemaError(f"{authority_table} shutdown fence is malformed")
+            self._db().execute(f"UPDATE {authority_table} SET requested_shutdown = 1 WHERE singleton = 1")
+            row = self._db().execute(f"SELECT * FROM {authority_table} WHERE singleton = 1").fetchone()
             return self._queue_row(row)
 
     def predecessor_refresh_fenced(self) -> bool:
-        """Return the v18 predecessor fence without opening the v19 authority."""
+        """Return a supported legacy predecessor fence without migration."""
 
-        if self._legacy_schema_version != SchemaVersion(18):
-            raise MigrationRequired("predecessor refresh fencing requires a legacy schema-v18 opener")
-        row = self._db().execute("SELECT requested_shutdown FROM supervisor_authority WHERE singleton = 1").fetchone()
-        return row is not None and int(row["requested_shutdown"]) == 1
+        version = self._legacy_schema_version
+        authority_table = _predecessor_refresh_authority_table(version) if version is not None else None
+        if authority_table is None:
+            raise MigrationRequired("predecessor refresh fencing requires a supported legacy schema-v18-v20 opener")
+        row = self._db().execute(f"SELECT requested_shutdown FROM {authority_table} WHERE singleton = 1").fetchone()
+        if row is None:
+            return False
+        try:
+            requested_shutdown = int(row["requested_shutdown"])
+        except (TypeError, ValueError) as exc:
+            raise CorruptSchemaError(f"{authority_table} shutdown fence is malformed") from exc
+        if requested_shutdown not in {0, 1}:
+            raise CorruptSchemaError(f"{authority_table} shutdown fence is malformed")
+        return requested_shutdown == 1
 
     def acquire_harness(
         self,

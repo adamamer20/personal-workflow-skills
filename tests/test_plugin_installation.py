@@ -285,6 +285,7 @@ def test_bootstrap_fences_active_harness_before_shared_tool_install(
     unit_path = bootstrap._matching_harness_unit()
     unit_path.parent.mkdir(parents=True)
     unit_path.write_text("existing harness unit\n", encoding="utf-8")
+    fence_calls: list[str] = []
 
     class ActiveChildLedger:
         def __init__(self, path: Path, *, allow_legacy: bool = False) -> None:
@@ -293,10 +294,12 @@ def test_bootstrap_fences_active_harness_before_shared_tool_install(
 
         def arm_harness_refresh_fence(self) -> None:
             assert not migration_required
+            fence_calls.append("arm_harness_refresh_fence")
             raise installer.HarnessRefreshBlocked("worker child is active")
 
         def arm_predecessor_refresh_fence(self) -> None:
             assert migration_required
+            fence_calls.append("arm_predecessor_refresh_fence")
             raise installer.HarnessRefreshBlocked("worker child is active")
 
         def close(self) -> None:
@@ -319,6 +322,7 @@ def test_bootstrap_fences_active_harness_before_shared_tool_install(
     with pytest.raises(installer.BootstrapError, match="harness refresh deferred"):
         bootstrap.execute()
     assert bootstrap.completed == ["preflight"]
+    assert fence_calls == ["arm_predecessor_refresh_fence" if migration_required else "arm_harness_refresh_fence"]
     assert not any(call[1:3] == ("tool", "install") for call in runner.calls)
 
 

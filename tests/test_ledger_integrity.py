@@ -52,6 +52,7 @@ from codex_flow.ledger import (
     CURRENT_SCHEMA_VERSION,
     CorruptSchemaError,
     DispatchConflict,
+    HarnessRefreshBlocked,
     InvalidTransition,
     Ledger,
     MigrationRequired,
@@ -163,6 +164,54 @@ def _noninternal_inventory(path: Path) -> list[tuple[str, str, str, str | None]]
         (object_type, name, table, ledger_module._canonical_ddl(sql) if sql is not None else None)
         for object_type, name, table, sql in rows
     ]
+
+
+def _prepare_supported_legacy_ledger(
+    path: Path, version: SchemaVersion, *, authority: bool = True, active_child: bool = False
+) -> None:
+    root = path.parent
+    ledger = Ledger(path)
+    ledger.acquire_harness(
+        repository_root=root,
+        state_root=root,
+        pid=os.getpid(),
+        process_birth_identity="legacy-process",
+        executable_digest="a" * 64,
+        version="0.2.0",
+        owner_nonce_sha256="b" * 64,
+    )
+    if active_child:
+        ledger.create_run("run")
+        ledger.create_milestone("run", "milestone")
+        claim = ledger.claim_dispatch("run", "milestone", "executor", 1)
+        ledger.enqueue_dispatch(
+            claim.dispatch_id,
+            backend="sdk_headless",
+            capsule_json='{"model":"test","prompt":"bounded"}',
+            route_json="{}",
+            workspace_path=root,
+            result_contract_sha256="c" * 64,
+        )
+        ledger._db().execute("UPDATE dispatch_queue SET state = 'running' WHERE dispatch_id = ?", (claim.dispatch_id,))
+    ledger.close()
+
+    connection = sqlite3.connect(path)
+    if version < SchemaVersion(21):
+        connection.execute("DROP TABLE program_outcomes")
+    if version < SchemaVersion(20):
+        connection.execute("DROP TABLE dispatch_terminal_integrity")
+    if version == SchemaVersion(18):
+        connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    if not authority:
+        authority_table = "supervisor_authority" if version == SchemaVersion(18) else "harness_authority"
+        connection.execute(f"DELETE FROM {authority_table}")
+    connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (str(int(version)),))
+    connection.execute(
+        "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+        (_SCHEMA_IDENTITIES[version],),
+    )
+    connection.commit()
+    connection.close()
 
 
 class LedgerTests(unittest.TestCase):
@@ -894,6 +943,108 @@ class LedgerTests(unittest.TestCase):
             migrated = Ledger(path, migrate=True)
             self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
             migrated.close()
+
+    def test_supported_legacy_predecessor_fence_arms_and_migrates_v18_v19_v20(self) -> None:
+        authority_tables = {
+            SchemaVersion(18): "supervisor_authority",
+            SchemaVersion(19): "harness_authority",
+            SchemaVersion(20): "harness_authority",
+        }
+        for version, authority_table in authority_tables.items():
+            with self.subTest(version=version):
+                with TemporaryDirectory() as directory:
+                    path = Path(directory) / "workflow.db"
+                    _prepare_supported_legacy_ledger(path, version)
+
+                    with self.assertRaises(MigrationRequired):
+                        Ledger(path, migrate=True)
+
+                    legacy = Ledger(path, allow_legacy=True)
+                    self.assertFalse(legacy.predecessor_refresh_fenced())
+                    fence = legacy.arm_predecessor_refresh_fence()
+                    self.assertIsNotNone(fence)
+                    self.assertEqual(fence["requested_shutdown"], 1)
+                    self.assertTrue(legacy.predecessor_refresh_fenced())
+                    self.assertEqual(legacy.arm_predecessor_refresh_fence(), fence)
+                    legacy.close()
+
+                    check = sqlite3.connect(path)
+                    self.assertEqual(
+                        check.execute(
+                            f"SELECT requested_shutdown FROM {authority_table} WHERE singleton = 1"
+                        ).fetchone()[0],
+                        1,
+                    )
+                    check.close()
+
+                    migrated = Ledger(path, migrate=True)
+                    self.assertEqual(migrated.schema_version, CURRENT_SCHEMA_VERSION)
+                    migrated.close()
+
+                    check = sqlite3.connect(path)
+                    self.assertEqual(
+                        check.execute(
+                            "SELECT requested_shutdown FROM harness_authority WHERE singleton = 1"
+                        ).fetchone()[0],
+                        1,
+                    )
+                    self.assertEqual(
+                        check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0],
+                        str(int(CURRENT_SCHEMA_VERSION)),
+                    )
+                    check.close()
+
+    def test_predecessor_refresh_fence_rejects_active_child_before_mutation(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            _prepare_supported_legacy_ledger(path, SchemaVersion(20), active_child=True)
+
+            legacy = Ledger(path, allow_legacy=True)
+            with self.assertRaisesRegex(HarnessRefreshBlocked, "active"):
+                legacy.arm_predecessor_refresh_fence()
+            legacy.close()
+
+            connection = sqlite3.connect(path)
+            self.assertEqual(
+                connection.execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()[
+                    0
+                ],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0], "20"
+            )
+            connection.close()
+
+    def test_predecessor_refresh_fence_reports_absent_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            _prepare_supported_legacy_ledger(path, SchemaVersion(20), authority=False)
+
+            legacy = Ledger(path, allow_legacy=True)
+            self.assertFalse(legacy.predecessor_refresh_fenced())
+            self.assertIsNone(legacy.arm_predecessor_refresh_fence())
+            legacy.close()
+
+    def test_current_schema_harness_refresh_fence_remains_unchanged(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = Ledger(root / "workflow.db")
+            authority = ledger.acquire_harness(
+                repository_root=root,
+                state_root=root,
+                pid=os.getpid(),
+                process_birth_identity="current-process",
+                executable_digest="a" * 64,
+                version="0.2.0",
+                owner_nonce_sha256="b" * 64,
+            )
+            self.assertEqual(authority["requested_shutdown"], 0)
+            fenced = ledger.arm_harness_refresh_fence()
+            self.assertIsNotNone(fenced)
+            self.assertEqual(fenced["requested_shutdown"], 1)
+            self.assertTrue(ledger.harness_refresh_fenced())
+            ledger.close()
 
     def test_schema_v16_to_v17_migration_is_atomic_and_preserves_recovery_facts(self) -> None:
         with TemporaryDirectory() as directory:
