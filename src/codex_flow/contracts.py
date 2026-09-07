@@ -1479,6 +1479,9 @@ class ModelFacingProgramControllerAction:
             assert self.milestone_id is not None
             assert self.subject_wire is not None
             return ((f"repair:{self.milestone_id}:{self.subject_wire}", self.milestone_id),)
+        if self.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE and self.evidence_sha256 is not None:
+            assert self.milestone_id is not None
+            return ((f"promote:{self.milestone_id}:{self.subject_wire}", self.milestone_id),)
         if self.kind is ProgramControllerActionKind.INTEGRATE_CANDIDATE:
             assert self.milestone_id is not None and self.candidate_sha is not None
             return ((f"integrate:{self.milestone_id}:{self.candidate_sha}", self.milestone_id),)

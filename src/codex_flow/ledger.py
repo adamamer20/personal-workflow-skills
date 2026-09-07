@@ -4361,8 +4361,11 @@ class Ledger:
                         raise CorruptSchemaError("controller inspected bundle digest is invalid")
                     try:
                         inspected_bundle = ModelFacingControllerActionBundle.from_json_bytes(bundle_text)
-                    except (TypeError, ValueError) as exc:
-                        raise CorruptSchemaError("controller inspected bundle is malformed") from exc
+                    except (TypeError, ValueError):
+                        try:
+                            inspected_bundle = ModelFacingProgramControllerActionBundle.from_json_bytes(bundle_text)
+                        except (TypeError, ValueError) as exc:
+                            raise CorruptSchemaError("controller inspected bundle is malformed") from exc
                     if (
                         inspected_bundle.decision_id != ControllerDecisionId(str(generation["decision_id"]))
                         or int(inspected_bundle.generation) != int(generation["generation"])
@@ -4464,6 +4467,9 @@ class Ledger:
                             if item.kind is ProgramControllerActionKind.REQUEST_REPAIR
                             else f"resolve-blocker:{item.milestone_id}:{item.blocker_gate_id}"
                             if item.kind is ProgramControllerActionKind.RESOLVE_CANDIDATE_BLOCKER
+                            else f"promote:{item.milestone_id}:{item.subject_wire}"
+                            if item.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE
+                            and item.evidence_sha256 is not None
                             else f"promote:{item.milestone_id}"
                             if item.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE
                             else f"integrate:{item.milestone_id}"
@@ -11227,6 +11233,31 @@ class Ledger:
             nodes[node_id] = raw
         return nodes
 
+    def _require_program_capability_in_transaction(self, program_id: ProgramId) -> None:
+        """Reject unsupported approval intent before any program mutation."""
+
+        row = self._db().execute("SELECT program_graph_json FROM runs WHERE run_id = ?", (str(program_id),)).fetchone()
+        if row is None:
+            raise RecordNotFound(f"program does not exist: {program_id}")
+        try:
+            graph_value = strict_json_loads(str(row["program_graph_json"]), max_bytes=2_000_000)
+            if not isinstance(graph_value, Mapping):
+                raise ValueError("program graph is not an object")
+            nodes = self._program_node_payloads(graph_value)
+        except (TypeError, ValueError) as exc:
+            raise CorruptSchemaError("program graph projection is invalid") from exc
+        if any(
+            isinstance(payload.get("capsule"), Mapping) and bool(payload["capsule"].get("approval_gates"))
+            for payload in nodes.values()
+        ):
+            raise StaleWriter("approval_capability_unavailable")
+
+    def _require_decision_program_capability_in_transaction(self, decision: sqlite3.Row) -> None:
+        """Apply the retained-graph guard to shared controller decisions."""
+
+        if decision["program_id"] is not None:
+            self._require_program_capability_in_transaction(ProgramId(str(decision["program_id"])))
+
     def _refresh_program_completion_in_transaction(
         self,
         program_id: ProgramId,
@@ -11239,6 +11270,7 @@ class Ledger:
         row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program_id),)).fetchone()
         if row is None:
             raise RecordNotFound(f"program does not exist: {program_id}")
+        self._require_program_capability_in_transaction(program_id)
         status = self._program_status_from_row(row)
         complete = all(program_node_closure_satisfied(node) for node in status.nodes)
         current_state = ProgramState(str(row["program_state"]))
@@ -11622,6 +11654,7 @@ class Ledger:
                 raise RecordNotFound(f"program does not exist: {identity}")
             if row["program_digest"] is None:
                 raise StaleWriter("run is not registered as a program")
+            self._require_program_capability_in_transaction(identity)
             current = str(row["program_state"])
             if current in {ProgramState.COMPLETED.value, ProgramState.FAILED.value}:
                 raise StaleWriter("program is terminal")
@@ -11654,6 +11687,7 @@ class Ledger:
         program = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program_id),)).fetchone()
         if program is None or program["program_digest"] is None:
             raise RecordNotFound(f"program does not exist: {program_id}")
+        self._require_program_capability_in_transaction(program_id)
         decision_id = ControllerDecisionId(f"decision/program/{program_id}/{event_kind.value}/{event_key}")
         existing = (
             self._db()
@@ -11717,6 +11751,10 @@ class Ledger:
         identity = ProgramId(str(program_id))
         kind = event_kind if isinstance(event_kind, ProgramEventKind) else ProgramEventKind(event_kind)
         with self._transaction():
+            # Validate retained/imported graph capability before checkpoint
+            # coalescing can supersede a decision or otherwise mutate
+            # controller state.
+            self._require_program_capability_in_transaction(identity)
             if kind is ProgramEventKind.CHECKPOINT:
                 now = utc_now()
                 # An ACTIVE inspection is a durable deferral, not a terminal
@@ -11799,6 +11837,12 @@ class Ledger:
 
         current = now or utc_now()
         with self._transaction():
+            for program_row in (
+                self._db()
+                .execute("SELECT DISTINCT program_id FROM controller_decisions WHERE program_id IS NOT NULL")
+                .fetchall()
+            ):
+                self._require_program_capability_in_transaction(ProgramId(str(program_row["program_id"])))
             stale = (
                 self._db()
                 .execute(
@@ -11880,13 +11924,16 @@ class Ledger:
             program = (
                 self._db()
                 .execute(
-                    "SELECT program_revision FROM runs WHERE run_id = ?",
+                    "SELECT program_revision, program_digest FROM runs WHERE run_id = ?",
                     (str(row["program_id"]),),
                 )
                 .fetchone()
             )
             if program is None or int(row["program_revision"]) != int(program["program_revision"]):
                 raise StaleWriter("program controller decision belongs to a stale program revision")
+            if program["program_digest"] is None:
+                raise StaleWriter("program controller decision is not bound to a program")
+            self._require_program_capability_in_transaction(ProgramId(str(row["program_id"])))
             concurrent = (
                 self._db()
                 .execute(
@@ -12275,6 +12322,7 @@ class Ledger:
         if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
             raise ValueError("program candidate commit is invalid")
         with self._transaction():
+            self._require_program_capability_in_transaction(program)
             existing = self._program_candidate_sha(program, milestone)
             if existing == candidate_sha:
                 for fact in reversed(self.review_lifecycle(program, milestone)):
@@ -12423,6 +12471,7 @@ class Ledger:
             )
             if row is None or row["program_digest"] is None or milestone_row is None:
                 raise RecordNotFound(f"program candidate does not exist: {program}/{milestone}")
+            self._require_program_capability_in_transaction(program)
             node = self.program_graph(program).node(milestone)
             already_integrated = node.capsule.integration_mode is ProgramIntegrationMode.ALREADY_INTEGRATED
             if already_integrated:
@@ -12684,6 +12733,96 @@ class Ledger:
             raise CorruptSchemaError("runtime evidence manifest identity is invalid")
         return manifest
 
+    def invalidate_runtime_evidence(
+        self,
+        program_id: ProgramId | str,
+        milestone_id: MilestoneId | str,
+        evidence_sha256: str,
+        *,
+        reason: str = "The retained runtime evidence snapshot failed its current integrity rehash.",
+    ) -> ProgramStatus:
+        """Retain a typed integrity blocker when an evidence subject goes stale."""
+
+        subject = ReviewSubject(ProgramOutcomeKind.RUNTIME_EVIDENCE, evidence_sha256)
+        program = ProgramId(str(program_id))
+        milestone = MilestoneId(str(milestone_id))
+        blocker = TypedBlocker(
+            "runtime-evidence-integrity",
+            BlockerKind.EXECUTION,
+            BlockerScope.WHOLE_PROGRAM,
+            True,
+            reason,
+        )
+        data: JsonObject = {"evidence_sha256": subject.digest, "blocker": blocker.to_json()}
+        with self._transaction():
+            row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            milestone_row = (
+                self._db()
+                .execute(
+                    "SELECT * FROM milestones WHERE run_id = ? AND milestone_id = ?",
+                    (str(program), str(milestone)),
+                )
+                .fetchone()
+            )
+            if row is None or row["program_digest"] is None or milestone_row is None:
+                raise RecordNotFound(f"runtime evidence program node does not exist: {program}/{milestone}")
+            self._require_program_capability_in_transaction(program)
+            outcome = self._program_outcome_row(program, milestone, subject)
+            if outcome is None:
+                raise RecordNotFound("runtime evidence outcome does not exist")
+            facts = self.review_lifecycle(program, milestone)
+            existing = next(
+                (
+                    fact
+                    for fact in facts
+                    if fact.kind == "evidence_invalidated" and fact.data.get("evidence_sha256") == subject.digest
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing.data != data:
+                    raise StaleWriter("runtime evidence invalidation conflicts with its durable blocker")
+                return self._program_status_from_row(row)
+            current = WorkflowState(str(milestone_row["current_state"]))
+            if current in {
+                WorkflowState.RUNNING,
+                WorkflowState.COMPLETED,
+                WorkflowState.REVIEWING,
+            }:
+                self._transition_program_state_in_transaction(
+                    program,
+                    milestone,
+                    WorkflowState.BLOCKED,
+                    expected_state=current,
+                    reason=ReasonCode.EXECUTION_FAILURE,
+                )
+            self._record_program_fact_in_transaction(
+                program,
+                milestone,
+                phase=LifecyclePhase.RECOVERY,
+                kind="evidence_invalidated",
+                data=data,
+            )
+            if str(row["program_state"]) == ProgramState.COMPLETED.value:
+                self._db().execute(
+                    "UPDATE runs SET program_state = 'needs_decision', program_revision = program_revision + 1 "
+                    "WHERE run_id = ?",
+                    (str(program),),
+                )
+            self._ensure_program_decision_in_transaction(
+                program,
+                event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                event_key=f"milestone/{milestone}/evidence/{subject.digest}/invalidated",
+                payload={
+                    "milestone_id": str(milestone),
+                    "evidence_sha256": subject.digest,
+                    "blocker": blocker.to_json(),
+                },
+            )
+            refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+            assert refreshed is not None
+            return self._program_status_from_row(refreshed)
+
     def _validate_program_review_set_in_transaction(
         self,
         program_id: ProgramId,
@@ -12715,6 +12854,12 @@ class Ledger:
         }
         if set(review_ids) != accepted or not accepted or accepted_roles != expected_roles:
             raise StaleWriter("program closure requires every exact accepted review")
+        criteria_digest = node.capsule.acceptance_criteria_sha256
+        if criteria_digest is not None and any(
+            fact.kind == "review_completed" and fact.data.get("acceptance_criteria_sha256") != criteria_digest
+            for fact in matching
+        ):
+            raise StaleWriter("program closure reviews are bound to stale acceptance criteria")
         if any(
             fact.kind == "review_completed"
             and self._fact_subject_wire(fact.data) == subject_wire
@@ -12789,6 +12934,7 @@ class Ledger:
             )
             if row is None or row["program_digest"] is None or milestone_row is None:
                 raise RecordNotFound(f"runtime evidence program node does not exist: {program}/{milestone}")
+            self._require_program_capability_in_transaction(program)
             capsule = self._program_node_capsule(program, milestone)
             if (
                 capsule.outcome_kind is not ProgramOutcomeKind.RUNTIME_EVIDENCE
@@ -12957,9 +13103,14 @@ class Ledger:
         receipt: Mapping[str, object] | None = None,
         now: str | None = None,
         advance_program_revision: bool = True,
+        expected_program_revision: int | None = None,
     ) -> None:
         """Close an accepted no-integration or already-integrated subject."""
 
+        self._require_program_capability_in_transaction(program)
+        program_row = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+        if program_row is None or program_row["program_digest"] is None:
+            raise RecordNotFound(f"program does not exist: {program}")
         node = self.program_graph(program).node(milestone)
         expected_outcome, expected_integration = validate_program_outcome_pair(
             node.capsule.outcome_kind, node.capsule.integration_mode
@@ -12968,6 +13119,15 @@ class Ledger:
             raise StaleWriter("program closure subject kind does not match the node")
         if expected_integration is ProgramIntegrationMode.GIT:
             raise StaleWriter("Git-integrated nodes close through their integration receipt")
+        if expected_integration is ProgramIntegrationMode.NO_INTEGRATION:
+            if (
+                isinstance(expected_program_revision, bool)
+                or not isinstance(expected_program_revision, int)
+                or expected_program_revision < 0
+            ):
+                raise StaleWriter("runtime evidence closure requires the harness revision fence")
+            if int(program_row["program_revision"]) != expected_program_revision:
+                raise StaleWriter("runtime evidence closure program revision is stale")
         self._validate_program_review_set_in_transaction(program, milestone, subject, review_ids)
         outcome = self._program_outcome_row(program, milestone, subject)
         facts = self.review_lifecycle(program, milestone)
@@ -13130,6 +13290,7 @@ class Ledger:
         review_ids: Sequence[str],
         receipt: Mapping[str, object] | None = None,
         now: str | None = None,
+        expected_program_revision: int | None = None,
     ) -> ProgramStatus:
         """Atomically mark one independently accepted node closure."""
 
@@ -13145,7 +13306,13 @@ class Ledger:
             typed_subject = ReviewSubject(ProgramOutcomeKind.COMMIT, str(subject))
         with self._transaction():
             self._close_program_node_in_transaction(
-                program, milestone, typed_subject, review_ids, receipt=receipt, now=now
+                program,
+                milestone,
+                typed_subject,
+                review_ids,
+                receipt=receipt,
+                now=now,
+                expected_program_revision=expected_program_revision,
             )
             refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
             assert refreshed is not None
@@ -13172,6 +13339,7 @@ class Ledger:
         except ValueError as exc:
             raise StaleWriter("review subject is malformed") from exc
         with self._transaction():
+            self._require_program_capability_in_transaction(program)
             node = self.program_graph(program).node(milestone)
             if subject.kind is not node.capsule.outcome_kind or self._program_subject(program, milestone) != subject:
                 raise StaleWriter("review does not cover the exact current program subject")
@@ -13190,6 +13358,8 @@ class Ledger:
                 "finding_ids": [item.finding_id for item in result.findings],
                 "promotion_blocking": (not result.accepted) or any(item.promotion_blocking for item in result.findings),
             }
+            if node.capsule.acceptance_criteria_sha256 is not None:
+                data["acceptance_criteria_sha256"] = node.capsule.acceptance_criteria_sha256
             if subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE:
                 data["evidence_sha256"] = subject.digest
             else:
@@ -13285,6 +13455,7 @@ class Ledger:
             )
             if row is None or row["program_digest"] is None or milestone_row is None:
                 raise RecordNotFound(f"program candidate does not exist: {program}/{milestone}")
+            self._require_program_capability_in_transaction(program)
             facts = self.review_lifecycle(program, milestone)
             if not any(
                 fact.kind in {"candidate_adopted", "candidate_recorded", "candidate_reconciled"}
@@ -13435,6 +13606,9 @@ class Ledger:
         )
         if current is None:
             raise RecordNotFound(f"program milestone does not exist: {program_id}/{milestone_id}")
+        run = self._db().execute("SELECT program_digest FROM runs WHERE run_id = ?", (str(program_id),)).fetchone()
+        if run is not None and run["program_digest"] is not None:
+            self._require_program_capability_in_transaction(ProgramId(str(program_id)))
         actual = WorkflowState(str(current["current_state"]))
         if actual is expected_state and actual is not target:
             if not is_transition_allowed(actual, target):
@@ -13522,6 +13696,7 @@ class Ledger:
             )
             if row is None or row["program_digest"] is None or milestone_row is None:
                 raise RecordNotFound(f"program executor result does not exist: {program}/{milestone}")
+            self._require_program_capability_in_transaction(program)
             for fact in reversed(self.review_lifecycle(program, milestone)):
                 if fact.kind != "executor_terminal" or fact.data.get("dispatch_id") != dispatch_value:
                     continue
@@ -13909,35 +14084,13 @@ class Ledger:
                     or self._program_subject(bundle.program_id, MilestoneId(action.milestone_id)) != subject
                 ):
                     raise StaleWriter("program promotion action does not target the exact program subject")
+                self._validate_program_review_set_in_transaction(
+                    bundle.program_id,
+                    MilestoneId(action.milestone_id),
+                    subject,
+                    action.review_ids,
+                )
                 facts = self.review_lifecycle(bundle.program_id, action.milestone_id)
-                accepted = {
-                    str(item.data.get("review_id"))
-                    for item in facts
-                    if item.kind == "review_completed"
-                    and item.data.get("accepted") is True
-                    and self._fact_subject_wire(item.data) == subject.wire_value
-                }
-                capsule = nodes[action.milestone_id].get("capsule")
-                modes = capsule.get("acceptance_modes", []) if isinstance(capsule, dict) else []
-                expected_roles = {
-                    role_by_mode[mode] for mode in modes if isinstance(mode, str) and mode in role_by_mode
-                }
-                accepted_roles = {
-                    str(item.data.get("reviewer_role"))
-                    for item in facts
-                    if item.kind == "review_completed"
-                    and item.data.get("accepted") is True
-                    and self._fact_subject_wire(item.data) == subject.wire_value
-                }
-                if set(action.review_ids) != accepted or not accepted or accepted_roles != expected_roles:
-                    raise StaleWriter("program promotion requires every exact accepted review")
-                if any(
-                    item.kind == "review_completed"
-                    and self._fact_subject_wire(item.data) == subject.wire_value
-                    and item.data.get("promotion_blocking") is True
-                    for item in facts
-                ):
-                    raise StaleWriter("program promotion has a promotion-blocking finding")
                 terminal_blocker = self._program_applicable_blocker(
                     bundle.program_id,
                     operation="promote",
@@ -13945,19 +14098,28 @@ class Ledger:
                 )
                 if terminal_blocker is not None:
                     raise StaleWriter("program promotion has a promotion-blocking terminal blocker")
+                state = self.current_state(bundle.program_id, action.milestone_id)
+                if node.integration_mode is ProgramIntegrationMode.NO_INTEGRATION:
+                    # Runtime evidence is an external effect of the action:
+                    # the harness must rehash the immutable snapshot under
+                    # its current revision fence before this closure is
+                    # recorded.  Keeping this branch free of lifecycle
+                    # mutation also protects recovered outbox replay.
+                    if state is not WorkflowState.REVIEWING:
+                        raise StaleWriter("runtime evidence promotion requires a reviewing milestone")
+                    effects.append(f"promote:{action.milestone_id}:{subject.wire_value}")
+                    continue
                 if not any(
                     item.kind == "promotion_accepted" and self._fact_subject_wire(item.data) == subject.wire_value
                     for item in facts
                 ):
-                    if node.integration_mode is ProgramIntegrationMode.GIT:
-                        self._record_program_fact_in_transaction(
-                            bundle.program_id,
-                            action.milestone_id,
-                            phase=LifecyclePhase.ACCEPTANCE,
-                            kind="promotion_accepted",
-                            data={"candidate_sha": subject.digest, "review_ids": list(action.review_ids)},
-                        )
-                state = self.current_state(bundle.program_id, action.milestone_id)
+                    self._record_program_fact_in_transaction(
+                        bundle.program_id,
+                        action.milestone_id,
+                        phase=LifecyclePhase.ACCEPTANCE,
+                        kind="promotion_accepted",
+                        data={"candidate_sha": subject.digest, "review_ids": list(action.review_ids)},
+                    )
                 if node.integration_mode is ProgramIntegrationMode.GIT:
                     if state is WorkflowState.REVIEWING:
                         self._transition_program_state_in_transaction(
@@ -14126,6 +14288,7 @@ class Ledger:
             program = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(bundle.program_id),)).fetchone()
             if program is None:
                 raise RecordNotFound(f"program does not exist: {bundle.program_id}")
+            self._require_program_capability_in_transaction(bundle.program_id)
             existing_outbox = (
                 self._db()
                 .execute("SELECT * FROM controller_action_outbox WHERE decision_id = ?", (str(bundle.decision_id),))
@@ -14266,6 +14429,7 @@ class Ledger:
             )
             if program_row is None:
                 raise RecordNotFound(f"program does not exist: {program}")
+            self._require_program_capability_in_transaction(program)
             integration_id = f"integration/{program}/{milestone}/{candidate_sha}"
             pending = (
                 self._db()
@@ -14469,6 +14633,7 @@ class Ledger:
             raise ValueError("applied program action effect cannot carry an error")
         with self._transaction():
             program, milestone, bundle = self._program_action_effect_binding(action_id, effect_id)
+            self._require_program_capability_in_transaction(program)
             existing = self.program_action_effect_state(action_id, effect_id)
             if existing == state:
                 self._acknowledge_program_action_if_terminal_in_transaction(action_id, bundle)
@@ -14558,6 +14723,7 @@ class Ledger:
             row = self._db().execute("SELECT program_state FROM runs WHERE run_id = ?", (str(program),)).fetchone()
             if row is None:
                 raise RecordNotFound(f"program does not exist: {program}")
+            self._require_program_capability_in_transaction(program)
             self._db().execute(
                 "UPDATE runs SET program_state = 'needs_decision' WHERE run_id = ? AND program_state NOT IN ('completed', 'failed', 'external_blocked')",
                 (str(program),),
@@ -14670,6 +14836,8 @@ class Ledger:
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            if decision["program_id"] is not None:
+                self._require_program_capability_in_transaction(ProgramId(str(decision["program_id"])))
             if int(decision["current_generation"]) != int(generation_value):
                 raise StaleWriter("controller generation is stale")
             if str(decision["state"]) not in {
@@ -14809,6 +14977,7 @@ class Ledger:
             )
             if decision is None or row is None:
                 raise RecordNotFound(f"controller launch authority does not exist: {identity}/{generation_value}")
+            self._require_decision_program_capability_in_transaction(decision)
             authority = (
                 self._db().execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()
             )
@@ -14850,6 +15019,7 @@ class Ledger:
             )
             if decision is None or row is None:
                 raise RecordNotFound(f"controller launch authority does not exist: {identity}/{generation_value}")
+            self._require_decision_program_capability_in_transaction(decision)
             authority = (
                 self._db().execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()
             )
@@ -14899,13 +15069,14 @@ class Ledger:
             decision = (
                 self._db()
                 .execute(
-                    "SELECT current_generation FROM controller_decisions WHERE decision_id = ?",
+                    "SELECT current_generation, program_id FROM controller_decisions WHERE decision_id = ?",
                     (str(identity),),
                 )
                 .fetchone()
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if int(decision["current_generation"]) != int(generation_value):
                 raise StaleWriter("controller generation is stale")
             row = (
@@ -14979,13 +15150,14 @@ class Ledger:
             decision = (
                 self._db()
                 .execute(
-                    "SELECT current_generation FROM controller_decisions WHERE decision_id = ?",
+                    "SELECT current_generation, program_id FROM controller_decisions WHERE decision_id = ?",
                     (str(identity),),
                 )
                 .fetchone()
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if int(decision["current_generation"]) != int(generation_value):
                 raise StaleWriter("controller generation is stale")
             row = (
@@ -15060,13 +15232,14 @@ class Ledger:
             decision = (
                 self._db()
                 .execute(
-                    "SELECT current_generation FROM controller_decisions WHERE decision_id = ?",
+                    "SELECT current_generation, program_id FROM controller_decisions WHERE decision_id = ?",
                     (str(identity),),
                 )
                 .fetchone()
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if int(decision["current_generation"]) != int(generation_value):
                 raise StaleWriter("controller generation is stale")
             row = (
@@ -15147,6 +15320,7 @@ class Ledger:
                 raise RecordNotFound(
                     f"controller profile-drift authority does not exist: {identity}/{generation_value}"
                 )
+            self._require_decision_program_capability_in_transaction(decision)
             if int(decision["current_generation"]) != int(generation_value):
                 raise StaleWriter("controller profile-drift generation is stale")
             if (
@@ -15311,6 +15485,7 @@ class Ledger:
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if int(decision["revision"]) != expected_revision:
                 raise StaleWriter("controller replacement revision is stale")
             generation = (
@@ -15402,6 +15577,7 @@ class Ledger:
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if int(decision["revision"]) != expected_revision:
                 raise StaleWriter("controller replan revision is stale")
             generations = (
@@ -15522,13 +15698,14 @@ class Ledger:
             decision = (
                 self._db()
                 .execute(
-                    "SELECT revision, state, claimant_kind, claimant_id, claim_token_sha256, claim_lease_expires_at FROM controller_decisions WHERE decision_id = ?",
+                    "SELECT revision, state, claimant_kind, claimant_id, claim_token_sha256, claim_lease_expires_at, program_id FROM controller_decisions WHERE decision_id = ?",
                     (str(identity),),
                 )
                 .fetchone()
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if int(decision["revision"]) != expected_revision:
                 raise StaleWriter("controller pre-identity reset authority is stale")
             if claimant_id or token:
@@ -15616,6 +15793,7 @@ class Ledger:
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if (
                 int(decision["current_generation"]) != int(generation_value)
                 or int(decision["revision"]) != expected_revision
@@ -15687,6 +15865,8 @@ class Ledger:
     def _controller_completed_inspection_claimant_audit_sha256(
         decision: sqlite3.Row,
         generation: sqlite3.Row,
+        *,
+        audit_revision: int | None = None,
     ) -> str:
         """Bind a completed read to its exact non-secret model owner facts."""
 
@@ -15697,19 +15877,25 @@ class Ledger:
             or decision["claim_started_at"] is None
         ):
             raise CorruptSchemaError("completed controller inspection lacks its model claimant audit")
-        audit_revision = int(decision["revision"])
-        if generation["inspection_bundle_json"] is not None:
+        resolved_revision = int(decision["revision"]) if audit_revision is None else audit_revision
+        if audit_revision is None and generation["inspection_bundle_json"] is not None:
+            bundle_text = str(generation["inspection_bundle_json"])
             try:
-                inspected_bundle = ModelFacingControllerActionBundle.from_json_bytes(
-                    str(generation["inspection_bundle_json"])
-                )
-            except (TypeError, ValueError) as exc:
-                raise CorruptSchemaError("controller recovery inspected bundle is malformed") from exc
-            audit_revision = inspected_bundle.expected_revision
+                inspected_bundle = ModelFacingControllerActionBundle.from_json_bytes(bundle_text)
+            except (TypeError, ValueError):
+                try:
+                    inspected_bundle = ModelFacingProgramControllerActionBundle.from_json_bytes(bundle_text)
+                except (TypeError, ValueError) as exc:
+                    raise CorruptSchemaError("controller recovery inspected bundle is malformed") from exc
+            resolved_revision = (
+                inspected_bundle.expected_revision
+                if isinstance(inspected_bundle, ModelFacingControllerActionBundle)
+                else inspected_bundle.expected_program_revision
+            )
         payload = {
             "decision_id": str(decision["decision_id"]),
             "generation": int(generation["generation"]),
-            "revision": audit_revision,
+            "revision": resolved_revision,
             "claimant_kind": str(decision["claimant_kind"]),
             "claimant_id": str(decision["claimant_id"]),
             "claim_token_sha256": str(decision["claim_token_sha256"]),
@@ -15750,6 +15936,7 @@ class Ledger:
             )
             if row is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(row)
             if generation is not None and int(row["current_generation"]) != generation:
                 raise StaleWriter("controller generation is stale")
             if str(row["state"]) in {
@@ -15895,6 +16082,7 @@ class Ledger:
             )
             if row is None or row["claim_token_sha256"] != token_hash or row["claimant_id"] != claimant_id:
                 raise StaleWriter("controller claim token is stale")
+            self._require_decision_program_capability_in_transaction(row)
             if int(row["revision"]) != expected_revision or row["state"] != ControllerDecisionState.CLAIMED.value:
                 raise StaleWriter("controller claim revision or state is stale")
             if row["claim_lease_expires_at"] is not None and str(row["claim_lease_expires_at"]) <= current:
@@ -15973,6 +16161,7 @@ class Ledger:
             )
             if decision is None or generation_row is None:
                 raise RecordNotFound(f"controller rate-limit decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if (
                 int(decision["revision"]) != expected_revision
                 or int(decision["current_generation"]) != int(generation_value)
@@ -16413,6 +16602,14 @@ class Ledger:
         """Commit the exact program bundle retained by one recovery read."""
 
         identity = ControllerDecisionId(str(decision_id))
+        decision = (
+            self._db()
+            .execute(
+                "SELECT claimant_id FROM controller_decisions WHERE decision_id = ?",
+                (str(identity),),
+            )
+            .fetchone()
+        )
         row = (
             self._db()
             .execute(
@@ -16431,6 +16628,8 @@ class Ledger:
             or row["inspection_bundle_sha256"] is None
         ):
             raise StaleWriter("program controller recovery has no persisted inspected bundle")
+        if decision is None or decision["claimant_id"] is None:
+            raise StaleWriter("program controller recovery claimant is unavailable")
         try:
             persisted = ModelFacingProgramControllerActionBundle.from_json_bytes(str(row["inspection_bundle_json"]))
         except (TypeError, ValueError) as exc:
@@ -16441,7 +16640,7 @@ class Ledger:
             raise CorruptSchemaError("program controller recovery bundle digest is invalid")
         return self.submit_program_controller_actions(
             persisted,
-            claimant_id="recovery-inspection",
+            claimant_id=str(decision["claimant_id"]),
             token="",
             allow_recovered=True,
             now=now,
@@ -16472,6 +16671,7 @@ class Ledger:
             )
             if row is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(row)
             outbox = (
                 self._db()
                 .execute("SELECT * FROM controller_action_outbox WHERE action_id = ?", (action_id,))
@@ -16623,6 +16823,8 @@ class Ledger:
                 if decision_row is not None
                 else None
             )
+            if decision_row is not None:
+                self._require_decision_program_capability_in_transaction(decision_row)
             if (
                 decision_row is not None
                 and generation_row is not None
@@ -16663,6 +16865,7 @@ class Ledger:
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if str(decision["state"]) in {
                 ControllerDecisionState.ACTION_COMMITTED.value,
                 ControllerDecisionState.ACKNOWLEDGED.value,
@@ -16784,6 +16987,7 @@ class Ledger:
             )
             if decision is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(decision)
             if str(decision["state"]) not in {
                 ControllerDecisionState.AWAITING_CLAIM.value,
                 ControllerDecisionState.CLAIMED.value,
@@ -16835,13 +17039,19 @@ class Ledger:
                     if isinstance(bundle, ModelFacingControllerActionBundle)
                     else bundle.expected_program_revision
                 )
-                if int(bundle_revision) != int(decision["revision"]):
+                expected_bundle_revision = (
+                    int(decision["revision"])
+                    if isinstance(bundle, ModelFacingControllerActionBundle)
+                    else int(decision["program_revision"])
+                )
+                if int(bundle_revision) != expected_bundle_revision:
                     raise StaleWriter("controller inspection bundle revision is stale")
                 bundle_json = bundle.to_json_bytes().decode("utf-8")
                 bundle_sha256 = bundle.sha256
                 inspection_audit_sha256 = self._controller_completed_inspection_claimant_audit_sha256(
                     decision,
                     generation,
+                    audit_revision=int(bundle_revision),
                 )
             elif bundle is not None:
                 raise ValueError("non-completed controller inspection cannot carry an action bundle")
@@ -16983,6 +17193,7 @@ class Ledger:
             )
             if row is None:
                 raise RecordNotFound(f"controller decision does not exist: {identity}")
+            self._require_decision_program_capability_in_transaction(row)
             expires = row["claim_lease_expires_at"]
             generation = (
                 self._db()

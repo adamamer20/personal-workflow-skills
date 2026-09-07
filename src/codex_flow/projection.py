@@ -85,19 +85,38 @@ _EXECUTION_KEYS: Final[frozenset[str]] = frozenset(
         "permission_mode",
     }
 )
+_EXECUTION_KEYS_WITH_CRITERIA: Final[frozenset[str]] = _EXECUTION_KEYS | {"acceptance_criteria_sha256"}
 _EXECUTION_KEYS_WITH_MODES: Final[frozenset[str]] = _EXECUTION_KEYS | {"acceptance_modes"}
+_EXECUTION_KEYS_WITH_CRITERIA_AND_MODES: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_CRITERIA | {"acceptance_modes"}
 _EXECUTION_KEYS_WITH_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS | {"plugin_requirements"}
+_EXECUTION_KEYS_WITH_CRITERIA_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_CRITERIA | {
+    "plugin_requirements"
+}
 _EXECUTION_KEYS_WITH_MODES_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS | {
     "acceptance_modes",
     "plugin_requirements",
 }
+_EXECUTION_KEYS_WITH_CRITERIA_MODES_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_CRITERIA | {
+    "acceptance_modes",
+    "plugin_requirements",
+}
 _EXECUTION_KEYS_WITH_IMAGES: Final[frozenset[str]] = _EXECUTION_KEYS | {"local_image_paths"}
+_EXECUTION_KEYS_WITH_CRITERIA_AND_IMAGES: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_CRITERIA | {"local_image_paths"}
 _EXECUTION_KEYS_WITH_IMAGES_AND_MODES: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_IMAGES | {"acceptance_modes"}
+_EXECUTION_KEYS_WITH_CRITERIA_IMAGES_AND_MODES: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_CRITERIA_AND_IMAGES | {
+    "acceptance_modes"
+}
 _EXECUTION_KEYS_WITH_IMAGES_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_IMAGES | {"plugin_requirements"}
+_EXECUTION_KEYS_WITH_CRITERIA_IMAGES_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_CRITERIA_AND_IMAGES | {
+    "plugin_requirements"
+}
 _EXECUTION_KEYS_WITH_IMAGES_MODES_AND_PLUGINS: Final[frozenset[str]] = _EXECUTION_KEYS_WITH_IMAGES | {
     "acceptance_modes",
     "plugin_requirements",
 }
+_EXECUTION_KEYS_WITH_CRITERIA_IMAGES_MODES_AND_PLUGINS: Final[frozenset[str]] = (
+    _EXECUTION_KEYS_WITH_CRITERIA_AND_IMAGES | {"acceptance_modes", "plugin_requirements"}
+)
 _DEFAULT_VALIDATION: Final[ValidationSpec] = ValidationSpec(("git", "diff", "--check"), 60.0)
 _LANE: Final[str] = "model-facing"
 
@@ -332,13 +351,21 @@ def load_control_capsule(path: Path, *, state_root: Path) -> tuple[ExecutionCaps
             raise ProjectionError("model-facing capsule is malformed") from exc
     if keys in {
         _EXECUTION_KEYS,
+        _EXECUTION_KEYS_WITH_CRITERIA,
         _EXECUTION_KEYS_WITH_MODES,
+        _EXECUTION_KEYS_WITH_CRITERIA_AND_MODES,
         _EXECUTION_KEYS_WITH_PLUGINS,
+        _EXECUTION_KEYS_WITH_CRITERIA_AND_PLUGINS,
         _EXECUTION_KEYS_WITH_MODES_AND_PLUGINS,
+        _EXECUTION_KEYS_WITH_CRITERIA_MODES_AND_PLUGINS,
         _EXECUTION_KEYS_WITH_IMAGES,
+        _EXECUTION_KEYS_WITH_CRITERIA_AND_IMAGES,
         _EXECUTION_KEYS_WITH_IMAGES_AND_MODES,
+        _EXECUTION_KEYS_WITH_CRITERIA_IMAGES_AND_MODES,
         _EXECUTION_KEYS_WITH_IMAGES_AND_PLUGINS,
+        _EXECUTION_KEYS_WITH_CRITERIA_IMAGES_AND_PLUGINS,
         _EXECUTION_KEYS_WITH_IMAGES_MODES_AND_PLUGINS,
+        _EXECUTION_KEYS_WITH_CRITERIA_IMAGES_MODES_AND_PLUGINS,
     }:
         try:
             return capsule_from_json(decoded), hashlib.sha256(raw).hexdigest()

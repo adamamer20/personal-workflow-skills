@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from codex_flow.domain import (
     Generation,
     MilestoneId,
     NativePermissionMode,
+    ProgramApprovalGate,
     ProgramControllerActionKind,
     ProgramControllerDecisionStatus,
     ProgramEventKind,
@@ -38,6 +40,7 @@ from codex_flow.domain import (
     WorkflowState,
     WorkspaceMode,
 )
+from codex_flow.harness import WorkflowHarness
 from codex_flow.ledger import Ledger, StaleWriter
 from codex_flow.runtime_evidence import (
     RuntimeEvidenceError,
@@ -45,6 +48,7 @@ from codex_flow.runtime_evidence import (
     capture_runtime_evidence,
     verify_runtime_evidence,
 )
+from codex_flow.worktrees import WorktreeError
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -130,9 +134,71 @@ def _runtime_graph(root: Path) -> tuple[ProgramGraph, ExecutionCapsule, str]:
     return graph, capsule, source_head
 
 
-def _apply_program_action(
+def _gate_test_graph(root: Path) -> ProgramGraph:
+    source_head = _repository(root)
+    runtime = _runtime_capsule(root, source_head)
+    downstream = ExecutionCapsule(
+        runtime.capsule_version,
+        runtime.run_id,
+        MilestoneId("downstream"),
+        runtime.repository_root,
+        runtime.workspace_mode,
+        runtime.workspace_path,
+        runtime.branch,
+        runtime.base_sha,
+        runtime.lane,
+        ("downstream",),
+        runtime.protected_paths,
+        runtime.validation,
+        runtime.model,
+        runtime.reasoning_effort,
+        runtime.prompt,
+        runtime.output_schema,
+        runtime.permission_mode,
+        runtime.acceptance_modes,
+        runtime.plugin_requirements,
+        runtime.local_image_paths,
+        runtime.outcome_kind,
+        runtime.integration_mode,
+        runtime.runtime_artifact_paths,
+        runtime.runtime_artifact_max_files,
+        runtime.runtime_artifact_max_bytes,
+        (),
+        runtime.acceptance_criteria_sha256,
+    )
+    return ProgramGraph(
+        ProgramId("program"),
+        root / "canonical-plan.md",
+        "b" * 64,
+        (
+            ProgramNodeSpec(MilestoneId("runtime"), runtime),
+            ProgramNodeSpec(MilestoneId("downstream"), downstream, (MilestoneId("runtime"),)),
+        ),
+        source_head,
+    )
+
+
+def _inject_retained_approval_gate(ledger: Ledger) -> None:
+    row = ledger._db().execute("SELECT program_graph_json FROM runs WHERE run_id = 'program'").fetchone()
+    assert row is not None
+    graph = json.loads(str(row["program_graph_json"]))
+    graph["nodes"][0]["capsule"]["approval_gates"] = [
+        ProgramApprovalGate(
+            "operator-approval",
+            (MilestoneId("downstream"),),
+            (MilestoneId("runtime"),),
+            "The retained graph requires an operator decision.",
+        ).to_json()
+    ]
+    ledger._db().execute(
+        "UPDATE runs SET program_graph_json = ? WHERE run_id = 'program'",
+        (json.dumps(graph, ensure_ascii=False, sort_keys=True, separators=(",", ":")),),
+    )
+
+
+def _submit_program_action(
     ledger: Ledger, status: ProgramControllerDecisionStatus, action: ModelFacingProgramControllerAction
-) -> None:
+) -> tuple[ModelFacingProgramControllerActionBundle, object, object]:
     decision_id = status.decision_id
     claim = ledger.claim_program_controller_decision(
         decision_id,
@@ -158,10 +224,32 @@ def _apply_program_action(
         claimant_id=claim.claimant_id,
         token=str(claim.token),
     )
+    return bundle, receipt, claim
+
+
+def _apply_program_action(
+    ledger: Ledger, status: ProgramControllerDecisionStatus, action: ModelFacingProgramControllerAction
+) -> None:
+    bundle, receipt, claim = _submit_program_action(ledger, status, action)
+    if action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE and action.evidence_sha256 is not None:
+        manifest = ledger.runtime_evidence_manifest("program", action.milestone_id or "", action.evidence_sha256)
+        verify_runtime_evidence(
+            runtime_evidence_module.RuntimeEvidenceSnapshot(
+                manifest,
+                ledger.path.parent / ".codex-flow" / "artifacts" / "runtime-evidence" / action.evidence_sha256,
+            )
+        )
+        ledger.close_program_node(
+            "program",
+            action.milestone_id or "",
+            subject=action.subject_wire or "",
+            review_ids=action.review_ids,
+            expected_program_revision=int(status.payload["program_revision"]) + 1,
+        )
     for effect_id, _milestone_id in bundle.external_effects:
         ledger.record_program_action_effect(bundle.action_id, effect_id, state="applied")
     ledger.acknowledge_controller_action(
-        decision_id,
+        bundle.decision_id,
         action_id=receipt.action_id,
         bundle_sha256=bundle.sha256,
         committed_revision=receipt.expected_revision + 1,
@@ -169,10 +257,87 @@ def _apply_program_action(
         token=str(claim.token),
     )
     ledger.complete_controller_generation(
-        decision_id,
+        bundle.decision_id,
         generation=int(claim.generation),
         state="completed",
     )
+
+
+def _runtime_review_ready(
+    tmp_path: Path,
+) -> tuple[
+    Ledger, ExecutionCapsule, str, runtime_evidence_module.RuntimeEvidenceSnapshot, ProgramControllerDecisionStatus
+]:
+    graph, capsule, source_head = _runtime_graph(tmp_path)
+    state_dir = tmp_path / ".codex-flow"
+    state_dir.mkdir()
+    ledger = Ledger(state_dir / "workflow.db")
+    ledger.register_program(graph)
+    start = ledger.start_program("program")
+    _apply_program_action(
+        ledger,
+        start,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_READY_MILESTONES,
+            milestone_ids=("runtime",),
+        ),
+    )
+    ledger.claim_dispatch("program", "runtime", "executor", 1)
+    manifest = _manifest(capsule, source_head)
+    snapshot = capture_runtime_evidence(
+        tmp_path,
+        ("evidence",),
+        max_files=4,
+        max_bytes=4_096,
+        manifest=manifest,
+        snapshot_root=tmp_path / ".codex-flow" / "artifacts" / "runtime-evidence",
+    )
+    ledger.record_runtime_evidence(
+        "program",
+        "runtime",
+        manifest=snapshot.manifest,
+        terminal_status="completed",
+        dispatch_id=DispatchId("program/runtime/executor/1"),
+    )
+    implementation = next(
+        item
+        for item in ledger.program_controller_decisions()
+        if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
+    )
+    _apply_program_action(
+        ledger,
+        implementation,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_REVIEWS,
+            milestone_id="runtime",
+            evidence_sha256=snapshot.digest,
+            review_roles=("architecture-reviewer", "code-reviewer"),
+        ),
+    )
+    subject = f"runtime_evidence:{snapshot.digest}"
+    ledger.record_program_review(
+        "program",
+        "runtime",
+        ReviewResult(
+            "runtime-code", RoleId("code-reviewer"), True, (), subject, acceptance_mode=AcceptanceMode.OBJECTIVE
+        ),
+    )
+    ledger.record_program_review(
+        "program",
+        "runtime",
+        ReviewResult(
+            "runtime-architecture",
+            RoleId("architecture-reviewer"),
+            True,
+            (),
+            subject,
+            acceptance_mode=AcceptanceMode.ARCHITECTURE,
+        ),
+    )
+    review_completion = next(
+        item for item in ledger.program_controller_decisions() if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+    )
+    return ledger, capsule, source_head, snapshot, review_completion
 
 
 def test_runtime_evidence_capture_is_nested_content_addressed_and_rehashable(tmp_path: Path) -> None:
@@ -417,4 +582,193 @@ def test_runtime_evidence_failed_terminal_is_retained_with_a_blocker_and_exact_r
                 dispatch_id="program/runtime/executor/1",
             )
     finally:
+        ledger.close()
+
+
+def test_retained_gate_graph_is_rejected_before_start_mutation(tmp_path: Path) -> None:
+    graph = _gate_test_graph(tmp_path)
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(graph)
+        before = (
+            ledger._db().execute("SELECT program_state, program_revision FROM runs WHERE run_id = 'program'").fetchone()
+        )
+        assert before is not None
+        assert ledger.program_controller_decisions() == ()
+
+        _inject_retained_approval_gate(ledger)
+        with pytest.raises(StaleWriter, match="approval_capability_unavailable"):
+            ledger.start_program("program")
+
+        after = (
+            ledger._db().execute("SELECT program_state, program_revision FROM runs WHERE run_id = 'program'").fetchone()
+        )
+        assert after is not None
+        assert tuple(after) == tuple(before)
+        assert ledger.program_controller_decisions() == ()
+    finally:
+        ledger.close()
+
+
+def test_retained_gate_graph_blocks_launch_and_recovered_outbox_replay(tmp_path: Path) -> None:
+    graph = _gate_test_graph(tmp_path)
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(graph)
+        started = ledger.start_program("program")
+        claim = ledger.claim_program_controller_decision(
+            started.decision_id,
+            claimant_id="program-controller/runtime-test",
+            expected_revision=started.revision,
+            generation=int(started.current_generation),
+        )
+        before_launch = (
+            ledger._db().execute("SELECT program_state, program_revision FROM runs WHERE run_id = 'program'").fetchone()
+        )
+        generation_before = ledger.controller_generation(started.decision_id, int(started.current_generation))
+        _inject_retained_approval_gate(ledger)
+
+        with pytest.raises(StaleWriter, match="approval_capability_unavailable"):
+            ledger.prepare_controller_generation(
+                started.decision_id,
+                generation=started.current_generation,
+            )
+        generation_after = ledger.controller_generation(started.decision_id, int(started.current_generation))
+        after_launch = (
+            ledger._db().execute("SELECT program_state, program_revision FROM runs WHERE run_id = 'program'").fetchone()
+        )
+        assert before_launch is not None and after_launch is not None
+        assert tuple(after_launch) == tuple(before_launch)
+        assert generation_after == generation_before
+
+        # A committed action is retained before the graph is imported/mutated;
+        # replay must hit the same closed capability guard before returning it.
+        # Use a fresh gate-free program decision revision for this outbox proof.
+        ledger._db().execute(
+            "UPDATE runs SET program_graph_json = ? WHERE run_id = 'program'",
+            (
+                json.dumps(
+                    ledger._program_graph_projection(graph), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+            ),
+        )
+        action = ModelFacingProgramControllerAction(ProgramControllerActionKind.ACKNOWLEDGE_ONLY)
+        bundle = ModelFacingProgramControllerActionBundle(
+            1,
+            started.decision_id,
+            started.program_id,
+            "b" * 64,
+            Generation(int(claim.generation)),
+            started.event_kind,
+            started.event_key,
+            started.payload["program_revision"],
+            started.payload["trunk_head"],
+            (action,),
+            "retained outbox replay capability proof",
+        )
+        inspection_claim = ledger.reserve_controller_recovery_inspection(started.decision_id)
+        ledger.complete_controller_recovery_inspection(
+            started.decision_id,
+            inspection_outcome="completed",
+            claim=inspection_claim,
+            bundle=bundle,
+        )
+        receipt = ledger.submit_recovered_program_controller_actions(started.decision_id)
+        _inject_retained_approval_gate(ledger)
+        before_replay = (
+            ledger._db().execute("SELECT program_state, program_revision FROM runs WHERE run_id = 'program'").fetchone()
+        )
+        with pytest.raises(StaleWriter, match="approval_capability_unavailable"):
+            ledger.submit_recovered_program_controller_actions(started.decision_id)
+        after_replay = (
+            ledger._db().execute("SELECT program_state, program_revision FROM runs WHERE run_id = 'program'").fetchone()
+        )
+        assert before_replay is not None and after_replay is not None
+        assert tuple(after_replay) == tuple(before_replay)
+        assert receipt.action_id == bundle.action_id
+        harness = WorkflowHarness(tmp_path)
+        try:
+            assert harness._reconcile_program_action_outboxes() is False
+        finally:
+            harness.close()
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("damage", ("missing", "corrupt"))
+def test_runtime_promotion_rehash_blocks_missing_or_corrupt_snapshot(tmp_path: Path, damage: str) -> None:
+    ledger, _capsule, _source_head, snapshot, review_completion = _runtime_review_ready(tmp_path)
+    harness = WorkflowHarness(tmp_path)
+    try:
+        bundle, _receipt, _claim = _submit_program_action(
+            ledger,
+            review_completion,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                milestone_id="runtime",
+                evidence_sha256=snapshot.digest,
+                review_ids=("runtime-architecture", "runtime-code"),
+            ),
+        )
+        if damage == "missing":
+            shutil.rmtree(snapshot.root)
+        else:
+            snapshot.manifest_path.write_text("corrupt\n")
+
+        with pytest.raises(WorktreeError, match="pre-acceptance rehash"):
+            harness._apply_program_action_bundle(bundle)
+        status = ledger.program_status("program")
+        assert status.nodes[0].closure_satisfied is False
+        assert status.nodes[0].blocker is not None
+        assert ledger.program_action_effect_state(bundle.action_id, bundle.external_effects[0][0]) == "pending"
+    finally:
+        harness.close()
+        ledger.close()
+
+
+def test_recovered_runtime_promotion_rehashes_before_closure(tmp_path: Path) -> None:
+    ledger, _capsule, _source_head, snapshot, review_completion = _runtime_review_ready(tmp_path)
+    harness = WorkflowHarness(tmp_path)
+    try:
+        claim = ledger.claim_program_controller_decision(
+            review_completion.decision_id,
+            claimant_id="program-controller/runtime-test",
+            expected_revision=review_completion.revision,
+            generation=int(review_completion.current_generation),
+        )
+        bundle = ModelFacingProgramControllerActionBundle(
+            1,
+            review_completion.decision_id,
+            review_completion.program_id,
+            "b" * 64,
+            Generation(int(claim.generation)),
+            review_completion.event_kind,
+            review_completion.event_key,
+            review_completion.payload["program_revision"],
+            review_completion.payload["trunk_head"],
+            (
+                ModelFacingProgramControllerAction(
+                    ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                    milestone_id="runtime",
+                    evidence_sha256=snapshot.digest,
+                    review_ids=("runtime-architecture", "runtime-code"),
+                ),
+            ),
+            "bounded runtime evidence recovery promotion proof",
+        )
+        inspection_claim = ledger.reserve_controller_recovery_inspection(review_completion.decision_id)
+        ledger.complete_controller_recovery_inspection(
+            review_completion.decision_id,
+            inspection_outcome="completed",
+            claim=inspection_claim,
+            bundle=bundle,
+        )
+        recovered = ledger.submit_recovered_program_controller_actions(review_completion.decision_id)
+        assert recovered.action_id == bundle.action_id
+        assert harness._apply_program_action_outbox(bundle.action_id) is True
+        status = ledger.program_status("program")
+        assert status.state.value == "completed"
+        assert status.nodes[0].closure_satisfied is True
+    finally:
+        harness.close()
         ledger.close()

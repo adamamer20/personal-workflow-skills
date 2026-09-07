@@ -691,6 +691,10 @@ class WorkflowHarness:
 
         if self.epoch is None:
             return False
+        try:
+            self._assert_program_capability_available(self.ledger.program_graph(status.program_id))
+        except WorktreeError:
+            return False
         decision_id = str(status.decision_id)
         if decision_id in self._controller_children:
             return False
@@ -926,6 +930,7 @@ class WorkflowHarness:
 
         graph = self.ledger.program_graph(program_id)
         node = graph.node(milestone_id)
+        self._assert_program_capability_available(graph)
         dispatch_id = str(DispatchId.from_parts(program_id, milestone_id, role, generation))
         if self._program_dispatch_exists(dispatch_id):
             return
@@ -947,6 +952,37 @@ class WorkflowHarness:
             )
         finally:
             controller.close()
+
+    @staticmethod
+    def _assert_program_capability_available(graph: ProgramGraph) -> None:
+        """Keep unsupported approval intent inert at every launch boundary."""
+
+        if any(node.capsule.approval_gates for node in graph.nodes):
+            raise WorktreeError("approval_capability_unavailable")
+
+    def _assert_program_action_effect_eligible(self, bundle: ModelFacingProgramControllerActionBundle) -> None:
+        """Revalidate all harness-owned facts immediately before program effects."""
+
+        graph = self.ledger.program_graph(bundle.program_id)
+        self._assert_program_capability_available(graph)
+        for action in bundle.actions:
+            if action.evidence_sha256 is not None:
+                if action.milestone_id is None:
+                    raise WorktreeError("program evidence action is incomplete")
+                self._verify_program_runtime_evidence(
+                    str(bundle.program_id), action.milestone_id, action.evidence_sha256
+                )
+            if action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE and action.candidate_sha is not None:
+                node = graph.node(action.milestone_id or "")
+                if node.capsule.integration_mode is ProgramIntegrationMode.ALREADY_INTEGRATED:
+                    if node.review_base_sha is None:
+                        raise WorktreeError("already-integrated promotion lacks its review base")
+                    self._worktrees.verify_already_integrated_candidate(
+                        node.capsule,
+                        candidate_sha=action.candidate_sha,
+                        review_base_sha=node.review_base_sha,
+                        expected_trunk_head=graph.trunk_head,
+                    )
 
     def _apply_program_external_effect(
         self,
@@ -1064,6 +1100,7 @@ class WorkflowHarness:
     def _apply_program_action_bundle(self, bundle: ModelFacingProgramControllerActionBundle) -> bool:
         """Execute only the typed effects already committed by the ledger."""
 
+        self._assert_program_action_effect_eligible(bundle)
         graph = self.ledger.program_graph(bundle.program_id)
         changed = False
         for action in bundle.actions:
@@ -1164,6 +1201,38 @@ class WorkflowHarness:
                         bundle,
                         f"repair:{milestone_id}:{action.subject_wire}",
                         enqueue_repair_worker,
+                    )
+                    or changed
+                )
+            elif action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE and action.evidence_sha256 is not None:
+                if action.milestone_id is None or action.subject_wire is None:
+                    raise HarnessError("runtime evidence promotion effect is incomplete")
+
+                def close_runtime_promotion(
+                    milestone_value: str = action.milestone_id,
+                    evidence_value: str = action.evidence_sha256,
+                    subject_value: str = action.subject_wire,
+                    review_values: tuple[str, ...] = action.review_ids,
+                ) -> None:
+                    # Rehash inside the effect closure as the last
+                    # harness-owned check before the ledger closure.  The
+                    # ledger action commit intentionally records no runtime
+                    # closure of its own, so recovered replay reaches the
+                    # same fence.
+                    self._verify_program_runtime_evidence(str(bundle.program_id), milestone_value, evidence_value)
+                    self.ledger.close_program_node(
+                        bundle.program_id,
+                        milestone_value,
+                        subject=subject_value,
+                        review_ids=review_values,
+                        expected_program_revision=bundle.expected_program_revision + 1,
+                    )
+
+                changed = (
+                    self._apply_program_external_effect(
+                        bundle,
+                        f"promote:{action.milestone_id}:{action.subject_wire}",
+                        close_runtime_promotion,
                     )
                     or changed
                 )
@@ -1657,6 +1726,21 @@ class WorkflowHarness:
             snapshot_root = self.state_root / ".codex-flow" / "artifacts" / "runtime-evidence" / evidence_sha256
             verify_runtime_evidence(RuntimeEvidenceSnapshot(manifest, snapshot_root))
         except (LedgerError, RuntimeEvidenceError, OSError, ValueError) as exc:
+            # A failed rehash is a durable evidence fact, not merely a
+            # transient effect error.  Preserve the historical receipt and
+            # make the subject ineligible for reviews, promotion, and
+            # descendants before returning the fail-closed error.
+            try:
+                self.ledger.invalidate_runtime_evidence(
+                    program_id,
+                    milestone_id,
+                    evidence_sha256,
+                    reason="The retained runtime evidence snapshot failed its current integrity rehash.",
+                )
+            except LedgerError:
+                # Missing/corrupt ledger identity is still rejected below;
+                # there is no safe subject to invalidate in that case.
+                pass
             raise WorktreeError("runtime evidence snapshot failed its pre-acceptance rehash") from exc
 
     def reconcile_control_execution(self, run_id: str, milestone_id: str) -> CandidateRecord:
@@ -2377,20 +2461,8 @@ class WorkflowHarness:
                 raise IpcError("program action submission has an unsupported shape")
             bundle = ModelFacingProgramControllerActionBundle.from_json(payload["bundle"])
             graph = self.ledger.program_graph(bundle.program_id)
+            self._assert_program_action_effect_eligible(bundle)
             for action in bundle.actions:
-                if (
-                    action.kind
-                    in {
-                        ProgramControllerActionKind.START_REVIEWS,
-                        ProgramControllerActionKind.PROMOTE_CANDIDATE,
-                    }
-                    and action.evidence_sha256 is not None
-                ):
-                    if action.milestone_id is None:
-                        raise IpcError("program evidence action is incomplete")
-                    self._verify_program_runtime_evidence(
-                        str(bundle.program_id), action.milestone_id, action.evidence_sha256
-                    )
                 if action.kind not in {
                     ProgramControllerActionKind.PROMOTE_CANDIDATE,
                     ProgramControllerActionKind.INTEGRATE_CANDIDATE,
@@ -2424,6 +2496,15 @@ class WorkflowHarness:
             if set(payload) != required:
                 raise IpcError("recovered program action submission has an unsupported shape")
             identity = ControllerDecisionId(payload["decision_id"])
+            outbox = next(
+                (item for item in self.ledger.program_action_outboxes() if item.get("decision_id") == str(identity)),
+                None,
+            )
+            if outbox is None or not isinstance(outbox.get("bundle_json"), str):
+                raise IpcError("recovered program action bundle is unavailable")
+            self._assert_program_action_effect_eligible(
+                ModelFacingProgramControllerActionBundle.from_json_bytes(str(outbox["bundle_json"]))
+            )
             receipt = self.ledger.submit_recovered_program_controller_actions(identity)
             try:
                 self._apply_program_action_outbox(receipt.action_id)
@@ -4547,7 +4628,9 @@ class WorkflowHarness:
         return head
 
     @staticmethod
-    def _runtime_environment_revision(row: Mapping[str, object], workspace: Path, source_head: str) -> str:
+    def _runtime_environment_revision(
+        row: Mapping[str, object], workspace: Path, source_head: str, command: tuple[str, ...]
+    ) -> str:
         """Hash declared non-secret target facts without retaining their values."""
 
         route_raw = row.get("route_json")
@@ -4560,16 +4643,108 @@ class WorkflowHarness:
             if isinstance(decoded, Mapping):
                 route = decoded
         facts = {
-            "schema": "codex-flow/runtime-environment/v1",
             "backend": str(row.get("backend")),
             "workspace_path": str(workspace),
             "source_head_sha": source_head,
+            "protected_paths_sha256": None,
+            "command": list(command),
             "effective_permission": route.get("effective_permission"),
             "native_profile_sha256": route.get("native_profile_sha256"),
             "native_compatibility_sha256": route.get("native_compatibility_sha256"),
         }
-        encoded = json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        encoded = json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _runtime_provenance_from_row(row: Mapping[str, object], capsule: ExecutionCapsule) -> dict[str, object]:
+        """Decode the controller-bound runtime facts retained at enqueue."""
+
+        try:
+            route_value = strict_json_loads(str(row["route_json"]), max_bytes=1_048_576)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WorktreeError("runtime evidence route authority is unavailable") from exc
+        if not isinstance(route_value, Mapping):
+            raise WorktreeError("runtime evidence route authority is malformed")
+        raw = route_value.get("runtime_provenance")
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "schema",
+            "source_head_sha",
+            "protected_paths_sha256",
+            "command",
+            "effective_permission",
+            "native_profile_sha256",
+            "native_compatibility_sha256",
+            "target",
+            "environment_revision",
+        }:
+            raise WorktreeError("runtime evidence pre-execution provenance is missing")
+        if raw.get("schema") != "codex-flow/runtime-provenance/v1":
+            raise WorktreeError("runtime evidence provenance schema is unsupported")
+        source_head = raw.get("source_head_sha")
+        protected_digest = raw.get("protected_paths_sha256")
+        environment_revision = raw.get("environment_revision")
+        if (
+            not isinstance(source_head, str)
+            or re.fullmatch(r"[0-9a-f]{40}", source_head) is None
+            or not isinstance(protected_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", protected_digest) is None
+            or not isinstance(environment_revision, str)
+            or re.fullmatch(r"[0-9a-f]{64}", environment_revision) is None
+        ):
+            raise WorktreeError("runtime evidence provenance digests are malformed")
+        command = raw.get("command")
+        effective_permission = raw.get("effective_permission")
+        target = raw.get("target")
+        if (
+            not isinstance(command, list)
+            or tuple(command) != capsule.validation.argv
+            or any(not isinstance(item, str) or not item or "\x00" in item for item in command)
+            or not isinstance(effective_permission, Mapping)
+            or not isinstance(target, Mapping)
+            or set(target) != {"backend", "workspace_path"}
+            or target.get("backend") != row.get("backend")
+            or target.get("workspace_path") != os.fspath(capsule.workspace_path)
+            or route_value.get("effective_permission") != effective_permission
+        ):
+            raise WorktreeError("runtime evidence provenance facts do not match the queue")
+        for key in ("native_profile_sha256", "native_compatibility_sha256"):
+            value = raw.get(key)
+            if value is not None and (not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None):
+                raise WorktreeError("runtime evidence capability identity is malformed")
+        target_facts = {
+            "backend": target["backend"],
+            "workspace_path": target["workspace_path"],
+            "source_head_sha": source_head,
+            "protected_paths_sha256": protected_digest,
+            "command": command,
+            "effective_permission": effective_permission,
+            "native_profile_sha256": raw.get("native_profile_sha256"),
+            "native_compatibility_sha256": raw.get("native_compatibility_sha256"),
+        }
+        encoded = (
+            json.dumps(target_facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+        ).encode("utf-8")
+        if hashlib.sha256(encoded).hexdigest() != environment_revision:
+            raise WorktreeError("runtime evidence environment revision is invalid")
+        return dict(raw)
+
+    def _assert_runtime_provenance_current(
+        self, row: Mapping[str, object], capsule: ExecutionCapsule
+    ) -> dict[str, object]:
+        """Require checkout and protected bytes to match pre-execution facts."""
+
+        provenance = self._runtime_provenance_from_row(row, capsule)
+        source_head = str(provenance["source_head_sha"])
+        if self._runtime_git_head(capsule.workspace_path) != source_head:
+            raise WorktreeError("runtime evidence source HEAD changed after enqueue")
+        from .controller import protected_paths_digest
+
+        if (
+            protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+            != provenance["protected_paths_sha256"]
+        ):
+            raise WorktreeError("runtime evidence protected paths changed after enqueue")
+        return provenance
 
     @staticmethod
     def _runtime_acceptance_criteria_digest(capsule: ExecutionCapsule) -> str:
@@ -4681,7 +4856,23 @@ class WorkflowHarness:
                             terminal_status=terminal_status,
                         )
                         artifact_paths = None
-                    source_head = self._runtime_git_head(node.workspace_path)
+                    # Runtime provenance is captured before enqueue.  A
+                    # terminal worker result must never replace it with the
+                    # checkout's current HEAD or environment: a checkout can
+                    # have drifted while the worker was running, and that
+                    # drift is itself a durable integrity blocker.
+                    try:
+                        provenance = self._assert_runtime_provenance_current(row, node.capsule)
+                    except WorktreeError:
+                        provenance = self._runtime_provenance_from_row(row, node.capsule)
+                        runtime_blocker = self._runtime_evidence_blocker(
+                            "runtime-provenance-drift",
+                            "Retain the result and reconcile the pre-execution source, protected paths, or target facts.",
+                            terminal_status=terminal_status,
+                        )
+                        artifact_paths = None
+                    source_head = str(provenance["source_head_sha"])
+                    environment_revision = str(provenance["environment_revision"])
                     context_value: Mapping[str, object] = {}
                     action_context = row.get("action_json")
                     if isinstance(action_context, str):
@@ -4719,7 +4910,7 @@ class WorkflowHarness:
                         graph.plan_revision_sha256,
                         capsule_digest,
                         source_head,
-                        self._runtime_environment_revision(row, node.workspace_path, source_head),
+                        environment_revision,
                         tuple(node.capsule.validation.argv),
                         terminal_status,
                         self._runtime_acceptance_criteria_digest(node.capsule),
@@ -4745,16 +4936,11 @@ class WorkflowHarness:
                             )
                     if runtime_blocker is None:
                         try:
-                            if self._runtime_git_head(node.workspace_path) != source_head:
-                                runtime_blocker = self._runtime_evidence_blocker(
-                                    "runtime-source-head-changed",
-                                    "Retain the first result and reconcile the runtime checkout identity.",
-                                    terminal_status=terminal_status,
-                                )
+                            self._assert_runtime_provenance_current(row, node.capsule)
                         except WorktreeError:
                             runtime_blocker = self._runtime_evidence_blocker(
-                                "runtime-source-head-unavailable",
-                                "Retain the first result and restore a readable runtime checkout identity.",
+                                "runtime-provenance-drift",
+                                "Retain the result and reconcile the pre-execution source, protected paths, or target facts.",
                                 terminal_status=terminal_status,
                             )
                     self.ledger.record_runtime_evidence(
@@ -5079,6 +5265,14 @@ class WorkflowHarness:
         """Issue and launch only while the fresh plugin descriptor remains held."""
 
         dispatch_id = str(row["dispatch_id"])
+        if capsule_value.get("outcome_kind") == ProgramOutcomeKind.RUNTIME_EVIDENCE.value:
+            from .controller import capsule_from_json
+
+            try:
+                runtime_capsule = capsule_from_json(capsule_value)
+                self._assert_runtime_provenance_current(row, runtime_capsule)
+            except (TypeError, ValueError, WorktreeError, RuntimeError) as exc:
+                raise HarnessError("runtime evidence provenance changed before worker launch") from exc
         # Bind secretless provider identity at the service boundary.  The
         # profile loader verifies the invoking environment contains the value,
         # but only its key name and digest enter SQLite.

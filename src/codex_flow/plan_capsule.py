@@ -153,6 +153,13 @@ class CompiledProgramGraph:
         bound_nodes = []
         for node in self.nodes:
             projected = project_model_facing_capsule(node.capsule.capsule, state_root=selected_root)
+            if node.review_base_sha is not None:
+                # The physical trunk HEAD remains the graph-level current
+                # trunk fact, while an already-integrated node reviews the
+                # exact historical base supplied by the operator.  Project
+                # that base into the capsule so every downstream read-only
+                # candidate check sees the same identity.
+                projected = replace(projected, base_sha=node.review_base_sha)
             bound_nodes.append(
                 ProgramNodeSpec(
                     MilestoneId(node.milestone_id),

@@ -410,6 +410,8 @@ def capsule_json(capsule: ExecutionCapsule) -> JsonObject:
         value["plugin_requirements"] = [dict(item) for item in capsule.plugin_requirements]
     if capsule.local_image_paths:
         value["local_image_paths"] = list(capsule.local_image_paths)
+    if capsule.acceptance_criteria_sha256 is not None:
+        value["acceptance_criteria_sha256"] = capsule.acceptance_criteria_sha256
     if (
         capsule.outcome_kind is not ProgramOutcomeKind.COMMIT
         or capsule.integration_mode is not ProgramIntegrationMode.GIT
@@ -450,6 +452,7 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
     }
     optional = {"acceptance_modes", "plugin_requirements"}
     image_optional = {"local_image_paths"}
+    criteria_optional = {"acceptance_criteria_sha256"}
     outcome_optional = {
         "outcome_kind",
         "integration_mode",
@@ -461,18 +464,32 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
     accepted_keys = (
         expected,
         expected | {"acceptance_modes"},
+        expected | criteria_optional,
+        expected | {"acceptance_modes"} | criteria_optional,
         expected | optional,
+        expected | optional | criteria_optional,
         expected | image_optional,
+        expected | image_optional | criteria_optional,
         expected | image_optional | {"acceptance_modes"},
+        expected | image_optional | {"acceptance_modes"} | criteria_optional,
         expected | image_optional | {"plugin_requirements"},
+        expected | image_optional | {"plugin_requirements"} | criteria_optional,
         expected | image_optional | optional,
+        expected | image_optional | optional | criteria_optional,
         expected | outcome_optional,
+        expected | outcome_optional | criteria_optional,
         expected | outcome_optional | {"acceptance_modes"},
+        expected | outcome_optional | {"acceptance_modes"} | criteria_optional,
         expected | outcome_optional | {"plugin_requirements"},
+        expected | outcome_optional | {"plugin_requirements"} | criteria_optional,
         expected | outcome_optional | image_optional,
+        expected | outcome_optional | image_optional | criteria_optional,
         expected | outcome_optional | image_optional | {"acceptance_modes"},
+        expected | outcome_optional | image_optional | {"acceptance_modes"} | criteria_optional,
         expected | outcome_optional | image_optional | {"plugin_requirements"},
+        expected | outcome_optional | image_optional | {"plugin_requirements"} | criteria_optional,
         expected | outcome_optional | image_optional | optional,
+        expected | outcome_optional | image_optional | optional | criteria_optional,
     )
     if not any(set(value) == keys for keys in accepted_keys):
         raise ValueError("capsule keys do not match the closed execution schema")
@@ -534,6 +551,11 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         raise ValueError("capsule runtime_artifact_paths must be an array of strings")
     if not isinstance(raw_gates, list) or any(not isinstance(item, Mapping) for item in raw_gates):
         raise ValueError("capsule approval_gates must be an array of objects")
+    criteria_digest = value.get("acceptance_criteria_sha256")
+    if criteria_digest is not None and (
+        not isinstance(criteria_digest, str) or re.fullmatch(r"[0-9a-f]{64}", criteria_digest) is None
+    ):
+        raise ValueError("capsule acceptance criteria digest is invalid")
     return ExecutionCapsule(
         version,
         RunId(run_id),
@@ -561,6 +583,7 @@ def capsule_from_json(value: Mapping[str, object]) -> ExecutionCapsule:
         value.get("runtime_artifact_max_files"),  # type: ignore[arg-type]
         value.get("runtime_artifact_max_bytes"),  # type: ignore[arg-type]
         tuple(ProgramApprovalGate.from_json(item) for item in raw_gates),
+        criteria_digest,  # type: ignore[arg-type]
     )
 
 
@@ -601,6 +624,57 @@ def protected_paths_digest(root: Path, paths: tuple[str, ...]) -> str:
                 continue
             digest.update(candidate.read_bytes())
     return digest.hexdigest()
+
+
+def runtime_pre_execution_provenance(
+    capsule: ExecutionCapsule,
+    *,
+    backend: str,
+    effective_permission: NativePermissionAuthority,
+    native_profile_sha256: str | None,
+    native_compatibility_sha256: str | None,
+) -> JsonObject:
+    """Bind runtime evidence to observations made before its worker starts."""
+
+    result = subprocess.run(
+        ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+        cwd=capsule.workspace_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    source_head = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", source_head) is None:
+        raise ControllerError("runtime evidence source HEAD is unavailable before dispatch")
+    protected_digest = protected_paths_digest(capsule.workspace_path, capsule.protected_paths)
+    target_facts: JsonObject = {
+        "backend": backend,
+        "workspace_path": os.fspath(capsule.workspace_path),
+        "source_head_sha": source_head,
+        "protected_paths_sha256": protected_digest,
+        "command": list(capsule.validation.argv),
+        "effective_permission": effective_permission.facts,
+        "native_profile_sha256": native_profile_sha256,
+        "native_compatibility_sha256": native_compatibility_sha256,
+    }
+    # ``_canonical_json`` is the shared durable JSON codec and deliberately
+    # includes its terminal newline.  The terminal-result verifier recomputes
+    # this exact byte stream from the retained route facts.
+    environment_revision = _digest_bytes(_canonical_json(target_facts))
+    return {
+        "schema": "codex-flow/runtime-provenance/v1",
+        "source_head_sha": source_head,
+        "protected_paths_sha256": protected_digest,
+        "command": list(capsule.validation.argv),
+        "effective_permission": effective_permission.facts,
+        "native_profile_sha256": native_profile_sha256,
+        "native_compatibility_sha256": native_compatibility_sha256,
+        "target": {
+            "backend": backend,
+            "workspace_path": os.fspath(capsule.workspace_path),
+        },
+        "environment_revision": environment_revision,
+    }
 
 
 def protected_paths_digest_at_revision(repository: Path, revision: str, paths: tuple[str, ...]) -> str:
@@ -948,6 +1022,14 @@ class Controller:
                     else {"status": "unsupported_app_native_per_task_override"}
                 ),
             }
+            if capsule.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+                route["runtime_provenance"] = runtime_pre_execution_provenance(
+                    capsule,
+                    backend=backend,
+                    effective_permission=effective_permission,
+                    native_profile_sha256=native_profile_sha256,
+                    native_compatibility_sha256=native_compatibility_sha256,
+                )
             queue_projection = capsule_json(capsule)
             result_schema_version = 2 if capsule.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE else 1
             if (
