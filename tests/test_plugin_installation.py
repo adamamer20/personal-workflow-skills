@@ -11,6 +11,7 @@ from types import ModuleType
 
 import pytest
 
+import codex_flow.service as service_module
 from codex_flow.ledger import Ledger
 from codex_flow.service import (
     ServiceError,
@@ -338,9 +339,21 @@ def test_bootstrap_fences_active_harness_before_shared_tool_install(
     assert not any(call[1:3] == ("tool", "install") for call in runner.calls)
 
 
-@pytest.mark.parametrize("refresh_succeeds", [False, True])
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        None,
+        "authorize-before",
+        "authorize-after",
+        "publish-before",
+        "publish-after",
+        "daemon-reload",
+        "import-environment",
+        "start",
+    ],
+)
 def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
-    standard_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, refresh_succeeds: bool
+    standard_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_stage: str | None
 ) -> None:
     root = Path(__file__).parents[1].resolve()
     config_home = tmp_path / "config"
@@ -365,9 +378,35 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
         owner_nonce_sha256="b" * 64,
     )
     ledger.close()
-    service_unit = generate_unit(service_root, executable=executable, provider_env_key="OPENAI_API_KEY")
+    service_unit = generate_unit(
+        service_root, executable=executable, provider_env_key="OPENAI_API_KEY", profile_sha256="e" * 64
+    )
+    old_unit = generate_unit(
+        service_root, executable=executable, provider_env_key="OPENAI_API_KEY", profile_sha256="c" * 64
+    )
     service_config = tmp_path / "service-config"
-    install_unit(service_unit, config_home=service_config)
+    install_unit(old_unit, config_home=service_config)
+    original_authorize = Ledger.authorize_controller_profile_refresh
+    original_install = service_module.install_unit
+
+    def authorize(self: Ledger, **kwargs: str) -> int:
+        if failure_stage == "authorize-before":
+            raise RuntimeError("injected authorization failure")
+        result = original_authorize(self, **kwargs)
+        if failure_stage == "authorize-after":
+            raise RuntimeError("injected committed authorization failure")
+        return result
+
+    def publish(unit, **kwargs):
+        if failure_stage == "publish-before":
+            raise RuntimeError("injected publication failure")
+        result = original_install(unit, **kwargs)
+        if failure_stage == "publish-after":
+            raise RuntimeError("injected published failure")
+        return result
+
+    monkeypatch.setattr(Ledger, "authorize_controller_profile_refresh", authorize)
+    monkeypatch.setattr(service_module, "install_unit", publish)
 
     matching_unit = installer.Bootstrap(root, runner=FakeRunner(root))._matching_harness_unit()
     matching_unit.parent.mkdir(parents=True)
@@ -392,7 +431,7 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
             return result
         if operation == "is-active":
             return ServiceResult(0 if service_active["value"] else 3)
-        if operation == "daemon-reload" and not refresh_succeeds:
+        if operation == failure_stage:
             return ServiceResult(1)
         if operation == "start":
             service_active["value"] = True
@@ -427,6 +466,8 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
                     refresh_with_credential(
                         service_unit,
                         config_home=service_config,
+                        profile_sha256=service_unit.profile_sha256,
+                        native_compatibility_sha256="d" * 64,
                         environment={"OPENAI_API_KEY": "secret"},
                         runner=service_runner,
                         process_is_live=lambda pid, birth: processes.get((pid, birth), False),
@@ -451,7 +492,7 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
 
     monkeypatch.setattr(bootstrap, "fence_existing_harness", fenced)
 
-    if refresh_succeeds:
+    if failure_stage is None:
         facts = bootstrap.execute()
         assert facts["controller_version"] == installer.CONTROLLER_VERSION
         assert "marketplace-ready" in bootstrap.completed
@@ -461,7 +502,7 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
         )
         assert service_events[-1] == "is-active"
     else:
-        with pytest.raises(installer.BootstrapError, match="daemon reload failed"):
+        with pytest.raises(installer.BootstrapError):
             bootstrap.execute()
         assert bootstrap.completed == ["preflight", "harness-refresh-fenced", "controller-installed"]
         assert installer_events == ["fence", "tool-install", "refresh"]

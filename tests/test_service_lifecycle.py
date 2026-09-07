@@ -409,14 +409,24 @@ def _same_topology_refresh_fixture(
     return repository, unit, ledger_path, config_home, executable, processes, service_state
 
 
-@pytest.mark.parametrize("schema_version", [19, 20])
+@pytest.mark.parametrize("schema_version", [19, 20, 21])
 @pytest.mark.parametrize("initial_fenced", [False, True])
+@pytest.mark.parametrize("rotated_profile", [False, True])
 def test_refresh_migrates_v19_v20_through_current_harness_topology(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_version: int, initial_fenced: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_version: int, initial_fenced: bool, rotated_profile: bool
 ) -> None:
     repository, unit, ledger_path, config_home, _executable, processes, service_state = _same_topology_refresh_fixture(
         tmp_path, schema_version, fenced=initial_fenced
     )
+    if rotated_profile:
+        old_unit = generate_unit(
+            repository, executable=_executable, provider_env_key="OPENAI_API_KEY", profile_sha256="c" * 64
+        )
+        install_unit(old_unit, config_home=config_home)
+        unit = generate_unit(
+            repository, executable=_executable, provider_env_key="OPENAI_API_KEY", profile_sha256="e" * 64
+        )
+    old_bytes = unit_path(config_home=config_home, repository_root=repository).read_bytes()
     events: list[str] = []
     shutdown_paths: list[Path] = []
     installed_units: list[str] = []
@@ -425,10 +435,12 @@ def test_refresh_migrates_v19_v20_through_current_harness_topology(
 
     def traced_init(self: Ledger, path: str | Path, **kwargs: object) -> None:
         if kwargs.get("migrate"):
+            assert unit_path(config_home=config_home, repository_root=repository).read_bytes() == old_bytes
             events.append("migrate-open")
         original_init(self, path, **kwargs)
 
     def traced_install(target: object, **kwargs: object) -> Path:
+        events.append("publish")
         installed_units.append(getattr(target, "runtime", "unknown"))
         return original_install(target, **kwargs)  # type: ignore[arg-type]
 
@@ -483,6 +495,8 @@ def test_refresh_migrates_v19_v20_through_current_harness_topology(
     result = refresh_with_credential(
         unit,
         config_home=config_home,
+        profile_sha256=unit.profile_sha256,
+        native_compatibility_sha256="d" * 64 if rotated_profile else None,
         environment={"OPENAI_API_KEY": "secret"},
         runner=runner,
         process_is_live=lambda pid, birth: processes.get((pid, birth), False),
@@ -495,8 +509,11 @@ def test_refresh_migrates_v19_v20_through_current_harness_topology(
     assert result["new_epoch"] == 2
     assert shutdown_paths == [repository / ".codex-flow" / "runtime" / "harness.sock"]
     assert "supervisor.sock" not in {path.name for path in shutdown_paths}
-    assert events.index("shutdown") < events.index("migrate-open") < events.index("start")
-    assert installed_units == []
+    if schema_version < 21:
+        assert events.index("shutdown") < events.index("migrate-open") < events.index("publish")
+    assert events.index("publish") < events.index("daemon-reload") < events.index("start")
+    assert unit_path(config_home=config_home, repository_root=repository).read_bytes() == unit.text.encode()
+    assert installed_units == ["harness"]
 
     migrated = Ledger(ledger_path)
     try:
@@ -569,6 +586,13 @@ def test_v20_migration_failure_keeps_current_topology_forward_only(
     _repository, unit, ledger_path, config_home, _executable, processes, service_state = _same_topology_refresh_fixture(
         tmp_path, 20
     )
+    old_unit = generate_unit(
+        _repository, executable=_executable, provider_env_key="OPENAI_API_KEY", profile_sha256="c" * 64
+    )
+    install_unit(old_unit, config_home=config_home)
+    unit = generate_unit(
+        _repository, executable=_executable, provider_env_key="OPENAI_API_KEY", profile_sha256="e" * 64
+    )
     original_init = Ledger.__init__
     calls: list[tuple[str, ...]] = []
 
@@ -616,6 +640,8 @@ def test_v20_migration_failure_keeps_current_topology_forward_only(
         refresh_with_credential(
             unit,
             config_home=config_home,
+            profile_sha256=unit.profile_sha256,
+            native_compatibility_sha256="d" * 64,
             environment={"OPENAI_API_KEY": "secret"},
             runner=runner,
             process_is_live=lambda pid, birth: processes.get((pid, birth), False),
@@ -623,7 +649,7 @@ def test_v20_migration_failure_keeps_current_topology_forward_only(
         )
 
     assert "start" not in [call[2] for call in calls]
-    assert (config_home / "systemd" / "user" / unit.unit_name).read_bytes() == unit.text.encode("utf-8")
+    assert (config_home / "systemd" / "user" / unit.unit_name).read_bytes() == old_unit.text.encode("utf-8")
     check = sqlite3.connect(ledger_path)
     try:
         expected_version = "20" if failure_stage == "before_commit" else "21"
@@ -1950,6 +1976,7 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(
         assert [call[2] for call in calls] == [
             "is-active",
             "show",
+            "show",
             "daemon-reload",
             "import-environment",
             "show",
@@ -2457,6 +2484,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     assert [call[2] for call in retry_calls] == [
         "is-active",
         "show",
+        *(["show"] if failure_stage == "rollback_failure" else []),
         "daemon-reload",
         "import-environment",
         "show",
@@ -2743,3 +2771,249 @@ def test_refresh_rollback_cannot_restore_with_unproven_manager_pid(tmp_path: Pat
         assert unit_path(repository_root=unit.repository_root, config_home=config_home).read_text() == unit.text
     finally:
         ledger.close()
+
+
+@pytest.mark.parametrize("schema_version", [20, 21])
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "active-generation",
+        "authorize-before",
+        "authorize-after",
+        "publish-before",
+        "publish-after",
+        "daemon-reload",
+        "import-environment",
+        "start",
+    ],
+)
+def test_profile_rotation_failure_reentry_preserves_unit_and_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_version: int, failure_stage: str
+) -> None:
+    import json
+
+    from codex_flow.domain import ControllerGenerationState
+
+    repository, _unit, ledger_path, config_home, executable, processes, service_state = _same_topology_refresh_fixture(
+        tmp_path, 21
+    )
+    processes[(500, "old-birth")] = False
+    service_state["active"] = False
+    old_unit = generate_unit(
+        repository, executable=executable, provider_env_key="OPENAI_API_KEY", profile_sha256="c" * 64
+    )
+    target = generate_unit(
+        repository, executable=executable, provider_env_key="OPENAI_API_KEY", profile_sha256="e" * 64
+    )
+    path = install_unit(old_unit, config_home=config_home)
+    original_authorize = Ledger.authorize_controller_profile_refresh
+    original_install = service_module.install_unit
+    armed = True
+    events: list[str] = []
+    # Real decisions exercise the existing authorization boundary, including an
+    # identified terminal generation which must retain all its historical facts.
+    ledger = Ledger(ledger_path, allow_legacy=True)
+    decisions = []
+    for name in ("eligible", "identified"):
+        ledger.create_run(name)
+        ledger.create_milestone(name, "repair")
+        dispatch = ledger.claim_dispatch(name, "repair", "executor", 1).dispatch_id
+        ledger.enqueue_dispatch(
+            dispatch,
+            backend="sdk_headless",
+            capsule_json='{"model":"test","prompt":"bounded"}',
+            route_json=json.dumps({"native_profile_sha256": "c" * 64, "native_compatibility_sha256": "b" * 64}),
+            workspace_path=repository,
+            result_contract_sha256="a" * 64,
+            source_thread_id="source",
+            native_profile_sha256="c" * 64,
+            native_compatibility_sha256="b" * 64,
+        )
+        decision = ledger.create_controller_decision(dispatch, kind="checkpoint", source_thread_id="source")
+        wake = ledger.claim_wake(f"wake/{dispatch}/checkpoint")
+        assert wake is not None
+        ledger.record_wake_delivery(str(wake["delivery_id"]), outcome="delivered", source_turn_id="wake-turn")
+        if name == "eligible":
+            ledger.prepare_controller_generation(decision.decision_id, generation=1)
+            ledger.record_controller_profile_drift(decision.decision_id, generation=1)
+        if name == "identified":
+            ledger.prepare_controller_generation(decision.decision_id, generation=1)
+            ledger.bind_controller_generation_thread(
+                decision.decision_id, generation=1, controller_thread_id="identified-thread"
+            )
+            if failure_stage != "active-generation":
+                ledger.complete_controller_generation(
+                    decision.decision_id, generation=1, state=ControllerGenerationState.FAILED
+                )
+        decisions.append(decision)
+    identified = decisions[1]
+
+    def identified_snapshot(current: Ledger) -> tuple[object, ...]:
+        return (
+            current.controller_decision(identified.decision_id),
+            current.controller_generation(identified.decision_id, 1),
+            current.queue_binding(identified.dispatch_id),
+            current.queue_dispatch(identified.dispatch_id),
+        )
+
+    historical = identified_snapshot(ledger)
+    if failure_stage != "active-generation":
+        ledger.arm_harness_refresh_fence()
+    ledger.close()
+    if schema_version == 20:
+        with sqlite3.connect(ledger_path) as connection:
+            connection.execute("DROP TABLE program_outcomes")
+            connection.execute("UPDATE schema_meta SET value = '20' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = 'codex_flow_dispatch_terminal_integrity_v20' WHERE key = 'schema_identity'"
+            )
+
+    def authorize(self: Ledger, **kwargs: str) -> int:
+        events.append("authorize")
+        assert path.read_bytes() in (old_unit.text.encode(), target.text.encode())
+        if armed and failure_stage == "authorize-before":
+            raise RuntimeError("injected authorization failure")
+        result = original_authorize(self, **kwargs)
+        assert identified_snapshot(self) == historical
+        if armed and failure_stage == "authorize-after":
+            raise RuntimeError("injected committed authorization failure")
+        return result
+
+    def publish(unit, **kwargs):
+        events.append("publish")
+        assert "authorize" in events
+        if armed and failure_stage == "publish-before":
+            raise RuntimeError("injected publication failure")
+        result = original_install(unit, **kwargs)
+        if armed and failure_stage == "publish-after":
+            raise RuntimeError("injected published unit failure")
+        return result
+
+    monkeypatch.setattr(Ledger, "authorize_controller_profile_refresh", authorize)
+    monkeypatch.setattr(service_module, "install_unit", publish)
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        operation = argv[2]
+        events.append(operation)
+        result = _SystemctlResult(0)
+        if operation == "show":
+            result.stdout = "ActiveState=inactive\nMainPID=0\n"
+        if operation == "is-active":
+            return _SystemctlResult(0 if service_state["active"] else 3)
+        if armed and operation == failure_stage:
+            return _SystemctlResult(1)
+        if operation == "start":
+            assert path.read_bytes() == target.text.encode()
+            service_state["active"] = True
+            processes[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = True
+            replacement = Ledger(ledger_path)
+            replacement.acquire_harness(
+                repository_root=repository,
+                state_root=repository,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
+                version=target.version,
+                owner_nonce_sha256="d" * 64,
+            )
+            replacement.close()
+        return result
+
+    def refresh() -> dict[str, object]:
+        return refresh_with_credential(
+            target,
+            config_home=config_home,
+            profile_sha256=target.profile_sha256,
+            native_compatibility_sha256="d" * 64,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+        )
+
+    if failure_stage == "active-generation":
+        with pytest.raises(ServiceRefreshDeferred):
+            refresh()
+        assert path.read_bytes() == old_unit.text.encode()
+        assert "authorize" not in events and "publish" not in events and "start" not in events
+        check = Ledger(ledger_path, allow_legacy=True)
+        assert identified_snapshot(check) == historical
+        assert check.queue_binding(decisions[0].dispatch_id)["native_profile_sha256"] == "c" * 64
+        check.close()
+        return
+
+    with pytest.raises(ServiceRefreshFailed):
+        refresh()
+    published = failure_stage in {"publish-after", "daemon-reload", "import-environment", "start"}
+    assert path.read_bytes() == (target if published else old_unit).text.encode()
+    assert events.count("start") == int(failure_stage == "start")
+    check = Ledger(ledger_path)
+    assert check.schema_version.value == 21
+    assert check.harness_refresh_fenced()
+    assert identified_snapshot(check) == historical
+    binding = check.queue_binding(decisions[0].dispatch_id)
+    assert binding["native_profile_sha256"] == ("c" if failure_stage == "authorize-before" else "e") * 64
+    check.close()
+    armed = False
+    events.clear()
+    assert refresh()["refreshed"] is True
+    assert events.count("start") == 1
+    check = Ledger(ledger_path)
+    assert identified_snapshot(check) == historical
+    assert check.queue_binding(decisions[0].dispatch_id)["native_profile_sha256"] == "e" * 64
+    check.close()
+
+
+@pytest.mark.parametrize("mutation", ["profile", "mode", "target", "target-mode", "missing-compatibility"])
+def test_profile_rotation_rejects_unit_drift_before_publication_or_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    repository, _unit, ledger_path, config_home, executable, _processes, _state = _same_topology_refresh_fixture(
+        tmp_path, 20, fenced=True
+    )
+    old = generate_unit(repository, executable=executable, provider_env_key="OPENAI_API_KEY", profile_sha256="c" * 64)
+    target = generate_unit(
+        repository, executable=executable, provider_env_key="OPENAI_API_KEY", profile_sha256="e" * 64
+    )
+    path = install_unit(old, config_home=config_home)
+    original_install = service_module.install_unit
+    calls: list[str] = []
+
+    def publish(unit, **kwargs):
+        calls.append("publish")
+        result = original_install(unit, **kwargs)
+        if mutation == "target":
+            path.write_text(old.text)
+        return result
+
+    monkeypatch.setattr(service_module, "install_unit", publish)
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        operation = argv[2]
+        calls.append(operation)
+        if operation == "show":
+            if mutation == "profile":
+                path.write_text(old.text.replace("c" * 64, "f" * 64))
+            elif mutation == "mode":
+                path.chmod(0o400)
+            result = _SystemctlResult(0)
+            result.stdout = "ActiveState=inactive\nMainPID=0\n"
+            return result
+        if operation == "daemon-reload" and mutation == "target-mode":
+            path.chmod(0o400)
+        return _SystemctlResult(3 if operation == "is-active" else 0)
+
+    with pytest.raises(ServiceError):
+        refresh_with_credential(
+            target,
+            config_home=config_home,
+            profile_sha256=target.profile_sha256,
+            native_compatibility_sha256=None if mutation == "missing-compatibility" else "d" * 64,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda *_: False,
+        )
+    assert "start" not in calls
+    assert ("publish" in calls) == mutation.startswith("target")
+    check = Ledger(ledger_path, allow_legacy=True)
+    assert check.schema_version.value == (21 if mutation.startswith("target") else 20)
+    check.close()

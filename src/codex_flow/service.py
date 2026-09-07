@@ -918,13 +918,35 @@ def refresh_with_credential(
             allow_profile_identity_update=True,
         )
     elif not interrupted_recovery:
-        _validate_installed_unit(
+        predecessor_unit_digest = _validate_installed_unit(
             unit,
             config_home=config_home,
             expected_profile_sha256=profile_sha256,
             credential_value=value,
             allow_profile_identity_update=True,
         )
+
+    predecessor_unit_snapshot: tuple[bytes, str, int] | None = None
+    if not (legacy_topology_migration or interrupted_recovery):
+        predecessor_unit_snapshot = _read_installed_unit(unit_path_value)
+        if hashlib.sha256(predecessor_unit_snapshot[0]).hexdigest() != predecessor_unit_digest:
+            raise ServiceRefreshFailed("installed predecessor unit changed during capture")
+        predecessor_profile = next(
+            (
+                line
+                for line in predecessor_unit_snapshot[1].splitlines()
+                if line.startswith("# Codex-Flow-Profile-SHA256=")
+            ),
+            None,
+        )
+        target_profile = None if profile_sha256 is None else f"# Codex-Flow-Profile-SHA256={profile_sha256}"
+        if predecessor_profile != target_profile and native_compatibility_sha256 is None:
+            raise ServiceRefreshFailed("profile rotation requires explicit native compatibility identity")
+
+    def assert_predecessor_unit_unchanged() -> None:
+        if predecessor_unit_snapshot is not None:
+            if _read_installed_unit(unit_path_value) != predecessor_unit_snapshot:
+                raise ServiceRefreshFailed("installed predecessor unit changed during refresh")
 
     installed_launcher_identity = _installed_command_identity(unit)
 
@@ -1231,6 +1253,8 @@ def refresh_with_credential(
             process_is_live=live_checker,
         )
 
+        assert_predecessor_unit_unchanged()
+
         if migration_required:
             # The old authority is now fenced and its process/unit are gone.
             # Only the v18 supervisor topology needs a replacement unit staged
@@ -1265,7 +1289,9 @@ def refresh_with_credential(
                     config_home=config_home,
                     expected_profile_sha256=profile_sha256,
                     credential_value=value,
+                    allow_profile_identity_update=True,
                 )
+                assert_predecessor_unit_unchanged()
             owned_ledger.close()
             try:
                 owned_ledger = Ledger(
@@ -1282,13 +1308,28 @@ def refresh_with_credential(
                     restore_legacy_pair()
                 raise
 
+        assert_predecessor_unit_unchanged()
         if profile_sha256 is not None and native_compatibility_sha256 is not None:
             owned_ledger.authorize_controller_profile_refresh(
                 native_profile_sha256=profile_sha256,
                 native_compatibility_sha256=native_compatibility_sha256,
             )
 
-        if not migration_required:
+        if not (legacy_topology_migration or interrupted_recovery):
+            predecessor_authority = _prove_stopped_current_owner(
+                owned_ledger,
+                unit=unit,
+                config_home=config_home,
+                profile_sha256=profile_sha256,
+                credential_value=value,
+                expected_authority=predecessor_authority,
+                expected_launcher_identity=installed_launcher_identity,
+                runner=runner,
+                process_is_live=live_checker,
+            )
+            assert_predecessor_unit_unchanged()
+
+        if not legacy_topology_migration:
             interrupted_unit_staged = interrupted_recovery
             install_unit(unit, config_home=config_home)
         if unit.runtime != "harness":
@@ -1299,6 +1340,9 @@ def refresh_with_credential(
             expected_profile_sha256=profile_sha256,
             credential_value=value,
         )
+        target_unit_snapshot = _read_installed_unit(unit_path_value)
+        if target_unit_snapshot[0] != unit.text.encode("utf-8"):
+            raise ServiceRefreshFailed("installed target unit changed during capture")
         if _installed_command_identity(unit) != installed_launcher_identity:
             raise ServiceRefreshFailed("installed service launcher changed before replacement start")
         if _run_manager(("daemon-reload",), runner=runner) != 0:
@@ -1318,6 +1362,8 @@ def refresh_with_credential(
             process_is_live=live_checker,
             allow_profile_identity_update=False,
         )
+        if _read_installed_unit(unit_path_value) != target_unit_snapshot:
+            raise ServiceRefreshFailed("installed target unit changed before replacement start")
         # Mark before invoking systemctl start.  A failed/timeout start is
         # still an uncertain replacement unless the bounded positive absence
         # proof below establishes that no replacement could have run.
