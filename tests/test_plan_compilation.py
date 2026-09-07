@@ -57,6 +57,65 @@ ModelFacingCapsule(
     assert compiled.capsule.plugin_requirements[0].canonical_id == "demo-plugin"
 
 
+def _adoption_plan(tmp_path: Path) -> Path:
+    plan = tmp_path / "adoption-plan.md"
+    plan.write_text(
+        """## Next execution — adopted-node
+
+```python
+ModelFacingCapsule(
+    schema_version=4,
+    objective="adopt",
+    decomposition=("review",),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE,),
+    acceptance_criteria=("ready",),
+    mutable_surfaces=("src/adopted.py",),
+    protected_surfaces=("README.md",),
+    authorities=(ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),),
+    prompt="review the adopted candidate",
+    integration_mode=ProgramIntegrationMode.ALREADY_INTEGRATED,
+)
+```
+""",
+        encoding="utf-8",
+    )
+    return plan
+
+
+def test_program_compiler_binds_adopted_candidate_and_review_base_to_scalar_fields(tmp_path: Path) -> None:
+    compiled = compile_program_graph(
+        _adoption_plan(tmp_path),
+        "adoption-program",
+        milestone_ids=("adopted-node",),
+        adopted_nodes={"adopted-node": ("d" * 40, "c" * 40)},
+    )
+
+    node = compiled.node("adopted-node")
+    assert node.adopted_candidate_sha == "d" * 40
+    assert node.review_base_sha == "c" * 40
+
+
+@pytest.mark.parametrize(
+    "binding",
+    (
+        ("D" * 40, "c" * 40),
+        ("d" * 39, "c" * 40),
+        ("d" * 40, "c" * 39),
+        ("d" * 40, ""),
+    ),
+)
+def test_program_compiler_rejects_invalid_adopted_candidate_review_base_pairs(
+    tmp_path: Path, binding: tuple[str, str]
+) -> None:
+    with pytest.raises(PlanCapsuleError, match="adopted node"):
+        compile_program_graph(
+            _adoption_plan(tmp_path),
+            "adoption-program",
+            milestone_ids=("adopted-node",),
+            adopted_nodes={"adopted-node": binding},
+        )
+
+
 def test_active_controller_turn_recovery_correctness_closure_capsule_compiles_from_canonical_plan() -> None:
     plan = Path("docs/reviews/peer-thread-workflow.md")
     with pytest.raises(PlanCapsuleError, match="exactly one active milestone heading"):

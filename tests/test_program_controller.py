@@ -45,6 +45,7 @@ from codex_flow.domain import (
     ProgramEventKind,
     ProgramGraph,
     ProgramId,
+    ProgramIntegrationMode,
     ProgramNodeSpec,
     ProgramNodeStatus,
     ProgramState,
@@ -122,6 +123,31 @@ def _graph(root: Path) -> ProgramGraph:
         ),
         TRUNK_HEAD,
     )
+
+
+def _write_adoption_plan(root: Path) -> Path:
+    plan = root / "adoption-plan.md"
+    plan.write_text(
+        """## Next execution — adopted-node
+
+```python
+ModelFacingCapsule(
+    schema_version=4,
+    objective="adopt an existing candidate",
+    decomposition=("verify",),
+    acceptance_modes=(AcceptanceMode.OBJECTIVE,),
+    acceptance_criteria=("the exact candidate is closed",),
+    mutable_surfaces=("src/adopted.py",),
+    protected_surfaces=("README.md",),
+    authorities=(ModelAuthority(AcceptanceMode.OBJECTIVE, RoleId("code-reviewer")),),
+    prompt="verify the exact existing candidate",
+    integration_mode=ProgramIntegrationMode.ALREADY_INTEGRATED,
+)
+```
+""",
+        encoding="utf-8",
+    )
+    return plan
 
 
 def _bundle(
@@ -525,6 +551,229 @@ def test_candidate_blocker_scope_survives_adoption_reconciliation(tmp_path: Path
         assert replayed.nodes[0].blocker == blocker
     finally:
         ledger.close()
+
+
+def test_program_cli_register_and_adopt_closes_exact_integrated_candidate_without_git_mutation(
+    tmp_path: Path,
+) -> None:
+    from typer.testing import CliRunner
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "Codex Flow Test")
+    _git(repository, "config", "user.email", "codex-flow@example.invalid")
+    (repository / "README.md").write_text("protected\n", encoding="utf-8")
+    (repository / ".gitignore").write_text(".codex-flow/\n", encoding="utf-8")
+    plan = _write_adoption_plan(repository)
+    _git(repository, "add", "README.md", ".gitignore", plan.name)
+    _git(repository, "commit", "-m", "base")
+    review_base = _git(repository, "rev-parse", "HEAD")
+    (repository / "src").mkdir()
+    (repository / "src" / "adopted.py").write_text("adopted = True\n", encoding="utf-8")
+    _git(repository, "add", "src/adopted.py")
+    _git(repository, "commit", "-m", "adopted candidate")
+    candidate = _git(repository, "rev-parse", "HEAD")
+
+    runner = CliRunner()
+    register = runner.invoke(
+        app,
+        [
+            "program",
+            "register",
+            "--program-id",
+            "adoption-program",
+            "--plan-path",
+            str(plan),
+            "--milestone-id",
+            "adopted-node",
+            "--adopted-node",
+            f"adopted-node={candidate},{review_base}",
+            "--trunk-head",
+            candidate,
+            "--state-root",
+            str(repository),
+            "--json",
+        ],
+    )
+    assert register.exit_code == 0, register.stdout
+    registered = json.loads(register.stdout)
+    assert registered["program_id"] == "adoption-program"
+    assert registered["nodes"][0]["integration_mode"] == ProgramIntegrationMode.ALREADY_INTEGRATED.value
+
+    def git_state() -> tuple[str, str, str, bytes, bytes]:
+        return (
+            _git(repository, "show-ref"),
+            _git(repository, "ls-files", "-s"),
+            _git(repository, "status", "--porcelain", "--untracked-files=all"),
+            (repository / "README.md").read_bytes(),
+            (repository / "src" / "adopted.py").read_bytes(),
+        )
+
+    before_adoption = git_state()
+    adopt_args = [
+        "program",
+        "adopt-candidate",
+        "--program-id",
+        "adoption-program",
+        "--milestone-id",
+        "adopted-node",
+        "--candidate-sha",
+        candidate,
+        "--state-root",
+        str(repository),
+        "--json",
+    ]
+    adopted = runner.invoke(app, adopt_args)
+    assert adopted.exit_code == 0, adopted.stdout + adopted.stderr
+    adopted_payload = json.loads(adopted.stdout)
+    node = adopted_payload["nodes"][0]
+    assert node["candidate_sha"] == candidate
+    assert node["closure_satisfied"] is False
+    assert node["integrated"] is False
+    assert git_state() == before_adoption
+
+    with Ledger(repository / ".codex-flow" / "workflow.db") as ledger:
+        status = ledger.program_status("adoption-program")
+        implementation = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
+        )
+        claim = ledger.claim_program_controller_decision(
+            implementation.decision_id,
+            claimant_id="program-controller/adoption-test",
+            expected_revision=implementation.revision,
+            generation=int(implementation.current_generation),
+        )
+        review_action = ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_REVIEWS,
+            milestone_id="adopted-node",
+            candidate_sha=candidate,
+            review_roles=("code-reviewer",),
+        )
+        review_bundle = ModelFacingProgramControllerActionBundle(
+            1,
+            implementation.decision_id,
+            status.program_id,
+            status.plan_digest,
+            claim.generation,
+            implementation.event_kind,
+            implementation.event_key,
+            implementation.payload["program_revision"],  # type: ignore[arg-type]
+            status.trunk_head,
+            (review_action,),
+            "start the adoption review",
+        )
+        review_receipt = ledger.submit_program_controller_actions(
+            review_bundle,
+            claimant_id=claim.claimant_id,
+            token=str(claim.token),
+        )
+        for effect_id, _milestone_id in review_bundle.external_effects:
+            ledger.record_program_action_effect(review_receipt.action_id, effect_id, state="applied")
+        ledger.acknowledge_controller_action(
+            implementation.decision_id,
+            action_id=review_receipt.action_id,
+            bundle_sha256=review_bundle.sha256,
+            committed_revision=review_receipt.expected_revision + 1,
+            claimant_id=claim.claimant_id,
+            token=str(claim.token),
+        )
+        ledger.complete_controller_generation(
+            implementation.decision_id,
+            generation=int(claim.generation),
+            state=ControllerGenerationState.COMPLETED,
+        )
+        ledger.record_program_review(
+            "adoption-program",
+            "adopted-node",
+            ReviewResult(
+                "adoption-code-review",
+                RoleId("code-reviewer"),
+                True,
+                (),
+                candidate,
+                acceptance_mode=AcceptanceMode.OBJECTIVE,
+            ),
+        )
+        review_completion = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+        )
+        promotion_claim = ledger.claim_program_controller_decision(
+            review_completion.decision_id,
+            claimant_id="program-controller/adoption-test",
+            expected_revision=review_completion.revision,
+            generation=int(review_completion.current_generation),
+        )
+        promotion_bundle = ModelFacingProgramControllerActionBundle(
+            1,
+            review_completion.decision_id,
+            status.program_id,
+            status.plan_digest,
+            promotion_claim.generation,
+            review_completion.event_kind,
+            review_completion.event_key,
+            review_completion.payload["program_revision"],  # type: ignore[arg-type]
+            status.trunk_head,
+            (
+                ModelFacingProgramControllerAction(
+                    ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                    milestone_id="adopted-node",
+                    candidate_sha=candidate,
+                    review_ids=("adoption-code-review",),
+                ),
+            ),
+            "close the adopted candidate",
+        )
+        promotion_receipt = ledger.submit_program_controller_actions(
+            promotion_bundle,
+            claimant_id=promotion_claim.claimant_id,
+            token=str(promotion_claim.token),
+        )
+        ledger.acknowledge_controller_action(
+            review_completion.decision_id,
+            action_id=promotion_receipt.action_id,
+            bundle_sha256=promotion_bundle.sha256,
+            committed_revision=promotion_receipt.expected_revision + 1,
+            claimant_id=promotion_claim.claimant_id,
+            token=str(promotion_claim.token),
+        )
+        ledger.complete_controller_generation(
+            review_completion.decision_id,
+            generation=int(promotion_claim.generation),
+            state=ControllerGenerationState.COMPLETED,
+        )
+        closed = ledger.program_status("adoption-program")
+        assert closed.nodes[0].closure_satisfied is True
+        assert closed.nodes[0].state == WorkflowState.ACCEPTED.value
+
+    replayed = runner.invoke(app, adopt_args)
+    assert replayed.exit_code == 0, replayed.stdout + replayed.stderr
+    replayed_payload = json.loads(replayed.stdout)
+    assert replayed_payload["nodes"][0]["closure_satisfied"] is True
+    assert replayed_payload["nodes"][0]["candidate_sha"] == candidate
+    assert git_state() == before_adoption
+
+    with Ledger(repository / ".codex-flow" / "workflow.db") as ledger:
+        status = ledger.program_status("adoption-program")
+        assert status.nodes[0].candidate_sha == candidate
+        assert status.nodes[0].closure_satisfied is True
+        assert ledger.queue_dispatches() == ()
+
+    (repository / "README.md").write_text("mutated\n", encoding="utf-8")
+    dirty = runner.invoke(app, adopt_args)
+    assert dirty.exit_code == 2
+    assert "already-integrated adoption" in dirty.stderr
+    (repository / "README.md").write_bytes(before_adoption[3])
+
+    wrong_args = list(adopt_args)
+    wrong_args[wrong_args.index(candidate)] = "0" * 40
+    wrong_candidate = runner.invoke(app, wrong_args)
+    assert wrong_candidate.exit_code == 2
+    assert "registered candidate" in wrong_candidate.stderr
 
 
 def test_external_executor_candidate_projects_blocked_scope(tmp_path: Path) -> None:

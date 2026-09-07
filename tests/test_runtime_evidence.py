@@ -5,10 +5,13 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+import codex_flow.controller as controller_module
+import codex_flow.harness as harness_module
 import codex_flow.runtime_evidence as runtime_evidence_module
 from codex_flow.contracts import (
     ModelFacingProgramControllerAction,
@@ -233,10 +236,13 @@ def _apply_program_action(
     bundle, receipt, claim = _submit_program_action(ledger, status, action)
     if action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE and action.evidence_sha256 is not None:
         manifest = ledger.runtime_evidence_manifest("program", action.milestone_id or "", action.evidence_sha256)
+        artifact_root = ledger.path.parent / "artifacts"
+        if not artifact_root.is_dir():
+            artifact_root = ledger.path.parent / ".codex-flow" / "artifacts"
         verify_runtime_evidence(
             runtime_evidence_module.RuntimeEvidenceSnapshot(
                 manifest,
-                ledger.path.parent / ".codex-flow" / "artifacts" / "runtime-evidence" / action.evidence_sha256,
+                artifact_root / "runtime-evidence" / action.evidence_sha256,
             )
         )
         ledger.close_program_node(
@@ -265,10 +271,15 @@ def _apply_program_action(
 
 def _runtime_review_ready(
     tmp_path: Path,
+    graph: ProgramGraph | None = None,
 ) -> tuple[
     Ledger, ExecutionCapsule, str, runtime_evidence_module.RuntimeEvidenceSnapshot, ProgramControllerDecisionStatus
 ]:
-    graph, capsule, source_head = _runtime_graph(tmp_path)
+    if graph is None:
+        graph, capsule, source_head = _runtime_graph(tmp_path)
+    else:
+        capsule = graph.node("runtime").capsule
+        source_head = graph.trunk_head
     state_dir = tmp_path / ".codex-flow"
     state_dir.mkdir()
     ledger = Ledger(state_dir / "workflow.db")
@@ -338,6 +349,84 @@ def _runtime_review_ready(
         item for item in ledger.program_controller_decisions() if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
     )
     return ledger, capsule, source_head, snapshot, review_completion
+
+
+def _transitive_runtime_graph(root: Path) -> ProgramGraph:
+    graph, runtime, source_head = _runtime_graph(root)
+    downstream = replace(
+        runtime,
+        milestone_id=MilestoneId("downstream"),
+        mutable_paths=("downstream.txt",),
+        output_schema=model_facing_result_schema(1),
+        outcome_kind=ProgramOutcomeKind.COMMIT,
+        integration_mode=ProgramIntegrationMode.GIT,
+        runtime_artifact_paths=(),
+        runtime_artifact_max_files=None,
+        runtime_artifact_max_bytes=None,
+    )
+    return replace(
+        graph,
+        nodes=(
+            graph.node("runtime"),
+            ProgramNodeSpec(MilestoneId("downstream"), downstream, (MilestoneId("runtime"),)),
+        ),
+        trunk_head=source_head,
+    )
+
+
+def _transitive_runtime_ready(
+    tmp_path: Path,
+) -> tuple[Ledger, ExecutionCapsule, str, runtime_evidence_module.RuntimeEvidenceSnapshot]:
+    graph = _transitive_runtime_graph(tmp_path)
+    ledger, capsule, source_head, snapshot, review_completion = _runtime_review_ready(tmp_path, graph)
+    _apply_program_action(
+        ledger,
+        review_completion,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.PROMOTE_CANDIDATE,
+            milestone_id="runtime",
+            evidence_sha256=snapshot.digest,
+            review_ids=("runtime-architecture", "runtime-code"),
+        ),
+    )
+    return ledger, capsule, source_head, snapshot
+
+
+def _downstream_start_request(
+    ledger: Ledger,
+) -> tuple[dict[str, object], ModelFacingProgramControllerActionBundle]:
+    decision = ledger.start_program("program", event_key="start-downstream")
+    claim = ledger.claim_program_controller_decision(
+        decision.decision_id,
+        claimant_id="program-controller/transitive-runtime-test",
+        expected_revision=decision.revision,
+        generation=int(decision.current_generation),
+    )
+    bundle = ModelFacingProgramControllerActionBundle(
+        1,
+        decision.decision_id,
+        decision.program_id,
+        str(decision.payload["plan_digest"]),
+        Generation(int(claim.generation)),
+        decision.event_kind,
+        decision.event_key,
+        decision.payload["program_revision"],
+        decision.payload["trunk_head"],
+        (
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("downstream",),
+            ),
+        ),
+        "start the transitive runtime successor",
+    )
+    return {
+        "version": 1,
+        "operation": "program_submit_actions",
+        "bundle": bundle.to_json(),
+        "claimant_id": claim.claimant_id,
+        "token": str(claim.token),
+    }, bundle
 
 
 def test_runtime_evidence_capture_is_nested_content_addressed_and_rehashable(tmp_path: Path) -> None:
@@ -772,3 +861,329 @@ def test_recovered_runtime_promotion_rehashes_before_closure(tmp_path: Path) -> 
     finally:
         harness.close()
         ledger.close()
+
+
+def test_public_recovered_program_submission_restarts_before_commit_and_replays_after_commit(
+    tmp_path: Path,
+) -> None:
+    ledger, _capsule, _source_head, snapshot, review_completion = _runtime_review_ready(tmp_path)
+    claim = ledger.claim_program_controller_decision(
+        review_completion.decision_id,
+        claimant_id="program-controller/runtime-recovery-test",
+        expected_revision=review_completion.revision,
+        generation=int(review_completion.current_generation),
+    )
+    bundle = ModelFacingProgramControllerActionBundle(
+        1,
+        review_completion.decision_id,
+        review_completion.program_id,
+        "b" * 64,
+        Generation(int(claim.generation)),
+        review_completion.event_kind,
+        review_completion.event_key,
+        review_completion.payload["program_revision"],
+        review_completion.payload["trunk_head"],
+        (
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.PROMOTE_CANDIDATE,
+                milestone_id="runtime",
+                evidence_sha256=snapshot.digest,
+                review_ids=("runtime-architecture", "runtime-code"),
+            ),
+        ),
+        "recover the exact runtime promotion",
+    )
+    inspection_claim = ledger.reserve_controller_recovery_inspection(review_completion.decision_id)
+    ledger.complete_controller_recovery_inspection(
+        review_completion.decision_id,
+        inspection_outcome="completed",
+        claim=inspection_claim,
+        bundle=bundle,
+    )
+    assert not any(
+        item["decision_id"] == str(review_completion.decision_id) for item in ledger.program_action_outboxes("program")
+    )
+    ledger.close()
+
+    request = {
+        "version": 1,
+        "operation": "program_submit_recovered_actions",
+        "decision_id": str(review_completion.decision_id),
+    }
+    harness = WorkflowHarness(tmp_path)
+    try:
+        first = harness._controller_request(request)
+        assert first["ok"] is True
+        first_outboxes = tuple(
+            item
+            for item in harness.ledger.program_action_outboxes("program")
+            if item["decision_id"] == str(review_completion.decision_id)
+        )
+        assert len(first_outboxes) == 1
+        assert first_outboxes[0]["action_id"] == bundle.action_id
+        assert harness.ledger.program_action_effect_state(bundle.action_id, bundle.external_effects[0][0]) == "applied"
+        assert harness.ledger.program_status("program").nodes[0].closure_satisfied is True
+    finally:
+        harness.close()
+
+    restarted = WorkflowHarness(tmp_path)
+    try:
+        replay = restarted._controller_request(request)
+        assert replay["ok"] is True
+        assert replay["receipt"]["action_id"] == first["receipt"]["action_id"]
+        assert (
+            len(
+                tuple(
+                    item
+                    for item in restarted.ledger.program_action_outboxes("program")
+                    if item["decision_id"] == str(review_completion.decision_id)
+                )
+            )
+            == 1
+        )
+        assert (
+            sum(fact.kind == "promotion_accepted" for fact in restarted.ledger.review_lifecycle("program", "runtime"))
+            == 1
+        )
+    finally:
+        restarted.close()
+
+
+def test_retained_approval_gate_blocks_program_queue_claim_without_mutation(tmp_path: Path) -> None:
+    ledger, _capsule, _source_head, _snapshot = _transitive_runtime_ready(tmp_path)
+    ledger.close()
+    harness = WorkflowHarness(tmp_path)
+    try:
+        request, _bundle = _downstream_start_request(harness.ledger)
+        assert harness._controller_request(request)["ok"] is True
+        authority = harness.acquire()
+        before = harness.ledger.queue_dispatch("program/downstream/executor/1")
+        _inject_retained_approval_gate(harness.ledger)
+
+        with pytest.raises(StaleWriter, match="approval_capability_unavailable"):
+            harness.ledger.claim_queue_dispatch(
+                epoch=int(authority["epoch"]),
+                claim_nonce_sha256="e" * 64,
+            )
+
+        assert harness.ledger.queue_dispatch("program/downstream/executor/1") == before
+    finally:
+        harness.close()
+
+
+def test_retained_approval_gate_blocks_recovery_continuation_without_mutation(tmp_path: Path) -> None:
+    ledger, _capsule, _source_head, _snapshot = _transitive_runtime_ready(tmp_path)
+    ledger.close()
+    harness = WorkflowHarness(tmp_path)
+    try:
+        request, _bundle = _downstream_start_request(harness.ledger)
+        assert harness._controller_request(request)["ok"] is True
+        authority = harness.acquire()
+        dispatch_id = "program/downstream/executor/1"
+        epoch = int(authority["epoch"])
+        assert harness.ledger.claim_queue_dispatch(epoch=epoch, claim_nonce_sha256="f" * 64) is not None
+        harness.ledger.set_queue_state(dispatch_id, "starting", epoch=epoch)
+        queue = harness.ledger.queue_dispatch(dispatch_id)
+        token = "approval-recovery-token"
+        token_sha256 = hashlib.sha256(token.encode("ascii")).hexdigest()
+        harness.ledger.issue_attempt_capability(
+            dispatch_id,
+            generation=int(queue["generation"]),
+            attempt=int(queue["attempt"]),
+            operation="submit_result",
+            schema_sha256=str(queue["result_contract_sha256"]),
+            workspace_path=tmp_path,
+            backend="sdk_headless",
+            token_sha256=token_sha256,
+            expires_at="9999-12-31T23:59:59Z",
+        )
+        harness.ledger.bind_worker_liveness(
+            dispatch_id,
+            epoch=epoch,
+            generation=int(queue["generation"]),
+            attempt=int(queue["attempt"]),
+            pid=os.getpid(),
+            process_birth_identity="approval-recovery-worker",
+            lease_token_sha256=token_sha256,
+        )
+        harness.ledger.mark_worker_exit(
+            dispatch_id,
+            pid=os.getpid(),
+            process_birth_identity="approval-recovery-worker",
+            exit_code=79,
+            classification="transient-after-identity",
+        )
+        harness.ledger.record_recovery_inspection(
+            dispatch_id,
+            kind="transient_failed_turn",
+            thread_id="approval-recovery-thread",
+            turn_id="approval-recovery-turn",
+            next_eligible_at="2000-01-01T00:00:00Z",
+        )
+        assert harness.ledger.queue_dispatch(dispatch_id)["state"] == "recovery_continuation_pending"
+        before_queue = harness.ledger.queue_dispatch(dispatch_id)
+        before_recovery = harness.ledger.recovery_state(dispatch_id)
+        before_policy = harness.ledger.retry_policy(dispatch_id)
+        _inject_retained_approval_gate(harness.ledger)
+
+        with pytest.raises(StaleWriter, match="approval_capability_unavailable"):
+            harness.ledger.begin_recovery_continuation(
+                dispatch_id,
+                epoch=epoch,
+                claim_nonce_sha256="a" * 64,
+                now="2000-01-01T00:00:01Z",
+            )
+
+        assert harness.ledger.queue_dispatch(dispatch_id) == before_queue
+        assert harness.ledger.recovery_state(dispatch_id) == before_recovery
+        assert harness.ledger.retry_policy(dispatch_id) == before_policy
+    finally:
+        harness.close()
+
+
+def test_transitive_runtime_predecessor_corruption_blocks_public_enqueue(tmp_path: Path) -> None:
+    ledger, _capsule, _source_head, snapshot = _transitive_runtime_ready(tmp_path)
+    ledger.close()
+    harness = WorkflowHarness(tmp_path)
+    try:
+        request, _bundle = _downstream_start_request(harness.ledger)
+        snapshot.manifest_path.write_text("corrupt\n")
+
+        with pytest.raises(WorktreeError, match="pre-acceptance rehash"):
+            harness._controller_request(request)
+
+        assert (
+            harness.ledger._db()
+            .execute("SELECT COUNT(*) FROM dispatch_queue WHERE run_id = 'program' AND milestone_id = 'downstream'")
+            .fetchone()[0]
+            == 0
+        )
+        status = harness.ledger.program_status("program")
+        runtime_status = next(node for node in status.nodes if node.milestone_id == "runtime")
+        assert runtime_status.closure_satisfied is False
+        assert runtime_status.blocker is not None
+        assert any(
+            fact.kind == "evidence_invalidated" for fact in harness.ledger.review_lifecycle("program", "runtime")
+        )
+        assert any(
+            decision.event_kind is ProgramEventKind.CONTROLLER_ATTENTION and decision.event_key.endswith("/invalidated")
+            for decision in harness.ledger.program_controller_decisions()
+        )
+        assert not any(
+            any(
+                action.kind is ProgramControllerActionKind.START_READY_MILESTONES
+                and "downstream" in action.milestone_ids
+                for action in ModelFacingProgramControllerActionBundle.from_json_bytes(str(item["bundle_json"])).actions
+            )
+            for item in harness.ledger.program_action_outboxes("program")
+            if item.get("bundle_json") is not None
+        )
+    finally:
+        harness.close()
+
+
+def _patch_trusted_program_controller(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_controller = controller_module.Controller
+
+    class TestController(real_controller):
+        def __init__(self, state_root: Path, *, worktrees: object = None) -> None:
+            super().__init__(
+                state_root,
+                _trusted_test_adapter_factory=lambda _config: object(),
+                worktrees=worktrees,  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(controller_module, "Controller", TestController)
+
+
+def test_transitive_runtime_predecessor_corruption_blocks_queued_launch_before_popen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, _capsule, _source_head, snapshot = _transitive_runtime_ready(tmp_path)
+    ledger.close()
+    _patch_trusted_program_controller(monkeypatch)
+    harness = WorkflowHarness(tmp_path)
+    popen_calls = 0
+
+    real_popen = harness_module.subprocess.Popen
+
+    def unexpected_popen(*args: object, **kwargs: object) -> object:
+        nonlocal popen_calls
+        command = args[0] if args else kwargs.get("args")
+        if isinstance(command, tuple | list) and command and command[0] == "git":
+            return real_popen(*args, **kwargs)
+        popen_calls += 1
+        raise AssertionError("corrupt transitive evidence must block Popen")
+
+    monkeypatch.setattr(harness_module.subprocess, "Popen", unexpected_popen)
+    try:
+        request, _bundle = _downstream_start_request(harness.ledger)
+        response = harness._controller_request(request)
+        assert response["ok"] is True
+        queued = harness.ledger.queue_dispatch("program/downstream/executor/1")
+        assert queued["state"] == "queued"
+
+        authority = harness.acquire()
+        claimed = harness.ledger.claim_queue_dispatch(
+            epoch=int(authority["epoch"]),
+            claim_nonce_sha256="c" * 64,
+        )
+        assert claimed is not None
+        snapshot.manifest_path.write_text("corrupt\n")
+
+        with pytest.raises(WorktreeError, match="pre-acceptance rehash"):
+            harness._spawn_one(claimed)
+
+        assert popen_calls == 0
+        assert harness.ledger.queue_dispatch("program/downstream/executor/1")["state"] == "human_attention_required"
+        runtime_status = next(
+            node for node in harness.ledger.program_status("program").nodes if node.milestone_id == "runtime"
+        )
+        assert runtime_status.closure_satisfied is False
+        assert runtime_status.blocker is not None
+    finally:
+        harness.close()
+
+
+def test_unchanged_transitive_runtime_evidence_allows_one_worker_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, _capsule, _source_head, _snapshot = _transitive_runtime_ready(tmp_path)
+    ledger.close()
+    _patch_trusted_program_controller(monkeypatch)
+    harness = WorkflowHarness(tmp_path)
+    try:
+        request, _bundle = _downstream_start_request(harness.ledger)
+        assert harness._controller_request(request)["ok"] is True
+        authority = harness.acquire()
+        claimed = harness.ledger.claim_queue_dispatch(
+            epoch=int(authority["epoch"]),
+            claim_nonce_sha256="d" * 64,
+        )
+        assert claimed is not None
+        popen_calls = 0
+
+        class LiveChild:
+            pid = os.getpid()
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                return None
+
+            def wait(self, *, timeout: float) -> int:
+                assert timeout > 0
+                return 0
+
+        def one_popen(*_args: object, **_kwargs: object) -> LiveChild:
+            nonlocal popen_calls
+            popen_calls += 1
+            return LiveChild()
+
+        monkeypatch.setattr(harness_module.subprocess, "Popen", one_popen)
+        harness._spawn_one(claimed)
+        assert popen_calls == 1
+        assert harness.ledger.queue_dispatch("program/downstream/executor/1")["state"] == "starting"
+    finally:
+        harness.close()

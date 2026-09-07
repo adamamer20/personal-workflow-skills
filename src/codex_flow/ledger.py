@@ -7964,6 +7964,7 @@ class Ledger:
             )
             if row is None:
                 return None
+            self._require_queue_program_capability_in_transaction(row)
             if row["execution_status"] == ExecutionStatus.CANCELLED.value:
                 self._cancel_queue_row_in_transaction(row)
                 return None
@@ -10448,6 +10449,7 @@ class Ledger:
             )
             if recovery is None or queue is None:
                 raise RecordNotFound(f"recovery state does not exist: {dispatch_id}")
+            self._require_queue_program_capability_in_transaction(queue)
             if recovery["recovery_state"] != "recovery_continuation_pending":
                 raise StaleWriter("recovery continuation is not pending")
             if queue["state"] != "recovery_continuation_pending":
@@ -11251,6 +11253,15 @@ class Ledger:
             for payload in nodes.values()
         ):
             raise StaleWriter("approval_capability_unavailable")
+
+    def _require_queue_program_capability_in_transaction(self, queue: sqlite3.Row) -> None:
+        """Apply the retained program capability guard to one queue row."""
+
+        run = self._db().execute("SELECT program_digest FROM runs WHERE run_id = ?", (str(queue["run_id"]),)).fetchone()
+        if run is None:
+            raise CorruptSchemaError("queue dispatch run is missing")
+        if run["program_digest"] is not None:
+            self._require_program_capability_in_transaction(ProgramId(str(queue["run_id"])))
 
     def _require_decision_program_capability_in_transaction(self, decision: sqlite3.Row) -> None:
         """Apply the retained-graph guard to shared controller decisions."""
@@ -12504,7 +12515,7 @@ class Ledger:
                 item.kind in {"promotion_accepted", "integration_completed"}
                 and item.data.get("candidate_sha") == candidate.commit_sha
                 for item in facts
-            ):
+            ) and not (already_integrated and existing == candidate.commit_sha):
                 raise StaleWriter("program candidate is already promoted or integrated")
             current = WorkflowState(str(milestone_row["current_state"]))
             predecessor_sha: str | None = None
@@ -12540,13 +12551,70 @@ class Ledger:
                 else WorkflowState.REPAIR_REQUIRED
             )
             if already_integrated and target_state is WorkflowState.COMPLETED:
+                adoption_dispatch = DispatchId.from_parts(
+                    program,
+                    milestone,
+                    RoleId("executor"),
+                    Generation(1),
+                )
+                if dispatch_value is not None:
+                    try:
+                        supplied_dispatch = DispatchId(dispatch_value)
+                    except ValueError as exc:
+                        raise StaleWriter("already-integrated adoption dispatch identity is invalid") from exc
+                    if supplied_dispatch != adoption_dispatch:
+                        raise StaleWriter("already-integrated adoption dispatch identity is not the initial executor")
+                dispatch_value = str(adoption_dispatch)
+                if existing == candidate.commit_sha:
+                    prior_adoption = next(
+                        (
+                            fact
+                            for fact in facts
+                            if fact.kind == "candidate_adopted"
+                            and fact.data.get("candidate_sha") == candidate.commit_sha
+                        ),
+                        None,
+                    )
+                    if prior_adoption is None:
+                        raise CorruptSchemaError("already-integrated adoption is missing its durable receipt")
+                    if (
+                        prior_adoption.data.get("adoption_receipt") != receipt_value
+                        or prior_adoption.data.get("dispatch_id") != dispatch_value
+                    ):
+                        raise StaleWriter("already-integrated adoption replay conflicts with its durable receipt")
+                    refreshed = self._db().execute("SELECT * FROM runs WHERE run_id = ?", (str(program),)).fetchone()
+                    assert refreshed is not None
+                    return self._program_status_from_row(refreshed)
                 if current is WorkflowState.PLANNED:
-                    self._transition_program_state_in_transaction(
+                    existing_dispatch = (
+                        self._db()
+                        .execute(
+                            "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND milestone_id = ? AND role = 'executor'",
+                            (str(program), str(milestone)),
+                        )
+                        .fetchone()
+                    )
+                    if existing_dispatch is not None:
+                        raise StaleWriter("already-integrated adoption has a conflicting executor dispatch")
+                    now = utc_now()
+                    self._db().execute(
+                        "INSERT INTO dispatches(dispatch_id, run_id, milestone_id, role, generation, claimed_at) "
+                        "VALUES (?, ?, ?, 'executor', 1, ?)",
+                        (dispatch_value, str(program), str(milestone), now),
+                    )
+                    self._db().execute(
+                        "UPDATE milestones SET current_state = ?, updated_at = ? WHERE run_id = ? AND milestone_id = ?",
+                        (WorkflowState.STARTING.value, now, str(program), str(milestone)),
+                    )
+                    self._append_event_in_transaction(
                         program,
                         milestone,
-                        WorkflowState.STARTING,
-                        expected_state=WorkflowState.PLANNED,
-                        reason=ReasonCode.TERMINAL_OUTCOME,
+                        from_state=WorkflowState.PLANNED,
+                        to_state=WorkflowState.STARTING,
+                        event_type="dispatch_claimed",
+                        reason=WorkflowReason(ReasonCode.DISPATCH_CLAIMED),
+                        dispatch_id=adoption_dispatch,
+                        data=None,
                     )
                     current = WorkflowState.STARTING
                 if current is WorkflowState.STARTING:
@@ -14289,6 +14357,10 @@ class Ledger:
             if program is None:
                 raise RecordNotFound(f"program does not exist: {bundle.program_id}")
             self._require_program_capability_in_transaction(bundle.program_id)
+            if allow_recovered:
+                inspected = self._recovered_program_controller_bundle_in_transaction(bundle.decision_id)
+                if inspected.sha256 != bundle.sha256:
+                    raise StaleWriter("program controller recovery bundle is not the inspected bundle")
             existing_outbox = (
                 self._db()
                 .execute("SELECT * FROM controller_action_outbox WHERE decision_id = ?", (str(bundle.decision_id),))
@@ -14578,6 +14650,75 @@ class Ledger:
             args = (str(ProgramId(str(program_id))),)
         query += " ORDER BY a.committed_at, a.action_id"
         return tuple(self._queue_row(row) for row in self._db().execute(query, args).fetchall())
+
+    def _recovered_program_controller_bundle_in_transaction(
+        self, identity: ControllerDecisionId
+    ) -> ModelFacingProgramControllerActionBundle:
+        """Validate and return the one exact inspected program bundle."""
+
+        decision = (
+            self._db().execute("SELECT * FROM controller_decisions WHERE decision_id = ?", (str(identity),)).fetchone()
+        )
+        if decision is None:
+            raise RecordNotFound(f"program controller decision does not exist: {identity}")
+        if decision["program_id"] is None:
+            raise StaleWriter("controller decision is not bound to a program")
+        if (
+            decision["claimant_kind"] != ControllerClaimantKind.MODEL.value
+            or decision["claimant_id"] is None
+            or decision["claim_token_sha256"] is None
+            or decision["claim_started_at"] is None
+        ):
+            raise CorruptSchemaError("program controller recovery claimant audit is missing")
+        generation = (
+            self._db()
+            .execute(
+                "SELECT * FROM controller_decision_generations WHERE decision_id = ? AND generation = ?",
+                (str(identity), int(decision["current_generation"])),
+            )
+            .fetchone()
+        )
+        if generation is None:
+            raise CorruptSchemaError("program controller recovery generation is missing")
+        if (
+            generation["inspection_completed_at"] is None
+            or generation["inspection_outcome"] != ControllerGenerationState.COMPLETED.value
+            or generation["inspection_bundle_json"] is None
+            or generation["inspection_bundle_sha256"] is None
+        ):
+            raise StaleWriter("program controller recovery has no persisted inspected bundle")
+        raw = str(generation["inspection_bundle_json"])
+        digest = str(generation["inspection_bundle_sha256"])
+        try:
+            bundle = ModelFacingProgramControllerActionBundle.from_json_bytes(raw)
+        except (TypeError, ValueError) as exc:
+            raise CorruptSchemaError("program controller recovery bundle is malformed") from exc
+        if hashlib.sha256(raw.encode("utf-8")).hexdigest() != digest or bundle.sha256 != digest:
+            raise CorruptSchemaError("program controller recovery bundle digest is invalid")
+        summary_raw = strict_json_loads(str(decision["summary_json"]), max_bytes=16_384)
+        if not isinstance(summary_raw, Mapping):
+            raise CorruptSchemaError("program controller decision summary is malformed")
+        if (
+            bundle.decision_id != identity
+            or int(bundle.generation) != int(generation["generation"])
+            or bundle.program_id != ProgramId(str(decision["program_id"]))
+            or bundle.expected_program_revision != int(decision["program_revision"])
+            or bundle.plan_digest != summary_raw.get("plan_digest")
+            or bundle.expected_trunk_head != summary_raw.get("trunk_head")
+            or bundle.event_kind.value != decision["event_kind"]
+            or bundle.event_key != decision["event_key"]
+        ):
+            raise StaleWriter("program controller recovery bundle identity is stale")
+        return bundle
+
+    def recovered_program_controller_bundle(
+        self, decision_id: ControllerDecisionId | str
+    ) -> ModelFacingProgramControllerActionBundle:
+        """Read the validated completed inspection bundle before its outbox exists."""
+
+        identity = ControllerDecisionId(str(decision_id))
+        with self._transaction():
+            return self._recovered_program_controller_bundle_in_transaction(identity)
 
     def _program_action_effect_binding(
         self, action_id: str, effect_id: str
@@ -16602,42 +16743,14 @@ class Ledger:
         """Commit the exact program bundle retained by one recovery read."""
 
         identity = ControllerDecisionId(str(decision_id))
+        persisted = self.recovered_program_controller_bundle(identity)
         decision = (
             self._db()
-            .execute(
-                "SELECT claimant_id FROM controller_decisions WHERE decision_id = ?",
-                (str(identity),),
-            )
+            .execute("SELECT claimant_id FROM controller_decisions WHERE decision_id = ?", (str(identity),))
             .fetchone()
         )
-        row = (
-            self._db()
-            .execute(
-                "SELECT inspection_completed_at, inspection_outcome, inspection_bundle_json, inspection_bundle_sha256 "
-                "FROM controller_decision_generations "
-                "WHERE decision_id = ? AND generation = (SELECT current_generation FROM controller_decisions WHERE decision_id = ?)",
-                (str(identity), str(identity)),
-            )
-            .fetchone()
-        )
-        if (
-            row is None
-            or row["inspection_completed_at"] is None
-            or row["inspection_outcome"] != ControllerGenerationState.COMPLETED.value
-            or row["inspection_bundle_json"] is None
-            or row["inspection_bundle_sha256"] is None
-        ):
-            raise StaleWriter("program controller recovery has no persisted inspected bundle")
         if decision is None or decision["claimant_id"] is None:
             raise StaleWriter("program controller recovery claimant is unavailable")
-        try:
-            persisted = ModelFacingProgramControllerActionBundle.from_json_bytes(str(row["inspection_bundle_json"]))
-        except (TypeError, ValueError) as exc:
-            raise CorruptSchemaError("program controller recovery bundle is malformed") from exc
-        if hashlib.sha256(str(row["inspection_bundle_json"]).encode("utf-8")).hexdigest() != str(
-            row["inspection_bundle_sha256"]
-        ) or persisted.sha256 != str(row["inspection_bundle_sha256"]):
-            raise CorruptSchemaError("program controller recovery bundle digest is invalid")
         return self.submit_program_controller_actions(
             persisted,
             claimant_id=str(decision["claimant_id"]),

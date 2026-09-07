@@ -362,7 +362,7 @@ def compile_program_graph(
             milestone_id,
             compile_canonical_plan(path, milestone_id),
             tuple(edge_map.get(milestone_id, ())),
-            (adopted[milestone_id][1], adopted[milestone_id][0]) if milestone_id in adopted else None,
+            adopted[milestone_id][1] if milestone_id in adopted else None,
             adopted[milestone_id][0] if milestone_id in adopted else None,
         )
         for milestone_id in selected

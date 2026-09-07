@@ -73,6 +73,7 @@ from .domain import (
     ExecutionCapsule,
     ExecutionStatus,
     LifecyclePhase,
+    LifecycleRecord,
     LiveTurnKeyframe,
     NativePermissionMode,
     ProgramControllerActionKind,
@@ -81,10 +82,12 @@ from .domain import (
     ProgramIntegrationMode,
     ProgramNodeSpec,
     ProgramOutcomeKind,
+    ProgramStatus,
     ReasonCode,
     ReasoningEffort,
     RecoveryActionKind,
     RetryBudgetChange,
+    ReviewSubject,
     RuntimeEvidenceManifest,
     Sandbox,
     ThreadIdentity,
@@ -931,6 +934,13 @@ class WorkflowHarness:
         graph = self.ledger.program_graph(program_id)
         node = graph.node(milestone_id)
         self._assert_program_capability_available(graph)
+        self._assert_program_worker_effect_eligible(
+            program_id,
+            milestone_id,
+            role,
+            generation,
+            action_context,
+        )
         dispatch_id = str(DispatchId.from_parts(program_id, milestone_id, role, generation))
         if self._program_dispatch_exists(dispatch_id):
             return
@@ -960,17 +970,198 @@ class WorkflowHarness:
         if any(node.capsule.approval_gates for node in graph.nodes):
             raise WorktreeError("approval_capability_unavailable")
 
+    @staticmethod
+    def _program_subject_from_facts(facts: Sequence[LifecycleRecord]) -> ReviewSubject | None:
+        """Resolve the latest durable subject without trusting action input."""
+
+        for fact in reversed(facts):
+            candidate = fact.data.get("candidate_sha")
+            evidence = fact.data.get("evidence_sha256")
+            if isinstance(candidate, str):
+                try:
+                    return ReviewSubject(ProgramOutcomeKind.COMMIT, candidate)
+                except ValueError as exc:
+                    raise WorktreeError("program lifecycle candidate subject is malformed") from exc
+            if isinstance(evidence, str):
+                try:
+                    return ReviewSubject(ProgramOutcomeKind.RUNTIME_EVIDENCE, evidence)
+                except ValueError as exc:
+                    raise WorktreeError("program lifecycle evidence subject is malformed") from exc
+        return None
+
+    def _resolve_program_effect_subjects(
+        self,
+        graph: ProgramGraph,
+        status: ProgramStatus,
+        target_milestone_ids: Sequence[str],
+        *,
+        include_targets: bool,
+        explicit_subjects: Mapping[str, str] | None = None,
+    ) -> tuple[tuple[str, ReviewSubject], ...]:
+        """Resolve current dependency/review subjects from durable program facts."""
+
+        status_by_id = {str(node.milestone_id): node for node in status.nodes}
+        resolved: list[tuple[str, ReviewSubject]] = []
+        seen_nodes: set[str] = set()
+        seen_subjects: set[tuple[str, str, str]] = set()
+
+        def current_subject(milestone_id: str) -> ReviewSubject:
+            try:
+                node = graph.node(milestone_id)
+                node_status = status_by_id[milestone_id]
+            except (KeyError, ValueError) as exc:
+                raise WorktreeError("program effect names an unknown milestone") from exc
+            subject = self._program_subject_from_facts(self.ledger.review_lifecycle(graph.program_id, milestone_id))
+            if subject is None:
+                raise WorktreeError("program effect lacks a current durable subject")
+            expected_digest = (
+                node_status.evidence_sha256
+                if node_status.outcome_kind is ProgramOutcomeKind.RUNTIME_EVIDENCE
+                else node_status.candidate_sha
+            )
+            if (
+                subject.kind is not node.capsule.outcome_kind
+                or expected_digest != subject.digest
+                or (subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE and node_status.evidence_sha256 is None)
+            ):
+                raise WorktreeError("program effect subject is stale")
+            return subject
+
+        def visit_dependency(milestone_id: str) -> None:
+            if milestone_id in seen_nodes:
+                return
+            seen_nodes.add(milestone_id)
+            try:
+                node = graph.node(milestone_id)
+                node_status = status_by_id[milestone_id]
+            except (KeyError, ValueError) as exc:
+                raise WorktreeError("program effect dependency is unknown") from exc
+            for dependency in node.dependencies:
+                visit_dependency(str(dependency))
+            if not node_status.closure_satisfied or node_status.blocker is not None:
+                raise WorktreeError("program effect has an ineligible dependency closure")
+            subject = current_subject(milestone_id)
+            if subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+                key = (milestone_id, subject.kind.value, subject.digest)
+                if key not in seen_subjects:
+                    resolved.append((milestone_id, subject))
+                    seen_subjects.add(key)
+
+        for milestone_id in target_milestone_ids:
+            target = str(milestone_id)
+            try:
+                node = graph.node(target)
+            except (KeyError, ValueError) as exc:
+                raise WorktreeError("program effect names an unknown milestone") from exc
+            for dependency in node.dependencies:
+                visit_dependency(str(dependency))
+            if not include_targets:
+                continue
+            subject = current_subject(target)
+            expected_wire = explicit_subjects.get(target) if explicit_subjects is not None else None
+            if expected_wire is not None and subject.wire_value != expected_wire:
+                raise WorktreeError("program effect subject does not match current durable facts")
+            key = (target, subject.kind.value, subject.digest)
+            if key not in seen_subjects and subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE:
+                resolved.append((target, subject))
+                seen_subjects.add(key)
+        return tuple(resolved)
+
+    def _rehash_program_effect_subjects(
+        self,
+        graph: ProgramGraph,
+        status: ProgramStatus,
+        target_milestone_ids: Sequence[str],
+        *,
+        include_targets: bool,
+        explicit_subjects: Mapping[str, str] | None = None,
+    ) -> None:
+        for milestone_id, subject in self._resolve_program_effect_subjects(
+            graph,
+            status,
+            target_milestone_ids,
+            include_targets=include_targets,
+            explicit_subjects=explicit_subjects,
+        ):
+            self._verify_program_runtime_evidence(str(graph.program_id), milestone_id, subject.digest)
+
+    def _assert_program_worker_effect_eligible(
+        self,
+        program_id: str,
+        milestone_id: str,
+        role: str,
+        generation: int,
+        action_context: Mapping[str, object] | None,
+    ) -> None:
+        """Fence a worker effect using current graph, subject and dependencies."""
+
+        try:
+            graph = self.ledger.program_graph(program_id)
+        except RecordNotFound:
+            # Ordinary standalone dispatches share the queue table but have no
+            # program graph and retain their existing launch behavior.
+            return
+        if generation < 1:
+            raise WorktreeError("program worker generation is invalid")
+        self._assert_program_capability_available(graph)
+        status = self.ledger.program_status(program_id)
+        graph.node(milestone_id)
+        if role != "executor" and role not in {
+            "code-reviewer",
+            "visual-reviewer",
+            "architecture-reviewer",
+        }:
+            raise WorktreeError("program worker role is unsupported")
+        explicit_subject: str | None = None
+        if action_context is not None:
+            if action_context.get("program_id") != program_id or action_context.get("milestone_id") != milestone_id:
+                raise WorktreeError("program worker action context identity is stale")
+            candidate = action_context.get("candidate_sha")
+            evidence = action_context.get("evidence_sha256")
+            if (candidate is None) == (evidence is None):
+                raise WorktreeError("program worker action context lacks one subject")
+            if candidate is not None and not isinstance(candidate, str):
+                raise WorktreeError("program worker candidate subject is malformed")
+            if evidence is not None and not isinstance(evidence, str):
+                raise WorktreeError("program worker evidence subject is malformed")
+            explicit_subject = candidate if candidate is not None else f"runtime_evidence:{evidence}"
+            if role != "executor" and action_context.get("review_role") != role:
+                raise WorktreeError("program reviewer action context role is stale")
+        elif role != "executor":
+            raise WorktreeError("program reviewer action context is missing")
+        self._rehash_program_effect_subjects(
+            graph,
+            status,
+            (milestone_id,),
+            include_targets=explicit_subject is not None or role != "executor",
+            explicit_subjects={milestone_id: explicit_subject} if explicit_subject is not None else None,
+        )
+
     def _assert_program_action_effect_eligible(self, bundle: ModelFacingProgramControllerActionBundle) -> None:
         """Revalidate all harness-owned facts immediately before program effects."""
 
         graph = self.ledger.program_graph(bundle.program_id)
         self._assert_program_capability_available(graph)
+        status = self.ledger.program_status(bundle.program_id)
         for action in bundle.actions:
-            if action.evidence_sha256 is not None:
-                if action.milestone_id is None:
-                    raise WorktreeError("program evidence action is incomplete")
-                self._verify_program_runtime_evidence(
-                    str(bundle.program_id), action.milestone_id, action.evidence_sha256
+            target_ids = (
+                action.milestone_ids
+                if action.kind is ProgramControllerActionKind.START_READY_MILESTONES
+                else ((action.milestone_id,) if action.milestone_id is not None else ())
+            )
+            if target_ids:
+                include_target = action.kind is not ProgramControllerActionKind.START_READY_MILESTONES
+                explicit = (
+                    {action.milestone_id: action.subject_wire}
+                    if include_target and action.milestone_id is not None and action.subject_wire is not None
+                    else None
+                )
+                self._rehash_program_effect_subjects(
+                    graph,
+                    status,
+                    target_ids,
+                    include_targets=include_target,
+                    explicit_subjects=explicit,
                 )
             if action.kind is ProgramControllerActionKind.PROMOTE_CANDIDATE and action.candidate_sha is not None:
                 node = graph.node(action.milestone_id or "")
@@ -2496,15 +2687,8 @@ class WorkflowHarness:
             if set(payload) != required:
                 raise IpcError("recovered program action submission has an unsupported shape")
             identity = ControllerDecisionId(payload["decision_id"])
-            outbox = next(
-                (item for item in self.ledger.program_action_outboxes() if item.get("decision_id") == str(identity)),
-                None,
-            )
-            if outbox is None or not isinstance(outbox.get("bundle_json"), str):
-                raise IpcError("recovered program action bundle is unavailable")
-            self._assert_program_action_effect_eligible(
-                ModelFacingProgramControllerActionBundle.from_json_bytes(str(outbox["bundle_json"]))
-            )
+            bundle = self.ledger.recovered_program_controller_bundle(identity)
+            self._assert_program_action_effect_eligible(bundle)
             receipt = self.ledger.submit_recovered_program_controller_actions(identity)
             try:
                 self._apply_program_action_outbox(receipt.action_id)
@@ -5167,6 +5351,25 @@ class WorkflowHarness:
                 ) from terminalization_error
             raise
 
+    @staticmethod
+    def _program_worker_action_context(row: Mapping[str, object]) -> Mapping[str, object] | None:
+        """Decode the immutable program worker context retained in the queue."""
+
+        raw = row.get("action_json")
+        if raw is None:
+            return None
+        if isinstance(raw, Mapping):
+            return raw
+        if not isinstance(raw, str):
+            raise HarnessError("program worker action context is malformed")
+        try:
+            value = strict_json_loads(raw, max_bytes=16_384)
+        except (TypeError, ValueError) as exc:
+            raise HarnessError("program worker action context is malformed") from exc
+        if not isinstance(value, Mapping):
+            raise HarnessError("program worker action context is malformed")
+        return value
+
     def _prepare_and_spawn_one(
         self,
         row: dict[str, object],
@@ -5176,6 +5379,13 @@ class WorkflowHarness:
     ) -> None:
         if self.epoch is None:
             return
+        self._assert_program_worker_effect_eligible(
+            str(row["run_id"]),
+            str(row["milestone_id"]),
+            str(row["role"]),
+            int(row["generation"]),
+            self._program_worker_action_context(row),
+        )
         if row.get("backend") != "sdk_headless":
             # The visible App-native creation API has no proven per-task
             # collaboration/agent override.  Never silently run it as a leaf
@@ -5399,6 +5609,16 @@ class WorkflowHarness:
             if capsule_fd is not None:
                 os.close(capsule_fd)
         created_paths.append(capsule_path)
+        # Re-resolve current program dependencies after all preparation and
+        # immediately before the queue crosses into ``starting``/Popen.  A
+        # retained queue row must not reuse an earlier successful check.
+        self._assert_program_worker_effect_eligible(
+            str(row["run_id"]),
+            str(row["milestone_id"]),
+            str(row["role"]),
+            int(row["generation"]),
+            self._program_worker_action_context(row),
+        )
         self.ledger.set_queue_state(dispatch_id, "starting", epoch=self.epoch)
         command = (
             *self.worker_command,
