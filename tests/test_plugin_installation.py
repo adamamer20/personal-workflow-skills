@@ -11,6 +11,9 @@ from types import ModuleType
 
 import pytest
 
+from codex_flow.ledger import Ledger
+from codex_flow.service import ServiceError, generate_unit, install_unit, refresh_with_credential
+
 
 def _installer() -> ModuleType:
     path = Path(__file__).parents[1] / "scripts" / "install_personal_workflow_skills.py"
@@ -324,6 +327,129 @@ def test_bootstrap_fences_active_harness_before_shared_tool_install(
     assert bootstrap.completed == ["preflight"]
     assert fence_calls == ["arm_predecessor_refresh_fence" if migration_required else "arm_harness_refresh_fence"]
     assert not any(call[1:3] == ("tool", "install") for call in runner.calls)
+
+
+@pytest.mark.parametrize("refresh_succeeds", [False, True])
+def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
+    standard_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, refresh_succeeds: bool
+) -> None:
+    root = Path(__file__).parents[1].resolve()
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(config_home))
+
+    service_root = tmp_path / "service-root"
+    service_root.mkdir()
+    executable = tmp_path / "codex-flow"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    service_state = service_root / ".codex-flow"
+    service_state.mkdir()
+    ledger_path = service_state / "workflow.db"
+    ledger = Ledger(ledger_path)
+    ledger.acquire_harness(
+        repository_root=service_root,
+        state_root=service_root,
+        pid=500,
+        process_birth_identity="old-birth",
+        executable_digest="a" * 64,
+        version=installer.CONTROLLER_VERSION,
+        owner_nonce_sha256="b" * 64,
+    )
+    ledger.close()
+    service_unit = generate_unit(service_root, executable=executable, provider_env_key="OPENAI_API_KEY")
+    service_config = tmp_path / "service-config"
+    install_unit(service_unit, config_home=service_config)
+
+    matching_unit = installer.Bootstrap(root, runner=FakeRunner(root))._matching_harness_unit()
+    matching_unit.parent.mkdir(parents=True)
+    matching_unit.write_text(service_unit.text, encoding="utf-8")
+    processes = {(500, "old-birth"): True}
+    service_active = {"value": True}
+    service_events: list[str] = []
+
+    class ServiceResult:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def service_runner(argv: tuple[str, ...], **_: object) -> ServiceResult:
+        operation = argv[2]
+        service_events.append(operation)
+        if operation == "is-active":
+            return ServiceResult(0 if service_active["value"] else 3)
+        if operation == "daemon-reload" and not refresh_succeeds:
+            return ServiceResult(1)
+        if operation == "start":
+            service_active["value"] = True
+            processes[(501, "new-birth")] = True
+            replacement = Ledger(ledger_path)
+            replacement.acquire_harness(
+                repository_root=service_root,
+                state_root=service_root,
+                pid=501,
+                process_birth_identity="new-birth",
+                executable_digest="c" * 64,
+                version=service_unit.version,
+                owner_nonce_sha256="d" * 64,
+            )
+            replacement.close()
+        return ServiceResult(0)
+
+    def service_shutdown(socket_path: Path, _timeout: float) -> dict[str, object]:
+        assert socket_path.name == "harness.sock"
+        service_events.append("shutdown")
+        processes[(500, "old-birth")] = False
+        service_active["value"] = False
+        return {"version": 1, "ok": True, "operation": "shutdown"}
+
+    installer_events: list[str] = []
+
+    class ServiceRunner(FakeRunner):
+        def run(self, argv: tuple[str, ...]):
+            if argv[1:3] == ("harness", "refresh"):
+                installer_events.append("refresh")
+                try:
+                    refresh_with_credential(
+                        service_unit,
+                        config_home=service_config,
+                        environment={"OPENAI_API_KEY": "secret"},
+                        runner=service_runner,
+                        process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+                        clock=lambda: 0.0,
+                        sleeper=lambda _delay: None,
+                        shutdown_sender=service_shutdown,
+                    )
+                except ServiceError as exc:
+                    raise installer.BootstrapError(str(exc)) from exc
+                return installer.CommandResult('{"refreshed":true}', "")
+            result = super().run(argv)
+            if argv[1:3] == ("tool", "install"):
+                installer_events.append("tool-install")
+            return result
+
+    runner = ServiceRunner(root)
+    bootstrap = installer.Bootstrap(root, runner=runner)
+
+    def fenced() -> None:
+        installer_events.append("fence")
+        bootstrap.completed.append("harness-refresh-fenced")
+
+    monkeypatch.setattr(bootstrap, "fence_existing_harness", fenced)
+
+    if refresh_succeeds:
+        facts = bootstrap.execute()
+        assert facts["controller_version"] == installer.CONTROLLER_VERSION
+        assert "marketplace-ready" in bootstrap.completed
+        assert "plugin-installed" in bootstrap.completed
+        assert (
+            installer_events.index("fence") < installer_events.index("tool-install") < installer_events.index("refresh")
+        )
+        assert service_events[-1] == "is-active"
+    else:
+        with pytest.raises(installer.BootstrapError, match="daemon reload failed"):
+            bootstrap.execute()
+        assert bootstrap.completed == ["preflight", "harness-refresh-fenced", "controller-installed"]
+        assert installer_events == ["fence", "tool-install", "refresh"]
+        assert not any("marketplace" in call or "plugin" in call for call in runner.calls)
 
 
 def test_bootstrap_rejects_unsafe_harness_unit_before_shared_tool_install(

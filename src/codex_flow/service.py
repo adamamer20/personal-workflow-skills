@@ -572,7 +572,9 @@ def refresh_with_credential(
         environment=environment,
     )
     owned_ledger = ledger
+    predecessor_schema_version: int | None = None
     migration_required = False
+    legacy_topology_migration = False
     interrupted_recovery = False
     ledger_path: Path | None = None
     live_checker = process_is_live or (
@@ -584,9 +586,14 @@ def refresh_with_credential(
             raise ServiceRefreshFailed("harness ledger is unavailable")
         try:
             compatibility = ledger_schema_compatibility(ledger_path)
-            migration_required = compatibility.get("ledger_schema_version") == 18
-            if compatibility.get("migration_required") and not migration_required:
-                raise ServiceRefreshFailed("service refresh only supports the installed schema-v18 predecessor handoff")
+            raw_schema_version = compatibility.get("ledger_schema_version")
+            if isinstance(raw_schema_version, bool) or not isinstance(raw_schema_version, int):
+                raise ServiceRefreshFailed("harness ledger schema identity is unavailable")
+            predecessor_schema_version = raw_schema_version
+            migration_required = bool(compatibility.get("migration_required"))
+            if migration_required and predecessor_schema_version not in {18, 19, 20}:
+                raise ServiceRefreshFailed("service refresh only supports schema-v18/v19/v20 predecessor handoff")
+            legacy_topology_migration = predecessor_schema_version == 18
             if migration_required:
                 # Keep the predecessor schema intact while the old service is
                 # fenced and stopped.  The migrating opener is created only
@@ -598,9 +605,11 @@ def refresh_with_credential(
             raise ServiceRefreshFailed("harness ledger cannot be opened") from exc
     elif isinstance(ledger, Ledger):
         try:
-            migration_required = int(ledger.schema_version) == 18
-            if ledger.schema_version < CURRENT_SCHEMA_VERSION and not migration_required:
-                raise ServiceRefreshFailed("service refresh only supports the installed schema-v18 predecessor handoff")
+            predecessor_schema_version = int(ledger.schema_version)
+            migration_required = predecessor_schema_version < int(CURRENT_SCHEMA_VERSION)
+            if migration_required and predecessor_schema_version not in {18, 19, 20}:
+                raise ServiceRefreshFailed("service refresh only supports schema-v18/v19/v20 predecessor handoff")
+            legacy_topology_migration = predecessor_schema_version == 18
             ledger_path = ledger.path
         except LedgerError as exc:
             raise ServiceRefreshFailed("harness ledger cannot be inspected") from exc
@@ -659,7 +668,7 @@ def refresh_with_credential(
                 if os.path.lexists(runtime / socket_name):
                     raise ServiceRefreshFailed("interrupted refresh socket entry remains")
 
-    if migration_required:
+    if legacy_topology_migration:
         # The replacement unit cannot validate an installed v18 predecessor:
         # first prove the exact old command/description, then replace it only
         # after the predecessor has been fenced and stopped.
@@ -682,13 +691,14 @@ def refresh_with_credential(
     legacy_unit_raw: bytes | None = None
     legacy_unit_mode: int | None = None
     interrupted_unit_staged = False
-    if migration_required or interrupted_recovery:
+    if legacy_topology_migration or interrupted_recovery:
         # Keep an exact rollback image until the v18 ledger has crossed its
-        # migration fence.  Installing the replacement before migration means
+        # migration fence. Installing the replacement before migration means
         # an install failure leaves the fenced v18 pair retryable, never a v19
-        # ledger paired only with a stopped predecessor unit.  The same image
+        # ledger paired only with a stopped predecessor unit. The same image
         # protects an interrupted v19 handoff while its replacement unit is
-        # being staged or health-checked.
+        # being staged or health-checked. Same-topology v19/v20 migrations
+        # retain the current unit and therefore have no legacy rollback image.
         legacy_unit_raw, _legacy_unit_text, legacy_unit_mode = _read_installed_unit(unit_path_value)
 
     def restore_legacy_unit(*, replacement_death_proven: bool = False) -> None:
@@ -912,17 +922,18 @@ def refresh_with_credential(
         _authority_matches_unit(authority, unit)
         predecessor_authority = dict(authority)
         old_pid, old_birth_identity, old_epoch = _authority_identity(authority)
-        predecessor_unit = _legacy_supervisor_unit(unit) if (migration_required or interrupted_recovery) else unit
+        legacy_topology = legacy_topology_migration or interrupted_recovery
+        predecessor_unit = _legacy_supervisor_unit(unit) if legacy_topology else unit
         socket_path = (
-            unit.state_root / ".codex-flow" / "runtime" / ("supervisor.sock" if migration_required else "harness.sock")
+            unit.state_root / ".codex-flow" / "runtime" / ("supervisor.sock" if legacy_topology else "harness.sock")
         )
-        if migration_required and os.path.lexists(socket_path):
+        if os.path.lexists(socket_path):
             try:
                 socket_metadata = os.lstat(socket_path)
             except OSError as exc:
-                raise ServiceRefreshFailed("legacy supervisor socket path is unavailable") from exc
+                raise ServiceRefreshFailed("predecessor harness socket path is unavailable") from exc
             if stat.S_ISLNK(socket_metadata.st_mode):
-                raise ServiceRefreshFailed("legacy supervisor socket path must not be a symlink")
+                raise ServiceRefreshFailed("predecessor harness socket path must not be a symlink")
         old_process_live = False if interrupted_recovery else live_checker(old_pid, old_birth_identity)
         if old_process_live:
             shutdown_sender(socket_path, remaining())
@@ -942,33 +953,50 @@ def refresh_with_credential(
             old_process_live = live_checker(old_pid, old_birth_identity)
 
         if migration_required:
-            # The old authority is now fenced and its process/unit are gone;
-            # stage the replacement unit before mutating the schema identity.
+            # The old authority is now fenced and its process/unit are gone.
+            # Only the v18 supervisor topology needs a replacement unit staged
+            # before its schema rename; v19/v20 already use the current unit
+            # and keep those bytes in place while migrating forward.
             if ledger_path is None:
                 raise ServiceRefreshFailed("legacy ledger path is unavailable")
-            legacy_socket = unit.state_root / ".codex-flow" / "runtime" / "supervisor.sock"
-            if os.path.lexists(legacy_socket):
-                raise ServiceRefreshFailed("legacy supervisor socket remains after predecessor stop")
-            try:
-                install_unit(unit, config_home=config_home)
+            runtime = unit.state_root / ".codex-flow" / "runtime"
+            if legacy_topology_migration:
+                if os.path.lexists(runtime / "supervisor.sock"):
+                    raise ServiceRefreshFailed("legacy supervisor socket remains after predecessor stop")
+                if os.path.lexists(runtime / "harness.sock"):
+                    raise ServiceRefreshFailed("unexpected harness socket remains after predecessor stop")
+                try:
+                    install_unit(unit, config_home=config_home)
+                    _validate_installed_unit(
+                        unit,
+                        config_home=config_home,
+                        expected_profile_sha256=profile_sha256,
+                        credential_value=value,
+                    )
+                except BaseException:
+                    restore_legacy_pair()
+                    raise
+            else:
+                if os.path.lexists(runtime / "harness.sock"):
+                    raise ServiceRefreshFailed("harness socket remains after predecessor stop")
+                if os.path.lexists(runtime / "supervisor.sock"):
+                    raise ServiceRefreshFailed("unexpected supervisor socket remains after predecessor stop")
                 _validate_installed_unit(
                     unit,
                     config_home=config_home,
                     expected_profile_sha256=profile_sha256,
                     credential_value=value,
                 )
-            except BaseException:
-                restore_legacy_pair()
-                raise
             owned_ledger.close()
             try:
                 owned_ledger = Ledger(ledger_path, migrate=True)
             except BaseException:
-                # The v18 fence is committed before the replacement unit is
-                # staged.  If opening or migrating the ledger fails, keep the
-                # exact fenced supervisor/unit pair so the next refresh can
-                # retry the handoff without a mixed v19 ledger.
-                restore_legacy_pair()
+                # The predecessor fence is committed before migration. If
+                # opening or migrating fails, v18 restores its exact legacy
+                # pair; v19/v20 retain their current-schema unit and ledger
+                # bytes without any topology downgrade.
+                if legacy_topology_migration:
+                    restore_legacy_pair()
                 raise
 
         if profile_sha256 is not None and native_compatibility_sha256 is not None:
