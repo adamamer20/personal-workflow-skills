@@ -1046,6 +1046,252 @@ class LedgerTests(unittest.TestCase):
             self.assertTrue(ledger.harness_refresh_fenced())
             ledger.close()
 
+    def test_refresh_state_inspection_validates_supported_authority_topologies(self) -> None:
+        for version in (SchemaVersion(18), SchemaVersion(19), SchemaVersion(20), SchemaVersion(21)):
+            with self.subTest(version=version):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    path = root / "workflow.db"
+                    if version is CURRENT_SCHEMA_VERSION:
+                        ledger = Ledger(path)
+                        ledger.acquire_harness(
+                            repository_root=root,
+                            state_root=root,
+                            pid=os.getpid(),
+                            process_birth_identity="current-process",
+                            executable_digest="a" * 64,
+                            version="0.2.0",
+                            owner_nonce_sha256="b" * 64,
+                        )
+                        ledger.close()
+                    else:
+                        _prepare_supported_legacy_ledger(path, version)
+
+                    opener = Ledger(path, allow_legacy=version is not CURRENT_SCHEMA_VERSION)
+                    try:
+                        inspection = opener.refresh_state_inspection()
+                        authority = inspection["authority"]
+                        self.assertIsInstance(authority, dict)
+                        self.assertEqual(authority["pid"], os.getpid())
+                        self.assertEqual(inspection["active_dispatches"], 0)
+                        self.assertEqual(inspection["live_worker_leases"], 0)
+                        self.assertEqual(inspection["active_controller_generations"], 0)
+                        self.assertEqual(inspection["live_controller_claims"], 0)
+                    finally:
+                        opener.close()
+
+    def test_refresh_state_inspection_does_not_zero_children_when_authority_is_absent(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            _prepare_supported_legacy_ledger(path, SchemaVersion(20), authority=False, active_child=True)
+            ledger = Ledger(path, allow_legacy=True)
+            try:
+                inspection = ledger.refresh_state_inspection()
+                self.assertIsNone(inspection["authority"])
+                self.assertEqual(inspection["active_dispatches"], 1)
+            finally:
+                ledger.close()
+
+    def test_live_human_and_model_controller_claims_block_refresh_fence_without_mutation(self) -> None:
+        for claimant_kind in (ControllerClaimantKind.HUMAN, ControllerClaimantKind.MODEL):
+            with self.subTest(claimant_kind=claimant_kind):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    ledger = Ledger(root / "workflow.db")
+                    ledger.acquire_harness(
+                        repository_root=root,
+                        state_root=root,
+                        pid=os.getpid(),
+                        process_birth_identity="current-process",
+                        executable_digest="a" * 64,
+                        version="0.2.0",
+                        owner_nonce_sha256="b" * 64,
+                    )
+                    ledger.create_run("run")
+                    ledger.create_milestone("run", "milestone")
+                    dispatch = ledger.claim_dispatch("run", "milestone", "executor", 1)
+                    ledger.enqueue_dispatch(
+                        dispatch.dispatch_id,
+                        backend="sdk_headless",
+                        capsule_json='{"model":"test","prompt":"bounded"}',
+                        route_json="{}",
+                        workspace_path=root,
+                        result_contract_sha256="c" * 64,
+                    )
+                    decision = ledger.create_controller_decision(dispatch.dispatch_id, kind="checkpoint")
+                    ledger.claim_controller_decision(
+                        decision.decision_id,
+                        claimant_kind=claimant_kind,
+                        claimant_id=f"{claimant_kind.value}-claimant",
+                        expected_revision=decision.revision,
+                    )
+                    with self.assertRaisesRegex(HarnessRefreshBlocked, "controller claim"):
+                        ledger.arm_harness_refresh_fence()
+                    authority = ledger.harness_authority()
+                    self.assertIsNotNone(authority)
+                    self.assertEqual(authority["requested_shutdown"], 0)
+                    inspection = ledger.refresh_state_inspection()
+                    self.assertEqual(inspection["live_controller_claims"], 1)
+                    ledger.close()
+
+    def test_expired_controller_claim_does_not_block_refresh_fence(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = Ledger(root / "workflow.db")
+            ledger.acquire_harness(
+                repository_root=root,
+                state_root=root,
+                pid=os.getpid(),
+                process_birth_identity="current-process",
+                executable_digest="a" * 64,
+                version="0.2.0",
+                owner_nonce_sha256="b" * 64,
+            )
+            ledger.create_run("run")
+            ledger.create_milestone("run", "milestone")
+            dispatch = ledger.claim_dispatch("run", "milestone", "executor", 1)
+            ledger.enqueue_dispatch(
+                dispatch.dispatch_id,
+                backend="sdk_headless",
+                capsule_json='{"model":"test","prompt":"bounded"}',
+                route_json="{}",
+                workspace_path=root,
+                result_contract_sha256="c" * 64,
+            )
+            decision = ledger.create_controller_decision(dispatch.dispatch_id, kind="checkpoint")
+            ledger.claim_controller_decision(
+                decision.decision_id,
+                claimant_kind=ControllerClaimantKind.HUMAN,
+                claimant_id="expired-claimant",
+                expected_revision=decision.revision,
+            )
+            ledger._db().execute(
+                "UPDATE controller_decisions SET claim_lease_expires_at = ? WHERE decision_id = ?",
+                ("2000-01-01T00:00:00Z", str(decision.decision_id)),
+            )
+            fenced = ledger.arm_harness_refresh_fence()
+            self.assertIsNotNone(fenced)
+            self.assertEqual(fenced["requested_shutdown"], 1)
+            self.assertEqual(ledger.refresh_state_inspection()["live_controller_claims"], 0)
+            ledger.close()
+
+    def test_malformed_controller_claim_or_lease_fails_closed_before_refresh_fence(self) -> None:
+        overrides = {
+            "invalid_digest": "claim_token_sha256 = '" + "g" * 64 + "'",
+            "incomplete_claim": "claimant_id = NULL",
+            "invalid_lease": "claim_lease_expires_at = 'not-a-timestamp'",
+        }
+        for name, override in overrides.items():
+            with self.subTest(name=name):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    ledger = Ledger(root / "workflow.db")
+                    ledger.acquire_harness(
+                        repository_root=root,
+                        state_root=root,
+                        pid=os.getpid(),
+                        process_birth_identity="current-process",
+                        executable_digest="a" * 64,
+                        version="0.2.0",
+                        owner_nonce_sha256="b" * 64,
+                    )
+                    ledger.create_run("run")
+                    ledger.create_milestone("run", "milestone")
+                    dispatch = ledger.claim_dispatch("run", "milestone", "executor", 1)
+                    ledger.enqueue_dispatch(
+                        dispatch.dispatch_id,
+                        backend="sdk_headless",
+                        capsule_json='{"model":"test","prompt":"bounded"}',
+                        route_json="{}",
+                        workspace_path=root,
+                        result_contract_sha256="c" * 64,
+                    )
+                    decision = ledger.create_controller_decision(dispatch.dispatch_id, kind="checkpoint")
+                    ledger.claim_controller_decision(
+                        decision.decision_id,
+                        claimant_kind=ControllerClaimantKind.HUMAN,
+                        claimant_id="valid-claimant",
+                        expected_revision=decision.revision,
+                    )
+                    ledger._db().execute(
+                        "UPDATE controller_decisions SET "
+                        "claimant_kind = 'human', claimant_id = 'valid-claimant', "
+                        "claim_token_sha256 = ?, claim_started_at = ?, claim_lease_expires_at = ? "
+                        "WHERE decision_id = ?",
+                        (
+                            "a" * 64,
+                            "2026-01-01T00:00:00Z",
+                            "2999-01-01T00:00:00Z",
+                            str(decision.decision_id),
+                        ),
+                    )
+                    if name == "incomplete_claim":
+                        ledger._db().execute("PRAGMA ignore_check_constraints = ON")
+                    try:
+                        ledger._db().execute(
+                            f"UPDATE controller_decisions SET {override} WHERE decision_id = ?",
+                            (str(decision.decision_id),),
+                        )
+                    finally:
+                        if name == "incomplete_claim":
+                            ledger._db().execute("PRAGMA ignore_check_constraints = OFF")
+                    with self.assertRaisesRegex(CorruptSchemaError, "controller"):
+                        ledger.arm_harness_refresh_fence()
+                    authority = ledger.harness_authority()
+                    self.assertIsNotNone(authority)
+                    self.assertEqual(authority["requested_shutdown"], 0)
+                    ledger.close()
+
+    def test_expected_refresh_authority_rejects_drift_before_first_migration_transaction(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            _prepare_supported_legacy_ledger(path, SchemaVersion(20))
+            legacy = Ledger(path, allow_legacy=True)
+            expected = legacy.arm_predecessor_refresh_fence()
+            self.assertIsNotNone(expected)
+            legacy.close()
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE harness_authority SET pid = 501 WHERE singleton = 1")
+            connection.commit()
+            connection.close()
+
+            with self.assertRaisesRegex(StaleWriter, "refresh authority changed"):
+                Ledger(path, migrate=True, expected_refresh_authority=expected)
+            check = sqlite3.connect(path)
+            self.assertEqual(
+                check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0], "20"
+            )
+            self.assertEqual(check.execute("SELECT pid FROM harness_authority WHERE singleton = 1").fetchone()[0], 501)
+            check.close()
+
+    def test_expected_refresh_authority_rechecks_between_migration_transactions(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow.db"
+            _prepare_supported_legacy_ledger(path, SchemaVersion(19))
+            legacy = Ledger(path, allow_legacy=True)
+            expected = legacy.arm_predecessor_refresh_fence()
+            self.assertIsNotNone(expected)
+            legacy.close()
+            original = Ledger._migrate_v20_to_v21
+
+            def drift_after_first_transaction(instance: Ledger) -> None:
+                instance._db().execute("UPDATE harness_authority SET pid = 502 WHERE singleton = 1")
+                original(instance)
+
+            Ledger._migrate_v20_to_v21 = drift_after_first_transaction  # type: ignore[method-assign]
+            try:
+                with self.assertRaisesRegex(StaleWriter, "refresh authority changed"):
+                    Ledger(path, migrate=True, expected_refresh_authority=expected)
+            finally:
+                Ledger._migrate_v20_to_v21 = original  # type: ignore[method-assign]
+
+            check = sqlite3.connect(path)
+            self.assertEqual(
+                check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0], "20"
+            )
+            self.assertEqual(check.execute("SELECT pid FROM harness_authority WHERE singleton = 1").fetchone()[0], 502)
+            check.close()
+
     def test_schema_v16_to_v17_migration_is_atomic_and_preserves_recovery_facts(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "workflow.db"

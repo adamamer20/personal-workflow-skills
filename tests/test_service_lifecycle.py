@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import socket
 import sqlite3
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -266,12 +268,21 @@ class _SystemctlResult:
         self.returncode = returncode
 
 
+def _write_python_launcher(path: Path) -> None:
+    path.write_text(f"#!{Path(sys.executable).resolve()}\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+_TEST_REPLACEMENT_PID = os.getpid()
+_TEST_REPLACEMENT_BIRTH = service_module.process_birth_identity(_TEST_REPLACEMENT_PID)
+_TEST_INTERPRETER_DIGEST = hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest()
+
+
 def _refresh_fixture(tmp_path: Path) -> tuple[Path, object, Ledger, dict[tuple[int, str], bool], dict[str, bool]]:
     repository = tmp_path / "repo"
     repository.mkdir()
     executable = tmp_path / "codex-flow"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
+    _write_python_launcher(executable)
     state_dir = repository / ".codex-flow"
     state_dir.mkdir()
     ledger = Ledger(state_dir / "workflow.db")
@@ -297,8 +308,7 @@ def _interrupted_refresh_fixture(tmp_path: Path) -> tuple[Path, object, Path, Pa
     repository = tmp_path / "repo"
     repository.mkdir()
     executable = tmp_path / "codex-flow"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
+    _write_python_launcher(executable)
     state_dir = repository / ".codex-flow"
     state_dir.mkdir()
     ledger_path = state_dir / "workflow.db"
@@ -332,8 +342,7 @@ def _same_topology_refresh_fixture(
     repository = tmp_path / f"repo-v{schema_version}"
     repository.mkdir()
     executable = tmp_path / f"codex-flow-v{schema_version}"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
+    _write_python_launcher(executable)
     state_dir = repository / ".codex-flow"
     state_dir.mkdir()
     ledger_path = state_dir / "workflow.db"
@@ -432,15 +441,15 @@ def test_refresh_migrates_v19_v20_through_current_harness_topology(
         if operation == "is-active":
             return Result(0 if service_state["active"] else 3)
         if operation == "start":
-            processes[(501, "new-birth")] = True
+            processes[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = True
             service_state["active"] = True
             replacement = Ledger(ledger_path)
             replacement.acquire_harness(
                 repository_root=repository,
                 state_root=repository,
-                pid=501,
-                process_birth_identity="new-birth",
-                executable_digest="c" * 64,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
                 version=unit.version,
                 owner_nonce_sha256="d" * 64,
             )
@@ -658,15 +667,15 @@ def test_v20_committed_migration_failure_retries_forward_without_shutdown_or_dow
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
-            processes[(501, "new-birth")] = True
+            processes[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = True
             service_state["active"] = True
             replacement = Ledger(ledger_path)
             replacement.acquire_harness(
                 repository_root=repository,
                 state_root=repository,
-                pid=501,
-                process_birth_identity="new-birth",
-                executable_digest="c" * 64,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
                 version=unit.version,
                 owner_nonce_sha256="d" * 64,
             )
@@ -700,7 +709,7 @@ def test_v20_uncertain_start_retains_current_unit_and_fence_without_rollback(tmp
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
             service_state["active"] = True
-            processes[(501, "new-birth")] = True
+            processes[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = True
             return _SystemctlResult(1)
         return _SystemctlResult(0)
 
@@ -728,6 +737,394 @@ def test_v20_uncertain_start_retains_current_unit_and_fence_without_rollback(tmp
         assert authority is not None and authority["requested_shutdown"] == 1
     finally:
         check.close()
+
+
+@pytest.mark.parametrize("identity_failure", ["interpreter_digest", "proc_executable", "pid_reuse"])
+def test_refresh_rejects_replacement_identity_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity_failure: str
+) -> None:
+    """Replacement health requires the installed interpreter and one PID birth."""
+
+    repository, unit, ledger, processes, service_state = _refresh_fixture(tmp_path)
+    replacement_birth = _TEST_REPLACEMENT_BIRTH if identity_failure != "pid_reuse" else "replacement-birth"
+    processes[(_TEST_REPLACEMENT_PID, replacement_birth)] = False
+    calls: list[tuple[str, ...]] = []
+
+    if identity_failure == "proc_executable":
+        monkeypatch.setattr(service_module, "_process_executable_path", lambda _pid: Path("/bin/sh"))
+
+    identity_values = iter((replacement_birth, "reused-birth"))
+
+    def read_identity(_pid: int) -> str:
+        if identity_failure == "pid_reuse":
+            return next(identity_values)
+        return replacement_birth
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        calls.append(argv)
+        operation = argv[2]
+        if operation == "is-active":
+            return _SystemctlResult(0 if service_state["active"] else 3)
+        if operation == "start":
+            service_state["active"] = True
+            processes[(_TEST_REPLACEMENT_PID, replacement_birth)] = True
+            replacement = Ledger(ledger.path)
+            try:
+                replacement.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=_TEST_REPLACEMENT_PID,
+                    process_birth_identity=replacement_birth,
+                    executable_digest=(
+                        "c" * 64 if identity_failure == "interpreter_digest" else _TEST_INTERPRETER_DIGEST
+                    ),
+                    version=unit.version,
+                    owner_nonce_sha256="d" * 64,
+                )
+            finally:
+                replacement.close()
+        elif operation == "stop":
+            service_state["active"] = False
+            processes[(_TEST_REPLACEMENT_PID, replacement_birth)] = False
+        return _SystemctlResult(0)
+
+    def shutdown(_socket_path: Path, _timeout: float) -> dict[str, object]:
+        processes[(500, "old-birth")] = False
+        service_state["active"] = False
+        return {"version": 1, "ok": True, "operation": "shutdown"}
+
+    try:
+        with pytest.raises(ServiceRefreshFailed, match="health check failed"):
+            refresh_with_credential(
+                unit,
+                config_home=tmp_path / "config",
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=runner,
+                ledger=ledger,
+                process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+                identity_reader=read_identity,
+                shutdown_sender=shutdown,
+            )
+        assert "start" in [call[2] for call in calls]
+        assert "stop" in [call[2] for call in calls]
+        assert (tmp_path / "config" / "systemd" / "user" / unit.unit_name).read_text(encoding="utf-8") == unit.text
+        authority = ledger.harness_authority()
+        assert authority is not None and authority["requested_shutdown"] == 1
+    finally:
+        ledger.close()
+
+
+def test_refresh_rejects_malformed_launcher_before_fencing(tmp_path: Path) -> None:
+    _repository, unit, ledger, _processes, _service_state = _refresh_fixture(tmp_path)
+    unit.executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+    try:
+        with pytest.raises(ServiceRefreshFailed, match="direct absolute Python shebang"):
+            refresh_with_credential(
+                unit,
+                config_home=tmp_path / "config",
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=lambda argv, **_: calls.append(argv) or _SystemctlResult(3),
+                ledger=ledger,
+                process_is_live=lambda _pid, _birth: True,
+                shutdown_sender=lambda *_args: pytest.fail("malformed launcher must fail before shutdown"),
+            )
+        assert calls == []
+        authority = ledger.harness_authority()
+        assert authority is not None and authority["requested_shutdown"] == 0
+    finally:
+        ledger.close()
+
+
+def test_refresh_rejects_launcher_drift_after_capture(tmp_path: Path) -> None:
+    repository, unit, ledger, processes, service_state = _refresh_fixture(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        calls.append(argv)
+        operation = argv[2]
+        if operation == "is-active":
+            return _SystemctlResult(0 if service_state["active"] else 3)
+        if operation == "start":
+            service_state["active"] = True
+            processes[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = True
+            unit.executable.write_text(f"#!{Path(sys.executable).resolve()}\n# launcher drift\n", encoding="utf-8")
+            replacement = Ledger(ledger.path)
+            try:
+                replacement.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=_TEST_REPLACEMENT_PID,
+                    process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
+                    version=unit.version,
+                    owner_nonce_sha256="d" * 64,
+                )
+            finally:
+                replacement.close()
+        return _SystemctlResult(0)
+
+    def shutdown(_socket_path: Path, _timeout: float) -> dict[str, object]:
+        processes[(500, "old-birth")] = False
+        service_state["active"] = False
+        return {"version": 1, "ok": True, "operation": "shutdown"}
+
+    try:
+        with pytest.raises(ServiceRefreshFailed, match="launcher changed during replacement health"):
+            refresh_with_credential(
+                unit,
+                config_home=tmp_path / "config",
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=runner,
+                ledger=ledger,
+                process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+                identity_reader=lambda _pid: _TEST_REPLACEMENT_BIRTH,
+                shutdown_sender=shutdown,
+            )
+        assert "start" in [call[2] for call in calls]
+        assert "stop" not in [call[2] for call in calls]
+        authority = ledger.harness_authority()
+        assert authority is not None and authority["requested_shutdown"] == 0
+    finally:
+        ledger.close()
+
+
+def test_refresh_rejects_predecessor_authority_drift_before_migration(tmp_path: Path) -> None:
+    _repository, unit, ledger_path, config_home, _executable, processes, service_state = _same_topology_refresh_fixture(
+        tmp_path, 20
+    )
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        operation = argv[2]
+        return _SystemctlResult(0 if operation == "is-active" and service_state["active"] else 3)
+
+    def shutdown(_socket_path: Path, _timeout: float) -> dict[str, object]:
+        processes[(500, "old-birth")] = False
+        service_state["active"] = False
+        connection = sqlite3.connect(ledger_path)
+        connection.execute("UPDATE harness_authority SET pid = 501 WHERE singleton = 1")
+        connection.commit()
+        connection.close()
+        return {"version": 1, "ok": True, "operation": "shutdown"}
+
+    with pytest.raises(ServiceRefreshFailed, match="authority changed"):
+        refresh_with_credential(
+            unit,
+            config_home=config_home,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+            shutdown_sender=shutdown,
+        )
+
+    check = sqlite3.connect(ledger_path)
+    try:
+        assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "20"
+        assert check.execute("SELECT pid FROM harness_authority WHERE singleton = 1").fetchone()[0] == 501
+        assert check.execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()[0] == 1
+    finally:
+        check.close()
+
+
+def test_refresh_rejects_authority_drift_between_legacy_close_and_migration_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _repository, unit, ledger_path, config_home, _executable, processes, service_state = _same_topology_refresh_fixture(
+        tmp_path, 19
+    )
+    original_init = Ledger.__init__
+    raced = False
+
+    def race_migration_open(self: Ledger, path: str | Path, **kwargs: object) -> None:
+        nonlocal raced
+        if kwargs.get("migrate") and not raced:
+            raced = True
+            connection = sqlite3.connect(ledger_path)
+            connection.execute("UPDATE harness_authority SET pid = 501 WHERE singleton = 1")
+            connection.commit()
+            connection.close()
+        original_init(self, path, **kwargs)
+
+    monkeypatch.setattr(Ledger, "__init__", race_migration_open)
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        operation = argv[2]
+        return _SystemctlResult(0 if operation == "is-active" and service_state["active"] else 3)
+
+    def shutdown(_socket_path: Path, _timeout: float) -> dict[str, object]:
+        processes[(500, "old-birth")] = False
+        service_state["active"] = False
+        return {"version": 1, "ok": True, "operation": "shutdown"}
+
+    with pytest.raises(ServiceRefreshFailed, match="ledger operation failed"):
+        refresh_with_credential(
+            unit,
+            config_home=config_home,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+            shutdown_sender=shutdown,
+        )
+
+    assert raced is True
+    check = sqlite3.connect(ledger_path)
+    try:
+        assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "19"
+        assert check.execute("SELECT pid FROM harness_authority WHERE singleton = 1").fetchone()[0] == 501
+        assert check.execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()[0] == 1
+    finally:
+        check.close()
+
+
+@pytest.mark.parametrize("socket_name", ["harness.sock", "supervisor.sock"])
+@pytest.mark.parametrize("entry_kind", ["regular", "dangling", "socket"])
+def test_current_schema_reentry_rejects_any_retained_socket_entry(
+    tmp_path: Path, socket_name: str, entry_kind: str
+) -> None:
+    repository, unit, ledger_path, config_home, _executable, processes, service_state = _same_topology_refresh_fixture(
+        tmp_path, 21, fenced=True
+    )
+    install_unit(service_module._legacy_supervisor_unit(unit), config_home=config_home)
+    processes[(500, "old-birth")] = False
+    service_state["active"] = False
+    runtime = repository / ".codex-flow" / "runtime"
+    runtime.mkdir(exist_ok=True)
+    socket_path = runtime / socket_name
+    bound_socket: socket.socket | None = None
+    bound_target: Path | None = None
+    if entry_kind == "regular":
+        socket_path.write_text("retained", encoding="utf-8")
+    elif entry_kind == "dangling":
+        socket_path.symlink_to(runtime / "missing.sock")
+    else:
+        bound_target = Path("/tmp") / f"codex-flow-{os.getpid()}-{abs(hash(os.fspath(socket_path)))}"
+        bound_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bound_socket.bind(os.fspath(bound_target))
+        socket_path.symlink_to(bound_target)
+
+    calls: list[tuple[str, ...]] = []
+    try:
+        with pytest.raises(ServiceRefreshFailed, match="socket entry remains"):
+            refresh_with_credential(
+                unit,
+                config_home=config_home,
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=lambda argv, **_: calls.append(argv) or _SystemctlResult(3),
+                process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+            )
+        assert "start" not in [call[2] for call in calls]
+        check = sqlite3.connect(ledger_path)
+        try:
+            assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "21"
+            assert (
+                check.execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()[0] == 1
+            )
+        finally:
+            check.close()
+    finally:
+        if bound_socket is not None:
+            bound_socket.close()
+        if bound_target is not None:
+            bound_target.unlink(missing_ok=True)
+
+
+def test_current_unhealthy_replacement_retains_current_unit_and_fresh_retry_succeeds(tmp_path: Path) -> None:
+    repository, unit, ledger, processes, service_state = _refresh_fixture(tmp_path)
+    first_birth = "first-replacement"
+    processes[(_TEST_REPLACEMENT_PID, first_birth)] = False
+    first_calls: list[tuple[str, ...]] = []
+
+    def first_runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        first_calls.append(argv)
+        operation = argv[2]
+        if operation == "is-active":
+            return _SystemctlResult(0 if service_state["active"] else 3)
+        if operation == "start":
+            service_state["active"] = True
+            processes[(_TEST_REPLACEMENT_PID, first_birth)] = True
+            replacement = Ledger(ledger.path)
+            try:
+                replacement.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=_TEST_REPLACEMENT_PID,
+                    process_birth_identity=first_birth,
+                    executable_digest="c" * 64,
+                    version=unit.version,
+                    owner_nonce_sha256="d" * 64,
+                )
+            finally:
+                replacement.close()
+        elif operation == "stop":
+            service_state["active"] = False
+            processes[(_TEST_REPLACEMENT_PID, first_birth)] = False
+        return _SystemctlResult(0)
+
+    def shutdown(_socket_path: Path, _timeout: float) -> dict[str, object]:
+        processes[(500, "old-birth")] = False
+        service_state["active"] = False
+        return {"version": 1, "ok": True, "operation": "shutdown"}
+
+    try:
+        with pytest.raises(ServiceRefreshFailed, match="health check failed"):
+            refresh_with_credential(
+                unit,
+                config_home=tmp_path / "config",
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=first_runner,
+                ledger=ledger,
+                process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+                identity_reader=lambda _pid: first_birth,
+                shutdown_sender=shutdown,
+            )
+        assert "stop" in [call[2] for call in first_calls]
+        assert (tmp_path / "config" / "systemd" / "user" / unit.unit_name).read_text(encoding="utf-8") == unit.text
+        authority = ledger.harness_authority()
+        assert authority is not None and authority["epoch"] == 2 and authority["requested_shutdown"] == 1
+    finally:
+        ledger.close()
+
+    retry_birth = "retry-replacement"
+    processes[(_TEST_REPLACEMENT_PID, retry_birth)] = False
+    retry_started = False
+
+    def retry_runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        nonlocal retry_started
+        operation = argv[2]
+        if operation == "is-active":
+            return _SystemctlResult(0 if service_state["active"] else 3)
+        if operation == "start":
+            retry_started = True
+            service_state["active"] = True
+            processes[(_TEST_REPLACEMENT_PID, retry_birth)] = True
+            replacement = Ledger(repository / ".codex-flow" / "workflow.db")
+            try:
+                replacement.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=_TEST_REPLACEMENT_PID,
+                    process_birth_identity=retry_birth,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
+                    version=unit.version,
+                    owner_nonce_sha256="e" * 64,
+                )
+            finally:
+                replacement.close()
+        return _SystemctlResult(0)
+
+    result = refresh_with_credential(
+        unit,
+        config_home=tmp_path / "config",
+        environment={"OPENAI_API_KEY": "secret"},
+        runner=retry_runner,
+        process_is_live=lambda pid, birth: processes.get((pid, birth), False),
+        identity_reader=lambda _pid: retry_birth,
+        sleeper=lambda _delay: pytest.fail("current retry should not wait"),
+        shutdown_sender=lambda *_args: pytest.fail("retry must not shut down the stopped replacement"),
+    )
+    assert result["refreshed"] is True
+    assert result["old_epoch"] == 2 and result["new_epoch"] == 3
+    assert retry_started is True
 
 
 @pytest.mark.parametrize("failure_stage", ["daemon-reload", "import-environment", "start", "health"])
@@ -801,9 +1198,9 @@ def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hi
                 replacement.acquire_harness(
                     repository_root=unit.repository_root,
                     state_root=unit.state_root,
-                    pid=501,
-                    process_birth_identity="new-birth",
-                    executable_digest="c" * 64,
+                    pid=_TEST_REPLACEMENT_PID,
+                    process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
                     version=unit.version,
                     owner_nonce_sha256="d" * 64,
                 )
@@ -816,7 +1213,9 @@ def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hi
         config_home=config_home,
         environment={"OPENAI_API_KEY": "secret"},
         runner=retry_runner,
-        process_is_live=lambda pid, birth: pid == 501 and birth == "new-birth" and replacement_started,
+        process_is_live=lambda pid, birth: (
+            pid == _TEST_REPLACEMENT_PID and birth == _TEST_REPLACEMENT_BIRTH and replacement_started
+        ),
         clock=lambda: 0.0,
         sleeper=lambda _delay: None,
         shutdown_sender=lambda *_args: pytest.fail("stopped predecessor must not be shut down again"),
@@ -879,7 +1278,7 @@ def test_interrupted_v19_refresh_keeps_harness_bytes_for_post_start_uncertainty(
             return {
                 **authority,
                 "pid": 501,
-                "process_birth_identity": "replacement-birth",
+                "process_birth_identity": _TEST_REPLACEMENT_BIRTH,
                 "epoch": int(authority["epoch"]) + 1,
                 "requested_shutdown": 2,
             }
@@ -913,7 +1312,9 @@ def test_interrupted_v19_refresh_keeps_harness_bytes_for_post_start_uncertainty(
                 environment={"OPENAI_API_KEY": "secret"},
                 runner=runner,
                 ledger=current_ledger,
-                process_is_live=lambda pid, birth: started and pid == 501 and birth == "replacement-birth",
+                process_is_live=lambda pid, birth: (
+                    started and pid == _TEST_REPLACEMENT_PID and birth == _TEST_REPLACEMENT_BIRTH
+                ),
                 clock=lambda: 0.0,
                 sleeper=lambda _delay: pytest.fail("uncertain refresh must fail without polling"),
                 shutdown_sender=lambda *_args: pytest.fail("interrupted predecessor must not be shut down again"),
@@ -932,7 +1333,7 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
     before_bytes = installed_path.read_bytes()
     before_mode = stat.S_IMODE(installed_path.stat().st_mode)
     replacement = {"started": False}
-    process_live = {(500, "old-birth"): False, (501, "replacement-birth"): False}
+    process_live = {(500, "old-birth"): False, (_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH): False}
     service_active = {"value": False}
     calls: list[tuple[str, ...]] = []
     fence_calls = 0
@@ -962,9 +1363,9 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
                 acquired.acquire_harness(
                     repository_root=repository,
                     state_root=repository,
-                    pid=501,
-                    process_birth_identity="replacement-birth",
-                    executable_digest="c" * 64,
+                    pid=_TEST_REPLACEMENT_PID,
+                    process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
                     version=unit.version,
                     owner_nonce_sha256="d" * 64,
                 )
@@ -972,7 +1373,7 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
                 acquired.close()
         elif operation == "stop":
             service_active["value"] = False
-            process_live[(501, "replacement-birth")] = False
+            process_live[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = False
         return Result(0)
 
     current_ledger = Ledger(ledger_path)
@@ -996,8 +1397,10 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
     assert [call[2] for call in calls] == [
         "is-active",
         "is-active",
+        "is-active",
         "daemon-reload",
         "import-environment",
+        "is-active",
         "start",
         "is-active",
         "stop",
@@ -1012,8 +1415,8 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
         authority = check.harness_authority()
         assert authority is not None
         assert authority["epoch"] == 2
-        assert authority["pid"] == 501
-        assert authority["process_birth_identity"] == "replacement-birth"
+        assert authority["pid"] == _TEST_REPLACEMENT_PID
+        assert authority["process_birth_identity"] == _TEST_REPLACEMENT_BIRTH
         assert authority["requested_shutdown"] == 1
     finally:
         check.close()
@@ -1031,9 +1434,9 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
                 acquired.acquire_harness(
                     repository_root=repository,
                     state_root=repository,
-                    pid=502,
+                    pid=_TEST_REPLACEMENT_PID,
                     process_birth_identity="retry-birth",
-                    executable_digest="e" * 64,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
                     version=unit.version,
                     owner_nonce_sha256="f" * 64,
                 )
@@ -1046,7 +1449,10 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
         config_home=config_home,
         environment={"OPENAI_API_KEY": "secret"},
         runner=retry_runner,
-        process_is_live=lambda pid, birth: pid == 502 and birth == "retry-birth" and retry_started["value"],
+        process_is_live=lambda pid, birth: (
+            pid == _TEST_REPLACEMENT_PID and birth == "retry-birth" and retry_started["value"]
+        ),
+        identity_reader=lambda _pid: "retry-birth",
         clock=lambda: 0.0,
         sleeper=lambda _delay: pytest.fail("canonical retry should complete without waiting"),
         shutdown_sender=lambda *_args: pytest.fail("stopped replacement must not be shut down again"),
@@ -1064,7 +1470,7 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
 
     repository, unit, ledger_path, config_home, installed_path = _interrupted_refresh_fixture(tmp_path)
     before_bytes = installed_path.read_bytes()
-    process_live = {(501, "replacement-birth"): requested_shutdown == 1}
+    process_live = {(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH): requested_shutdown == 1}
     service_active = {"value": False}
     calls: list[tuple[str, ...]] = []
     fence_calls = 0
@@ -1092,9 +1498,9 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
                 replacement.acquire_harness(
                     repository_root=repository,
                     state_root=repository,
-                    pid=501,
-                    process_birth_identity="replacement-birth",
-                    executable_digest="c" * 64,
+                    pid=_TEST_REPLACEMENT_PID,
+                    process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
                     version=unit.version,
                     owner_nonce_sha256="d" * 64,
                 )
@@ -1105,7 +1511,7 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
             service_active["value"] = True
         elif operation == "stop":
             service_active["value"] = False
-            process_live[(501, "replacement-birth")] = False
+            process_live[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = False
         return Result(0)
 
     ledger = Ledger(ledger_path)
@@ -1130,8 +1536,10 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
         [
             "is-active",
             "is-active",
+            "is-active",
             "daemon-reload",
             "import-environment",
+            "is-active",
             "start",
             "is-active",
             "stop",
@@ -1142,8 +1550,10 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
         else [
             "is-active",
             "is-active",
+            "is-active",
             "daemon-reload",
             "import-environment",
+            "is-active",
             "start",
             "stop",
             "is-active",
@@ -1214,10 +1624,11 @@ def test_refresh_accepts_legitimate_replacement_after_predecessor_wait_observati
     assert predecessor is not None
     replacement = {
         **predecessor,
-        "pid": 501,
-        "process_birth_identity": "replacement-birth",
+        "pid": _TEST_REPLACEMENT_PID,
+        "process_birth_identity": _TEST_REPLACEMENT_BIRTH,
         "epoch": int(predecessor["epoch"]) + 1,
         "requested_shutdown": 0,
+        "executable_digest": _TEST_INTERPRETER_DIGEST,
     }
     # The first read is the interrupted-recovery preflight.  The next three
     # predecessor reads exercise repeated post-start wait-loop observations
@@ -1249,7 +1660,7 @@ def test_refresh_accepts_legitimate_replacement_after_predecessor_wait_observati
             environment={"OPENAI_API_KEY": "secret"},
             runner=runner,
             ledger=ledger,
-            process_is_live=lambda pid, birth: (pid, birth) == (501, "replacement-birth"),
+            process_is_live=lambda pid, birth: (pid, birth) == (_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH),
             clock=lambda: 0.0,
             sleeper=lambda delay: sleeps.append(delay),
             shutdown_sender=lambda *_args: pytest.fail("interrupted predecessor must not be shut down again"),
@@ -1264,37 +1675,13 @@ def test_refresh_accepts_legitimate_replacement_after_predecessor_wait_observati
     assert sleeps == [0.05, 0.05]
 
 
-def test_refresh_rejects_replacement_to_different_replacement_identity_drift(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_refresh_rejects_replacement_to_different_replacement_identity_drift(tmp_path: Path) -> None:
     """Once a replacement is acquired, a different replacement cannot win rollback."""
 
     repository, unit, ledger_path, config_home, installed_path = _interrupted_refresh_fixture(tmp_path)
     ledger = Ledger(ledger_path)
     predecessor = ledger.harness_authority()
     assert predecessor is not None
-    replacement_a = {
-        **predecessor,
-        "pid": 501,
-        "process_birth_identity": "replacement-a",
-        "epoch": int(predecessor["epoch"]) + 1,
-        "requested_shutdown": 0,
-    }
-    replacement_b = {
-        **predecessor,
-        "pid": 502,
-        "process_birth_identity": "replacement-b",
-        "epoch": int(predecessor["epoch"]) + 2,
-        "requested_shutdown": 1,
-    }
-    # The interrupted-recovery preflight must still see the fenced
-    # predecessor before the acquired replacement and its drifted successor.
-    observations = iter((predecessor, replacement_a, replacement_b))
-
-    def observed_authority() -> object:
-        return next(observations, replacement_b)
-
-    monkeypatch.setattr(ledger, "harness_authority", observed_authority)
     service_active = {"value": False}
 
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
@@ -1308,9 +1695,9 @@ def test_refresh_rejects_replacement_to_different_replacement_identity_drift(
                 acquired.acquire_harness(
                     repository_root=repository,
                     state_root=repository,
-                    pid=501,
+                    pid=_TEST_REPLACEMENT_PID,
                     process_birth_identity="replacement-a",
-                    executable_digest="c" * 64,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
                     version=unit.version,
                     owner_nonce_sha256="d" * 64,
                 )
@@ -1318,6 +1705,23 @@ def test_refresh_rejects_replacement_to_different_replacement_identity_drift(
                 acquired.close()
         elif operation == "stop":
             service_active["value"] = False
+            drifted = Ledger(ledger_path)
+            try:
+                replacement = drifted.acquire_harness(
+                    repository_root=repository,
+                    state_root=repository,
+                    pid=502,
+                    process_birth_identity="replacement-b",
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
+                    version=unit.version,
+                    owner_nonce_sha256="d" * 64,
+                )
+                drifted.request_harness_shutdown(
+                    epoch=int(replacement["epoch"]),
+                    owner_nonce_sha256="d" * 64,
+                )
+            finally:
+                drifted.close()
         return _SystemctlResult(0)
 
     try:
@@ -1350,14 +1754,14 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
         if operation == "is-active":
             return _SystemctlResult(0 if service_state["active"] else 3)
         if operation == "start":
-            processes[(500, "new-birth")] = True
+            processes[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = True
             service_state["active"] = True
             ledger.acquire_harness(
                 repository_root=unit.repository_root,
                 state_root=unit.state_root,
-                pid=500,
-                process_birth_identity="new-birth",
-                executable_digest="c" * 64,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
                 version=unit.version,
                 owner_nonce_sha256="d" * 64,
             )
@@ -1391,8 +1795,10 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
         assert shutdowns[0][0] == unit.state_root / ".codex-flow" / "runtime" / "harness.sock"
         assert [call[2] for call in calls] == [
             "is-active",
+            "is-active",
             "daemon-reload",
             "import-environment",
+            "is-active",
             "start",
             "is-active",
         ]
@@ -1400,7 +1806,7 @@ def test_refresh_handoff_fences_shutdowns_by_identity_and_verifies_replacement(t
         authority = ledger.harness_authority()
         assert authority is not None
         assert authority["requested_shutdown"] == 0
-        assert authority["process_birth_identity"] == "new-birth"
+        assert authority["process_birth_identity"] == _TEST_REPLACEMENT_BIRTH
     finally:
         ledger.close()
 
@@ -1409,8 +1815,7 @@ def test_refresh_defers_before_shutdown_or_manager_mutation_for_active_child(tmp
     repository = tmp_path / "repo"
     repository.mkdir()
     executable = tmp_path / "codex-flow"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
+    _write_python_launcher(executable)
     unit = generate_unit(repository, executable=executable, provider_env_key="OPENAI_API_KEY")
     config_home = tmp_path / "config"
     install_unit(unit, config_home=config_home)
@@ -1438,8 +1843,7 @@ def test_refresh_preflight_allows_only_a_well_formed_profile_identity_update(tmp
     repository = tmp_path / "repo"
     repository.mkdir()
     executable = tmp_path / "codex-flow"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
+    _write_python_launcher(executable)
     config_home = tmp_path / "config"
     old_unit = generate_unit(
         repository,
@@ -1534,8 +1938,7 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     repository.mkdir()
     executable = tmp_path / "supervisor-bin" / "codex-flow-supervisor"
     executable.parent.mkdir()
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
+    _write_python_launcher(executable)
     state_root = repository / ".codex-flow"
     state_root.mkdir()
     ledger_path = state_root / "workflow.db"
@@ -1579,15 +1982,15 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
         if operation == "is-active":
             return Result(0 if service_state["active"] else 3)
         if operation == "start":
-            processes[(501, "new-birth")] = True
+            processes[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = True
             service_state["active"] = True
             replacement = Ledger(ledger_path)
             replacement.acquire_harness(
                 repository_root=repository,
                 state_root=repository,
-                pid=501,
-                process_birth_identity="new-birth",
-                executable_digest="c" * 64,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
                 version=unit.version,
                 owner_nonce_sha256="d" * 64,
             )
@@ -1618,7 +2021,15 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     installed = (config_home / "systemd" / "user" / unit.unit_name).read_text(encoding="utf-8")
     exec_lines = [line for line in installed.splitlines() if line.startswith("ExecStart=")]
     assert exec_lines == [f"ExecStart={executable} harness run --foreground --state-root {repository}"]
-    assert [call[2] for call in calls] == ["is-active", "daemon-reload", "import-environment", "start", "is-active"]
+    assert [call[2] for call in calls] == [
+        "is-active",
+        "is-active",
+        "daemon-reload",
+        "import-environment",
+        "is-active",
+        "start",
+        "is-active",
+    ]
     migrated = Ledger(ledger_path)
     try:
         assert migrated.schema_version.value == 21
@@ -1635,8 +2046,7 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
     repository = tmp_path / "repository"
     repository.mkdir()
     executable = tmp_path / "codex-flow"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
+    _write_python_launcher(executable)
     state_root = repository / ".codex-flow"
     state_root.mkdir()
     ledger_path = state_root / "workflow.db"
@@ -1698,7 +2108,7 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
         )
     finally:
         check.close()
-    assert [call[2] for call in calls] == ["is-active"]
+    assert [call[2] for call in calls] == ["is-active", "is-active"]
 
 
 @pytest.mark.parametrize("failure_stage", ["before_commit", "after_commit", "rollback_failure"])
@@ -1708,8 +2118,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     repository = tmp_path / "repository"
     repository.mkdir()
     executable = tmp_path / "codex-flow"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
+    _write_python_launcher(executable)
     state_root = repository / ".codex-flow"
     state_root.mkdir()
     ledger_path = state_root / "workflow.db"
@@ -1796,7 +2205,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     else:
         assert installed_path.read_bytes() == before_bytes
         assert stat.S_IMODE(installed_path.stat().st_mode) == before_mode
-    assert [call[2] for call in calls] == ["is-active"]
+    assert [call[2] for call in calls] == ["is-active", "is-active"]
     check = sqlite3.connect(ledger_path)
     try:
         expected_version = "21" if failure_stage == "rollback_failure" else "18"
@@ -1838,9 +2247,9 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
                 migrated.acquire_harness(
                     repository_root=repository,
                     state_root=repository,
-                    pid=501,
-                    process_birth_identity="new-birth",
-                    executable_digest="c" * 64,
+                    pid=_TEST_REPLACEMENT_PID,
+                    process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
                     version=unit.version,
                     owner_nonce_sha256="d" * 64,
                 )
@@ -1853,7 +2262,9 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
         config_home=config_home,
         environment={"OPENAI_API_KEY": "secret"},
         runner=retry_runner,
-        process_is_live=lambda pid, birth: pid == 501 and birth == "new-birth" and replacement["started"],
+        process_is_live=lambda pid, birth: (
+            pid == _TEST_REPLACEMENT_PID and birth == _TEST_REPLACEMENT_BIRTH and replacement["started"]
+        ),
         clock=lambda: 0.0,
         sleeper=lambda _delay: None,
         shutdown_sender=lambda *_args: pytest.fail("stopped predecessor must not be shut down again"),
@@ -1862,8 +2273,10 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     assert replacement["started"] is True
     assert [call[2] for call in retry_calls] == [
         "is-active",
+        "is-active",
         "daemon-reload",
         "import-environment",
+        "is-active",
         "start",
         "is-active",
     ]

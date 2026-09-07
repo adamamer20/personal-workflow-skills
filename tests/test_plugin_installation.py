@@ -12,7 +12,13 @@ from types import ModuleType
 import pytest
 
 from codex_flow.ledger import Ledger
-from codex_flow.service import ServiceError, generate_unit, install_unit, refresh_with_credential
+from codex_flow.service import (
+    ServiceError,
+    generate_unit,
+    install_unit,
+    process_birth_identity,
+    refresh_with_credential,
+)
 
 
 def _installer() -> ModuleType:
@@ -26,6 +32,9 @@ def _installer() -> ModuleType:
 
 
 installer = _installer()
+_TEST_REPLACEMENT_PID = os.getpid()
+_TEST_REPLACEMENT_BIRTH = process_birth_identity(_TEST_REPLACEMENT_PID)
+_TEST_INTERPRETER_DIGEST = hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest()
 
 
 def test_make_bootstrap_runs_inside_the_locked_project_environment() -> None:
@@ -340,7 +349,7 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
     service_root = tmp_path / "service-root"
     service_root.mkdir()
     executable = tmp_path / "codex-flow"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.write_text(f"#!{Path(sys.executable).resolve()}\n", encoding="utf-8")
     executable.chmod(0o755)
     service_state = service_root / ".codex-flow"
     service_state.mkdir()
@@ -380,14 +389,14 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
             return ServiceResult(1)
         if operation == "start":
             service_active["value"] = True
-            processes[(501, "new-birth")] = True
+            processes[(_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)] = True
             replacement = Ledger(ledger_path)
             replacement.acquire_harness(
                 repository_root=service_root,
                 state_root=service_root,
-                pid=501,
-                process_birth_identity="new-birth",
-                executable_digest="c" * 64,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
                 version=service_unit.version,
                 owner_nonce_sha256="d" * 64,
             )

@@ -153,6 +153,198 @@ def _authority_matches_unit(authority: Mapping[str, object], unit: ServiceUnit) 
             raise ServiceRefreshFailed(f"harness authority {field} does not match the repository unit")
 
 
+def _authority_stable_identity(authority: Mapping[str, object]) -> tuple[object, ...]:
+    """Return the authority facts that cannot change during one handoff."""
+
+    fields = (
+        "repository_root",
+        "state_root",
+        "epoch",
+        "owner_nonce_sha256",
+        "pid",
+        "process_birth_identity",
+        "executable_digest",
+        "version",
+        "requested_shutdown",
+    )
+    values = tuple(authority.get(field) for field in fields)
+    if any(value is None for value in values):
+        raise ServiceRefreshFailed("harness authority identity is incomplete")
+    owner_nonce_sha256 = values[3]
+    executable_digest = values[6]
+    if not isinstance(owner_nonce_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", owner_nonce_sha256) is None:
+        raise ServiceRefreshFailed("harness authority owner identity is malformed")
+    if not isinstance(executable_digest, str) or re.fullmatch(r"[0-9a-f]{64}", executable_digest) is None:
+        raise ServiceRefreshFailed("harness authority executable identity is malformed")
+    _authority_shutdown_bit(authority)
+    return values
+
+
+def _stable_regular_file(
+    path: Path, *, label: str, reject_symlink: bool = True, max_bytes: int | None = 1_048_576
+) -> tuple[bytes, int]:
+    """Read one executable while proving its path and inode stayed stable."""
+
+    if not path.is_absolute():
+        raise ServiceRefreshFailed(f"{label} path is not absolute")
+    _assert_no_symlink_ancestors(path)
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if reject_symlink:
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ServiceRefreshFailed(f"{label} is unavailable") from exc
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not (before.st_mode & 0o111):
+            raise ServiceRefreshFailed(f"{label} is not a single-link executable file")
+        read_limit = before.st_size + 1 if max_bytes is None else max_bytes + 1
+        first = os.read(fd, read_limit)
+        os.lseek(fd, 0, os.SEEK_SET)
+        second = os.read(fd, read_limit)
+        after = os.fstat(fd)
+        if (
+            first != second
+            or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or before.st_size != after.st_size
+        ):
+            raise ServiceRefreshFailed(f"{label} changed while being hashed")
+        if max_bytes is not None and len(first) > max_bytes:
+            raise ServiceRefreshFailed(f"{label} is oversized")
+        if reject_symlink:
+            try:
+                linked = os.stat(path, follow_symlinks=False)
+            except OSError as exc:
+                raise ServiceRefreshFailed(f"{label} path is unavailable") from exc
+            if (
+                stat.S_ISLNK(linked.st_mode)
+                or linked.st_nlink != 1
+                or (linked.st_dev, linked.st_ino) != (after.st_dev, after.st_ino)
+            ):
+                raise ServiceRefreshFailed(f"{label} path changed while being hashed")
+        return first, stat.S_IMODE(after.st_mode)
+    finally:
+        os.close(fd)
+
+
+def _installed_command_identity(unit: ServiceUnit) -> tuple[str, Path, str]:
+    """Bind the installed console launcher to its direct Python interpreter."""
+
+    launcher_raw, _launcher_mode = _stable_regular_file(unit.executable, label="installed service launcher")
+    first_line, separator, _rest = launcher_raw.partition(b"\n")
+    if not separator or not first_line.startswith(b"#!"):
+        raise ServiceRefreshFailed("installed service launcher has no direct Python shebang")
+    try:
+        shebang = first_line[2:].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ServiceRefreshFailed("installed service launcher shebang is malformed") from exc
+    if shebang.startswith(" "):
+        shebang = shebang[1:]
+    if (
+        not shebang.startswith("/")
+        or not shebang
+        or any(character.isspace() or ord(character) < 0x20 for character in shebang)
+        or not Path(shebang).name.startswith("python")
+    ):
+        raise ServiceRefreshFailed("installed service launcher must use a direct absolute Python shebang")
+    try:
+        interpreter = Path(shebang).resolve(strict=True)
+    except OSError as exc:
+        raise ServiceRefreshFailed("installed service launcher interpreter is unavailable") from exc
+    interpreter_raw, _interpreter_mode = _stable_regular_file(
+        interpreter, label="installed service interpreter", reject_symlink=False, max_bytes=None
+    )
+    return hashlib.sha256(launcher_raw).hexdigest(), interpreter, hashlib.sha256(interpreter_raw).hexdigest()
+
+
+def _process_executable_path(pid: int) -> Path:
+    """Resolve Linux's executable identity for one live process."""
+
+    raw = os.readlink(f"/proc/{pid}/exe")
+    if not raw or raw.endswith(" (deleted)"):
+        raise OSError("process executable path is unavailable")
+    return Path(raw).resolve(strict=True)
+
+
+def _process_matches_interpreter(
+    pid: int,
+    birth_identity: str,
+    interpreter: Path,
+    *,
+    identity_reader: Callable[[int], str],
+) -> bool:
+    """Read /proc/exe only across two equal birth observations."""
+
+    try:
+        before = identity_reader(pid)
+        if before != birth_identity:
+            return False
+        executable = _process_executable_path(pid)
+        after = identity_reader(pid)
+    except (OSError, ValueError):
+        return False
+    return before == after == birth_identity and executable == interpreter
+
+
+def _prove_stopped_current_owner(
+    ledger: Ledger,
+    *,
+    unit: ServiceUnit,
+    config_home: Path | None,
+    profile_sha256: str | None,
+    credential_value: str,
+    expected_authority: Mapping[str, object],
+    expected_launcher_identity: tuple[str, Path, str],
+    runner: Callable[..., object],
+    process_is_live: ProcessLiveness,
+    allow_profile_identity_update: bool = True,
+) -> dict[str, object]:
+    """Prove one unchanged fenced owner is stopped before a lifecycle edge."""
+
+    try:
+        inspection = ledger.refresh_state_inspection()
+    except LedgerError as exc:
+        raise ServiceRefreshFailed("harness refresh state is not canonical") from exc
+    authority_value = inspection.get("authority")
+    if not isinstance(authority_value, Mapping):
+        raise ServiceRefreshFailed("harness authority is unavailable")
+    _authority_matches_unit(authority_value, unit)
+    if _authority_stable_identity(authority_value) != _authority_stable_identity(expected_authority):
+        raise ServiceRefreshFailed("harness authority changed while the predecessor was stopping")
+    if _authority_shutdown_bit(authority_value) != 1:
+        raise ServiceRefreshFailed("harness refresh fence disappeared while the predecessor was stopping")
+    for name in (
+        "active_dispatches",
+        "live_worker_leases",
+        "active_controller_generations",
+        "live_controller_claims",
+    ):
+        count = inspection.get(name)
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ServiceRefreshFailed("harness refresh state contains an invalid activity count")
+        if count:
+            raise ServiceRefreshDeferred("harness refresh deferred while a child or controller claim is active")
+    old_pid, old_birth_identity, _old_epoch = _authority_identity(authority_value)
+    if process_is_live(old_pid, old_birth_identity):
+        raise ServiceRefreshDeferred("harness predecessor process is still live")
+    if _unit_is_active(unit, runner=runner):
+        raise ServiceRefreshDeferred("harness predecessor unit is still active")
+    _validate_installed_unit(
+        unit,
+        config_home=config_home,
+        expected_profile_sha256=profile_sha256,
+        credential_value=credential_value,
+        allow_profile_identity_update=allow_profile_identity_update,
+    )
+    if _installed_command_identity(unit) != expected_launcher_identity:
+        raise ServiceRefreshFailed("installed service launcher changed while the predecessor was stopping")
+    runtime = unit.state_root / ".codex-flow" / "runtime"
+    if any(os.path.lexists(runtime / socket_name) for socket_name in ("harness.sock", "supervisor.sock")):
+        raise ServiceRefreshFailed("harness refresh socket entry remains")
+    return dict(authority_value)
+
+
 def _replacement_is_healthy(
     authority: Mapping[str, object] | None,
     *,
@@ -161,6 +353,9 @@ def _replacement_is_healthy(
     old_birth_identity: str,
     old_epoch: int,
     process_is_live: ProcessLiveness,
+    identity_reader: Callable[[int], str],
+    interpreter: Path,
+    interpreter_digest: str,
 ) -> bool:
     if authority is None:
         return False
@@ -186,7 +381,14 @@ def _replacement_is_healthy(
         return False
     if pid == old_pid and birth_identity == old_birth_identity:
         return False
-    return process_is_live(pid, birth_identity)
+    if authority.get("executable_digest") != interpreter_digest:
+        return False
+    return process_is_live(pid, birth_identity) and _process_matches_interpreter(
+        pid,
+        birth_identity,
+        interpreter,
+        identity_reader=identity_reader,
+    )
 
 
 def _unit_arg(path: Path) -> str:
@@ -577,6 +779,7 @@ def refresh_with_credential(
     legacy_topology_migration = False
     interrupted_recovery = False
     ledger_path: Path | None = None
+    authority_value: Mapping[str, object] | None = None
     live_checker = process_is_live or (
         lambda pid, birth_identity: _exact_process_is_live(pid, birth_identity, identity_reader)
     )
@@ -687,6 +890,8 @@ def refresh_with_credential(
             credential_value=value,
             allow_profile_identity_update=True,
         )
+
+    installed_launcher_identity = _installed_command_identity(unit)
 
     legacy_unit_raw: bytes | None = None
     legacy_unit_mode: int | None = None
@@ -821,8 +1026,23 @@ def refresh_with_credential(
         current_pid, current_birth, current_epoch = _authority_identity(current)
         if (current_pid, current_birth, current_epoch) != identity or _authority_shutdown_bit(current) != 1:
             raise ServiceRefreshFailed("replacement harness authority changed after stop")
-        if dict(current) != dict(cast(Mapping[str, object], fenced)):
+        if _authority_stable_identity(current) != _authority_stable_identity(cast(Mapping[str, object], fenced)):
             raise ServiceRefreshFailed("replacement harness authority row changed after stop")
+
+        if not (legacy_topology_migration or interrupted_recovery):
+            _prove_stopped_current_owner(
+                owned_ledger,
+                unit=unit,
+                config_home=config_home,
+                profile_sha256=profile_sha256,
+                credential_value=value,
+                expected_authority=fenced,
+                expected_launcher_identity=installed_launcher_identity,
+                runner=runner,
+                process_is_live=live_checker,
+                allow_profile_identity_update=False,
+            )
+            return
 
         _validate_installed_unit(
             unit,
@@ -904,24 +1124,27 @@ def refresh_with_credential(
 
     try:
         try:
-            fence = (
-                cast(Mapping[str, object], authority_value)
-                if interrupted_recovery
-                else owned_ledger.arm_predecessor_refresh_fence()
-                if migration_required
-                else owned_ledger.arm_harness_refresh_fence()
-            )
+            if interrupted_recovery:
+                if authority_value is None:
+                    raise ServiceRefreshFailed("harness authority is unavailable")
+                predecessor_authority = dict(authority_value)
+            else:
+                fence = (
+                    owned_ledger.arm_predecessor_refresh_fence()
+                    if migration_required
+                    else owned_ledger.arm_harness_refresh_fence()
+                )
+                if fence is None:
+                    raise ServiceRefreshFailed("harness authority is unavailable")
+                predecessor_authority = dict(cast(Mapping[str, object], fence))
         except HarnessRefreshBlocked as exc:
             raise ServiceRefreshDeferred(str(exc)) from exc
         except LedgerError as exc:
             raise ServiceRefreshFailed("harness refresh fence could not be armed") from exc
-        if fence is None:
-            raise ServiceRefreshFailed("harness authority is unavailable")
 
-        authority = cast(Mapping[str, object], fence)
-        _authority_matches_unit(authority, unit)
-        predecessor_authority = dict(authority)
-        old_pid, old_birth_identity, old_epoch = _authority_identity(authority)
+        _authority_matches_unit(predecessor_authority, unit)
+        _authority_stable_identity(predecessor_authority)
+        old_pid, old_birth_identity, old_epoch = _authority_identity(predecessor_authority)
         legacy_topology = legacy_topology_migration or interrupted_recovery
         predecessor_unit = _legacy_supervisor_unit(unit) if legacy_topology else unit
         socket_path = (
@@ -951,6 +1174,18 @@ def refresh_with_credential(
             remaining()
             sleeper(min(0.05, remaining()))
             old_process_live = live_checker(old_pid, old_birth_identity)
+
+        predecessor_authority = _prove_stopped_current_owner(
+            owned_ledger,
+            unit=predecessor_unit,
+            config_home=config_home,
+            profile_sha256=profile_sha256,
+            credential_value=value,
+            expected_authority=predecessor_authority,
+            expected_launcher_identity=installed_launcher_identity,
+            runner=runner,
+            process_is_live=live_checker,
+        )
 
         if migration_required:
             # The old authority is now fenced and its process/unit are gone.
@@ -989,7 +1224,11 @@ def refresh_with_credential(
                 )
             owned_ledger.close()
             try:
-                owned_ledger = Ledger(ledger_path, migrate=True)
+                owned_ledger = Ledger(
+                    ledger_path,
+                    migrate=True,
+                    expected_refresh_authority=predecessor_authority,
+                )
             except BaseException:
                 # The predecessor fence is committed before migration. If
                 # opening or migrating fails, v18 restores its exact legacy
@@ -1016,11 +1255,25 @@ def refresh_with_credential(
             expected_profile_sha256=profile_sha256,
             credential_value=value,
         )
+        if _installed_command_identity(unit) != installed_launcher_identity:
+            raise ServiceRefreshFailed("installed service launcher changed before replacement start")
         if _run_manager(("daemon-reload",), runner=runner) != 0:
             raise ServiceRefreshFailed("user-manager daemon reload failed")
         if _run_manager(("import-environment", key), runner=runner) != 0:
             raise ServiceRefreshFailed("user-manager credential import failed")
         imported = True
+        predecessor_authority = _prove_stopped_current_owner(
+            owned_ledger,
+            unit=unit,
+            config_home=config_home,
+            profile_sha256=profile_sha256,
+            credential_value=value,
+            expected_authority=predecessor_authority,
+            expected_launcher_identity=installed_launcher_identity,
+            runner=runner,
+            process_is_live=live_checker,
+            allow_profile_identity_update=False,
+        )
         # Mark before invoking systemctl start.  A failed/timeout start is
         # still an uncertain replacement unless the bounded positive absence
         # proof below establishes that no replacement could have run.
@@ -1108,6 +1361,8 @@ def refresh_with_credential(
             elif replacement_identity != identity:
                 raise ServiceRefreshFailed("replacement harness authority identity drifted")
 
+            if _installed_command_identity(unit) != installed_launcher_identity:
+                raise ServiceRefreshFailed("installed service launcher changed during replacement health")
             healthy = (
                 shutdown_bit == 0
                 and _unit_is_active(unit, runner=runner)
@@ -1118,6 +1373,9 @@ def refresh_with_credential(
                     old_birth_identity=old_birth_identity,
                     old_epoch=old_epoch,
                     process_is_live=live_checker,
+                    identity_reader=identity_reader,
+                    interpreter=installed_launcher_identity[1],
+                    interpreter_digest=installed_launcher_identity[2],
                 )
             )
             if healthy:

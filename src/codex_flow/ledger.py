@@ -1694,14 +1694,22 @@ class Ledger:
         fault_injector: FaultInjector | None = None,
         migrate: bool = False,
         allow_legacy: bool = False,
+        expected_refresh_authority: Mapping[str, object] | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("SQLite busy timeout must be positive")
+        if expected_refresh_authority is not None and not migrate:
+            raise ValueError("expected refresh authority requires migrate=True")
+        if expected_refresh_authority is not None and not isinstance(expected_refresh_authority, Mapping):
+            raise TypeError("expected refresh authority must be a mapping")
         self.path = _absolute_path(path)
         self._timeout = timeout
         self._fault_injector = fault_injector
         self._migrate_requested = migrate
         self._allow_legacy = allow_legacy
+        self._expected_refresh_authority = (
+            dict(expected_refresh_authority) if expected_refresh_authority is not None else None
+        )
         self._legacy_schema_version: SchemaVersion | None = None
         self._connection: sqlite3.Connection | None = None
         self._database_fd: int | None = None
@@ -1803,6 +1811,7 @@ class Ledger:
             self._validate_live_identity()
             if self._expected_identity is None:
                 self._expected_identity = identity
+            self._expected_refresh_authority = None
         except sqlite3.DatabaseError as exc:
             restore_failed_migration()
             self._close_connection()
@@ -2074,6 +2083,25 @@ class Ledger:
             raise MigrationRequired(
                 f"schema {version} migration requires the predecessor {authority_table} refresh fence"
             )
+
+    def _expected_refresh_authority_table(self) -> str:
+        version = self.schema_version
+        if version == CURRENT_SCHEMA_VERSION:
+            return "harness_authority"
+        authority_table = _predecessor_refresh_authority_table(version)
+        if authority_table is None:
+            raise MigrationRequired(f"schema {version} does not expose a refresh authority")
+        return authority_table
+
+    def _validate_expected_refresh_authority_in_transaction(self) -> None:
+        expected = self._expected_refresh_authority
+        if expected is None:
+            return
+        self._raise_if_active_harness_children_in_transaction()
+        authority_table = self._expected_refresh_authority_table()
+        row = self._db().execute(f"SELECT * FROM {authority_table} WHERE singleton = 1").fetchone()
+        if row is None or dict(self._queue_row(row)) != expected:
+            raise StaleWriter("refresh authority changed during migration")
 
     def _migrate_empty_v9_draft(self) -> None:
         row = (
@@ -6084,6 +6112,7 @@ class Ledger:
         connection.execute("BEGIN IMMEDIATE")
         try:
             self._validate_live_identity()
+            self._validate_expected_refresh_authority_in_transaction()
             if validate_authority:
                 self._validate_schema_metadata(CURRENT_SCHEMA_VERSION)
                 self._validate_shape(CURRENT_SCHEMA_VERSION)
@@ -6092,6 +6121,7 @@ class Ledger:
             yield
             self._fault("before_commit")
             self._validate_live_identity()
+            self._validate_expected_refresh_authority_in_transaction()
             if validate_authority:
                 self._validate_schema_metadata(CURRENT_SCHEMA_VERSION)
                 self._validate_shape(CURRENT_SCHEMA_VERSION)
@@ -6982,61 +7012,54 @@ class Ledger:
         return hashlib.sha256(_encode_json(payload).encode("utf-8")).hexdigest()
 
     def refresh_state_inspection(self) -> JsonObject:
-        """Inspect the exact fenced v19 recovery state without mutation."""
+        """Inspect one validated legacy/current recovery snapshot without mutation."""
 
-        if self.schema_version != CURRENT_SCHEMA_VERSION or self.schema_identity != _SCHEMA_IDENTITY:
-            raise CorruptSchemaError("refresh state requires the canonical schema-v19 identity")
-        marker = self._db().execute("SELECT value FROM schema_meta WHERE key = 'migration_marker'").fetchone()
-        if marker is None or str(marker[0]) != "complete":
-            raise CorruptSchemaError("refresh state requires a complete migration marker")
-        tables = {
-            str(row[1])
-            for row in self._db().execute("SELECT type, name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
-        if "harness_authority" not in tables or "supervisor_authority" in tables:
-            raise CorruptSchemaError("refresh state has an ambiguous authority table")
-        authority = self.harness_authority()
-        if authority is None:
-            return {
-                "authority": None,
-                "active_dispatches": 0,
-                "live_worker_leases": 0,
-                "active_controller_generations": 0,
-                "live_controller_claims": 0,
+        with self._read_transaction():
+            version = self.schema_version
+            if version not in {SchemaVersion(18), SchemaVersion(19), SchemaVersion(20), CURRENT_SCHEMA_VERSION}:
+                raise CorruptSchemaError(f"refresh state does not support schema {version}")
+            self._validate_schema_metadata(version)
+            self._validate_shape(version)
+            authority_table = (
+                "harness_authority"
+                if version == CURRENT_SCHEMA_VERSION
+                else _predecessor_refresh_authority_table(version)
+            )
+            if authority_table is None:
+                raise CorruptSchemaError(f"refresh state does not expose authority for schema {version}")
+            tables = {
+                str(row[1])
+                for row in self._db().execute("SELECT type, name FROM sqlite_master WHERE type = 'table'").fetchall()
             }
-        active_dispatches = int(
-            self._db()
-            .execute("SELECT COUNT(*) FROM dispatch_queue WHERE state IN ('claimed', 'starting', 'running')")
-            .fetchone()[0]
-        )
-        live_worker_leases = int(
-            self._db().execute("SELECT COUNT(*) FROM worker_liveness WHERE exited_at IS NULL").fetchone()[0]
-        )
-        active_controller_generations = int(
-            self._db()
-            .execute(
-                "SELECT COUNT(*) FROM controller_decision_generations WHERE state IN ('delivery_starting', 'active')"
+            alternate_table = "supervisor_authority" if authority_table == "harness_authority" else "harness_authority"
+            if authority_table not in tables or alternate_table in tables:
+                raise CorruptSchemaError("refresh state has an ambiguous authority table")
+            authority_row = self._db().execute(f"SELECT * FROM {authority_table} WHERE singleton = 1").fetchone()
+            authority = self._queue_row(authority_row) if authority_row is not None else None
+            active_dispatches = int(
+                self._db()
+                .execute("SELECT COUNT(*) FROM dispatch_queue WHERE state IN ('claimed', 'starting', 'running')")
+                .fetchone()[0]
             )
-            .fetchone()[0]
-        )
-        now = utc_now()
-        live_controller_claims = int(
-            self._db()
-            .execute(
-                "SELECT COUNT(*) FROM controller_decisions WHERE "
-                "claimant_kind IS NOT NULL AND claimant_id IS NOT NULL "
-                "AND claim_lease_expires_at IS NOT NULL AND claim_lease_expires_at > ?",
-                (now,),
+            live_worker_leases = int(
+                self._db().execute("SELECT COUNT(*) FROM worker_liveness WHERE exited_at IS NULL").fetchone()[0]
             )
-            .fetchone()[0]
-        )
-        return {
-            "authority": authority,
-            "active_dispatches": active_dispatches,
-            "live_worker_leases": live_worker_leases,
-            "active_controller_generations": active_controller_generations,
-            "live_controller_claims": live_controller_claims,
-        }
+            active_controller_generations = int(
+                self._db()
+                .execute(
+                    "SELECT COUNT(*) FROM controller_decision_generations WHERE state IN ('delivery_starting', 'active')"
+                )
+                .fetchone()[0]
+            )
+            now = utc_now()
+            live_controller_claims = self._live_controller_claim_count_in_transaction(now)
+            return {
+                "authority": authority,
+                "active_dispatches": active_dispatches,
+                "live_worker_leases": live_worker_leases,
+                "active_controller_generations": active_controller_generations,
+                "live_controller_claims": live_controller_claims,
+            }
 
     # H6-F live-worker diagnostics, retry policy and control-command authority.
     def append_diagnostic(
@@ -17710,11 +17733,57 @@ class Ledger:
         row = self._db().execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()
         return row is not None and int(row["requested_shutdown"]) == 1
 
+    def _live_controller_claim_count_in_transaction(self, now: str) -> int:
+        """Validate and count live human/model decision claims in one snapshot."""
+
+        rows = (
+            self._db()
+            .execute(
+                "SELECT claimant_kind, claimant_id, claim_token_sha256, claim_started_at, claim_lease_expires_at "
+                "FROM controller_decisions"
+            )
+            .fetchall()
+        )
+        live = 0
+        for row in rows:
+            claim_fields = tuple(
+                row[field] for field in ("claimant_kind", "claimant_id", "claim_token_sha256", "claim_started_at")
+            )
+            lease = row["claim_lease_expires_at"]
+            if all(value is None for value in claim_fields) and lease is None:
+                continue
+            if any(value is None for value in claim_fields) or lease is None:
+                raise CorruptSchemaError("controller claim or lease facts are incomplete")
+            try:
+                ControllerClaimantKind(str(row["claimant_kind"]))
+            except ValueError as exc:
+                raise CorruptSchemaError("controller claimant kind is invalid") from exc
+            if not isinstance(row["claimant_id"], str) or not str(row["claimant_id"]).strip():
+                raise CorruptSchemaError("controller claimant identity is invalid")
+            if re.fullmatch(r"[0-9a-f]{64}", str(row["claim_token_sha256"])) is None:
+                raise CorruptSchemaError("controller claim token digest is invalid")
+            for field in ("claim_started_at", "claim_lease_expires_at"):
+                value = row[field]
+                try:
+                    raw = str(value)
+                    parsed = datetime.fromisoformat(raw.removesuffix("Z") + ("+00:00" if raw.endswith("Z") else ""))
+                except ValueError as exc:
+                    raise CorruptSchemaError(f"controller {field} is not a valid timestamp") from exc
+                if parsed.tzinfo is None:
+                    raise CorruptSchemaError(f"controller {field} must be timezone-aware")
+            if str(lease) > now:
+                live += 1
+        return live
+
     def _raise_if_active_harness_children_in_transaction(self) -> None:
         # ``Popen`` cannot share the SQLite transaction that claims a queue
         # item.  Treat a durable pre-launch claim as active handoff work so a
         # refresh cannot win the gap between queue claim and worker-liveness
         # binding.  The harness will reconcile stale claims on restart.
+        now = utc_now()
+        live_controller_claims = self._live_controller_claim_count_in_transaction(now)
+        if live_controller_claims:
+            raise HarnessRefreshBlocked("harness refresh deferred while a controller claim is active")
         queue = (
             self._db()
             .execute("SELECT 1 FROM dispatch_queue WHERE state IN ('claimed', 'starting', 'running') LIMIT 1")
