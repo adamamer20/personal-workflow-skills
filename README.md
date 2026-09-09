@@ -265,9 +265,13 @@ which also performs the independent visual-quality review. Ordinary recovery
 defaults to Astra Low. Visual ambiguity, non-convergence, or material recovery
 complexity explicitly escalates to Astra Medium. Normal architecture conformance
 and semantic orchestration use Sol Medium. A combined architecture/security
-review escalates to Astra Medium only for significant or ambiguous boundaries or
-when Sol cannot close the question; High is an explicit exceptional escalation
-only. Do not duplicate objective and architecture reviews unnecessarily when
+review starts with Sol Medium; it escalates to Astra Medium only when Sol cannot
+close the question and records the unresolved risk, evidence checked and reason.
+Domain labels, severity, finding count and previous reviewer identity alone do
+not justify escalation. Retaining a higher-cost reviewer for continuity is optional;
+re-review is about the repaired findings. Record authorized routing changes before
+dispatch and preserve declared authorities. This is conditional escalation, not
+three mandatory reviews. High is an explicit exceptional escalation only. Do not duplicate objective and architecture reviews unnecessarily when
 selecting modes; every declared capsule authority remains required. Use one focused lens
 when it resolves the recorded risk. Use distinct authorities only for materially
 independent evidence. A mixed objective/visual milestone must preserve both kinds

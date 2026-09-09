@@ -227,6 +227,12 @@ review without a reason.
 
 If the same causal finding persists, return `REPLAN_RECOMMENDED` with the
 evidence needed to change the approach. Do not start an endless review loop.
+Escalation records the exact unresolved question, evidence checked and why the
+current authority cannot close it; domain labels, severity or finding counts
+alone are insufficient. Previous reviewer identity does not require retaining
+that reviewer or its cost tier. Transfer finding IDs, fixed candidate and causal
+proof to the selected authority. The controller owns routing and any authorized
+capsule update; never skip a declared authority or require a ladder of reviews.
 
 ## Verdict
 

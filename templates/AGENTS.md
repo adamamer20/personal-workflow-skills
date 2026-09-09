@@ -154,9 +154,14 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   defaults to Astra Low; independent visual-quality promotion review uses Astra Low.
   When selected, bounded architecture-conformance review uses Sol Medium. Visual ambiguity,
   non-convergence, or material recovery complexity escalates to Astra Medium;
-  a combined review escalates to Astra Medium for significant or ambiguous
-  boundaries or when Sol cannot close the question; High is an explicit
-  exceptional escalation only. Do not duplicate objective and architecture
+  a combined architecture/security review starts with Sol Medium and escalates
+  to Astra Medium only when Sol cannot close the question, with the unresolved
+  risk, checked evidence and reason recorded. Domain labels, severity, finding
+  count or prior reviewer identity alone do not justify escalation. Continuity
+  does not require retaining a higher-cost reviewer for re-review; preserve
+  declared authorities and record any authorized routing change before dispatch.
+  This is conditional escalation, not a mandatory sequence of reviews. High is
+  an explicit exceptional escalation only. Do not duplicate objective and architecture
   reviews unnecessarily when selecting modes; every declared capsule authority
   remains required. Select distinct authorities when their evidence and judgments
   are materially independent.

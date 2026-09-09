@@ -92,9 +92,13 @@
   its ownership or transport boundary.
 - Every review invocation names exactly one lens (`spec`, `correctness`,
   `standards`, `contract-risk`, `security`, or `visual`). The default is one
-  focused review context. Use Sol Medium for bounded architecture conformance;
-  escalate to Astra Medium only for a significant or ambiguous combined
-  architecture/security boundary or when Sol cannot close the question. Do not
+  focused review context. Use Sol Medium first for architecture/security review.
+  Escalate to Astra Medium only when Sol records a question it cannot close,
+  the evidence checked and why it remains unresolved. Domain labels, severity,
+  finding count and prior reviewer identity alone do not justify escalation.
+  A re-review need not retain a higher-cost reviewer for continuity; the
+  controller records routing changes while preserving declared authorities.
+  This is conditional escalation, not a mandatory ladder of reviewers. Do not
   duplicate objective and architecture reviews unnecessarily at mode selection;
   all declared capsule authorities remain required. Parallel distinct authorities
   require materially independent evidence and judgments, with both explicitly

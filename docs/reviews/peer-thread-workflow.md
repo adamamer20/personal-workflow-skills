@@ -13,6 +13,7 @@ working on that milestone; do not reload all history into every task.
 
 | Work | Current state / dependency | Next gate |
 | --- | --- | --- |
+| Controlled review escalation | General instruction clarification; one Luna XHigh worker owns plugin-only installation after validation | Verify installed 0.1.13+codex.20260909000000 and file parity |
 | refresh-start-intent | Existing uncommitted recovery candidate, single original owner; acceptance unverified here | Required checks, successor commit, one focused Sol Medium review of ROTATION-START-REENTRY-DOUBLE-START |
 | evidence-led-delivery-instructions | Accepted and committed as aad46cd | Closed; see history installation record |
 | Current plan/history separation | Accepted; snapshot and active capsule identity preserved | Closed |
@@ -36,6 +37,8 @@ The planner owns this direct user-requested instruction maintenance: plan/histor
 README, root and template AGENTS, plan-work/execute-milestone/recover-milestone/
 review-work skills, historical fixture references in tests/test_plan_compilation.py,
 and the matching version constants in plugin/marketplace manifests and installer.
+The bounded 2026-09-09 clarification also owns the matching validator wording;
+Luna validates and installs only the instruction plugin, without runtime refresh.
 The exact history relocation is exempted from the large-new-file pre-commit hook;
 all other paths retain the existing size gate. Targeted global AGENTS synchronization
 preserves unrelated local policy and follows independent consistency review.

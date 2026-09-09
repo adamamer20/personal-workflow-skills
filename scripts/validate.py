@@ -1307,7 +1307,7 @@ def validate_global_agents_template() -> None:
         "evidence and judgments are materially independent",
         "single mutable implementation owner",
         "independent visual-quality promotion review uses Astra Low",
-        "combined review escalates to Astra Medium for significant or ambiguous",
+        "a combined architecture/security review starts with Sol Medium",
         "High is an explicit exceptional escalation only",
         "passing code tests never implies that a rendered result is good",
         "When an owner stops converging",

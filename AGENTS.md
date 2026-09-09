@@ -254,9 +254,13 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   Astra Low. Semantic orchestration and normal architecture conformance use Sol
   Medium. Visual ambiguity, non-convergence, or material recovery complexity
   escalates to Astra Medium; High is exceptional only. When review is justified,
-  use one focused Sol Medium architecture review by default. Escalate a combined
-  architecture/security review to Astra Medium only for a significant or
-  ambiguous boundary or when Sol cannot close it. Do not duplicate objective and
+  use one focused Sol Medium architecture/security review first. Escalate to
+  Astra Medium only after Sol records the unresolved question, evidence already
+  checked and why it cannot close the risk. Domain labels, severity, finding
+  count and previous reviewer identity alone do not justify escalation.
+  Re-review targets the repaired findings; retaining a higher-cost reviewer is
+  optional, not required for continuity. Preserve declared capsule authorities;
+  the controller records any authorized routing change before dispatch. Do not duplicate objective and
   architecture reviews unnecessarily at mode selection; declared capsule
   authorities remain required. Use distinct authorities for independent evidence. Passing code tests never
   implies visual acceptance.
