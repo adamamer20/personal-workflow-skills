@@ -13,7 +13,7 @@ working on that milestone; do not reload all history into every task.
 
 | Work | Current state / dependency | Next gate |
 | --- | --- | --- |
-| Controlled review escalation | General instruction clarification; one Luna XHigh worker owns plugin-only installation after validation | Verify installed 0.1.13+codex.20260909000000 and file parity |
+| Sol-first routing | Source/config/tests delivered in local candidate; 62 focused tests and validators green; full gate reached 1263/1265 before the retained-capsule repair, with only the native-profile environment probe still unresolved | Independent Sol Medium policy review and a clean-environment full gate before installation; preserve unrelated dirty recovery/TUI surfaces |
 | refresh-start-intent | Existing uncommitted recovery candidate, single original owner; acceptance unverified here | Required checks, successor commit, one focused Sol Medium review of ROTATION-START-REENTRY-DOUBLE-START |
 | evidence-led-delivery-instructions | Accepted and committed as aad46cd | Closed; see history installation record |
 | Current plan/history separation | Accepted; snapshot and active capsule identity preserved | Closed |

@@ -1094,14 +1094,14 @@ def validate_native_routing_contract() -> None:
         "Controller capsules require every declared review authority",
         "not by itself a review trigger",
         "When selected, objective code review uses Luna XHigh",
-        "visual implementation defaults to Astra Low",
-        "Ordinary recovery defaults to Astra Low",
-        "Visual ambiguity, non-convergence, or material recovery complexity explicitly escalates to Astra Medium",
+        "visual implementation and independent visual-quality review default to Sol Medium",
+        "Ordinary recovery defaults to Sol High",
+        "escalates to Sol High",
         "Normal architecture conformance and semantic orchestration use Sol Medium",
         "combined architecture/security review",
-        "when Sol cannot close the question",
+        "after two Sol High attempts on the same failure",
         "Do not duplicate objective and architecture reviews",
-        "High is an explicit exceptional escalation only",
+        "Astra is used only when explicitly requested by the user",
         "A mixed objective/visual milestone must preserve both kinds of evidence",
         "Non-convergence triggers diagnosis and a change of authority or approach",
         "`CONTINUE_WITH_REPLAN` is internal and nonterminal",
@@ -1161,14 +1161,14 @@ def _validate_authorized_routing_defaults(workflow_path: Path, example_path: Pat
     """Reject drift from the user-authorized role boundaries."""
 
     workflow_expected = {
-        "planner": ("gpt-6-astra", "medium"),
+        "planner": ("gpt-5.6-sol", "medium"),
         "executor": ("gpt-5.6-luna", "xhigh"),
         "code-reviewer": ("gpt-5.6-luna", "xhigh"),
-        "visual-reviewer": ("gpt-6-astra", "low"),
+        "visual-reviewer": ("gpt-5.6-sol", "medium"),
         "architecture-reviewer": ("gpt-5.6-sol", "medium"),
-        # Recovery diagnosis is the explicit Medium escalation; ordinary
-        # recovery implementation is recover_local below.
-        "recovery": ("gpt-6-astra", "medium"),
+        # Recovery diagnosis is the explicit Sol High escalation; ordinary
+        # recovery implementation follows the same route below.
+        "recovery": ("gpt-5.6-sol", "high"),
         "decision": ("gpt-5.6-sol", "medium"),
     }
     for role, expected in workflow_expected.items():
@@ -1177,15 +1177,15 @@ def _validate_authorized_routing_defaults(workflow_path: Path, example_path: Pat
             fail(f"{workflow_path}: authorized route for {role!r} drifted; expected={expected}, actual={actual}")
 
     example_expected = {
-        "plan": ("gpt-6-astra", "medium"),
+        "plan": ("gpt-5.6-sol", "medium"),
         "execute_bounded": ("gpt-5.6-luna", "xhigh"),
         "execute_substantial": ("gpt-5.6-luna", "xhigh"),
-        "execute_visual": ("gpt-6-astra", "low"),
+        "execute_visual": ("gpt-5.6-sol", "medium"),
         "review": ("gpt-5.6-luna", "xhigh"),
         "review_implementation": ("gpt-5.6-luna", "xhigh"),
-        "review_visual": ("gpt-6-astra", "low"),
-        "recover_local": ("gpt-6-astra", "low"),
-        "recover_architecture": ("gpt-6-astra", "medium"),
+        "review_visual": ("gpt-5.6-sol", "medium"),
+        "recover_local": ("gpt-5.6-sol", "high"),
+        "recover_architecture": ("gpt-5.6-sol", "high"),
     }
     for role, expected in example_expected.items():
         actual = _configured_route_pair(example_path, role, effort_key="thinking")
@@ -1254,7 +1254,7 @@ def validate_readme_routing_table(path: Path | None = None) -> None:
         "Architecture conformance, when risk-triggered": workflow_roles["architecture-reviewer"],
         "Recovery diagnosis": workflow_roles["recovery"],
         "Controller decisions": workflow_roles["decision"],
-        "Significant/ambiguous architecture or security escalation": workflow_roles["planner"],
+        "Significant/ambiguous architecture or security escalation": workflow_roles["recovery"],
         "Mechanical repair after a precise finding": ("gpt-5.6-luna", "high"),
         "Independent objective/code review, when risk-triggered": example_roles["review"],
     }
@@ -1287,13 +1287,11 @@ def validate_global_agents_template() -> None:
         "never select it silently",
         "combine it with",
         "normal execution path",
-        "Astra Medium architecture thread",
+        "Sol Medium architecture thread",
         "Luna XHigh",
         "model=gpt-5.6-luna, thinking=xhigh",
         "model=gpt-5.6-sol, thinking=medium",
-        "model=gpt-6-astra, thinking=medium",
-        "model=gpt-6-astra, thinking=low",
-        "model=gpt-6-astra, thinking=high",
+        "model=gpt-5.6-sol, thinking=high",
         "Every Luna task uses `speed=fast` by default",
         "If the native schema advertises `speed`, pass `speed=fast`",
         "app's configured fast speed",
@@ -1306,9 +1304,10 @@ def validate_global_agents_template() -> None:
         "Do not duplicate objective and architecture reviews",
         "evidence and judgments are materially independent",
         "single mutable implementation owner",
-        "independent visual-quality promotion review uses Astra Low",
+        "independent visual-quality promotion review default to Sol Medium",
         "a combined architecture/security review starts with Sol Medium",
-        "High is an explicit exceptional escalation only",
+        "Astra is not a configured default or first escalation",
+        "two attempts on the same failure without new causal evidence or observable improvement",
         "passing code tests never implies that a rendered result is good",
         "When an owner stops converging",
         "A change of authority or approach is not a terminal condition",
@@ -1352,6 +1351,10 @@ def validate_global_agents_template() -> None:
 
     stale_routing = (
         "Visual-judgment implementation uses Astra Medium",
+        "Visual-judgment implementation defaults to Astra Low",
+        "Ordinary recovery defaults to Astra Low",
+        "Astra Medium architecture thread",
+        "escalates to Astra Medium",
         "thinking=medium for planning, visual implementation or recovery",
         "Astra Medium diagnostic continuation",
     )

@@ -226,26 +226,26 @@ for instruction precedence.
 
 Authorized native routing defaults:
 
-The Astra migration follows the official [model guidance](https://developers.openai.com/api/docs/guides/latest-model):
-preserve effective reasoning effort initially, make existing authorization clear,
-use incremental plans, and repeat verification only when new evidence warrants it.
-The [model page](https://developers.openai.com/api/docs/models/gpt-6-astra) documents
-image input, tool calling and structured outputs. Runtime capability proof remains
-separate from changing a configured model name. Existing tasks retain their pinned
-routes; these defaults apply to newly dispatched work.
+The Sol-first policy keeps routine planning and specialist judgment on Sol Medium
+and uses Sol High for escalation and recovery. Astra is a break-glass override,
+not a configured default: it requires either an explicit user request or two Sol
+High attempts on the same failure without new causal evidence or observable
+improvement. Runtime capability proof remains separate from changing a configured
+model name. Existing tasks retain their pinned routes; these defaults apply to
+newly dispatched work.
 
 | Situation | Task context | Native `model` | Native `thinking` |
 | --- | --- | --- | --- |
 | Small/local change | direct execution | `gpt-5.6-luna` | `high` |
 | Decision-ready substantial milestone | fresh execution | `gpt-5.6-luna` | `xhigh` |
-| Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents) | fresh execution | `gpt-6-astra` | `low` |
-| Ordinary recovery implementation | fresh execution | `gpt-6-astra` | `low` |
-| Independent visual-quality promotion review, when required | fresh peer | `gpt-6-astra` | `low` |
-| First-time large or uncertain program | planning | `gpt-6-astra` | `medium` |
+| Visual-judgment implementation (slides, landing pages, frontend/UI, rendered documents) | fresh execution | `gpt-5.6-sol` | `medium` |
+| Ordinary recovery implementation | fresh execution | `gpt-5.6-sol` | `high` |
+| Independent visual-quality promotion review, when required | fresh peer | `gpt-5.6-sol` | `medium` |
+| First-time large or uncertain program | planning | `gpt-5.6-sol` | `medium` |
 | Architecture conformance, when risk-triggered | fresh peer or planning | `gpt-5.6-sol` | `medium` |
-| Recovery diagnosis | fresh peer or planning | `gpt-6-astra` | `medium` |
+| Recovery diagnosis | fresh peer or planning | `gpt-5.6-sol` | `high` |
 | Controller decisions | ephemeral controller turn | `gpt-5.6-sol` | `medium` |
-| Significant/ambiguous architecture or security escalation | fresh peer or planning | `gpt-6-astra` | `medium` |
+| Significant/ambiguous architecture or security escalation | fresh peer or planning | `gpt-5.6-sol` | `high` |
 | Mechanical repair after a precise finding | fresh/current execution | `gpt-5.6-luna` | `high` |
 | Independent objective/code review, when risk-triggered | fresh peer | `gpt-5.6-luna` | `xhigh` |
 
@@ -260,13 +260,14 @@ file or configured role is not by itself a review trigger for that direct path.
 
 When selected, objective code review uses Luna XHigh. When success
 depends on composition, hierarchy, responsive behavior, rendered inspection, or
-other subjective visual judgment, visual implementation defaults to Astra Low,
-which also performs the independent visual-quality review. Ordinary recovery
-defaults to Astra Low. Visual ambiguity, non-convergence, or material recovery
-complexity explicitly escalates to Astra Medium. Normal architecture conformance
-and semantic orchestration use Sol Medium. A combined architecture/security
-review starts with Sol Medium; it escalates to Astra Medium only when Sol cannot
-close the question and records the unresolved risk, evidence checked and reason.
+other subjective visual judgment, visual implementation and independent
+visual-quality review default to Sol Medium. Ordinary recovery defaults to Sol High.
+Normal architecture conformance and semantic orchestration use Sol Medium. A
+combined architecture/security review starts with Sol Medium and escalates to
+Sol High only when the first pass cannot close the question and records the
+unresolved risk, evidence checked and reason. Astra is used only when explicitly
+requested by the user or after two Sol High attempts on the same failure without
+new causal evidence or observable improvement.
 Domain labels, severity, finding count and previous reviewer identity alone do
 not justify escalation. Retaining a higher-cost reviewer for continuity is optional;
 re-review is about the repaired findings. Record authorized routing changes before
@@ -281,7 +282,7 @@ wiring, copy replacement, asset processing, export, or a precisely identified
 CSS repair.
 
 Non-convergence triggers diagnosis and a change of authority or approach, not a
-terminal condition. An Astra recovery owner receives the current diff,
+terminal condition. A Sol High recovery owner receives the current diff,
 validation evidence, findings, accepted intent, and remaining gap. It finishes a
 bounded repair, replaces a failed implementation strategy, or replans and
 continues when outcome, public/persisted contracts, security/privacy boundary,

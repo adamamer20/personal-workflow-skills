@@ -93,8 +93,10 @@
 - Every review invocation names exactly one lens (`spec`, `correctness`,
   `standards`, `contract-risk`, `security`, or `visual`). The default is one
   focused review context. Use Sol Medium first for architecture/security review.
-  Escalate to Astra Medium only when Sol records a question it cannot close,
-  the evidence checked and why it remains unresolved. Domain labels, severity,
+  Escalate to Sol High only when the first Sol pass records a question it cannot
+  close, the evidence checked and why it remains unresolved. Astra is available
+  only on explicit user request or after two Sol High attempts on the same
+  failure without new causal evidence or observable improvement. Domain labels, severity,
   finding count and prior reviewer identity alone do not justify escalation.
   A re-review need not retain a higher-cost reviewer for continuity; the
   controller records routing changes while preserving declared authorities.

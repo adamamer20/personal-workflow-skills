@@ -198,7 +198,7 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 
 ## Controller routing and recovery semantics
 
-- For substantial or architecturally uncertain work, Astra Medium first
+- For substantial or architecturally uncertain work, Sol Medium first
   identifies the material assumptions and resolves them through existing evidence
   or a bounded discovery experiment. Make the earliest feasible implementation
   milestone a complete production vertical; a foundation names its concrete
@@ -221,7 +221,7 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   are explicit; and every new durable artifact is justified against a bounded
   file/module budget. Luna may split private helpers inside an owned module but
   may not invent another production module, public class, registry, runner,
-  schema or entrypoint without a bounded Astra plan update first.
+  schema or entrypoint without a bounded Sol plan update first.
 - After freezing that architecture map, planning must attempt to factor the
   program into independently closable vertical milestones with disjoint
   mutable surfaces. Record the milestone dependency DAG and current readiness;
@@ -242,7 +242,7 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 - After that design is accepted, Luna XHigh is the single mutable implementation
   owner and normal objective/code reviewer. Return material boundary, public or
   persisted contract, ownership, security/privacy, cost, destructive-behavior,
-  or scope changes to Astra Medium for a bounded plan update.
+  or scope changes to Sol Medium for a bounded plan update.
 - Model milestones with explicit objective, visual and architecture acceptance
   modes. Controller capsules require every declared review authority. Select
   required modes from concrete risk before dispatch; never skip a declared
@@ -250,13 +250,16 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   and no review trigger may close directly outside workflow-control by
   validation/self-review. Boundary, integration, prior-finding and visual risks
   retain independent acceptance; capsule changes preserve identity and evidence.
-- Visual-judgment implementation and visual-quality promotion review default to
-  Astra Low. Semantic orchestration and normal architecture conformance use Sol
-  Medium. Visual ambiguity, non-convergence, or material recovery complexity
-  escalates to Astra Medium; High is exceptional only. When review is justified,
-  use one focused Sol Medium architecture/security review first. Escalate to
-  Astra Medium only after Sol records the unresolved question, evidence already
-  checked and why it cannot close the risk. Domain labels, severity, finding
+- Visual-judgment implementation, visual-quality promotion review, semantic
+  orchestration, and normal architecture conformance default to Sol Medium.
+  Visual ambiguity, non-convergence, or material recovery complexity escalates
+  to Sol High. When review is justified, use one focused Sol Medium
+  architecture/security review first and Sol High only for the recorded
+  unresolved risk. Astra is never a default or first escalation: use it only
+  when the user explicitly requests it, or after Sol High itself has made two
+  attempts on the same failure without new causal evidence or observable
+  improvement. Record the unresolved question, evidence already checked, and
+  why Sol cannot close the risk. Domain labels, severity, finding
   count and previous reviewer identity alone do not justify escalation.
   Re-review targets the repaired findings; retaining a higher-cost reviewer is
   optional, not required for continuity. Preserve declared capsule authorities;
@@ -275,9 +278,10 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   oversized scope, implementation and environment. The controller owns rollover
   when work changes nature, a premise changes or compaction loses causal context;
   preserve the same workspace and candidate. Do not automatically upgrade models.
-- Ordinary recovery defaults to Astra Low. Astra Medium may finish bounded
-  recovery or replan while accepted outcome, contracts, security/privacy
-  boundary, cost, destructive behavior, and scope remain unchanged.
+- Ordinary recovery defaults to Sol High. Sol High may finish bounded recovery
+  or replan while accepted outcome, contracts, security/privacy boundary, cost,
+  destructive behavior, and scope remain unchanged. Astra remains a user-chosen
+  or post-Sol-loop exception, never an automatic fallback.
 - `CONTINUE_WITH_REPLAN` is internal and nonterminal. `NEEDS_DECISION` is only
   for genuinely underdetermined user intent or missing user authority.
   `EXTERNAL_BLOCKED` is only for missing credentials, permission, service,

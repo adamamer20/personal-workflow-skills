@@ -116,7 +116,7 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
 - Tests express observable guarantees and forbidden transitions, not helper
   decomposition or field assignment. Repository standards own detailed mechanics.
 
-- For a new substantial or architecturally uncertain program, start with a Astra
+- For a new substantial or architecturally uncertain program, start with a Sol
   Medium architecture thread and use `$plan-work`. Update the single project-owned
   canonical plan under `docs/reviews/` by default, or at the path defined by
   repository instructions. First resolve material unknowns through evidence or
@@ -142,31 +142,33 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
 - Substantial milestones use Luna XHigh with `$execute-milestone`; bounded or
   mechanical work follows the same objective route unless the controller
   explicitly escalates.
-- After Astra Medium freezes the architecture, Luna XHigh becomes the single
+- After Sol Medium freezes the architecture, Luna XHigh becomes the single
   mutable implementation owner. Luna resolves mechanical details but returns
   material boundary, contract, ownership, security/privacy, cost, destructive-
-  behavior, or scope changes to Astra Medium for a bounded plan update.
+  behavior, or scope changes to Sol Medium for a bounded plan update.
 - Every milestone declares one or more acceptance modes: `objective`, `visual`,
   and `architecture`. Acceptance modes name evidence and mandatory capsule
   authorities. Select the smallest sufficient modes from risk before dispatch;
   do not skip declared authorities or silently combine them afterwards.
   When selected, objective code review uses Luna XHigh. Visual-judgment implementation
-  defaults to Astra Low; independent visual-quality promotion review uses Astra Low.
+  and independent visual-quality promotion review default to Sol Medium.
   When selected, bounded architecture-conformance review uses Sol Medium. Visual ambiguity,
-  non-convergence, or material recovery complexity escalates to Astra Medium;
+  non-convergence, or material recovery complexity escalates to Sol High;
   a combined architecture/security review starts with Sol Medium and escalates
-  to Astra Medium only when Sol cannot close the question, with the unresolved
+  to Sol High only when the first Sol pass cannot close the question, with the unresolved
   risk, checked evidence and reason recorded. Domain labels, severity, finding
   count or prior reviewer identity alone do not justify escalation. Continuity
   does not require retaining a higher-cost reviewer for re-review; preserve
   declared authorities and record any authorized routing change before dispatch.
-  This is conditional escalation, not a mandatory sequence of reviews. High is
-  an explicit exceptional escalation only. Do not duplicate objective and architecture
+  Astra is not a configured default or first escalation. Use Astra only when
+  the user explicitly requests it, or after Sol High itself has made two attempts
+  on the same failure without new causal evidence or observable improvement.
+  This is conditional escalation, not a mandatory sequence of reviews. Do not duplicate objective and architecture
   reviews unnecessarily when selecting modes; every declared capsule authority
   remains required. Select distinct authorities when their evidence and judgments
   are materially independent.
   When objective and visual modes both apply, preserve both kinds of evidence;
-  passing code tests never implies that a rendered result is good. Ordinary recovery defaults to Astra Low. Luna
+  passing code tests never implies that a rendered result is good. Ordinary recovery defaults to Sol High. Luna
   is appropriate for visually adjacent work only after the target is frozen and
   the remaining execution is mechanical and objectively verifiable.
 - After two attempts at the same failure without new causal evidence or
@@ -176,8 +178,8 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   an architecture premise changes or compaction loses causal context; preserve
   the workspace and candidate. Numeric context limits are backstops.
 - When an owner stops converging, preserve the diff, evidence, findings,
-  accepted intent, and remaining gap for the selected recovery route. Astra
-  Medium may finish a bounded repair, change implementation strategy, or replan
+  accepted intent, and remaining gap for the selected recovery route. Sol High
+  may finish a bounded repair, change implementation strategy, or replan
   while outcome, contracts, security boundary, cost, destructive behavior, and
   scope remain within accepted intent.
   A change of authority or approach is not a terminal condition. Escalate to the
@@ -189,12 +191,12 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
 - These defaults are user-owned routing authorization for an explicitly selected
   legacy peer route: when a fresh peer is created, the handoff must pass the exact
   pair `model=gpt-5.6-luna, thinking=xhigh` for execution or independent
-  objective/code review, `model=gpt-5.6-sol, thinking=medium` for semantic
-  orchestration/decision or architecture conformance, `model=gpt-6-astra,
-  thinking=medium` for planning and explicit visual/recovery escalation, with
-  `model=gpt-6-astra, thinking=low` for visual implementation and ordinary recovery, and
-  `model=gpt-6-astra, thinking=low` for visual-quality review. The pair
-  `model=gpt-6-astra, thinking=high` is an explicit exceptional escalation only.
+  objective/code review, `model=gpt-5.6-sol, thinking=medium` for planning,
+  semantic orchestration/decision, visual work/review, or architecture
+  conformance, and `model=gpt-5.6-sol, thinking=high` for escalation and
+  recovery. Astra has no default pair in this policy; an exact Astra pair must
+  come from the explicit user request or a controller decision after the
+  documented Sol High loop threshold.
   Escalations are explicit controller decisions; no automatic escalation engine
   is introduced. The most specific applicable user instruction wins. Every Luna task uses `speed=fast` by
   default, including implementation and review, unless a more specific user
