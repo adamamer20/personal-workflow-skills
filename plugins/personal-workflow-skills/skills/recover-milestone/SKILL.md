@@ -51,6 +51,11 @@ Inspect:
 - failing commands, artifacts, services, and environment state;
 - context pressure or repeated tool patterns.
 
+Treat the assigned task/worktree binding as workspace authority. A missing saved
+Codex project only limits fresh `create_thread` addressability; it does not make
+an existing task-bound checkout or its dirty state unsupported. Keep the
+integration checkout, mutable task checkout, and saved project identity distinct.
+
 Do not restart from the original prompt. Do not discard working code or repeat
 already proven work.
 
@@ -61,8 +66,11 @@ evidence or improvement in the same observable check. Also reassess when work
 changes nature (implementation to redesign, oracle repair or hardening), a
 material architecture premise changes, or compaction loses the active causal
 context. The controller owns any fresh context, routing and resume; preserve
-the same workspace and candidate. Token/call thresholds are backstops, not the
-primary signal. Do not automatically select a stronger model.
+the same workspace and candidate. Token/call thresholds and an HTTP 503 are
+evidence, not required gates or the primary signal. In App-native mode, a usable
+interrupted task resumes in place; an inactive task whose context is itself
+degraded may roll over only through a controller-owned same-directory fork with
+explicit single-owner transfer. Do not automatically select a stronger model.
 
 Before blaming execution capability, distinguish a wrong outcome/oracle, an
 oversized milestone containing several deliverables, a wrong implementation,

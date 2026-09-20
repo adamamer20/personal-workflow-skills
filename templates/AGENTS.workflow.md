@@ -134,10 +134,16 @@
   baseline safely. Reuse the workspace across sequential work, rollover and
   repair. New workspaces serve concurrent ownership, dirty-state protection
   or explicitly isolated experiments.
+- Record `repository_root` as the integration checkout and `workspace_path` as
+  the exact mutable task/lane checkout. A saved Codex project is only fresh-START
+  addressing metadata and never overrides retained workspace ownership.
 - Parallel lanes are physically sibling Git worktrees below
   <repo-parent>/<repo-name>.worktrees/<program-slug>-<lane-slug>, branch
   agent/<program-slug>-<lane-slug>, from the exact base/predecessor. Use semantic
   names, not model/thread IDs. Workers never modify or integrate the trunk.
+- A pre-existing task-bound checkout under `$CODEX_HOME/worktrees/` remains an
+  `existing_worktree` when exact Git identity and single ownership are verified;
+  it need not follow the controller-created sibling naming convention.
 - Mutable completion requires an owned coherent commit after staged inspection,
   git diff --cached --check and gates; only read-only or explicit no-commit work
   is exempt. Bind review to exact commit tips/ranges; repairs add successor commits,

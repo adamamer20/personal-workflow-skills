@@ -32,6 +32,10 @@ the controller/integration owner may integrate the promoted commit, update DAG
 readiness and derive successors from the new trunk tip. This cognitive skill
 does not run Git operations itself.
 
+`repository_root` (the integration checkout) differs from `workspace_path` (the
+exact mutable execution checkout). A task-bound `$CODEX_HOME/worktrees/`
+checkout remains `existing_worktree`; saved-project absence does not block SDK.
+
 ## SDK-headless mode
 
 ```text

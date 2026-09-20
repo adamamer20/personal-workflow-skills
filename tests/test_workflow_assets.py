@@ -360,6 +360,25 @@ def test_template_and_config_assets_resolve() -> None:
     assert set(partitions["partitions"]) == set(PARTITION_NAMES)
 
 
+def test_task_bound_worktree_rollover_keeps_launch_addressing_separate_from_ownership() -> None:
+    handoff = (SKILLS_ROOT / "codex-thread-handoff" / "SKILL.md").read_text(encoding="utf-8")
+    global_template = (ROOT / "templates" / "AGENTS.md").read_text(encoding="utf-8")
+    workflow_template = (ROOT / "templates" / "AGENTS.workflow.md").read_text(encoding="utf-8")
+    normalized_handoff = " ".join(handoff.split())
+    normalized_global = " ".join(global_template.split())
+    normalized_workflow = " ".join(workflow_template.split())
+
+    assert "Saved-project absence is a `create_thread` limitation" in normalized_handoff
+    assert "`workspace_ownership: retained`" in normalized_handoff
+    assert "`fork_thread` exactly once" in normalized_handoff
+    assert "`environment.type=same-directory`" in normalized_handoff
+    assert "A latest-turn 503 is neither necessary nor sufficient" in normalized_handoff
+    assert "never runs in parallel with an active writer" in normalized_handoff
+    assert "task-bound Codex-managed checkout under `$CODEX_HOME/worktrees/`" in normalized_global
+    assert "A saved project only addresses a fresh native START" in normalized_global
+    assert "saved Codex project is only fresh-START addressing metadata" in normalized_workflow
+
+
 def test_default_routes_preserve_role_and_effort_boundaries() -> None:
     from codex_flow.config import load_workflow_config
     from codex_flow.harness import WorkflowHarness

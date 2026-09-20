@@ -152,16 +152,26 @@ models, reasoning effort, transports, permissions, or acceptance gates.
 - A fresh Codex thread or model context does not imply a fresh Git worktree. A
   worktree is an isolated mutable workspace owned by a program or execution
   lane, not by Luna, Astra, a reviewer, or a thread id.
+- Keep three identities separate: `repository_root` is the long-lived
+  integration checkout, `workspace_path` is the exact mutable checkout owned by
+  the current task/lane, and a saved Codex project is only an address for a
+  fresh native START. Project registration never determines which checkout owns
+  retained dirty state.
 - Reuse the same execution workspace across sequential milestones, context
   rollover, repair, recovery, model changes, and read-only review while mutable
   ownership remains singular. Allocate another worktree only for concurrent
   mutable ownership, protection of pre-existing user changes, or an explicitly
   isolated risky/alternative experiment.
-- Managed worktrees for repository `<parent>/<repo>` live only below sibling
+- Controller-created managed worktrees for repository `<parent>/<repo>` live only below sibling
   root `<parent>/<repo>.worktrees/`. Name each workspace with a stable semantic
   program slug, or `<program-slug>-<lane-slug>` for a parallel lane; never use a
   task id, client id, model name, or milestone number as the primary identity.
   Use the corresponding `agent/<program-or-lane-slug>` branch by default.
+- An already assigned Codex-managed worktree under `$CODEX_HOME/worktrees/` is
+  an `existing_worktree`, not a controller-created `managed_worktree`. Preserve
+  it when its physical Git toplevel, common Git directory, branch/HEAD, and
+  single mutable owner match the recorded capsule. Its disposable App lifecycle
+  does not make its dirty state disposable.
 - A parallel mutable lane is semantically a child of the program but uses a
   physical sibling Git worktree at
   `<repo-parent>/<repo-name>.worktrees/<program-slug>-<lane-slug>`. The
@@ -173,9 +183,12 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   `managed_worktree` before task creation and records the exact repository,
   path, branch, base SHA, and lane when applicable. Handoff transports launch
   threads; they do not invent Git topology or silently create another worktree.
-- When the native task API cannot address the selected existing workspace,
-  fail the handoff closed and preserve the workspace capsule. Never substitute
-  a runtime-generated worktree merely because a fresh thread was requested.
+- For a fresh native START, inability to address the selected workspace through
+  a saved project is a launch limitation only; fail that START closed and
+  preserve the workspace capsule. It is not evidence that an already-running
+  controller does not own its task-bound checkout. Recovery or context rollover
+  of that controller uses its existing task/worktree binding, never a substitute
+  checkout.
 - Before `COMPLETION`, every mutable milestone must create at least one coherent
   local commit containing only its owned surfaces after inspecting the staged
   diff and passing `git diff --cached --check` plus its outcome gates. Read-only
@@ -278,6 +291,13 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   oversized scope, implementation and environment. The controller owns rollover
   when work changes nature, a premise changes or compaction loses causal context;
   preserve the same workspace and candidate. Do not automatically upgrade models.
+- Context rollover is authorized by demonstrated context degradation, lost
+  causal state, changed work, or an explicit user request; an HTTP 503 on the
+  latest turn is not required. In App-native mode, first resume the same task
+  when an interrupted context remains usable. If the source task is inactive
+  and its context is itself unfit, fork it same-directory, seed the successor
+  once, and transfer the single mutable ownership without consulting
+  `list_projects`. Never fork an active writer or create a second checkout.
 - Ordinary recovery defaults to Sol High. Sol High may finish bounded recovery
   or replan while accepted outcome, contracts, security/privacy boundary, cost,
   destructive behavior, and scope remain unchanged. Astra remains a user-chosen

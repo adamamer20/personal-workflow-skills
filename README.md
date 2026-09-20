@@ -42,6 +42,11 @@ The capsule selects `current_checkout`, `existing_worktree`, or
 `managed_worktree`. Managed paths are always semantic siblings at
 `<repo>.worktrees/<lane>` with branch `agent/<lane>`; the same program/lane
 lease is reused across sequential milestones and fresh-process recovery.
+This naming rule applies to controller-created managed worktrees. A
+Codex-managed checkout already bound to a task may be represented as
+`existing_worktree` at its exact `$CODEX_HOME/worktrees/...` path. The capsule
+keeps its integration `repository_root` distinct from its mutable
+`workspace_path`; saved-project registration is only native START addressing.
 SQLite owns capsule digests, workspace leases, dispatch/thread/turn identity,
 ordered SDK lifecycle events, immutable native compatibility identity,
 monotonic effective permission authority, validation, and terminal results.
@@ -130,6 +135,11 @@ Managed worktrees for `<parent>/<repo>` live at
 numbers are not workspace identities. `plan-work` chooses the topology;
 `codex-thread-handoff` only launches into the exact selected workspace and fails
 closed when the native API cannot address it.
+
+An already-running task's Codex-managed worktree remains authoritative for its
+retained dirty state even when that path is not a saved project. Fresh
+`create_thread` addressability, current-task workspace ownership, and the later
+integration checkout are separate facts.
 
 Keep a lightweight current plan and a separate history document. The current
 plan selects outcome, risks, readiness, ownership and next gate. History retains
@@ -313,9 +323,11 @@ The skills cannot change the model of a task that is already running.
 
 The handoff capsule also carries `current_checkout`, `existing_worktree`, or
 `managed_worktree` plus the exact repository/path and any branch/base/lane
-identity. Native project lookup must resolve that exact path. The handoff never
-defaults every Git task to a new worktree and never substitutes a runtime-
-generated directory when the selected existing workspace is unavailable.
+identity. Native project lookup must resolve that exact path only for a fresh
+START. It is not consulted to decide whether an existing task owns its bound
+worktree. The handoff never defaults every Git task to a new worktree and never
+substitutes another directory when the selected existing workspace is
+unavailable.
 
 Execution capsules carry the exact planning callback `threadId` and a `hostId`
 only when native task tools returned it; environment ids are never substituted
@@ -337,6 +349,13 @@ a replacement task requires separate user authorization after the old owner is
 proven unavailable or terminal. This handles recoverable client/server and
 interruption cases without creating duplicate owners; it cannot guarantee an
 automatic callback when the runtime dies before the task can send one.
+
+When the task is inactive and the context itself is degraded, one explicit
+same-directory rollover may fork the task and seed the child with the frozen
+workspace/capsule facts. The source relinquishes mutable ownership only after
+that seed is delivered. A latest-turn 503 is neither necessary nor sufficient;
+active work is never forked and project registration is irrelevant to this
+same-directory continuation.
 
 ## Native handoff lifecycle hooks
 

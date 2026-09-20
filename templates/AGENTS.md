@@ -236,18 +236,31 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   review while mutable ownership remains singular. Create another worktree only
   for concurrent mutable ownership, protection of pre-existing user changes, or
   an explicitly isolated experiment.
+- Keep the long-lived integration checkout (`repository_root`), exact mutable
+  task/lane checkout (`workspace_path`), and saved Codex project identity
+  separate. A saved project only addresses a fresh native START; it is not
+  workspace ownership authority.
 - The program worktree is the sole local integration trunk and stays active
   until the whole plan closes. Before parallel mutable fan-out, its integration
   owner creates one coherent verified local commit containing only authorized
   surfaces and records its SHA as the frozen DAG base. If unrelated dirty bytes
   cannot be separated safely, fan-out waits for a plan-owned separation.
-- Managed worktrees for `<parent>/<repo>` live under sibling root
+- Controller-created managed worktrees for `<parent>/<repo>` live under sibling root
   `<parent>/<repo>.worktrees/` and use a semantic `<program-slug>` or
   `<program-slug>-<lane-slug>` directory with matching `agent/<slug>` branch.
   Never name them from a thread/client id or model. The plan chooses
   `current_checkout`, `existing_worktree`, or `managed_worktree`; handoff does
   not invent topology or replace an unavailable exact workspace with a
   runtime-generated worktree.
+- A task-bound Codex-managed checkout under `$CODEX_HOME/worktrees/` is a valid
+  `existing_worktree` when its physical Git identity, branch/HEAD, capsule, and
+  single mutable owner are verified. Preserve its retained dirty state; the
+  sibling-root naming rule applies only to worktrees created by the controller.
+- Project lookup governs fresh `create_thread` addressability only. Recovery and
+  rollover preserve the current task/worktree binding. Resume a usable
+  interrupted task; when the source task is inactive but its context is unfit,
+  fork same-directory once and transfer mutable ownership. Do not require a 503
+  on the latest turn, fork an active writer, or create a replacement checkout.
 - Parallel lane worktrees are semantic children but physical siblings at
   `<parent>/<repo>.worktrees/<program-slug>-<lane-slug>`, created from the
   frozen integration SHA or exact integrated predecessor with branch

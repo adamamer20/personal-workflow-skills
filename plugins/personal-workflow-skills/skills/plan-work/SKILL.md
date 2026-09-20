@@ -68,17 +68,17 @@ boundaries and nested swarm orchestration. Each milestone is single-owner;
 parallelize only ready milestones with disjoint work. Read-only scouts and
 independent acceptance evidence may overlap under the single controller.
 
-The controller owns the sole local integration trunk and workspace lifecycle.
-Before fan-out, record a verified owned commit as fan_out_base; separate unrelated
-dirty baseline bytes safely. Record each physical sibling worktree, semantic
-branch, exact base, owner and review commit/range; reuse it for sequential work.
-Workers never integrate the trunk. Mutable completion needs an owned local commit,
-staged inspection and git diff --cached --check; explicit no-commit/read-only
-work is exempt. Reviews bind commits; repairs add a successor commit. Integration
-requires blocking P0/P1=0, a merge commit for fan-out or recorded alternative,
-ancestry/extraneous-commit verification, conflict validation and new integrated tip.
-Retain recovery evidence. No push, rebase, history rewrite, discard, remote mutation
-or cleanup is authorized. Detailed topology/commands belong to controller policy.
+The controller owns the sole local integration trunk. Before fan-out, record
+`fan_out_base` and separate unrelated dirty baseline bytes. Distinguish
+integration, mutable checkout, and launch address: a saved Codex project
+is only a fresh native START address. Record every controller-created physical
+sibling worktree and any task-bound checkout under `$CODEX_HOME/worktrees/` may
+be selected as `existing_worktree`; retain path/Git identity, branch/base, owner,
+integration target and review commit/range. Mutable work
+needs an owned commit and `git diff --cached --check`; reviews bind commits and
+repairs add a successor commit. Integration needs P0/P1=0, merge commit or reason,
+ancestry/extraneous-commit verification and a new integrated tip. No push, rebase,
+history rewrite, discard, remote mutation or cleanup.
 
 ## Acceptance, evidence and non-convergence
 
@@ -106,7 +106,8 @@ After two attempts at the same failure without new causal evidence or observable
 improvement, diagnose oracle/outcome, scope, implementation or environment before
 another attempt. The controller owns rollover when work changes nature, a premise
 changes or compaction loses causal context. Preserve candidate/workspace;
-numeric context limits are backstops, not targets or automatic model escalation.
+numeric limits and HTTP 503 are evidence, not gates. App-native rollover records
+the source task and preserves single-owner same-directory continuation.
 
 ## Outcome and evidence priority
 

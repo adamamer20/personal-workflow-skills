@@ -13,6 +13,7 @@ working on that milestone; do not reload all history into every task.
 
 | Work | Current state / dependency | Next gate |
 | --- | --- | --- |
+| Task-bound worktree rollover | Instruction repair delivered: Codex-managed task workspace, saved-project address, and integration checkout are distinct; single-owner same-directory rollover is explicit; 63 focused tests and the full `make check` gate (1266 tests) are green | Independent Sol Medium contract review before installation |
 | Sol-first routing | Source/config/tests delivered in local candidate; 62 focused tests and validators green; full gate reached 1263/1265 before the retained-capsule repair, with only the native-profile environment probe still unresolved | Independent Sol Medium policy review and a clean-environment full gate before installation; preserve unrelated dirty recovery/TUI surfaces |
 | refresh-start-intent | Existing uncommitted recovery candidate, single original owner; acceptance unverified here | Required checks, successor commit, one focused Sol Medium review of ROTATION-START-REENTRY-DOUBLE-START |
 | evidence-led-delivery-instructions | Accepted and committed as aad46cd | Closed; see history installation record |
@@ -35,7 +36,8 @@ branch `agent/python-sdk-controller`; inspected HEAD
 ledger/service and four recovery test files, plus conversational-tui artifacts.
 The planner owns this direct user-requested instruction maintenance: plan/history,
 README, root and template AGENTS, plan-work/execute-milestone/recover-milestone/
-review-work skills, historical fixture references in tests/test_plan_compilation.py,
+review-work/codex-thread-handoff/workflow-control skills, workflow-asset tests,
+historical fixture references in tests/test_plan_compilation.py,
 and the matching version constants in plugin/marketplace manifests and installer.
 The bounded 2026-09-09 clarification also owns the matching validator wording;
 Luna validates and installs only the instruction plugin, without runtime refresh.
