@@ -11802,6 +11802,48 @@ class Ledger:
             raise RecordNotFound(f"program does not exist: {identity}")
         return self._program_status_from_row(row)
 
+    @staticmethod
+    def _declared_program_review_roles(capsule: ExecutionCapsule) -> tuple[str, ...]:
+        role_by_mode = {
+            AcceptanceMode.OBJECTIVE: "code-reviewer",
+            AcceptanceMode.VISUAL: "visual-reviewer",
+            AcceptanceMode.ARCHITECTURE: "architecture-reviewer",
+        }
+        return tuple(sorted(role_by_mode[mode] for mode in capsule.acceptance_modes))
+
+    def _eligible_program_review_roles(
+        self,
+        program_id: ProgramId,
+        milestone_id: MilestoneId,
+        capsule: ExecutionCapsule,
+        subject: ReviewSubject | None,
+    ) -> tuple[str, ...]:
+        """Return the exact review phase eligible for one current subject."""
+
+        declared = self._declared_program_review_roles(capsule)
+        non_architecture = tuple(role for role in declared if role != "architecture-reviewer")
+        initial = non_architecture or declared
+        if subject is None:
+            return initial
+        matching = [
+            fact
+            for fact in self.review_lifecycle(program_id, milestone_id)
+            if fact.kind == "review_completed" and self._fact_subject_wire(fact.data) == subject.wire_value
+        ]
+        if not matching:
+            return initial
+        by_role = {str(fact.data.get("reviewer_role")): fact for fact in matching}
+        if not all(
+            role in by_role
+            and by_role[role].data.get("accepted") is True
+            and by_role[role].data.get("promotion_blocking") is not True
+            for role in initial
+        ):
+            return ()
+        if "architecture-reviewer" in declared and "architecture-reviewer" not in by_role:
+            return ("architecture-reviewer",)
+        return ()
+
     def program_controller_context(
         self,
         program_id: ProgramId | str,
@@ -11826,11 +11868,6 @@ class Ledger:
             status = self._program_status_from_row(row)
             status_by_id = {node.milestone_id: node for node in status.nodes}
             ready = set(status.ready_milestones)
-            role_by_mode = {
-                AcceptanceMode.OBJECTIVE: "code-reviewer",
-                AcceptanceMode.VISUAL: "visual-reviewer",
-                AcceptanceMode.ARCHITECTURE: "architecture-reviewer",
-            }
             nodes = tuple(
                 ProgramControllerNodeContext(
                     node.milestone_id,
@@ -11838,7 +11875,12 @@ class Ledger:
                     node.dependencies,
                     node.mutable_surfaces,
                     node.capsule.acceptance_modes,
-                    tuple(sorted(role_by_mode[mode] for mode in node.capsule.acceptance_modes)),
+                    self._eligible_program_review_roles(
+                        identity,
+                        node.milestone_id,
+                        node.capsule,
+                        self._program_subject(identity, node.milestone_id),
+                    ),
                     status_by_id[node.milestone_id].candidate_sha,
                     status_by_id[node.milestone_id].review_ids,
                     status_by_id[node.milestone_id].finding_ids,
@@ -13695,15 +13737,51 @@ class Ledger:
                 data=data,
             )
             review_facts = self.review_lifecycle(program, milestone)
-            role_by_mode = {
-                AcceptanceMode.OBJECTIVE: "code-reviewer",
-                AcceptanceMode.VISUAL: "visual-reviewer",
-                AcceptanceMode.ARCHITECTURE: "architecture-reviewer",
-            }
-            expected_roles = {role_by_mode[mode] for mode in node.capsule.acceptance_modes}
+            expected_roles = set(self._declared_program_review_roles(node.capsule))
+            initial_roles = {role for role in expected_roles if role != "architecture-reviewer"} or expected_roles
             matching = [item for item in review_facts if self._fact_subject_wire(item.data) == subject.wire_value]
             completed = {str(item.data.get("reviewer_role")) for item in matching if item.kind == "review_completed"}
-            if expected_roles == completed and all(
+            initial_reviews = [
+                item
+                for item in matching
+                if item.kind == "review_completed" and item.data.get("reviewer_role") in initial_roles
+            ]
+            initial_blocking = any(item.data.get("promotion_blocking") is True for item in initial_reviews)
+            if initial_roles.issubset(completed) and initial_blocking:
+                payload: JsonObject = {
+                    "milestone_id": str(milestone),
+                    "promotion_blocking": True,
+                    "review_ids": sorted(str(item.data["review_id"]) for item in initial_reviews),
+                }
+                payload[
+                    "evidence_sha256" if subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE else "candidate_sha"
+                ] = subject.digest
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                    event_key=f"milestone/{milestone}/reviews/{subject.wire_value}/initial-blocked",
+                    payload=payload,
+                )
+            elif (
+                initial_roles.issubset(completed)
+                and "architecture-reviewer" in expected_roles
+                and "architecture-reviewer" not in completed
+            ):
+                payload = {
+                    "milestone_id": str(milestone),
+                    "promotion_blocking": False,
+                    "review_roles": ["architecture-reviewer"],
+                }
+                payload[
+                    "evidence_sha256" if subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE else "candidate_sha"
+                ] = subject.digest
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                    event_key=f"milestone/{milestone}/reviews/{subject.wire_value}/architecture-ready",
+                    payload=payload,
+                )
+            elif expected_roles == completed and all(
                 item.data.get("accepted") is True for item in matching if item.kind == "review_completed"
             ):
                 review_ids = sorted(str(item.data["review_id"]) for item in matching if item.kind == "review_completed")
@@ -14213,11 +14291,6 @@ class Ledger:
         ):
             raise StaleWriter("approval_capability_unavailable")
         effects: list[str] = []
-        role_by_mode = {
-            "objective": "code-reviewer",
-            "visual": "visual-reviewer",
-            "architecture": "architecture-reviewer",
-        }
         for action in bundle.actions:
             if action.kind is ProgramControllerActionKind.START_READY_MILESTONES:
                 selected = tuple(action.milestone_ids)
@@ -14271,13 +14344,14 @@ class Ledger:
                     is not None
                 ):
                     raise StaleWriter("program review action has a blocking program prerequisite")
-                capsule = nodes[action.milestone_id].get("capsule")
-                modes = capsule.get("acceptance_modes", []) if isinstance(capsule, dict) else []
-                expected_roles = tuple(
-                    sorted(role_by_mode[mode] for mode in modes if isinstance(mode, str) and mode in role_by_mode)
+                expected_roles = self._eligible_program_review_roles(
+                    bundle.program_id,
+                    MilestoneId(action.milestone_id),
+                    node,
+                    subject,
                 )
                 if tuple(action.review_roles) != expected_roles:
-                    raise StaleWriter("program review action does not name every declared authority")
+                    raise StaleWriter("program review action does not name the eligible promotion phase")
                 for role in action.review_roles:
                     latest = (
                         self._db()

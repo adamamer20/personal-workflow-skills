@@ -3095,17 +3095,21 @@ class ReviewWorkflow:
     ) -> ReviewLifecycleResult:
         """Run the complete bounded objective/visual/architecture review route.
 
-        All mode reviewers are read-only and independent.  The first review
-        pass is complete before any repair is attempted; a rejection is then
-        diagnosed by the recovery authority and, for an unchanged boundary,
-        recorded as a bounded ``CONTINUE_WITH_REPLAN`` before the same owner
-        repairs in the leased workspace.
+        All mode reviewers are read-only and independent. Objective and visual
+        authorities converge the exact candidate before architecture is invoked
+        as a late promotion gate. A rejection is diagnosed by the recovery
+        authority and, for an unchanged boundary, recorded as a bounded
+        ``CONTINUE_WITH_REPLAN`` before the same owner repairs in the leased
+        workspace.
         """
 
         declared_modes = (
             capsule.acceptance_modes if capsule is not None else (acceptance_modes or (AcceptanceMode.OBJECTIVE,))
         )
         modes = tuple(mode if isinstance(mode, AcceptanceMode) else AcceptanceMode(mode) for mode in declared_modes)
+        non_architecture_modes = tuple(mode for mode in modes if mode is not AcceptanceMode.ARCHITECTURE)
+        initial_review_modes = non_architecture_modes or modes
+        architecture_is_late = AcceptanceMode.ARCHITECTURE in modes and bool(non_architecture_modes)
         config = self.config or load_workflow_config(self.repository_root / "workflow.toml")
         plan = config.derive_authorities(modes, available_models=available_models)
         callback_map: dict[AcceptanceMode, Callable[..., ReviewResult]] = {}
@@ -3304,7 +3308,7 @@ class ReviewWorkflow:
             data={"round": 1, "revision": revision, "acceptance_modes": [mode.value for mode in modes]},
         )
 
-        def invoke(mode: AcceptanceMode, token: str, fresh: bool) -> ReviewResult:
+        def invoke(mode: AcceptanceMode, token: str, fresh: bool, *, round_number: int) -> ReviewResult:
             callback = callback_map[mode]
             rendered = evidence[0] if evidence else None
             if mode is AcceptanceMode.OBJECTIVE:
@@ -3329,17 +3333,30 @@ class ReviewWorkflow:
                 raise ControllerError(f"stale {mode.value} reviewer result")
             if mode is AcceptanceMode.VISUAL and evidence[0].evidence_id not in result.evidence_ids:
                 raise ControllerError("visual review did not acknowledge fixed rendered evidence")
+            if round_number > 1:
+                prior = next((review for review in first_reviews if review.acceptance_mode is mode), None)
+                if prior is not None:
+                    if prior.findings and result.prior_review_id != prior.review_id:
+                        raise ControllerError("fresh review must reference the exact prior authority review")
+                    prior_ids = {item.finding_id for item in prior.findings}
+                    for item in result.findings:
+                        if item.finding_id in prior_ids and not item.survives_prior_repair:
+                            raise ControllerError("surviving finding must acknowledge the exact prior repair")
+                        if item.finding_id not in prior_ids and item.survives_prior_repair:
+                            raise ControllerError("new review scope cannot masquerade as a surviving finding")
             self.ledger.record_review_fact(
                 run_id,
                 milestone_id,
                 phase=LifecyclePhase.REVIEW,
                 kind="authority_review",
-                data={"mode": mode.value, "review": self._review_json(result), "round": 1},
+                data={"mode": mode.value, "review": self._review_json(result), "round": round_number},
             )
             return result
 
         try:
-            first_reviews = [invoke(mode, revision, True) for mode in modes]
+            first_reviews = [invoke(mode, revision, True, round_number=1) for mode in initial_review_modes]
+            if architecture_is_late and not any(review.promotion_blockers for review in first_reviews):
+                first_reviews.append(invoke(AcceptanceMode.ARCHITECTURE, revision, True, round_number=1))
         except AuthorityUnavailable as exc:
             self.ledger.record_review_transition(
                 run_id,
@@ -3630,46 +3647,9 @@ class ReviewWorkflow:
         )
         second_reviews: list[ReviewResult] = []
         try:
-            for mode in modes:
-                callback = callback_map[mode]
-                rendered = evidence[0] if evidence else None
-                if mode is AcceptanceMode.OBJECTIVE:
-                    second = callback(fresh_revision, True)
-                elif mode is AcceptanceMode.VISUAL:
-                    second = callback(fresh_revision, rendered, True)
-                else:
-                    try:
-                        parameter_count = len(inspect.signature(callback).parameters)
-                    except (TypeError, ValueError):
-                        parameter_count = 3
-                    second = (
-                        callback(fresh_revision, rendered, True)
-                        if parameter_count >= 3
-                        else callback(fresh_revision, True)
-                    )
-                if second.reviewer_role != plan.for_mode(mode).role or second.acceptance_mode is not mode:
-                    raise ControllerError(f"stale authority for fresh {mode.value} review")
-                if not second.fresh or not second.read_only or second.reviewed_revision != fresh_revision:
-                    raise ControllerError(f"stale fresh {mode.value} review")
-                if mode is AcceptanceMode.VISUAL and evidence[0].evidence_id not in second.evidence_ids:
-                    raise ControllerError("fresh visual review did not acknowledge fixed rendered evidence")
-                prior = next(review for review in first_reviews if review.acceptance_mode is mode)
-                if prior.findings and second.prior_review_id != prior.review_id:
-                    raise ControllerError("fresh review must reference the exact prior authority review")
-                prior_ids = {item.finding_id for item in prior.findings}
-                for item in second.findings:
-                    if item.finding_id in prior_ids and not item.survives_prior_repair:
-                        raise ControllerError("surviving finding must acknowledge the exact prior repair")
-                    if item.finding_id not in prior_ids and item.survives_prior_repair:
-                        raise ControllerError("new review scope cannot masquerade as a surviving finding")
-                second_reviews.append(second)
-                self.ledger.record_review_fact(
-                    run_id,
-                    milestone_id,
-                    phase=LifecyclePhase.REVIEW,
-                    kind="authority_review",
-                    data={"mode": mode.value, "review": self._review_json(second), "round": 2},
-                )
+            second_reviews = [invoke(mode, fresh_revision, True, round_number=2) for mode in initial_review_modes]
+            if architecture_is_late and not any(review.promotion_blockers for review in second_reviews):
+                second_reviews.append(invoke(AcceptanceMode.ARCHITECTURE, fresh_revision, True, round_number=2))
         except AuthorityUnavailable as exc:
             self.ledger.record_review_transition(
                 run_id,

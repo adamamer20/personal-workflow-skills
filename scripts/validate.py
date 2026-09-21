@@ -1599,6 +1599,51 @@ def validate_semantic_density_contract() -> None:
                 fail(f"{path}: missing semantic-density contract: {token}")
 
 
+def validate_implementation_economy_and_review_order() -> None:
+    """Keep the first-sufficient ladder and late architecture gate aligned."""
+
+    overabstraction = SKILLS_ROOT / "overabstraction-audit" / "SKILL.md"
+    required_by_path = {
+        ROOT / "AGENTS.md": (
+            "minimum semantic delta",
+            "standard library",
+            "native platform/runtime capability",
+            "queue architecture review only after every declared non-architecture authority is green",
+        ),
+        GLOBAL_AGENTS_PATH: (
+            "minimum semantic delta",
+            "first sufficient rung",
+            "dispatch architecture review only after all declared non-architecture authorities are green",
+        ),
+        WORKFLOW_PATHS["plan"]: (
+            "declare `architecture` only when",
+            "local change inside a frozen boundary stays `objective`",
+            "architecture reviews that green fixed point",
+        ),
+        WORKFLOW_PATHS["execute"]: (
+            "trace before changing",
+            "stop at the first sufficient rung",
+            "planned artifact may be omitted",
+            "shared/root cause",
+        ),
+        WORKFLOW_PATHS["review"]: (
+            "late promotion gate",
+            "finish the standards lens with an economy pass",
+            "line-count reduction is never the finding",
+        ),
+        overabstraction: (
+            "reinvented-capability",
+            "dependency-overreach",
+            "first-sufficient ladder",
+        ),
+    }
+    for path, required in required_by_path.items():
+        normalized = " ".join(path.read_text(encoding="utf-8").lower().split())
+        for token in required:
+            if token not in normalized:
+                fail(f"{path}: missing implementation-economy/review-order contract: {token}")
+
+
 def validate_git_lane_integration_contract() -> None:
     """Enforce commit-addressed integration trunk and parallel lane policy."""
 
@@ -2479,6 +2524,7 @@ def main(partition: str | None = None) -> int:
     validate_global_agents_template()
     validate_milestone_graph_contract()
     validate_semantic_density_contract()
+    validate_implementation_economy_and_review_order()
     validate_git_lane_integration_contract()
     validate_workflow_assets()
     validate_outcome_evidence_priority_contract()

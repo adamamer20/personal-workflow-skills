@@ -20,11 +20,10 @@ that the oracle accepts valid alternatives and rejects wrong results where
 its assumptions matter. Provider-free success is not live proof; missing access
 blocks that proof, not unrelated work. Preserve permissions and safety gates.
 
-Freeze one deliverable. New ambitions go to successors; outcome-breaking defects
-stay in scope. Close ready cohorts independently when contracts permit. Refactor
-to remove a delivery bottleneck. Before an expensive guarantee, name outcome,
-threat, boundary, proof, cost and simpler alternative. Resolve inferred guarantees
-before implementation; explicit guarantees remain binding.
+Freeze one deliverable. Successors own new ambition; outcome-breaking defects
+stay. Close independent cohorts when contracts permit. Before an expensive
+guarantee, name outcome, threat, boundary, proof, cost and simpler alternative;
+resolve inferred guarantees and preserve explicit ones.
 
 ## Keep exactly one active plan
 
@@ -36,8 +35,7 @@ explicitly link any retained active design. Read only needed history.
 State independently closable milestones, owner, protected surfaces, acceptance
 modes (`objective`, `visual`, `architecture`), mandatory gates, hard-cap conflict
 policy and next decision-ready capsule. Detail only the ready milestone; later
-nodes keep outcome, prerequisites, owner and readiness. Future cutover blockers
-do not block independent current work.
+nodes keep outcome, prerequisites, owner and readiness.
 
 ## Freeze the implementation architecture map
 
@@ -68,17 +66,15 @@ boundaries and nested swarm orchestration. Each milestone is single-owner;
 parallelize only ready milestones with disjoint work. Read-only scouts and
 independent acceptance evidence may overlap under the single controller.
 
-The controller owns the sole local integration trunk. Before fan-out, record
-`fan_out_base` and separate unrelated dirty baseline bytes. Distinguish
-integration, mutable checkout, and launch address: a saved Codex project
-is only a fresh native START address. Record every controller-created physical
-sibling worktree and any task-bound checkout under `$CODEX_HOME/worktrees/` may
-be selected as `existing_worktree`; retain path/Git identity, branch/base, owner,
-integration target and review commit/range. Mutable work
-needs an owned commit and `git diff --cached --check`; reviews bind commits and
-repairs add a successor commit. Integration needs P0/P1=0, merge commit or reason,
-ancestry/extraneous-commit verification and a new integrated tip. No push, rebase,
-history rewrite, discard, remote mutation or cleanup.
+The controller owns the sole local integration trunk. Before fan-out record `fan_out_base`
+and separate unrelated dirty baseline bytes. Distinguish integration and mutable
+checkouts; a saved Codex project is only a fresh native START address. Each lane is a
+physical sibling worktree; `$CODEX_HOME/worktrees/` may be selected as
+`existing_worktree`. Retain Git identity, branch/base, owner, target and review
+commit/range. Mutable work needs an owned commit and `git diff --cached --check`;
+repairs add successor commits. Integration needs P0/P1=0,
+ancestry/extraneous-commit verification, a merge commit or reason and a new integrated tip. No push,
+rebase, history rewrite, discard, remote mutation or cleanup.
 
 ## Acceptance, evidence and non-convergence
 
@@ -92,22 +88,29 @@ path outside workflow-control. Review changed blocking findings, not unrelated
 surfaces. Visual acceptance requires independent rendered judgment. Capsule
 changes go through the controller, preserving mixed-mode evidence and identity.
 
-Use focused checks during work, affected gates at closure, appropriate full gates
-before integration; shared contracts/collection/packaging need the full repository
-gate. Reuse unchanged evidence. Verify mergeability and the actual integrated
-candidate. Delivery, review, merge and live proof differ. Separate severity from
-promotion_blocking; deferrals name owner/defer_to. Close with none blocking.
+Declare `architecture` only when the milestone materially changes or tests a
+boundary, public/persisted contract, ownership, storage/concurrency model,
+security/privacy boundary, execution topology, new structural module/service, or
+dependency direction. A local change inside a frozen boundary stays `objective`.
+When architecture is declared, objective and visual authorities converge the
+exact candidate first; architecture reviews that green fixed point as the final
+promotion gate. A repaired successor regains earlier approvals before
+architecture re-review.
 
-Report outcome, candidate, key checks, changed contracts, blocker and remainder;
-link domain proof. Record scope start, first vertical, mergeability, merge,
-known cost, waits and reopenings in history. No metrics platform or invented data.
+Use focused checks during work and affected/full gates at closure; shared
+contracts, collection or packaging need the repository gate. Reuse unchanged
+evidence; verify mergeability and the integrated candidate. Delivery, review,
+merge and live proof differ. Separate severity from `promotion_blocking`;
+deferrals name owner/defer_to and closure has none blocking.
 
-After two attempts at the same failure without new causal evidence or observable
-improvement, diagnose oracle/outcome, scope, implementation or environment before
-another attempt. The controller owns rollover when work changes nature, a premise
-changes or compaction loses causal context. Preserve candidate/workspace;
-numeric limits and HTTP 503 are evidence, not gates. App-native rollover records
-the source task and preserves single-owner same-directory continuation.
+Report outcome, candidate, checks, contract changes, blocker and remainder; link
+domain proof. Record scope start, first vertical, mergeability, merge, cost,
+waits and reopenings in history. No metrics platform or invented data.
+
+After two non-improving attempts without new causal evidence, diagnose outcome,
+scope, implementation or environment. Controller rollover preserves candidate
+and workspace when work/premises change or causal context is lost. Numeric limits
+and HTTP 503 are evidence, not gates; App-native rollover keeps one same-directory owner.
 
 ## Outcome and evidence priority
 
@@ -125,10 +128,8 @@ Use semantic names; historical identifiers need provenance and safe migration.
 
 ## Typed handoff and closure
 
-Write codex_flow.contracts.ModelFacingCapsule: intent, acceptance, surfaces,
-authorities, prompt, completion-biased recovery. JSON is controller projection,
-not a sidecar. Pass canonical plan path and exact milestone id to workflow-control.
-Planning does not implement. Skills never own dispatch, callbacks, routing,
-retry, successors, worktrees or ledger mutation. Controller reasoning handles
-material decisions, not supervision. Update readiness from the typed result;
-planning-only work stops at decision-ready.
+Write codex_flow.contracts.ModelFacingCapsule with intent, acceptance, surfaces,
+authorities, prompt and completion-biased recovery. JSON is controller projection,
+not a sidecar. Pass plan path and milestone id to workflow-control. Planning does
+not implement; skills never own lifecycle/transport. Update readiness from the
+typed result; planning-only work stops at decision-ready.

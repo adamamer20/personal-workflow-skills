@@ -16,18 +16,18 @@ State scope, non-goals, protected surfaces, acceptance modes, and promotion
 gates. Preserve unrelated changes and singular ownership of shared contracts
 and entrypoints.
 
-Implement the smallest coherent change within mutable surfaces and prove
-protected surfaces unchanged. Repair ordinary failures and self-review the
-diff. After two attempts at the same failure without new causal evidence or
-improvement in the same observable check, preserve the candidate and return a
-bounded diagnosis to the controller; do not make a third indistinguishable
-attempt. This trigger does not authorize an automatic retry or model change.
-Distinguish a wrong oracle/outcome, oversized milestone, implementation defect
-and environmental failure. New ambition goes to a successor; an outcome-breaking
-regression remains yours. Intermediate tests are chosen locally within the
-capsule; do not grow a benchmark or framework before the required vertical works. Acceptance is observable: rendered evidence for `visual`, boundary/safety
-evidence for `architecture`, deterministic evidence for `objective`; mixed
-capsules pass every mode.
+Trace before changing: locate the real production path, inspect existing
+implementations and callers, and identify the shared/root cause when a symptom
+repeats across callers. Do not distribute the same defensive patch across
+consumers when one owned boundary can fix the cause.
+
+Implement the smallest coherent change and prove protected surfaces unchanged.
+Repair ordinary failures and self-review. After two non-improving attempts
+without new causal evidence, preserve the candidate and diagnose outcome/oracle,
+scope, implementation or environment; no automatic retry/model change. Successors
+own new ambition; regressions stay. Do not build a benchmark/framework before the
+vertical works. Acceptance is rendered for `visual`, boundary/safety evidence for
+`architecture`, deterministic for `objective`; mixed capsules pass every mode.
 
 Use stable capability/domain names for every durable path or identifier; reject
 temporary milestone/task labels. Preserve numbered historical/protocol names
@@ -36,7 +36,17 @@ together.
 
 ## Preserve semantic density
 
-Implement the planned semantic delta. Vocabulary needs an invariant, policy,
+Implement the minimum semantic delta that satisfies the capsule guarantee. Stop
+at the first sufficient rung: remove work the outcome does not need; reuse an
+existing concept/helper/module/production path; use the standard library; use a
+native platform/runtime capability; use an already-owned dependency; implement
+locally with functions/direct composition; only then introduce a new abstraction,
+module, dependency or framework. A planned artifact may be omitted when an
+earlier rung satisfies the same guarantees; report the smaller delta. Never
+weaken correctness, security, integrity, accessibility or an explicit
+architecture guarantee.
+
+Vocabulary needs an invariant, policy,
 identity, validation, substitution or algorithm, not style or tests alone.
 Use functions/direct composition; classes need state/lifecycle/policy and a
 one-implementation protocol needs a real replaceable boundary.
@@ -63,38 +73,30 @@ Numeric targets are secondary unless the accepted plan marks them hard external 
 
 ## Proportional validation and findings
 
-Use discriminating checks during implementation. At closure run every affected
-semantic partition and named packaging/integration/promotion gate. Shared
-contracts, collection, or packaging require the full repository gate. Tests and
-metadata support, but do not replace, observable outcome evidence.
-
-Reuse green checks for unchanged code/environment; repeat only for changed
-dependencies, failures or unresolved risks. Complete explicit closure gates and
-report pending independent acceptance separately.
+Use discriminating checks, then affected partitions and named closure gates.
+Shared contracts, collection or packaging require the repository gate. Reuse
+unchanged green evidence; tests/metadata do not replace observable outcome proof.
+Report pending independent acceptance separately.
 
 Separate severity from promotion impact. P0 is presumptively blocking; P1
 blocks accepted guarantees, contracts, boundaries, production reachability, or
 integrity. Deferrals name owner and `defer_to`; close with none blocking.
 
-For a mutable milestone, `COMPLETION` also requires at least one coherent local
-commit on the assigned lane branch. Stage only owned surfaces, inspect the exact
-staged diff, run `git diff --cached --check`, verify the named outcome gates,
-and confirm no unrelated artifact entered the commit. Read-only work and an
-explicit no-commit capsule are the only exceptions. Report the exact commit tip
-or range; do not merge into the program integration trunk, amend a reviewed
-commit, push, rebase, rewrite history, discard changes or mutate a remote.
+Mutable `COMPLETION` needs an owned coherent local commit: stage only owned surfaces, inspect staged paths,
+run `git diff --cached --check` and gates, exclude unrelated artifacts. Read-only
+or explicit no-commit capsules are exempt. Report the exact commit tip or range;
+do not merge into the program integration trunk, amend a reviewed commit, push,
+rebase, rewrite, discard or mutate remotes.
 
 Skills own cognition only. They do not own dispatch, callbacks, routing,
 retries, successor scheduling, worktree creation, or ledger mutation.
 
 ## Controller boundary and result
 
-The parent alone invokes workflow-control/codex-flow and owns dispatch, reviews,
-repairs, successors and lifecycle. This task is a leaf: no subagents, peer tasks,
-review launches, controller calls or supervision. Implement, test, self-review
-and report pending acceptance. Use completion-biased recovery stays within accepted
-intent, contracts, safety, cost, destructive authority and scope; return material
-changes rather than weaken a gate.
+The parent owns workflow-control/codex-flow, dispatch, reviews, repairs and
+successors. This leaf launches no agents, reviews or controller calls. Implement,
+test and self-review; completion-biased recovery stays within accepted intent,
+contracts, safety, cost, destructive authority and scope.
 
 Return one raw codex_flow.contracts.ModelFacingResult for the SDK harness.
 JSON/JSONL is controller serialization. Keep outcome, exact candidate, key checks,

@@ -13,6 +13,7 @@ working on that milestone; do not reload all history into every task.
 
 | Work | Current state / dependency | Next gate |
 | --- | --- | --- |
+| Implementation economy and late architecture review | Candidate complete: first-sufficient solution ladder and late architecture acceptance are implemented; four skill validators, 328 focused tests and full `make check` with 1266 tests are green | Coherent local commit, focused independent Sol Medium contract review, then matching local plugin/tool installation and parity proof |
 | Task-bound worktree rollover | Instruction repair delivered: Codex-managed task workspace, saved-project address, and integration checkout are distinct; single-owner same-directory rollover is explicit; 63 focused tests and the full `make check` gate (1266 tests) are green | Independent Sol Medium contract review before installation |
 | Sol-first routing | Source/config/tests delivered in local candidate; 62 focused tests and validators green; full gate reached 1263/1265 before the retained-capsule repair, with only the native-profile environment probe still unresolved | Independent Sol Medium policy review and a clean-environment full gate before installation; preserve unrelated dirty recovery/TUI surfaces |
 | refresh-start-intent | Existing uncommitted recovery candidate, single original owner; acceptance unverified here | Required checks, successor commit, one focused Sol Medium review of ROTATION-START-REENTRY-DOUBLE-START |
@@ -32,21 +33,26 @@ Do not install the dirty recovery merely to deliver instruction changes.
 
 Workspace: `/home/adam/personal-workflow-skills.worktrees/python-sdk-controller`,
 branch `agent/python-sdk-controller`; inspected HEAD
-`b3478d1b0ced5017b685f974ff82daf92e20f88b`. Preserve the pre-existing dirty
-ledger/service and four recovery test files, plus conversational-tui artifacts.
-The planner owns this direct user-requested instruction maintenance: plan/history,
-README, root and template AGENTS, plan-work/execute-milestone/recover-milestone/
-review-work/codex-thread-handoff/workflow-control skills, workflow-asset tests,
+`8300bf0d8a4d042ff416522e64b72c17be22a043`. Preserve the unrelated
+conversational-tui artifacts.
+The planner owns this direct user-requested instruction and controller maintenance:
+plan/history, README, root and template AGENTS, plan-work/execute-milestone/
+recover-milestone/review-work/overabstraction-audit/codex-thread-handoff/
+workflow-control skills, controller/harness review sequencing and focused tests,
+workflow-asset tests,
 historical fixture references in tests/test_plan_compilation.py,
 and the matching version constants in plugin/marketplace manifests and installer.
 The bounded 2026-09-09 clarification also owns the matching validator wording;
-Luna validates and installs only the instruction plugin, without runtime refresh.
+The selected update validates and installs the matching instruction plugin and
+controller tool after one coherent source commit.
 The exact history relocation is exempted from the large-new-file pre-commit hook;
 all other paths retain the existing size gate. Targeted global AGENTS synchronization
 preserves unrelated local policy and follows independent consistency review.
-Only installer PLUGIN_VERSION changes; no installer behavior or runtime code does.
-No runtime, global configuration, authentication or downstream change belongs
-to the history split. Preserve source-block hashes and compiler behavior.
+Only installer PLUGIN_VERSION changes in installer behavior. The bounded runtime
+change is limited to review scheduling: non-architecture authorities converge
+first and architecture reviews the resulting exact candidate. No schema, global
+configuration, authentication or downstream change is authorized. Preserve
+source-block hashes and compiler behavior.
 
 This worktree remains the sole local integration trunk. There is no concurrent
 mutable fan-out or frozen DAG base for this update; no checkpoint SHA is

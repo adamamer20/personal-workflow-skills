@@ -40,16 +40,8 @@ def test_all_modes_require_distinct_authorities_and_fixed_evidence(tmp_path: Pat
         {"path": "target.txt"},
         "target has the repaired marker",
     )
-    first_architecture = ReviewFinding(
-        "F-architecture",
-        FindingCausalClass.ACCEPTANCE,
-        Severity.P1,
-        True,
-        "accept the revised strategy",
-        {"strategy": "initial"},
-        "architecture accepts the revised strategy",
-    )
     review_round = {"objective": 0, "visual": 0, "architecture": 0}
+    review_order: list[str] = []
 
     def objective() -> dict[str, object]:
         target.write_text("needs-repair\n", encoding="utf-8")
@@ -62,6 +54,7 @@ def test_all_modes_require_distinct_authorities_and_fixed_evidence(tmp_path: Pat
         return RenderedEvidence("render-1", token, "0" * 64, "render.svg", width=1, height=1)
 
     def objective_reviewer(token: str, fresh: bool) -> ReviewResult:
+        review_order.append("objective")
         review_round["objective"] += 1
         if review_round["objective"] == 1:
             return ReviewResult(
@@ -83,6 +76,7 @@ def test_all_modes_require_distinct_authorities_and_fixed_evidence(tmp_path: Pat
         )
 
     def visual_reviewer(token: str, fixed: RenderedEvidence, fresh: bool) -> ReviewResult:
+        review_order.append("visual")
         review_round["visual"] += 1
         return ReviewResult(
             f"visual-{review_round['visual']}",
@@ -95,23 +89,14 @@ def test_all_modes_require_distinct_authorities_and_fixed_evidence(tmp_path: Pat
         )
 
     def architecture_reviewer(token: str, fixed: RenderedEvidence, fresh: bool) -> ReviewResult:
+        review_order.append("architecture")
         review_round["architecture"] += 1
-        if review_round["architecture"] == 1:
-            return ReviewResult(
-                "architecture-1",
-                RoleId("architecture-reviewer"),
-                False,
-                (first_architecture,),
-                token,
-                acceptance_mode=AcceptanceMode.ARCHITECTURE,
-            )
         return ReviewResult(
-            "architecture-2",
+            "architecture-1",
             RoleId("architecture-reviewer"),
             True,
             (),
             token,
-            prior_review_id="architecture-1",
             acceptance_mode=AcceptanceMode.ARCHITECTURE,
         )
 
@@ -146,7 +131,8 @@ def test_all_modes_require_distinct_authorities_and_fixed_evidence(tmp_path: Pat
     assert result.authority_plan is not None
     assert len(result.authority_plan.assignments) == 6
     assert result.rendered_evidence[0].evidence_id == "render-1"
-    assert "architecture_replan_accepted" in [item.kind for item in result.lifecycle]
+    assert review_order == ["objective", "visual", "objective", "visual", "architecture"]
+    assert review_round == {"objective": 2, "visual": 2, "architecture": 1}
     assert ledger.current_state("multi", "m").value == "ACCEPTED"
 
 

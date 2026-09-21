@@ -105,6 +105,11 @@
   all declared capsule authorities remain required. Parallel distinct authorities
   require materially independent evidence and judgments, with both explicitly
   required by the plan.
+- Run declared authorities in promotion order. Objective and visual reviews
+  converge the exact candidate first; queue architecture review only after all
+  declared non-architecture authorities are green. Any repair creates a new
+  candidate that must regain those approvals before architecture review or
+  re-review. Do not spend architecture authority on an immature candidate.
 - Findings record severity separately from promotion impact. P0 is normally
   blocking; P1 blocks when it invalidates the outcome, a protected boundary,
   or safe successor work. A non-blocking finding records its owner and

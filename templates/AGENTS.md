@@ -103,6 +103,14 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
 
 ### Semantic density
 
+- Implement the minimum semantic delta that satisfies the observable guarantee.
+  Trace the production path, then stop at the first sufficient rung: delete
+  unneeded work; reuse an existing concept or path; use the standard library;
+  use a native platform/runtime capability; use an already-owned dependency;
+  implement locally with functions/direct composition; only then add a new
+  abstraction, module, dependency or framework.
+- This is not code golf. Never weaken correctness, security, integrity,
+  accessibility or an explicit architecture guarantee to reduce code or files.
 - Optimize semantic compression, not abstraction count; under-abstraction also
   matters when repeated decisions fail to disappear from call sites. Use the
   smallest representation that makes the invariant obvious. New vocabulary is
@@ -171,6 +179,12 @@ open promotion-blocking findings, while deferred findings name `defer_to`.
   passing code tests never implies that a rendered result is good. Ordinary recovery defaults to Sol High. Luna
   is appropriate for visually adjacent work only after the target is frozen and
   the remaining execution is mechanical and objectively verifiable.
+- Sequence declared authorities by promotion maturity. Objective and visual
+  reviews converge the exact candidate first. Dispatch architecture review only
+  after all declared non-architecture authorities are green. After any repair,
+  the successor candidate regains those approvals before architecture review or
+  re-review. Keep the repair loop bounded; material architecture drift returns
+  to planning/recovery.
 - After two attempts at the same failure without new causal evidence or
   improvement in the same observable check, diagnose before another attempt.
   Distinguish wrong oracle/outcome, oversized milestone, implementation and

@@ -322,7 +322,7 @@ def _runtime_review_ready(
             ProgramControllerActionKind.START_REVIEWS,
             milestone_id="runtime",
             evidence_sha256=snapshot.digest,
-            review_roles=("architecture-reviewer", "code-reviewer"),
+            review_roles=("code-reviewer",),
         ),
     )
     subject = f"runtime_evidence:{snapshot.digest}"
@@ -331,6 +331,21 @@ def _runtime_review_ready(
         "runtime",
         ReviewResult(
             "runtime-code", RoleId("code-reviewer"), True, (), subject, acceptance_mode=AcceptanceMode.OBJECTIVE
+        ),
+    )
+    architecture_ready = next(
+        item
+        for item in reversed(ledger.program_controller_decisions())
+        if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION and item.event_key.endswith("/architecture-ready")
+    )
+    _apply_program_action(
+        ledger,
+        architecture_ready,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_REVIEWS,
+            milestone_id="runtime",
+            evidence_sha256=snapshot.digest,
+            review_roles=("architecture-reviewer",),
         ),
     )
     ledger.record_program_review(
@@ -568,7 +583,7 @@ def test_runtime_program_closure_is_evidence_bound_and_never_creates_git_integra
                 ProgramControllerActionKind.START_REVIEWS,
                 milestone_id="runtime",
                 evidence_sha256=snapshot.digest,
-                review_roles=("architecture-reviewer", "code-reviewer"),
+                review_roles=("code-reviewer",),
             ),
         )
         subject = f"runtime_evidence:{snapshot.digest}"
@@ -577,6 +592,22 @@ def test_runtime_program_closure_is_evidence_bound_and_never_creates_git_integra
             "runtime",
             ReviewResult(
                 "runtime-code", RoleId("code-reviewer"), True, (), subject, acceptance_mode=AcceptanceMode.OBJECTIVE
+            ),
+        )
+        architecture_ready = next(
+            item
+            for item in reversed(ledger.program_controller_decisions())
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+            and item.event_key.endswith("/architecture-ready")
+        )
+        _apply_program_action(
+            ledger,
+            architecture_ready,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_REVIEWS,
+                milestone_id="runtime",
+                evidence_sha256=snapshot.digest,
+                review_roles=("architecture-reviewer",),
             ),
         )
         ledger.record_program_review(

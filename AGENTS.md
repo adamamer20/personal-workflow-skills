@@ -45,6 +45,14 @@ CODEX_FLOW_REAL_SDK=1 uv run codex-flow sdk-compatibility-sentinel \
 
 ## Semantic density
 
+- Implement the minimum semantic delta that satisfies the observable guarantee.
+  After tracing the real production path, stop at the first sufficient option:
+  remove work the outcome does not need; reuse an existing domain concept or
+  production path; use the standard library; use a native platform/runtime
+  capability; use an already-owned dependency; implement locally with functions
+  or direct composition; only then add a new abstraction, module, dependency or
+  framework. Never trade correctness, security, integrity, accessibility or an
+  explicit architecture guarantee for a smaller diff.
 - Optimize for semantic compression, not abstraction count. Under-abstraction
   is also a defect when a repeated domain decision, relationship, transition,
   or validation remains manually distributed. A useful abstraction makes that
@@ -263,6 +271,14 @@ models, reasoning effort, transports, permissions, or acceptance gates.
   and no review trigger may close directly outside workflow-control by
   validation/self-review. Boundary, integration, prior-finding and visual risks
   retain independent acceptance; capsule changes preserve identity and evidence.
+- Review authorities run in promotion order, not as a speculative wave. Objective
+  and visual authorities first converge the exact candidate through at most the
+  configured bounded repair. Queue architecture review only after every declared
+  non-architecture authority is green on that candidate. An architecture repair
+  creates a successor candidate that must regain non-architecture acceptance
+  before architecture re-review. A material boundary, contract, ownership or
+  security-model change returns to planning/recovery instead of another review
+  loop.
 - Visual-judgment implementation, visual-quality promotion review, semantic
   orchestration, and normal architecture conformance default to Sol Medium.
   Visual ambiguity, non-convergence, or material recovery complexity escalates

@@ -209,6 +209,73 @@ def _claim_and_apply(
     return receipt
 
 
+def _accept_program_reviews_in_promotion_order(
+    ledger: Ledger,
+    initial_decision: ProgramControllerDecisionStatus,
+    *,
+    candidate_sha: str,
+    code_review_id: str,
+    architecture_review_id: str,
+    trunk_head: str = TRUNK_HEAD,
+) -> ProgramControllerDecisionStatus:
+    _claim_and_apply(
+        ledger,
+        initial_decision,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_REVIEWS,
+            milestone_id="first",
+            candidate_sha=candidate_sha,
+            review_roles=("code-reviewer",),
+        ),
+        trunk_head=trunk_head,
+    )
+    ledger.record_program_review(
+        "program",
+        "first",
+        ReviewResult(
+            code_review_id,
+            RoleId("code-reviewer"),
+            True,
+            (),
+            candidate_sha,
+            acceptance_mode=AcceptanceMode.OBJECTIVE,
+        ),
+    )
+    architecture_ready = next(
+        item
+        for item in reversed(ledger.program_controller_decisions())
+        if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION and item.event_key.endswith("/architecture-ready")
+    )
+    _claim_and_apply(
+        ledger,
+        architecture_ready,
+        ModelFacingProgramControllerAction(
+            ProgramControllerActionKind.START_REVIEWS,
+            milestone_id="first",
+            candidate_sha=candidate_sha,
+            review_roles=("architecture-reviewer",),
+        ),
+        trunk_head=trunk_head,
+    )
+    ledger.record_program_review(
+        "program",
+        "first",
+        ReviewResult(
+            architecture_review_id,
+            RoleId("architecture-reviewer"),
+            True,
+            (),
+            candidate_sha,
+            acceptance_mode=AcceptanceMode.ARCHITECTURE,
+        ),
+    )
+    return next(
+        item
+        for item in reversed(ledger.program_controller_decisions())
+        if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+    )
+
+
 def _prepare_program_integration(
     ledger: Ledger,
     *,
@@ -238,28 +305,13 @@ def _prepare_program_integration(
         for item in ledger.program_controller_decisions()
         if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
     )
-    _claim_and_apply(
+    review_completion = _accept_program_reviews_in_promotion_order(
         ledger,
         implementation,
-        ModelFacingProgramControllerAction(
-            ProgramControllerActionKind.START_REVIEWS,
-            milestone_id="first",
-            candidate_sha=candidate_sha,
-            review_roles=("architecture-reviewer", "code-reviewer"),
-        ),
+        candidate_sha=candidate_sha,
+        code_review_id="code-accepted",
+        architecture_review_id="architecture-accepted",
         trunk_head=trunk_head,
-    )
-    for review_id, role, mode in (
-        ("architecture-accepted", "architecture-reviewer", AcceptanceMode.ARCHITECTURE),
-        ("code-accepted", "code-reviewer", AcceptanceMode.OBJECTIVE),
-    ):
-        ledger.record_program_review(
-            "program",
-            "first",
-            ReviewResult(review_id, RoleId(role), True, (), candidate_sha, acceptance_mode=mode),
-        )
-    review_completion = next(
-        item for item in ledger.program_controller_decisions() if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
     )
     _claim_and_apply(
         ledger,
@@ -361,38 +413,12 @@ def test_program_lifecycle_advances_only_after_exact_review_and_integration(tmp_
             for item in ledger.program_controller_decisions()
             if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
         )
-        _claim_and_apply(
+        review_completion = _accept_program_reviews_in_promotion_order(
             ledger,
             implementation,
-            ModelFacingProgramControllerAction(
-                ProgramControllerActionKind.START_REVIEWS,
-                milestone_id="first",
-                candidate_sha=CANDIDATE_SHA,
-                review_roles=("architecture-reviewer", "code-reviewer"),
-            ),
-        )
-        for review_id, role in (
-            ("architecture-accepted", "architecture-reviewer"),
-            ("code-accepted", "code-reviewer"),
-        ):
-            ledger.record_program_review(
-                "program",
-                "first",
-                ReviewResult(
-                    review_id,
-                    RoleId(role),
-                    True,
-                    (),
-                    CANDIDATE_SHA,
-                    acceptance_mode=(
-                        AcceptanceMode.ARCHITECTURE if role == "architecture-reviewer" else AcceptanceMode.OBJECTIVE
-                    ),
-                ),
-            )
-        review_completion = next(
-            item
-            for item in ledger.program_controller_decisions()
-            if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+            candidate_sha=CANDIDATE_SHA,
+            code_review_id="code-accepted",
+            architecture_review_id="architecture-accepted",
         )
         _claim_and_apply(
             ledger,
@@ -874,29 +900,12 @@ def test_future_milestone_blocker_does_not_block_current_candidate_promotion(tmp
             for item in ledger.program_controller_decisions()
             if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
         )
-        _claim_and_apply(
+        review_completion = _accept_program_reviews_in_promotion_order(
             ledger,
             implementation,
-            ModelFacingProgramControllerAction(
-                ProgramControllerActionKind.START_REVIEWS,
-                milestone_id="first",
-                candidate_sha=CANDIDATE_SHA,
-                review_roles=("architecture-reviewer", "code-reviewer"),
-            ),
-        )
-        for review_id, role, mode in (
-            ("architecture-future", "architecture-reviewer", AcceptanceMode.ARCHITECTURE),
-            ("code-future", "code-reviewer", AcceptanceMode.OBJECTIVE),
-        ):
-            ledger.record_program_review(
-                "program",
-                "first",
-                ReviewResult(review_id, RoleId(role), True, (), CANDIDATE_SHA, acceptance_mode=mode),
-            )
-        review_completion = next(
-            item
-            for item in ledger.program_controller_decisions()
-            if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+            candidate_sha=CANDIDATE_SHA,
+            code_review_id="code-future",
+            architecture_review_id="architecture-future",
         )
         _claim_and_apply(
             ledger,
@@ -1014,44 +1023,12 @@ def test_terminal_candidate_blocker_cannot_bypass_clean_review_promotion(tmp_pat
             for item in ledger.program_controller_decisions()
             if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
         )
-        _claim_and_apply(
+        review_completion = _accept_program_reviews_in_promotion_order(
             ledger,
             implementation,
-            ModelFacingProgramControllerAction(
-                ProgramControllerActionKind.START_REVIEWS,
-                milestone_id="first",
-                candidate_sha=CANDIDATE_SHA,
-                review_roles=("architecture-reviewer", "code-reviewer"),
-            ),
-        )
-        ledger.record_program_review(
-            "program",
-            "first",
-            ReviewResult(
-                "architecture-clean",
-                RoleId("architecture-reviewer"),
-                True,
-                (),
-                CANDIDATE_SHA,
-                acceptance_mode=AcceptanceMode.ARCHITECTURE,
-            ),
-        )
-        ledger.record_program_review(
-            "program",
-            "first",
-            ReviewResult(
-                "code-clean",
-                RoleId("code-reviewer"),
-                True,
-                (),
-                CANDIDATE_SHA,
-                acceptance_mode=AcceptanceMode.OBJECTIVE,
-            ),
-        )
-        review_completion = next(
-            item
-            for item in ledger.program_controller_decisions()
-            if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+            candidate_sha=CANDIDATE_SHA,
+            code_review_id="code-clean",
+            architecture_review_id="architecture-clean",
         )
         with pytest.raises(StaleWriter, match="promotion-blocking terminal blocker"):
             _claim_and_apply(
@@ -1255,7 +1232,7 @@ def test_program_context_contains_exact_graph_and_rejects_stale_revision(tmp_pat
         assert context.nodes[0].ready is True
         assert context.nodes[1].dependencies == (MilestoneId("first"),)
         assert context.nodes[0].mutable_surfaces == ("src/first.py",)
-        assert context.nodes[0].review_roles == ("architecture-reviewer", "code-reviewer")
+        assert context.nodes[0].review_roles == ("code-reviewer",)
         ledger.start_program("program")
         with pytest.raises(StaleWriter, match="context identity is stale"):
             ledger.program_controller_context(
@@ -1805,29 +1782,12 @@ def test_program_integration_conflict_has_one_action_bound_attention_decision(
             for item in ledger.program_controller_decisions()
             if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
         )
-        _claim_and_apply(
+        review_completion = _accept_program_reviews_in_promotion_order(
             ledger,
             implementation,
-            ModelFacingProgramControllerAction(
-                ProgramControllerActionKind.START_REVIEWS,
-                milestone_id="first",
-                candidate_sha=CANDIDATE_SHA,
-                review_roles=("architecture-reviewer", "code-reviewer"),
-            ),
-        )
-        for review_id, role, mode in (
-            ("architecture-accepted", "architecture-reviewer", AcceptanceMode.ARCHITECTURE),
-            ("code-accepted", "code-reviewer", AcceptanceMode.OBJECTIVE),
-        ):
-            ledger.record_program_review(
-                "program",
-                "first",
-                ReviewResult(review_id, RoleId(role), True, (), CANDIDATE_SHA, acceptance_mode=mode),
-            )
-        review_completion = next(
-            item
-            for item in ledger.program_controller_decisions()
-            if item.event_kind is ProgramEventKind.REVIEW_COMPLETED
+            candidate_sha=CANDIDATE_SHA,
+            code_review_id="code-accepted",
+            architecture_review_id="architecture-accepted",
         )
         _claim_and_apply(
             ledger,
@@ -1882,7 +1842,7 @@ def test_program_integration_conflict_has_one_action_bound_attention_decision(
         attention = [
             item
             for item in ledger.program_controller_decisions()
-            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION and item.event_key.startswith("action-effect/")
         ]
         assert len(attention) == 1
         assert attention[0].event_key == f"action-effect/{bundle.action_id}/failed"
@@ -1900,7 +1860,7 @@ def test_program_integration_conflict_has_one_action_bound_attention_decision(
         attention = [
             item
             for item in restarted.ledger.program_controller_decisions()
-            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+            if item.event_kind is ProgramEventKind.CONTROLLER_ATTENTION and item.event_key.startswith("action-effect/")
         ]
         assert len(attention) == 1
     finally:
@@ -2179,7 +2139,7 @@ def _runner_context() -> ProgramControllerContext:
                 (),
                 ("src/first.py",),
                 (AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
-                ("architecture-reviewer", "code-reviewer"),
+                ("code-reviewer",),
                 None,
                 (),
                 (),
@@ -2228,7 +2188,7 @@ def test_program_generation_acknowledges_and_closes_its_ephemeral_lineage(tmp_pa
     assert result.outcome == "acknowledged"
     assert client.completed == [(str(status.decision_id), 1, ControllerGenerationState.COMPLETED.value)]
     assert '"mutable_surfaces":["src/first.py"]' in adapter.prompts[0]
-    assert '"review_roles":["architecture-reviewer","code-reviewer"]' in adapter.prompts[0]
+    assert '"review_roles":["code-reviewer"]' in adapter.prompts[0]
 
 
 def test_program_action_schema_is_locally_closed_and_provider_projectable() -> None:

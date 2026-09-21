@@ -8,9 +8,12 @@ description: "Independently review a fixed change or artifact through one explic
 Review one fixed artifact through one named lens.
 
 One review is the default for a single declared authority. When a capsule
-declares distinct objective and architecture authorities, the controller may
-run those independent reviews in parallel; each remains required for
-promotion and uses separate evidence. One reviewer does not invoke another.
+declares architecture alongside objective or visual acceptance, the controller
+runs architecture as a late promotion gate only after every declared
+non-architecture authority is green on the exact candidate. Any repair creates a
+successor candidate that must regain those approvals before architecture review
+or re-review. Each authority remains required and uses its own evidence. One
+reviewer does not invoke another.
 
 Do not review everything by default.
 
@@ -90,6 +93,13 @@ composition when accepted guarantees remain intact. Do not reward explicitness
 or type count by itself; every retained abstraction must carry a distinct
 invariant, domain distinction, policy, lifecycle/identity, boundary validation,
 genuine substitution seam, or reusable algorithm.
+
+Finish the standards lens with an economy pass. Ask whether the change can be
+deleted because the outcome does not require it, replaced by an existing
+repository path, replaced by standard-library or native functionality, expressed
+without a new dependency/abstraction, or collapsed without losing a semantic
+guarantee. Record concrete replacement evidence; line-count reduction is never
+the finding or acceptance oracle.
 
 ### Visual
 

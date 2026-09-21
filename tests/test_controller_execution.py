@@ -790,6 +790,12 @@ def test_completed_controller_execution_accepts_one_exact_repair_successor_idemp
             dispatch_id="run/m1/executor/3",
             result_sha256="e" * 64,
         )
+    queued_reviews: list[tuple[str, int, str | None]] = []
+
+    def queue_review(_capsule: ExecutionCapsule, **values: object) -> None:
+        queued_reviews.append((str(values["role"]), int(values["generation"]), values.get("candidate_sha")))
+
+    monkeypatch.setattr(harness, "_enqueue_control_dispatch", queue_review)
     for role, mode in (
         ("code-reviewer", AcceptanceMode.OBJECTIVE),
         ("architecture-reviewer", AcceptanceMode.ARCHITECTURE),
@@ -812,6 +818,7 @@ def test_completed_controller_execution_accepts_one_exact_repair_successor_idemp
         harness._advance_control_acceptance(capsule, successor, 2)
         expected = WorkflowState.REVIEWING if mode is AcceptanceMode.OBJECTIVE else WorkflowState.ACCEPTED
         assert harness.ledger.current_state("run", "m1") is expected
+    assert queued_reviews == [("architecture-reviewer", 2, successor)]
     assert harness.ledger.dispatch_terminal_integrity("run/m1/executor/2") == retained_integrity
     harness.close()
 

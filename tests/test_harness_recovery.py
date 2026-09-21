@@ -440,18 +440,6 @@ def test_control_acceptance_waits_for_all_authorities_and_repairs_once(
         ),
     )
     harness._advance_control_acceptance(capsule, first_sha, 1)
-    assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REVIEWING
-    harness.ledger.record_control_review(
-        capsule.run_id,
-        capsule.milestone_id,
-        candidate_sha=first_sha,
-        dispatch_id="control-run/control-milestone/architecture-reviewer/1",
-        generation=1,
-        result=_control_review(
-            "architecture-accepted", "architecture-reviewer", first_sha, AcceptanceMode.ARCHITECTURE
-        ),
-    )
-    harness._advance_control_acceptance(capsule, first_sha, 1)
     assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REPAIR_REQUIRED
     assert queued == [("executor", 2, first_sha)]
 
@@ -525,10 +513,7 @@ def test_control_acceptance_waits_for_all_authorities_and_repairs_once(
         lambda _path: SimpleNamespace(derive_authorities=lambda _modes: None),
     )
     harness._queue_control_reviews(capsule, second_sha, generation=2)
-    assert queued[-2:] == [
-        ("code-reviewer", 2, second_sha),
-        ("architecture-reviewer", 2, second_sha),
-    ]
+    assert queued[-1] == ("code-reviewer", 2, second_sha)
 
     harness.ledger.record_control_review(
         capsule.run_id,
@@ -538,16 +523,6 @@ def test_control_acceptance_waits_for_all_authorities_and_repairs_once(
         generation=2,
         result=_control_review(
             "objective-rejected-again", "code-reviewer", second_sha, AcceptanceMode.OBJECTIVE, accepted=False
-        ),
-    )
-    harness.ledger.record_control_review(
-        capsule.run_id,
-        capsule.milestone_id,
-        candidate_sha=second_sha,
-        dispatch_id="control-run/control-milestone/architecture-reviewer/2",
-        generation=2,
-        result=_control_review(
-            "architecture-accepted-again", "architecture-reviewer", second_sha, AcceptanceMode.ARCHITECTURE
         ),
     )
     harness._advance_control_acceptance(capsule, second_sha, 2)
@@ -761,7 +736,9 @@ def test_persisted_control_repair_result_without_completed_event_capture_require
     ledger.close()
 
 
-def test_control_acceptance_promotes_only_after_every_fresh_authority_accepts(tmp_path: Path) -> None:
+def test_control_acceptance_queues_architecture_only_after_objective_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     harness = WorkflowHarness(tmp_path)
     capsule = _control_capsule(tmp_path)
     candidate_sha = "d" * 40
@@ -784,8 +761,15 @@ def test_control_acceptance_promotes_only_after_every_fresh_authority_accepts(tm
         generation=1,
         result=_control_review("objective-accepted", "code-reviewer", candidate_sha, AcceptanceMode.OBJECTIVE),
     )
+    queued: list[tuple[str, int, str | None]] = []
+
+    def queue(_capsule: ExecutionCapsule, **values: object) -> None:
+        queued.append((str(values["role"]), int(values["generation"]), values.get("candidate_sha")))
+
+    monkeypatch.setattr(harness, "_enqueue_control_dispatch", queue)
     harness._advance_control_acceptance(capsule, candidate_sha, 1)
     assert harness.ledger.current_state(capsule.run_id, capsule.milestone_id) is WorkflowState.REVIEWING
+    assert queued == [("architecture-reviewer", 1, candidate_sha)]
     harness.ledger.record_control_review(
         capsule.run_id,
         capsule.milestone_id,

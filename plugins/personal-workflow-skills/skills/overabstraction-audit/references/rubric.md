@@ -42,6 +42,16 @@ Collect concrete evidence for each signal:
 - Small requirement touches many files, most of them registration/wiring.
 - Code diff has more glue changes than policy changes.
 
+6. Reinvented capability
+- Repository code, standard library, or the native platform already provides the
+  required guarantee.
+- The local implementation adds another behavior owner or compatibility surface.
+
+7. Dependency overreach
+- Only a narrow fraction of the dependency/framework is used.
+- Existing or small local functionality can satisfy the same accepted guarantees
+  with less lifecycle, security, packaging, or upgrade surface.
+
 ## Rent Test
 
 A layer pays rent only if at least one condition is true:
@@ -58,12 +68,16 @@ Use this template per finding:
 
 - `Severity`: high | medium | low
 - `Type`: pass-through-indirection | speculative-interface |
-  ownership-fracture | debug-archaeology | change-amplification
+  ownership-fracture | debug-archaeology | change-amplification |
+  reinvented-capability | dependency-overreach
 - `Evidence`: file/line anchors and a brief call-path summary
 - `Why it does not pay rent`: missing invariant/policy/capability
 - `Recommendation`: merge, inline, move policy boundary, or defer protocol
 - `Expected impact`: fewer hops, clearer ownership, lower edit surface
 - `Validation`: tests/checks to run
+- `Replacement rung`: delete | reuse | stdlib | native | existing-dependency |
+  local-composition
+- `Guarantees preserved`: named outcome/safety guarantees retained by replacement
 
 ## Suggested PR Review Sentence
 

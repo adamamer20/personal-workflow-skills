@@ -268,6 +268,16 @@ Only small reversible work on the direct path outside workflow-control can close
 by validation/self-review without a reviewer when no risk trigger applies. A changed
 file or configured role is not by itself a review trigger for that direct path.
 
+Declared reviews are sequenced by candidate maturity. Objective and visual
+authorities run first and may trigger the single bounded repair. Architecture is
+a late promotion gate: it is dispatched only after every declared
+non-architecture authority is green on the exact candidate. A repair after an
+architecture finding creates a successor that must regain those earlier
+approvals before architecture re-review. Architecture is omitted entirely when
+the milestone does not materially exercise a boundary, public/persisted
+contract, ownership, storage/concurrency model, security/privacy boundary,
+execution topology, or structural dependency.
+
 When selected, objective code review uses Luna XHigh. When success
 depends on composition, hierarchy, responsive behavior, rendered inspection, or
 other subjective visual judgment, visual implementation and independent

@@ -4378,12 +4378,20 @@ class WorkflowHarness:
         }
         return tuple(role_by_mode[mode] for mode in capsule.acceptance_modes)
 
+    @classmethod
+    def _control_initial_authority_roles(cls, capsule: ExecutionCapsule) -> tuple[str, ...]:
+        """Return authorities that must converge before late architecture review."""
+
+        roles = cls._control_authority_roles(capsule)
+        non_architecture = tuple(role for role in roles if role != "architecture-reviewer")
+        return non_architecture or roles
+
     def _queue_control_reviews(self, capsule: ExecutionCapsule, candidate_sha: str, *, generation: int = 1) -> None:
-        """Queue each declared exact-candidate authority exactly once."""
+        """Queue the exact-candidate authorities that precede architecture."""
 
         config = load_workflow_config(self.state_root / "workflow.toml")
         config.derive_authorities(capsule.acceptance_modes)
-        for role in self._control_authority_roles(capsule):
+        for role in self._control_initial_authority_roles(capsule):
             self._enqueue_control_dispatch(
                 capsule,
                 role=role,
@@ -4507,7 +4515,10 @@ class WorkflowHarness:
             for item in facts
         ):
             return
-        roles = set(self._control_authority_roles(capsule))
+        role_order = self._control_authority_roles(capsule)
+        roles = set(role_order)
+        initial_roles = set(self._control_initial_authority_roles(capsule))
+        architecture_is_late = "architecture-reviewer" in roles and "architecture-reviewer" not in initial_roles
         completed_roles = {
             str(item.data.get("reviewer_role"))
             for item in facts
@@ -4515,18 +4526,40 @@ class WorkflowHarness:
             and item.data.get("candidate_sha") == candidate_sha
             and item.data.get("generation") == generation
         }
-        if not roles.issubset(completed_roles):
+        if not initial_roles.issubset(completed_roles):
             return
-        reviews = [
+        initial_reviews = [
             item
             for item in facts
             if item.kind == "review_completed"
             and item.data.get("candidate_sha") == candidate_sha
             and item.data.get("generation") == generation
-            and item.data.get("reviewer_role") in roles
+            and item.data.get("reviewer_role") in initial_roles
         ]
-        blocking = any(item.data.get("promotion_blocking") is True for item in reviews)
         blocker = self._control_candidate_blocker(facts, candidate_sha)
+        initial_blocking = any(item.data.get("promotion_blocking") is True for item in initial_reviews)
+        if initial_blocking or blocker is not None:
+            reviews = initial_reviews
+        else:
+            if architecture_is_late and "architecture-reviewer" not in completed_roles:
+                self._enqueue_control_dispatch(
+                    capsule,
+                    role="architecture-reviewer",
+                    generation=generation,
+                    candidate_sha=candidate_sha,
+                )
+                return
+            if not roles.issubset(completed_roles):
+                return
+            reviews = [
+                item
+                for item in facts
+                if item.kind == "review_completed"
+                and item.data.get("candidate_sha") == candidate_sha
+                and item.data.get("generation") == generation
+                and item.data.get("reviewer_role") in roles
+            ]
+        blocking = any(item.data.get("promotion_blocking") is True for item in reviews)
         if not blocking and blocker is None:
             review_ids = sorted(str(item.data["review_id"]) for item in reviews)
             self.ledger.record_review_transition(
