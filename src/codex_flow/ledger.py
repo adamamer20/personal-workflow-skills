@@ -146,7 +146,7 @@ from .domain import (
     validate_program_outcome_pair,
 )
 
-CURRENT_SCHEMA_VERSION = SchemaVersion(21)
+CURRENT_SCHEMA_VERSION = SchemaVersion(22)
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         SchemaVersion(1),
@@ -169,6 +169,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset(
         SchemaVersion(18),
         SchemaVersion(19),
         SchemaVersion(20),
+        SchemaVersion(21),
         CURRENT_SCHEMA_VERSION,
     }
 )
@@ -1166,6 +1167,31 @@ _V21_TABLE_DDL = {
 }
 
 
+_SERVICE_REFRESH_STARTS_DDL = """CREATE TABLE service_refresh_starts (
+    repository_root TEXT NOT NULL CHECK(length(repository_root) > 1),
+    state_root TEXT NOT NULL CHECK(length(state_root) > 1),
+    predecessor_epoch INTEGER NOT NULL CHECK(predecessor_epoch > 0),
+    predecessor_pid INTEGER NOT NULL CHECK(predecessor_pid > 0),
+    predecessor_birth_identity TEXT NOT NULL CHECK(length(predecessor_birth_identity) BETWEEN 1 AND 512),
+    predecessor_authority_sha256 TEXT NOT NULL CHECK(length(predecessor_authority_sha256) = 64),
+    unit_name TEXT NOT NULL CHECK(length(unit_name) BETWEEN 1 AND 512),
+    unit_sha256 TEXT NOT NULL CHECK(length(unit_sha256) = 64),
+    launcher_sha256 TEXT NOT NULL CHECK(length(launcher_sha256) = 64),
+    interpreter_sha256 TEXT NOT NULL CHECK(length(interpreter_sha256) = 64),
+    target_profile_sha256 TEXT CHECK(target_profile_sha256 IS NULL OR length(target_profile_sha256) = 64),
+    target_compatibility_sha256 TEXT CHECK(target_compatibility_sha256 IS NULL OR length(target_compatibility_sha256) = 64),
+    intended_schema_version INTEGER NOT NULL CHECK(intended_schema_version = 22),
+    state TEXT NOT NULL CHECK(state IN ('pending', 'healthy', 'stopped_replacement')),
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    replacement_authority_json TEXT,
+    PRIMARY KEY(repository_root, state_root, predecessor_epoch),
+    CHECK((state = 'pending' AND resolved_at IS NULL AND replacement_authority_json IS NULL)
+       OR (state != 'pending' AND resolved_at IS NOT NULL AND replacement_authority_json IS NOT NULL))
+)"""
+_V22_TABLE_DDL = {**_V21_TABLE_DDL, "service_refresh_starts": _SERVICE_REFRESH_STARTS_DDL}
+
+
 def _canonical_ddl(sql: str) -> str:
     """Return exact SQLite DDL modulo whitespace outside quoted values."""
 
@@ -1269,6 +1295,7 @@ _SCHEMA_IDENTITIES = {
     SchemaVersion(19): "codex_flow_harness_candidate_retention_v19",
     SchemaVersion(20): "codex_flow_dispatch_terminal_integrity_v20",
     SchemaVersion(21): "codex_flow_program_outcomes_v21",
+    SchemaVersion(22): "codex_flow_service_refresh_starts_v22",
 }
 _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 
@@ -1276,7 +1303,7 @@ _SCHEMA_IDENTITY = _SCHEMA_IDENTITIES[CURRENT_SCHEMA_VERSION]
 def _predecessor_refresh_authority_table(version: SchemaVersion) -> str | None:
     if version == SchemaVersion(18):
         return "supervisor_authority"
-    if version in {SchemaVersion(19), SchemaVersion(20)}:
+    if version in {SchemaVersion(19), SchemaVersion(20), SchemaVersion(21)}:
         return "harness_authority"
     return None
 
@@ -1634,6 +1661,140 @@ def _event_type(value: str) -> str:
     return value
 
 
+def _validate_service_refresh_start(row: Mapping[str, object]) -> None:
+    """Validate the bounded persisted start identity and appended replacement facts."""
+
+    if set(row) != {
+        "repository_root",
+        "state_root",
+        "predecessor_epoch",
+        "predecessor_pid",
+        "predecessor_birth_identity",
+        "predecessor_authority_sha256",
+        "unit_name",
+        "unit_sha256",
+        "launcher_sha256",
+        "interpreter_sha256",
+        "target_profile_sha256",
+        "target_compatibility_sha256",
+        "intended_schema_version",
+        "state",
+        "created_at",
+        "resolved_at",
+        "replacement_authority_json",
+    }:
+        raise CorruptSchemaError("refresh start identity shape is invalid")
+    for field in ("repository_root", "state_root"):
+        _persisted_canonical_path(row[field], label=f"refresh {field}")
+    for field in ("predecessor_epoch", "predecessor_pid"):
+        value = row[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise CorruptSchemaError(f"refresh {field} is invalid")
+    for field in ("predecessor_birth_identity", "unit_name"):
+        value = row[field]
+        if not isinstance(value, str) or not 1 <= len(value) <= 512 or value != value.strip():
+            raise CorruptSchemaError(f"refresh {field} is invalid")
+    for field in (
+        "predecessor_authority_sha256",
+        "unit_sha256",
+        "launcher_sha256",
+        "interpreter_sha256",
+        "target_profile_sha256",
+        "target_compatibility_sha256",
+    ):
+        value = row[field]
+        if value is None and field.startswith("target_"):
+            continue
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise CorruptSchemaError(f"refresh {field} is invalid")
+    if row["intended_schema_version"] != 22 or row["state"] not in {"pending", "healthy", "stopped_replacement"}:
+        raise CorruptSchemaError("refresh start schema or state is invalid")
+    times: list[datetime] = []
+    for field in ("created_at", "resolved_at"):
+        value = row[field]
+        if value is None and field == "resolved_at" and row["state"] == "pending":
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise CorruptSchemaError("refresh start timestamp is invalid") from exc
+        if parsed.tzinfo is None:
+            raise CorruptSchemaError("refresh start timestamp must be timezone-aware")
+        times.append(parsed)
+    if len(times) == 2 and times[1] < times[0]:
+        raise CorruptSchemaError("refresh start resolution precedes intent")
+    raw = row["replacement_authority_json"]
+    if row["state"] == "pending":
+        if raw is not None or row["resolved_at"] is not None:
+            raise CorruptSchemaError("pending refresh start carries replacement facts")
+        return
+    if not isinstance(raw, str) or len(raw.encode()) > 16384:
+        raise CorruptSchemaError("refresh replacement authority exceeds its bound")
+    replacement = _decode_json_object(raw, field_name="refresh replacement authority")
+    if replacement is None:
+        raise CorruptSchemaError("refresh replacement authority is missing")
+    if (
+        set(replacement)
+        != {
+            "singleton",
+            "repository_root",
+            "state_root",
+            "epoch",
+            "owner_nonce_sha256",
+            "pid",
+            "process_birth_identity",
+            "acquired_at",
+            "renewed_at",
+            "expires_at",
+            "executable_digest",
+            "version",
+            "requested_shutdown",
+        }
+        or type(replacement["singleton"]) is not int
+        or replacement["singleton"] != 1
+    ):
+        raise CorruptSchemaError("refresh replacement authority shape is invalid")
+    version = replacement["version"]
+    if not isinstance(version, str) or not 1 <= len(version) <= 512:
+        raise CorruptSchemaError("refresh replacement version is invalid")
+    replacement_times: list[datetime] = []
+    for field in ("acquired_at", "renewed_at", "expires_at"):
+        try:
+            instant = datetime.fromisoformat(str(replacement[field]).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise CorruptSchemaError("refresh replacement timestamp is invalid") from exc
+        if instant.tzinfo is None:
+            raise CorruptSchemaError("refresh replacement timestamp must be timezone-aware")
+        replacement_times.append(instant)
+    if not replacement_times[0] <= replacement_times[1] < replacement_times[2]:
+        raise CorruptSchemaError("refresh replacement timestamps are inconsistent")
+    for field in ("repository_root", "state_root"):
+        if replacement.get(field) != row[field]:
+            raise CorruptSchemaError("refresh replacement root identity changed")
+    epoch, pid, birth = replacement.get("epoch"), replacement.get("pid"), replacement.get("process_birth_identity")
+    if (
+        isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or epoch <= row["predecessor_epoch"]
+        or isinstance(pid, bool)
+        or not isinstance(pid, int)
+        or pid <= 0
+        or not isinstance(birth, str)
+        or not 1 <= len(birth) <= 512
+        or (pid == row["predecessor_pid"] and birth == row["predecessor_birth_identity"])
+    ):
+        raise CorruptSchemaError("refresh replacement did not acquire a distinct newer identity")
+    fence = replacement.get("requested_shutdown")
+    if type(fence) is not int or fence != (0 if row["state"] == "healthy" else 1):
+        raise CorruptSchemaError("refresh replacement fence is inconsistent with resolution")
+    for field in ("owner_nonce_sha256", "executable_digest"):
+        value = replacement.get(field)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise CorruptSchemaError("refresh replacement digest is invalid")
+    if replacement["executable_digest"] != row["interpreter_sha256"]:
+        raise CorruptSchemaError("refresh replacement executable differs from target")
+
+
 def _absolute_path(path: str | Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
@@ -1886,7 +2047,7 @@ class Ledger:
             return
         current_version = str(version[0])
         if (
-            current_version not in {"19", "20", "21"}
+            current_version not in {"19", "20", "21", "22"}
             or str(identity[0]) != _SCHEMA_IDENTITIES[SchemaVersion(int(current_version))]
         ):
             raise CorruptSchemaError("failed migration opener reached an unknown schema identity")
@@ -1902,11 +2063,13 @@ class Ledger:
         if supervisor_exists is not None or harness_exists is None or authority is None or int(authority[0]) != 1:
             raise CorruptSchemaError("failed migration opener cannot prove the fenced v19 authority")
         with self._transaction(validate_authority=False):
-            if current_version == "21":
+            if int(current_version) >= 22:
+                if connection.execute("SELECT 1 FROM service_refresh_starts LIMIT 1").fetchone() is not None:
+                    raise CorruptSchemaError("cannot compensate a migration with retained refresh start intent")
+                connection.execute("DROP TABLE service_refresh_starts")
+            if int(current_version) >= 21:
                 connection.execute("DROP TABLE program_outcomes")
-            if current_version == "20":
-                connection.execute("DROP TABLE dispatch_terminal_integrity")
-            elif current_version == "21":
+            if int(current_version) >= 20:
                 connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
             connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
@@ -2141,7 +2304,7 @@ class Ledger:
     def _create_schema(self) -> None:
         try:
             with self._transaction(validate_authority=False):
-                for statement in _V21_TABLE_DDL.values():
+                for statement in _V22_TABLE_DDL.values():
                     self._db().execute(statement)
                 for _name, (_table, statement) in _V15_INDEX_DDL.items():
                     self._db().execute(statement)
@@ -2236,6 +2399,7 @@ class Ledger:
             SchemaVersion(19): _V19_TABLE_DDL,
             SchemaVersion(20): _V20_TABLE_DDL,
             SchemaVersion(21): _V21_TABLE_DDL,
+            SchemaVersion(22): _V22_TABLE_DDL,
         }[version]
         actual_inventory = _schema_inventory(self._db())
         expected_inventory = _owned_inventory(definitions)
@@ -2852,6 +3016,26 @@ class Ledger:
                 "closure_generation": ("INTEGER", 1, 0),
                 "created_at": ("TEXT", 1, 0),
             }
+        if version >= SchemaVersion(22):
+            expected["service_refresh_starts"] = {
+                "repository_root": ("TEXT", 1, 1),
+                "state_root": ("TEXT", 1, 2),
+                "predecessor_epoch": ("INTEGER", 1, 3),
+                "predecessor_pid": ("INTEGER", 1, 0),
+                "predecessor_birth_identity": ("TEXT", 1, 0),
+                "predecessor_authority_sha256": ("TEXT", 1, 0),
+                "unit_name": ("TEXT", 1, 0),
+                "unit_sha256": ("TEXT", 1, 0),
+                "launcher_sha256": ("TEXT", 1, 0),
+                "interpreter_sha256": ("TEXT", 1, 0),
+                "target_profile_sha256": ("TEXT", 0, 0),
+                "target_compatibility_sha256": ("TEXT", 0, 0),
+                "intended_schema_version": ("INTEGER", 1, 0),
+                "state": ("TEXT", 1, 0),
+                "created_at": ("TEXT", 1, 0),
+                "resolved_at": ("TEXT", 0, 0),
+                "replacement_authority_json": ("TEXT", 0, 0),
+            }
         for table, expected_columns in expected.items():
             actual_table = table
             if table == "supervisor_authority":
@@ -3153,6 +3337,14 @@ class Ledger:
             raise CorruptSchemaError(f"ledger table {table!r} has unexpected foreign keys")
 
     def _validate_rows(self, *, allow_exited_active: bool = False) -> None:
+        if any(item[1] == "service_refresh_starts" for item in _schema_inventory(self._db())):
+            pending_seen = False
+            for start in self._db().execute("SELECT * FROM service_refresh_starts").fetchall():
+                _validate_service_refresh_start(self._queue_row(start))
+                if start["state"] == "pending":
+                    if pending_seen:
+                        raise CorruptSchemaError("multiple pending refresh starts have ambiguous ownership")
+                    pending_seen = True
         has_execution_tables = any(item[1] == "executions" for item in _schema_inventory(self._db()))
         has_integrity = any(item[1] == "execution_integrity" for item in _schema_inventory(self._db()))
         has_app_native = any(item[1] == "app_native_dispatches" for item in _schema_inventory(self._db()))
@@ -5036,6 +5228,9 @@ class Ledger:
                 raise CorruptSchemaError("program controller action receipt is inconsistent")
 
     def _migrate(self, version: SchemaVersion) -> None:
+        if version == SchemaVersion(21):
+            self._migrate_v21_to_v22()
+            return
         if version == SchemaVersion(20):
             self._migrate_v20_to_v21()
             return
@@ -5133,6 +5328,22 @@ class Ledger:
             raise CorruptSchemaError("migrated ledger violates the canonical foreign-key contract")
         self._migrate_v2_to_v3()
 
+    def _migrate_v21_to_v22(self) -> None:
+        """Add durable refresh start exclusion without inventing historical attempts."""
+
+        self._validate_schema_metadata(SchemaVersion(21))
+        self._validate_shape(SchemaVersion(21))
+        self._validate_rows()
+        with self._transaction(validate_authority=False):
+            self._db().execute(_SERVICE_REFRESH_STARTS_DDL)
+            self._db().execute("UPDATE schema_meta SET value = '22' WHERE key = 'schema_version'")
+            self._db().execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
+                (_SCHEMA_IDENTITIES[SchemaVersion(22)],),
+            )
+            self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
+            self._fault("after_migration")
+
     def _migrate_v20_to_v21(self) -> None:
         """Add the append-only program outcome subject store without backfill."""
 
@@ -5154,6 +5365,8 @@ class Ledger:
             )
             self._db().execute("UPDATE schema_meta SET value = 'complete' WHERE key = 'migration_marker'")
             self._fault("after_migration")
+
+        self._migrate_v21_to_v22()
 
     def _migrate_v19_to_v20(self) -> None:
         """Add immutable terminal authority for ordinary-control repairs."""
@@ -7016,7 +7229,13 @@ class Ledger:
 
         with self._read_transaction():
             version = self.schema_version
-            if version not in {SchemaVersion(18), SchemaVersion(19), SchemaVersion(20), CURRENT_SCHEMA_VERSION}:
+            if version not in {
+                SchemaVersion(18),
+                SchemaVersion(19),
+                SchemaVersion(20),
+                SchemaVersion(21),
+                CURRENT_SCHEMA_VERSION,
+            }:
                 raise CorruptSchemaError(f"refresh state does not support schema {version}")
             self._validate_schema_metadata(version)
             self._validate_shape(version)
@@ -17727,6 +17946,175 @@ class Ledger:
         row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
         return self._queue_row(row) if row is not None else None
 
+    def service_refresh_start(
+        self, *, repository_root: Path | str, state_root: Path | str, predecessor_epoch: int | None = None
+    ) -> JsonObject | None:
+        """Read retained intent, preferring any unresolved start over resolved history."""
+
+        with self._read_transaction():
+            self._validate_schema_metadata(CURRENT_SCHEMA_VERSION)
+            self._validate_shape(CURRENT_SCHEMA_VERSION)
+            self._validate_rows()
+            parameters: list[object] = [
+                os.fspath(Path(repository_root).resolve()),
+                os.fspath(Path(state_root).resolve()),
+            ]
+            predicate = "repository_root = ? AND state_root = ?"
+            if predecessor_epoch is not None:
+                predicate += " AND predecessor_epoch = ?"
+                parameters.append(predecessor_epoch)
+            else:
+                # One ledger has one harness authority. A changed root cannot
+                # hide an unresolved start that still owns this manager boundary.
+                predicate = f"({predicate}) OR state = 'pending'"
+            row = (
+                self._db()
+                .execute(
+                    f"SELECT * FROM service_refresh_starts WHERE {predicate} "
+                    "ORDER BY (state = 'pending') DESC, predecessor_epoch DESC LIMIT 1",
+                    parameters,
+                )
+                .fetchone()
+            )
+            return self._queue_row(row) if row is not None else None
+
+    def arm_service_refresh_start(
+        self,
+        *,
+        expected_authority: Mapping[str, object],
+        unit_name: str,
+        unit_sha256: str,
+        launcher_sha256: str,
+        interpreter_sha256: str,
+        target_profile_sha256: str | None,
+        target_compatibility_sha256: str | None,
+    ) -> JsonObject:
+        """Commit intent before the manager call; only a new insert permits start.
+
+        The returned permission is invocation-local, never a persisted replay token.
+        A crash or lost commit reply conservatively consumes the permission.
+        """
+
+        row: JsonObject = {
+            "repository_root": expected_authority.get("repository_root"),
+            "state_root": expected_authority.get("state_root"),
+            "predecessor_epoch": expected_authority.get("epoch"),
+            "predecessor_pid": expected_authority.get("pid"),
+            "predecessor_birth_identity": expected_authority.get("process_birth_identity"),
+            "predecessor_authority_sha256": hashlib.sha256(_encode_json(dict(expected_authority)).encode()).hexdigest(),
+            "unit_name": unit_name,
+            "unit_sha256": unit_sha256,
+            "launcher_sha256": launcher_sha256,
+            "interpreter_sha256": interpreter_sha256,
+            "target_profile_sha256": target_profile_sha256,
+            "target_compatibility_sha256": target_compatibility_sha256,
+            "intended_schema_version": int(CURRENT_SCHEMA_VERSION),
+            "state": "pending",
+            "created_at": utc_now(),
+            "resolved_at": None,
+            "replacement_authority_json": None,
+        }
+        _validate_service_refresh_start(row)
+        with self._transaction():
+            self._raise_if_active_harness_children_in_transaction()
+            current = self.harness_authority()
+            if current != dict(expected_authority) or current is None or current["requested_shutdown"] != 1:
+                raise StaleWriter("refresh start predecessor authority changed or is not fenced")
+            existing = (
+                self._db()
+                .execute(
+                    "SELECT * FROM service_refresh_starts WHERE (repository_root = ? AND state_root = ? "
+                    "AND predecessor_epoch = ?) OR state = 'pending' ORDER BY predecessor_epoch LIMIT 1",
+                    (row["repository_root"], row["state_root"], row["predecessor_epoch"]),
+                )
+                .fetchone()
+            )
+            if existing is not None:
+                retained = self._queue_row(existing)
+                if any(
+                    retained[field] != value
+                    for field, value in row.items()
+                    if field not in {"state", "created_at", "resolved_at", "replacement_authority_json"}
+                ):
+                    raise StaleWriter("refresh start conflicts with retained intent")
+                return {**retained, "start_permitted": False}
+            self._db().execute(
+                f"INSERT INTO service_refresh_starts ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",
+                tuple(row.values()),
+            )
+            self._fault("after_refresh_start_insert")
+        self._fault("after_refresh_start_commit")
+        return {**row, "start_permitted": True}
+
+    def resolve_service_refresh_start(
+        self, *, expected_start: Mapping[str, object], replacement_authority: Mapping[str, object], state: str
+    ) -> JsonObject:
+        """CAS exact observed replacement after service-owned health or stopped proof."""
+
+        expected = dict(expected_start)
+        _validate_service_refresh_start(expected)
+        if state not in {"healthy", "stopped_replacement"}:
+            raise ValueError("invalid refresh start resolution")
+        resolved = {
+            **expected,
+            "state": state,
+            "resolved_at": utc_now(),
+            "replacement_authority_json": _encode_json(dict(replacement_authority)),
+        }
+        _validate_service_refresh_start(resolved)
+        with self._transaction():
+            if self.harness_authority() != dict(replacement_authority):
+                raise StaleWriter("refresh replacement authority changed before resolution")
+            if state == "stopped_replacement":
+                self._raise_if_active_harness_children_in_transaction()
+            existing = (
+                self._db()
+                .execute(
+                    "SELECT * FROM service_refresh_starts WHERE repository_root = ? AND state_root = ? AND predecessor_epoch = ?",
+                    (expected["repository_root"], expected["state_root"], expected["predecessor_epoch"]),
+                )
+                .fetchone()
+            )
+            if existing is None:
+                raise StaleWriter("refresh start intent disappeared")
+            retained = self._queue_row(existing)
+            if retained["state"] != "pending":
+                recorded_authority = _decode_json_object(
+                    str(retained["replacement_authority_json"]), field_name="resolved refresh authority"
+                )
+                if (
+                    recorded_authority is not None
+                    and all(
+                        retained[field] == resolved[field]
+                        for field in resolved
+                        if field not in {"resolved_at", "replacement_authority_json"}
+                    )
+                    and all(
+                        recorded_authority[field] == replacement_authority[field]
+                        for field in recorded_authority
+                        if field not in {"renewed_at", "expires_at"}
+                    )
+                ):
+                    return retained
+                raise StaleWriter("refresh start resolution conflicts with retained history")
+            if retained != expected:
+                raise StaleWriter("refresh start intent changed before resolution")
+            self._db().execute(
+                "UPDATE service_refresh_starts SET state = ?, resolved_at = ?, replacement_authority_json = ? "
+                "WHERE repository_root = ? AND state_root = ? AND predecessor_epoch = ? AND state = 'pending'",
+                (
+                    state,
+                    resolved["resolved_at"],
+                    resolved["replacement_authority_json"],
+                    expected["repository_root"],
+                    expected["state_root"],
+                    expected["predecessor_epoch"],
+                ),
+            )
+            self._fault("after_refresh_start_resolution")
+        self._fault("after_refresh_start_resolution_commit")
+        return resolved
+
     def harness_refresh_fenced(self) -> bool:
         """Return whether the durable harness row rejects new work."""
 
@@ -17823,15 +18211,50 @@ class Ledger:
         with self._transaction():
             self._raise_if_active_harness_children_in_transaction()
 
-    def arm_harness_refresh_fence(self) -> JsonObject | None:
-        """Atomically reject active children and arm the existing shutdown fact."""
+    def arm_harness_refresh_fence(
+        self,
+        *,
+        expected_start: Mapping[str, object] | None = None,
+        expected_authority: Mapping[str, object] | None = None,
+    ) -> JsonObject | None:
+        """Fence normal refresh, or CAS one pending start's acquired unhealthy owner."""
 
+        if (expected_start is None) != (expected_authority is None):
+            raise ValueError("refresh replacement fence requires both expected start and authority")
         with self._transaction():
+            pending = self._db().execute("SELECT * FROM service_refresh_starts WHERE state = 'pending'").fetchall()
+            if expected_start is None and pending:
+                raise HarnessRefreshBlocked("unresolved prior refresh start must be reconciled before fencing")
             self._raise_if_active_harness_children_in_transaction()
-            row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
-            if row is None:
+            raw = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
+            current = self._queue_row(raw) if raw is not None else None
+            if expected_start is not None:
+                _validate_service_refresh_start(expected_start)
+                if len(pending) != 1 or self._queue_row(pending[0]) != dict(expected_start):
+                    raise StaleWriter("replacement fence conflicts with pending refresh intent")
+                if current is None or current != dict(expected_authority):
+                    raise StaleWriter("replacement fence authority changed")
+                if type(current["requested_shutdown"]) is not int or current["requested_shutdown"] not in {0, 1}:
+                    raise CorruptSchemaError("replacement fence bit is malformed")
+                if (
+                    expected_start["intended_schema_version"] != int(CURRENT_SCHEMA_VERSION)
+                    or current["executable_digest"] != expected_start["interpreter_sha256"]
+                ):
+                    raise StaleWriter("replacement fence schema or interpreter identity changed")
+                # Reuse the same closed identity checks as resolution. These
+                # prospective facts are never persisted by this fence API.
+                _validate_service_refresh_start(
+                    {
+                        **expected_start,
+                        "state": "stopped_replacement",
+                        "resolved_at": utc_now(),
+                        "replacement_authority_json": _encode_json({**current, "requested_shutdown": 1}),
+                    }
+                )
+            if current is None:
                 return None
-            self._db().execute("UPDATE harness_authority SET requested_shutdown = 1 WHERE singleton = 1")
+            if current["requested_shutdown"] != 1:
+                self._db().execute("UPDATE harness_authority SET requested_shutdown = 1 WHERE singleton = 1")
             row = self._db().execute("SELECT * FROM harness_authority WHERE singleton = 1").fetchone()
             return self._queue_row(row)
 
@@ -17849,7 +18272,7 @@ class Ledger:
         version = self._legacy_schema_version
         authority_table = _predecessor_refresh_authority_table(version) if version is not None else None
         if authority_table is None:
-            raise MigrationRequired("predecessor refresh fencing requires a supported legacy schema-v18-v20 opener")
+            raise MigrationRequired("predecessor refresh fencing requires a supported legacy schema-v18-v21 opener")
         with self._transaction(validate_authority=False):
             self._raise_if_active_harness_children_in_transaction()
             row = self._db().execute(f"SELECT * FROM {authority_table} WHERE singleton = 1").fetchone()
@@ -17871,7 +18294,7 @@ class Ledger:
         version = self._legacy_schema_version
         authority_table = _predecessor_refresh_authority_table(version) if version is not None else None
         if authority_table is None:
-            raise MigrationRequired("predecessor refresh fencing requires a supported legacy schema-v18-v20 opener")
+            raise MigrationRequired("predecessor refresh fencing requires a supported legacy schema-v18-v21 opener")
         row = self._db().execute(f"SELECT requested_shutdown FROM {authority_table} WHERE singleton = 1").fetchone()
         if row is None:
             return False

@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 import pytest
 
 import codex_flow.service as service_module
-from codex_flow.ledger import HarnessRefreshBlocked, Ledger
+from codex_flow.ledger import CURRENT_SCHEMA_VERSION, HarnessRefreshBlocked, Ledger
 from codex_flow.service import (
     CredentialUnavailable,
     ServiceError,
@@ -377,9 +377,11 @@ def _same_topology_refresh_fixture(
         ledger.arm_harness_refresh_fence()
     ledger.close()
 
-    if schema_version in {19, 20}:
+    if schema_version in {19, 20, 21}:
         connection = sqlite3.connect(ledger_path)
-        connection.execute("DROP TABLE program_outcomes")
+        connection.execute("DROP TABLE service_refresh_starts")
+        if schema_version < 21:
+            connection.execute("DROP TABLE program_outcomes")
         if schema_version == 19:
             connection.execute("DROP TABLE dispatch_terminal_integrity")
         connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (str(schema_version),))
@@ -388,12 +390,14 @@ def _same_topology_refresh_fixture(
             (
                 "codex_flow_harness_candidate_retention_v19"
                 if schema_version == 19
-                else "codex_flow_dispatch_terminal_integrity_v20",
+                else "codex_flow_dispatch_terminal_integrity_v20"
+                if schema_version == 20
+                else "codex_flow_program_outcomes_v21",
             ),
         )
         connection.commit()
         connection.close()
-    elif schema_version != 21:
+    elif schema_version != int(CURRENT_SCHEMA_VERSION):
         raise AssertionError(f"unsupported fixture schema: {schema_version}")
     if not authority:
         connection = sqlite3.connect(ledger_path)
@@ -409,7 +413,7 @@ def _same_topology_refresh_fixture(
     return repository, unit, ledger_path, config_home, executable, processes, service_state
 
 
-@pytest.mark.parametrize("schema_version", [19, 20, 21])
+@pytest.mark.parametrize("schema_version", [19, 20, 21, int(CURRENT_SCHEMA_VERSION)])
 @pytest.mark.parametrize("initial_fenced", [False, True])
 @pytest.mark.parametrize("rotated_profile", [False, True])
 def test_refresh_migrates_v19_v20_through_current_harness_topology(
@@ -509,7 +513,7 @@ def test_refresh_migrates_v19_v20_through_current_harness_topology(
     assert result["new_epoch"] == 2
     assert shutdown_paths == [repository / ".codex-flow" / "runtime" / "harness.sock"]
     assert "supervisor.sock" not in {path.name for path in shutdown_paths}
-    if schema_version < 21:
+    if schema_version < int(CURRENT_SCHEMA_VERSION):
         assert events.index("shutdown") < events.index("migrate-open") < events.index("publish")
     assert events.index("publish") < events.index("daemon-reload") < events.index("start")
     assert unit_path(config_home=config_home, repository_root=repository).read_bytes() == unit.text.encode()
@@ -517,7 +521,7 @@ def test_refresh_migrates_v19_v20_through_current_harness_topology(
 
     migrated = Ledger(ledger_path)
     try:
-        assert migrated.schema_version.value == 21
+        assert migrated.schema_version == CURRENT_SCHEMA_VERSION
         authority = migrated.harness_authority()
         assert authority is not None
         assert authority["epoch"] == 2
@@ -652,7 +656,7 @@ def test_v20_migration_failure_keeps_current_topology_forward_only(
     assert (config_home / "systemd" / "user" / unit.unit_name).read_bytes() == old_unit.text.encode("utf-8")
     check = sqlite3.connect(ledger_path)
     try:
-        expected_version = "20" if failure_stage == "before_commit" else "21"
+        expected_version = "20" if failure_stage == "before_commit" else str(int(CURRENT_SCHEMA_VERSION))
         assert (
             check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
             == expected_version
@@ -793,7 +797,7 @@ def test_v20_uncertain_start_retains_current_unit_and_fence_without_rollback(tmp
     assert (config_home / "systemd" / "user" / unit.unit_name).read_bytes() == unit.text.encode("utf-8")
     check = Ledger(ledger_path)
     try:
-        assert check.schema_version.value == 21
+        assert check.schema_version == CURRENT_SCHEMA_VERSION
         authority = check.harness_authority()
         assert authority is not None and authority["requested_shutdown"] == 1
     finally:
@@ -818,7 +822,7 @@ def test_refresh_rejects_replacement_identity_mismatch(
 
     def read_identity(_pid: int) -> str:
         if identity_failure == "pid_reuse":
-            return next(identity_values)
+            return next(identity_values, "reused-birth")
         return replacement_birth
 
     def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
@@ -861,7 +865,10 @@ def test_refresh_rejects_replacement_identity_mismatch(
         return {"version": 1, "ok": True, "operation": "shutdown"}
 
     try:
-        with pytest.raises(ServiceRefreshFailed, match="health check failed"):
+        with pytest.raises(
+            ServiceRefreshFailed,
+            match=("fence could not be armed" if identity_failure == "interpreter_digest" else "health check failed"),
+        ):
             refresh_with_credential(
                 unit,
                 config_home=tmp_path / "config",
@@ -873,10 +880,12 @@ def test_refresh_rejects_replacement_identity_mismatch(
                 shutdown_sender=shutdown,
             )
         assert "start" in [call[2] for call in calls]
-        assert "stop" in [call[2] for call in calls]
+        assert ("stop" in [call[2] for call in calls]) is (identity_failure != "interpreter_digest")
         assert (tmp_path / "config" / "systemd" / "user" / unit.unit_name).read_text(encoding="utf-8") == unit.text
         authority = ledger.harness_authority()
-        assert authority is not None and authority["requested_shutdown"] == 1
+        assert authority is not None and authority["requested_shutdown"] == int(
+            identity_failure != "interpreter_digest"
+        )
     finally:
         ledger.close()
 
@@ -1066,7 +1075,7 @@ def test_current_schema_reentry_rejects_any_retained_socket_entry(
     tmp_path: Path, socket_name: str, entry_kind: str
 ) -> None:
     repository, unit, ledger_path, config_home, _executable, processes, service_state = _same_topology_refresh_fixture(
-        tmp_path, 21, fenced=True
+        tmp_path, int(CURRENT_SCHEMA_VERSION), fenced=True
     )
     install_unit(service_module._legacy_supervisor_unit(unit), config_home=config_home)
     processes[(500, "old-birth")] = False
@@ -1106,7 +1115,9 @@ def test_current_schema_reentry_rejects_any_retained_socket_entry(
         assert "start" not in [call[2] for call in calls]
         check = sqlite3.connect(ledger_path)
         try:
-            assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "21"
+            assert check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == str(
+                int(CURRENT_SCHEMA_VERSION)
+            )
             assert (
                 check.execute("SELECT requested_shutdown FROM harness_authority WHERE singleton = 1").fetchone()[0] == 1
             )
@@ -1146,7 +1157,7 @@ def test_current_unhealthy_replacement_retains_current_unit_and_fresh_retry_succ
                     state_root=repository,
                     pid=_TEST_REPLACEMENT_PID,
                     process_birth_identity=first_birth,
-                    executable_digest="c" * 64,
+                    executable_digest=_TEST_INTERPRETER_DIGEST,
                     version=unit.version,
                     owner_nonce_sha256="d" * 64,
                 )
@@ -1171,7 +1182,7 @@ def test_current_unhealthy_replacement_retains_current_unit_and_fresh_retry_succ
                 runner=first_runner,
                 ledger=ledger,
                 process_is_live=lambda pid, birth: processes.get((pid, birth), False),
-                identity_reader=lambda _pid: first_birth,
+                identity_reader=lambda _pid: "unhealthy-birth",
                 shutdown_sender=shutdown,
             )
         assert "stop" in [call[2] for call in first_calls]
@@ -1283,7 +1294,9 @@ def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hi
     assert [call[2] for call in calls][:1] == ["show"]
     connection = sqlite3.connect(ledger_path)
     try:
-        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "21"
+        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == str(
+            int(CURRENT_SCHEMA_VERSION)
+        )
         authority = connection.execute(
             "SELECT requested_shutdown FROM harness_authority WHERE singleton = 1"
         ).fetchone()
@@ -1320,6 +1333,18 @@ def test_interrupted_v19_refresh_classifies_each_post_staging_failure_without_hi
             finally:
                 replacement.close()
         return _SystemctlResult(0)
+
+    if failure_stage in {"start", "health"}:
+        with pytest.raises(ServiceRefreshFailed, match="unresolved prior refresh start"):
+            refresh_with_credential(
+                unit,
+                config_home=config_home,
+                environment={"OPENAI_API_KEY": "secret"},
+                runner=retry_runner,
+                process_is_live=lambda _pid, _birth: False,
+            )
+        assert not replacement_started
+        return
 
     result = refresh_with_credential(
         unit,
@@ -1464,10 +1489,11 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
     fence_calls = 0
     original_fence = Ledger.arm_harness_refresh_fence
 
-    def count_fence(self: Ledger) -> object:
+    def count_fence(self: Ledger, **kwargs: object) -> object:
         nonlocal fence_calls
-        fence_calls += 1
-        return original_fence(self)
+        if self.harness_authority()["requested_shutdown"] == 0:
+            fence_calls += 1
+        return original_fence(self, **kwargs)
 
     monkeypatch.setattr(Ledger, "arm_harness_refresh_fence", count_fence)
 
@@ -1537,6 +1563,7 @@ def test_started_replacement_health_failure_is_refenced_stopped_and_restored_bef
         "is-active",
         "stop",
         "is-active",
+        "show",
         "show",
         "unset-environment",
     ]
@@ -1615,10 +1642,11 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
     fence_calls = 0
     original_fence = Ledger.arm_harness_refresh_fence
 
-    def count_fence(self: Ledger) -> object:
+    def count_fence(self: Ledger, **kwargs: object) -> object:
         nonlocal fence_calls
-        fence_calls += 1
-        return original_fence(self)
+        if self.harness_authority()["requested_shutdown"] == 0:
+            fence_calls += 1
+        return original_fence(self, **kwargs)
 
     monkeypatch.setattr(Ledger, "arm_harness_refresh_fence", count_fence)
 
@@ -1691,6 +1719,7 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
             "stop",
             "is-active",
             "show",
+            "show",
             "unset-environment",
         ]
         if requested_shutdown == 0
@@ -1705,17 +1734,17 @@ def test_refresh_rolls_back_matching_higher_epoch_with_existing_or_new_fence(
             "stop",
             "is-active",
             "show",
+            "show",
             "unset-environment",
         ]
     )
     assert fence_calls == (1 if requested_shutdown == 0 else 0)
 
 
-def test_refresh_positive_predecessor_absence_proof_restores_only_after_three_spaced_observations(
+def test_refresh_pending_intent_never_becomes_absent_after_spaced_observations(
     tmp_path: Path,
 ) -> None:
     _repository, unit, _ledger_path, config_home, installed_path = _interrupted_refresh_fixture(tmp_path)
-    before_bytes = installed_path.read_bytes()
     now = [0.0]
     sleeps: list[float] = []
 
@@ -1745,7 +1774,7 @@ def test_refresh_positive_predecessor_absence_proof_restores_only_after_three_sp
 
     ledger = Ledger(_ledger_path)
     try:
-        with pytest.raises(ServiceRefreshFailed, match="did not acquire a newer epoch"):
+        with pytest.raises(ServiceRefreshFailed, match="timed out"):
             refresh_with_credential(
                 unit,
                 config_home=config_home,
@@ -1761,9 +1790,14 @@ def test_refresh_positive_predecessor_absence_proof_restores_only_after_three_sp
     finally:
         ledger.close()
 
-    assert installed_path.read_bytes() == before_bytes
-    assert len(sleeps) == 2
-    assert all(delay >= 0.05 for delay in sleeps)
+    assert installed_path.read_bytes() == unit.text.encode()
+    assert len(sleeps) >= 3
+    check = Ledger(_ledger_path)
+    assert (
+        check.service_refresh_start(repository_root=unit.repository_root, state_root=unit.state_root)["state"]
+        == "pending"
+    )
+    check.close()
 
 
 def test_refresh_accepts_legitimate_replacement_after_predecessor_wait_observation(
@@ -1831,7 +1865,7 @@ def test_refresh_accepts_legitimate_replacement_after_predecessor_wait_observati
     assert result["old_epoch"] == int(predecessor["epoch"])
     assert result["new_epoch"] == int(replacement["epoch"])
     assert observed[:5] == [predecessor, predecessor, predecessor, predecessor, replacement]
-    assert sleeps == [0.05, 0.05]
+    assert sleeps == [0.05, 0.05, 0.05]
 
 
 def test_refresh_rejects_replacement_to_different_replacement_identity_drift(tmp_path: Path) -> None:
@@ -2004,6 +2038,9 @@ def test_refresh_defers_before_shutdown_or_manager_mutation_for_active_child(tmp
     shutdowns: list[Path] = []
 
     class ActiveChildLedger:
+        def service_refresh_start(self, **_kwargs: object) -> None:
+            return None
+
         def arm_harness_refresh_fence(self) -> None:
             raise HarnessRefreshBlocked("worker child is active")
 
@@ -2143,6 +2180,7 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     connection = sqlite3.connect(ledger_path)
     connection.execute("DROP TABLE dispatch_terminal_integrity")
     connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    connection.execute("DROP TABLE service_refresh_starts")
     connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
     connection.execute(
         "UPDATE schema_meta SET value = 'codex_flow_event_driven_program_controller_v18' WHERE key = 'schema_identity'"
@@ -2226,7 +2264,7 @@ def test_refresh_migrates_one_installed_v18_supervisor_handoff_to_harness(tmp_pa
     ]
     migrated = Ledger(ledger_path)
     try:
-        assert migrated.schema_version.value == 21
+        assert migrated.schema_version == CURRENT_SCHEMA_VERSION
         assert (
             migrated._db().execute("SELECT 1 FROM sqlite_master WHERE name = 'supervisor_authority'").fetchone() is None
         )
@@ -2258,6 +2296,7 @@ def test_v18_refresh_install_failure_keeps_legacy_pair_retryable(
     connection = sqlite3.connect(ledger_path)
     connection.execute("DROP TABLE dispatch_terminal_integrity")
     connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    connection.execute("DROP TABLE service_refresh_starts")
     connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
     connection.execute(
         "UPDATE schema_meta SET value = 'codex_flow_event_driven_program_controller_v18' WHERE key = 'schema_identity'"
@@ -2335,6 +2374,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     connection = sqlite3.connect(ledger_path)
     connection.execute("DROP TABLE dispatch_terminal_integrity")
     connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    connection.execute("DROP TABLE service_refresh_starts")
     connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
     connection.execute(
         "UPDATE schema_meta SET value = 'codex_flow_event_driven_program_controller_v18' WHERE key = 'schema_identity'"
@@ -2412,7 +2452,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     assert [call[2] for call in calls] == ["is-active", "show"]
     check = sqlite3.connect(ledger_path)
     try:
-        expected_version = "21" if failure_stage == "rollback_failure" else "18"
+        expected_version = str(int(CURRENT_SCHEMA_VERSION)) if failure_stage == "rollback_failure" else "18"
         assert (
             check.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
             == expected_version
@@ -2493,7 +2533,7 @@ def test_v18_refresh_migration_opener_failure_restores_legacy_pair_and_retries(
     ]
     migrated = Ledger(ledger_path)
     try:
-        assert migrated.schema_version.value == 21
+        assert migrated.schema_version == CURRENT_SCHEMA_VERSION
         assert migrated.harness_authority() is not None
     finally:
         migrated.close()
@@ -2508,6 +2548,7 @@ def test_v18_refresh_rejects_dangling_or_new_socket_symlink_before_start(tmp_pat
     connection = sqlite3.connect(ledger_path)
     connection.execute("DROP TABLE dispatch_terminal_integrity")
     connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+    connection.execute("DROP TABLE service_refresh_starts")
     connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
     connection.execute(
         "UPDATE schema_meta SET value = 'codex_flow_event_driven_program_controller_v18' WHERE key = 'schema_identity'"
@@ -2622,7 +2663,7 @@ def test_refresh_rejects_unproven_manager_before_any_effect(
     else:
         _repository, unit, ledger_path, config_home, _executable, _processes, _state = _same_topology_refresh_fixture(
             tmp_path,
-            21 if topology == "current" else 19,
+            int(CURRENT_SCHEMA_VERSION) if topology == "current" else 19,
             fenced=True,
         )
         installed = unit_path(repository_root=unit.repository_root, config_home=config_home)
@@ -2659,7 +2700,7 @@ def test_refresh_rejects_unproven_manager_before_any_effect(
     assert installed.read_bytes() == before
     with sqlite3.connect(ledger_path) as connection:
         assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == (
-            "19" if topology == "predecessor" else "21"
+            "19" if topology == "predecessor" else str(int(CURRENT_SCHEMA_VERSION))
         )
         assert connection.execute("SELECT requested_shutdown FROM harness_authority").fetchone()[0] == 1
 
@@ -2746,7 +2787,7 @@ def test_refresh_rollback_cannot_restore_with_unproven_manager_pid(tmp_path: Pat
                 state_root=unit.state_root,
                 pid=_TEST_REPLACEMENT_PID,
                 process_birth_identity=_TEST_REPLACEMENT_BIRTH,
-                executable_digest="f" * 64,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
                 version=unit.version,
                 owner_nonce_sha256="d" * 64,
             )
@@ -2763,6 +2804,7 @@ def test_refresh_rollback_cannot_restore_with_unproven_manager_pid(tmp_path: Pat
                 environment={"OPENAI_API_KEY": "secret"},
                 runner=runner,
                 process_is_live=lambda pid, _birth: started and not stopped and pid == _TEST_REPLACEMENT_PID,
+                identity_reader=lambda _pid: "unhealthy-birth",
                 sleeper=lambda _: pytest.fail("rollback must reject its final manager proof"),
             )
         assert started and stopped
@@ -2773,7 +2815,7 @@ def test_refresh_rollback_cannot_restore_with_unproven_manager_pid(tmp_path: Pat
         ledger.close()
 
 
-@pytest.mark.parametrize("schema_version", [20, 21])
+@pytest.mark.parametrize("schema_version", [20, 21, int(CURRENT_SCHEMA_VERSION)])
 @pytest.mark.parametrize(
     "failure_stage",
     [
@@ -2795,7 +2837,7 @@ def test_profile_rotation_failure_reentry_preserves_unit_and_decisions(
     from codex_flow.domain import ControllerGenerationState
 
     repository, _unit, ledger_path, config_home, executable, processes, service_state = _same_topology_refresh_fixture(
-        tmp_path, 21
+        tmp_path, int(CURRENT_SCHEMA_VERSION)
     )
     processes[(500, "old-birth")] = False
     service_state["active"] = False
@@ -2860,12 +2902,22 @@ def test_profile_rotation_failure_reentry_preserves_unit_and_decisions(
     if failure_stage != "active-generation":
         ledger.arm_harness_refresh_fence()
     ledger.close()
+    if schema_version < int(CURRENT_SCHEMA_VERSION):
+        with sqlite3.connect(ledger_path) as connection:
+            connection.execute("DROP TABLE service_refresh_starts")
     if schema_version == 20:
         with sqlite3.connect(ledger_path) as connection:
             connection.execute("DROP TABLE program_outcomes")
             connection.execute("UPDATE schema_meta SET value = '20' WHERE key = 'schema_version'")
             connection.execute(
                 "UPDATE schema_meta SET value = 'codex_flow_dispatch_terminal_integrity_v20' WHERE key = 'schema_identity'"
+            )
+
+    if schema_version == 21:
+        with sqlite3.connect(ledger_path) as connection:
+            connection.execute("UPDATE schema_meta SET value = '21' WHERE key = 'schema_version'")
+            connection.execute(
+                "UPDATE schema_meta SET value = 'codex_flow_program_outcomes_v21' WHERE key = 'schema_identity'"
             )
 
     def authorize(self: Ledger, **kwargs: str) -> int:
@@ -2947,7 +2999,7 @@ def test_profile_rotation_failure_reentry_preserves_unit_and_decisions(
     assert path.read_bytes() == (target if published else old_unit).text.encode()
     assert events.count("start") == int(failure_stage == "start")
     check = Ledger(ledger_path)
-    assert check.schema_version.value == 21
+    assert check.schema_version == CURRENT_SCHEMA_VERSION
     assert check.harness_refresh_fenced()
     assert identified_snapshot(check) == historical
     binding = check.queue_binding(decisions[0].dispatch_id)
@@ -2955,8 +3007,13 @@ def test_profile_rotation_failure_reentry_preserves_unit_and_decisions(
     check.close()
     armed = False
     events.clear()
-    assert refresh()["refreshed"] is True
-    assert events.count("start") == 1
+    if failure_stage == "start":
+        with pytest.raises(ServiceRefreshFailed, match="unresolved prior refresh start"):
+            refresh()
+        assert events.count("start") == 0
+    else:
+        assert refresh()["refreshed"] is True
+        assert events.count("start") == 1
     check = Ledger(ledger_path)
     assert identified_snapshot(check) == historical
     assert check.queue_binding(decisions[0].dispatch_id)["native_profile_sha256"] == "e" * 64
@@ -3015,5 +3072,304 @@ def test_profile_rotation_rejects_unit_drift_before_publication_or_start(
     assert "start" not in calls
     assert ("publish" in calls) == mutation.startswith("target")
     check = Ledger(ledger_path, allow_legacy=True)
-    assert check.schema_version.value == (21 if mutation.startswith("target") else 20)
+    assert check.schema_version.value == (int(CURRENT_SCHEMA_VERSION) if mutation.startswith("target") else 20)
     check.close()
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "raised", "timeout", "after_refresh_start_commit"])
+def test_refresh_pending_start_survives_reopen_without_second_manager_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    repository, unit, ledger, _processes, _state = _refresh_fixture(tmp_path)
+    ledger.close()
+    calls: list[str] = []
+    original_fault = Ledger._fault
+    now = [0.0]
+
+    def fault(self: Ledger, stage: str) -> None:
+        if stage == failure:
+            raise RuntimeError("lost intent commit reply")
+        original_fault(self, stage)
+
+    monkeypatch.setattr(Ledger, "_fault", fault)
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        operation = argv[2]
+        calls.append(operation)
+        if operation == "show":
+            return _SystemctlResult(0, "ActiveState=inactive\nMainPID=0\n")
+        if operation == "is-active":
+            return _SystemctlResult(3)
+        if operation == "start":
+            if failure == "raised":
+                raise OSError("uncertain manager reply")
+            return _SystemctlResult(1 if failure == "nonzero" else 0)
+        return _SystemctlResult(0)
+
+    def clock() -> float:
+        now[0] += 0.001
+        return now[0]
+
+    def refresh() -> dict[str, object]:
+        return refresh_with_credential(
+            unit,
+            config_home=tmp_path / "config",
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda _pid, _birth: False,
+            clock=clock,
+            sleeper=lambda delay: now.__setitem__(0, now[0] + delay),
+            deadline_seconds=0.1,
+        )
+
+    with pytest.raises(ServiceRefreshFailed):
+        refresh()
+    expected_starts = 0 if failure == "after_refresh_start_commit" else 1
+    assert calls.count("start") == expected_starts
+    ledger = Ledger(repository / ".codex-flow" / "workflow.db")
+    retained = ledger.service_refresh_start(repository_root=repository, state_root=repository)
+    assert retained is not None and retained["state"] == "pending"
+    authority = ledger.harness_authority()
+    ledger.close()
+    calls_before = list(calls)
+    with pytest.raises(ServiceRefreshFailed, match="unresolved prior refresh start"):
+        refresh()
+    assert calls == calls_before  # No fence, staging, import, stop, or start on replay.
+    ledger = Ledger(repository / ".codex-flow" / "workflow.db")
+    assert ledger.service_refresh_start(repository_root=repository, state_root=repository) == retained
+    assert ledger.harness_authority() == authority
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    "resolution_fault",
+    [
+        None,
+        "after_refresh_start_resolution",
+        "after_refresh_start_resolution_commit",
+        "became-healthy",
+        "authority-renewed",
+    ],
+)
+def test_pending_refresh_reconciles_late_healthy_replacement_and_lost_resolution_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolution_fault: str | None
+) -> None:
+    repository, unit, ledger, _processes, _state = _refresh_fixture(tmp_path)
+    path = ledger.path
+    ledger.close()
+    calls: list[str] = []
+    active = False
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        calls.append(argv[2])
+        if argv[2] == "show":
+            return _SystemctlResult(0, "ActiveState=inactive\nMainPID=0\n")
+        if argv[2] == "is-active":
+            return _SystemctlResult(0 if active else 3)
+        return _SystemctlResult(1 if argv[2] == "start" else 0)
+
+    def refresh() -> dict[str, object]:
+        return refresh_with_credential(
+            unit,
+            config_home=tmp_path / "config",
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda pid, birth: (
+                active and (pid, birth) == (_TEST_REPLACEMENT_PID, _TEST_REPLACEMENT_BIRTH)
+            ),
+        )
+
+    with pytest.raises(ServiceRefreshFailed):
+        refresh()
+    ledger = Ledger(path)
+    pending = ledger.service_refresh_start(repository_root=repository, state_root=repository)
+    replacement = ledger.acquire_harness(
+        repository_root=repository,
+        state_root=repository,
+        pid=_TEST_REPLACEMENT_PID,
+        process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+        executable_digest=_TEST_INTERPRETER_DIGEST,
+        version=unit.version,
+        owner_nonce_sha256="d" * 64,
+    )
+    ledger.close()
+    active = True
+    original_fault = Ledger._fault
+
+    def fault(self: Ledger, stage: str) -> None:
+        if stage == resolution_fault:
+            raise RuntimeError("lost resolution reply")
+        original_fault(self, stage)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Ledger, "_fault", fault)
+        if resolution_fault in {"became-healthy", "authority-renewed"}:
+            original_health = service_module._replacement_is_healthy
+            observed = [False]
+
+            def racing_health(*args: object, **kwargs: object) -> bool:
+                nonlocal replacement
+                if not observed[0]:
+                    observed[0] = True
+                    if resolution_fault == "authority-renewed":
+                        current = Ledger(path)
+                        replacement = current.renew_harness(epoch=2, owner_nonce_sha256="d" * 64)
+                        current.close()
+                    return False
+                return original_health(*args, **kwargs)
+
+            patcher.setattr(service_module, "_replacement_is_healthy", racing_health)
+        if resolution_fault is not None:
+            with pytest.raises(ServiceRefreshFailed):
+                refresh()
+        else:
+            assert refresh()["new_epoch"] == replacement["epoch"]
+    assert refresh()["new_epoch"] == replacement["epoch"]
+    assert calls.count("start") == 1 and "stop" not in calls
+    ledger = Ledger(path)
+    resolved = ledger.service_refresh_start(repository_root=repository, state_root=repository)
+    assert resolved is not None and pending is not None and resolved["state"] == "healthy"
+    for field in pending:
+        if field not in {"state", "resolved_at", "replacement_authority_json"}:
+            assert resolved[field] == pending[field]
+    assert ledger.harness_authority() == replacement
+    if resolution_fault is None:
+        # A later explicit installer fence starts a new handoff under epoch 2;
+        # resolved history must not permanently disable ordinary refresh.
+        ledger.arm_harness_refresh_fence()
+    ledger.close()
+    if resolution_fault is None:
+        active = False
+        with pytest.raises(ServiceRefreshFailed, match="replacement start failed"):
+            refresh()
+        assert calls.count("start") == 2
+        ledger = Ledger(path)
+        assert ledger.service_refresh_start(repository_root=repository, state_root=repository)["predecessor_epoch"] == 2
+        ledger.close()
+
+
+def test_pending_refresh_stops_exact_acquired_replacement_then_starts_only_new_epoch(tmp_path: Path) -> None:
+    repository, unit, ledger, _processes, _state = _refresh_fixture(tmp_path)
+    path = ledger.path
+    ledger.close()
+    calls: list[str] = []
+    active_pid = [0]
+    permit_start = [False]
+
+    def runner(argv: tuple[str, ...], **_: object) -> _SystemctlResult:
+        operation = argv[2]
+        calls.append(operation)
+        if operation == "show":
+            return _SystemctlResult(0, "ActiveState=inactive\nMainPID=0\n")
+        if operation == "is-active":
+            return _SystemctlResult(0 if active_pid[0] else 3)
+        if operation == "stop":
+            active_pid[0] = 0
+        if operation == "start":
+            if not permit_start[0]:
+                return _SystemctlResult(1)
+            replacement = Ledger(path)
+            replacement.acquire_harness(
+                repository_root=repository,
+                state_root=repository,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
+                version=unit.version,
+                owner_nonce_sha256="e" * 64,
+            )
+            replacement.close()
+            active_pid[0] = _TEST_REPLACEMENT_PID
+        return _SystemctlResult(0)
+
+    def refresh() -> dict[str, object]:
+        return refresh_with_credential(
+            unit,
+            config_home=tmp_path / "config",
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=runner,
+            process_is_live=lambda pid, _birth: pid == active_pid[0],
+        )
+
+    with pytest.raises(ServiceRefreshFailed):
+        refresh()
+    ledger = Ledger(path)
+    replacement = ledger.acquire_harness(
+        repository_root=repository,
+        state_root=repository,
+        pid=501,
+        process_birth_identity="acquired-unhealthy",
+        executable_digest=_TEST_INTERPRETER_DIGEST,
+        version=unit.version,
+        owner_nonce_sha256="d" * 64,
+    )
+    ledger.close()
+    active_pid[0] = 501
+    with pytest.raises(ServiceRefreshFailed, match="health check failed"):
+        refresh()
+    assert calls.count("start") == 1 and calls.count("stop") == 1
+    ledger = Ledger(path)
+    stopped = ledger.service_refresh_start(repository_root=repository, state_root=repository)
+    assert stopped is not None and stopped["state"] == "stopped_replacement"
+    assert ledger.harness_authority()["epoch"] == replacement["epoch"]
+    assert ledger.harness_refresh_fenced()
+    ledger.close()
+    permit_start[0] = True
+    assert refresh()["old_epoch"] == replacement["epoch"]
+    assert calls.count("start") == 2
+    ledger = Ledger(path)
+    assert (
+        ledger.service_refresh_start(repository_root=repository, state_root=repository, predecessor_epoch=1) == stopped
+    )
+    assert ledger.service_refresh_start(repository_root=repository, state_root=repository)["predecessor_epoch"] == 2
+    ledger.close()
+
+
+def test_refresh_stale_initial_read_cannot_fence_concurrent_pending_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, unit, ledger, _processes, _state = _refresh_fixture(tmp_path)
+    path = ledger.path
+    ledger.close()
+    original_fence = Ledger.arm_harness_refresh_fence
+    acquired: list[dict[str, object]] = []
+
+    def raced_fence(self: Ledger, **kwargs: object):
+        winner = Ledger(path)
+        predecessor = original_fence(winner)
+        winner.arm_service_refresh_start(
+            expected_authority=predecessor,
+            unit_name=unit.unit_name,
+            unit_sha256=hashlib.sha256(unit.text.encode()).hexdigest(),
+            launcher_sha256=hashlib.sha256(unit.executable.read_bytes()).hexdigest(),
+            interpreter_sha256=_TEST_INTERPRETER_DIGEST,
+            target_profile_sha256=None,
+            target_compatibility_sha256=None,
+        )
+        acquired.append(
+            winner.acquire_harness(
+                repository_root=repository,
+                state_root=repository,
+                pid=_TEST_REPLACEMENT_PID,
+                process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+                executable_digest=_TEST_INTERPRETER_DIGEST,
+                version=unit.version,
+                owner_nonce_sha256="d" * 64,
+            )
+        )
+        winner.close()
+        return original_fence(self, **kwargs)
+
+    monkeypatch.setattr(Ledger, "arm_harness_refresh_fence", raced_fence)
+    with pytest.raises(ServiceRefreshDeferred, match="unresolved prior refresh start"):
+        refresh_with_credential(
+            unit,
+            config_home=tmp_path / "config",
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=lambda *_args, **_kwargs: pytest.fail("losing refresh must not reach manager"),
+            process_is_live=lambda _pid, _birth: False,
+        )
+    ledger = Ledger(path)
+    assert ledger.harness_authority() == acquired[0]
+    assert ledger.service_refresh_start(repository_root=repository, state_root=repository)["state"] == "pending"
+    ledger.close()

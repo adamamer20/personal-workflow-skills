@@ -198,6 +198,8 @@ def _prepare_supported_legacy_ledger(
     ledger.close()
 
     connection = sqlite3.connect(path)
+    if version < SchemaVersion(22):
+        connection.execute("DROP TABLE service_refresh_starts")
     if version < SchemaVersion(21):
         connection.execute("DROP TABLE program_outcomes")
     if version < SchemaVersion(20):
@@ -834,6 +836,7 @@ class LedgerTests(unittest.TestCase):
             connection = sqlite3.connect(path)
             connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+            connection.execute("DROP TABLE service_refresh_starts")
             connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
             connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
@@ -861,6 +864,7 @@ class LedgerTests(unittest.TestCase):
             ledger.close()
             connection = sqlite3.connect(path)
             connection.execute("DROP TABLE dispatch_terminal_integrity")
+            connection.execute("DROP TABLE service_refresh_starts")
             connection.execute("UPDATE schema_meta SET value = '19' WHERE key = 'schema_version'")
             connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
@@ -927,6 +931,7 @@ class LedgerTests(unittest.TestCase):
             connection = sqlite3.connect(path)
             connection.execute("DROP TABLE dispatch_terminal_integrity")
             connection.execute("ALTER TABLE harness_authority RENAME TO supervisor_authority")
+            connection.execute("DROP TABLE service_refresh_starts")
             connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
             connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
@@ -1336,6 +1341,7 @@ class LedgerTests(unittest.TestCase):
                 "FROM retry_policies_v17"
             )
             connection.execute("DROP TABLE retry_policies_v17")
+            connection.execute("DROP TABLE service_refresh_starts")
             connection.execute("UPDATE schema_meta SET value = '16' WHERE key = 'schema_version'")
             connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
@@ -1433,6 +1439,7 @@ class LedgerTests(unittest.TestCase):
             for _name, (table, statement) in _V15_INDEX_DDL.items():
                 if table == "controller_decisions":
                     connection.execute(statement)
+            connection.execute("DROP TABLE service_refresh_starts")
             connection.execute("UPDATE schema_meta SET value = '17' WHERE key = 'schema_version'")
             connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
@@ -1500,6 +1507,7 @@ class LedgerTests(unittest.TestCase):
                     str(claim.dispatch_id),
                 ),
             )
+            connection.execute("DROP TABLE service_refresh_starts")
             connection.execute("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'")
             connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
@@ -2015,7 +2023,7 @@ def test_refresh_claim_history_after_completed_inspection(tmp_path: Path) -> Non
         (None, None),
     ],
 )
-@pytest.mark.parametrize("version", [18, 19, 20, 21])
+@pytest.mark.parametrize("version", [18, 19, 20, 21, int(CURRENT_SCHEMA_VERSION)])
 def test_refresh_claim_instants_at_fence_and_inspection(
     tmp_path: Path, lease: str | None, live: bool | None, version: int
 ) -> None:
@@ -2035,9 +2043,11 @@ def test_refresh_claim_instants_at_fence_and_inspection(
         expected_revision=decision.revision,
     )
     ledger.close()
-    if version < 21:
+    if version < int(CURRENT_SCHEMA_VERSION):
         with sqlite3.connect(path) as connection:
-            connection.execute("DROP TABLE program_outcomes")
+            connection.execute("DROP TABLE service_refresh_starts")
+            if version < 21:
+                connection.execute("DROP TABLE program_outcomes")
             if version < 20:
                 connection.execute("DROP TABLE dispatch_terminal_integrity")
             if version == 18:
@@ -2047,10 +2057,14 @@ def test_refresh_claim_instants_at_fence_and_inspection(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_identity'",
                 (_SCHEMA_IDENTITIES[SchemaVersion(version)],),
             )
-    ledger = Ledger(path, allow_legacy=version < 21)
+    ledger = Ledger(path, allow_legacy=version < int(CURRENT_SCHEMA_VERSION))
     try:
         ledger._db().execute("UPDATE controller_decisions SET claim_lease_expires_at = ?", (lease,))
-        fence = ledger.arm_predecessor_refresh_fence if version < 21 else ledger.arm_harness_refresh_fence
+        fence = (
+            ledger.arm_predecessor_refresh_fence
+            if version < int(CURRENT_SCHEMA_VERSION)
+            else ledger.arm_harness_refresh_fence
+        )
         with patch.object(ledger_module, "utc_now", return_value="2026-09-07T12:00:00+00:00") as now:
             if live is None:
                 with pytest.raises(CorruptSchemaError):
@@ -2068,3 +2082,334 @@ def test_refresh_claim_instants_at_fence_and_inspection(
                 assert now.call_count == 2
     finally:
         ledger.close()
+
+
+def _refresh_start_arguments(ledger: Ledger, root: Path) -> dict[str, object]:
+    ledger.acquire_harness(
+        repository_root=root,
+        state_root=root,
+        pid=500,
+        process_birth_identity="predecessor-birth",
+        executable_digest="a" * 64,
+        version="0.2.0",
+        owner_nonce_sha256="b" * 64,
+    )
+    return {
+        "expected_authority": ledger.arm_harness_refresh_fence(),
+        "unit_name": "codex-flow-test.service",
+        "unit_sha256": "c" * 64,
+        "launcher_sha256": "d" * 64,
+        "interpreter_sha256": "e" * 64,
+        "target_profile_sha256": None,
+        "target_compatibility_sha256": None,
+    }
+
+
+def test_refresh_start_concurrent_arms_grant_one_invocation_and_reopen_cannot_replay(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    path = tmp_path / "workflow.db"
+    ledger = Ledger(path)
+    arguments = _refresh_start_arguments(ledger, tmp_path)
+    ledger.close()
+    barrier = Barrier(2)
+
+    def arm() -> dict[str, object]:
+        current = Ledger(path)
+        try:
+            barrier.wait(timeout=10)
+            return current.arm_service_refresh_start(**arguments)
+        finally:
+            current.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: arm(), range(2)))
+    assert sorted(result.pop("start_permitted") for result in results) == [False, True]
+    assert results[0] == results[1]
+    ledger = Ledger(path)
+    assert ledger.arm_service_refresh_start(**arguments)["start_permitted"] is False
+    assert ledger.service_refresh_start(repository_root=tmp_path, state_root=tmp_path) == results[0]
+    assert ledger._db().execute("SELECT COUNT(*) FROM service_refresh_starts").fetchone()[0] == 1
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "unit_name",
+        "unit_sha256",
+        "launcher_sha256",
+        "interpreter_sha256",
+        "target_profile_sha256",
+        "target_compatibility_sha256",
+    ],
+)
+def test_refresh_start_conflicting_target_never_rearms(tmp_path: Path, field: str) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    arguments = _refresh_start_arguments(ledger, tmp_path)
+    ledger.arm_service_refresh_start(**arguments)
+    arguments[field] = "different.service" if field == "unit_name" else "f" * 64
+    with pytest.raises(ledger_module.StaleWriter, match="conflicts"):
+        ledger.arm_service_refresh_start(**arguments)
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    "fault_stage, retained", [("after_refresh_start_insert", False), ("after_refresh_start_commit", True)]
+)
+def test_refresh_start_commit_fault_has_no_replay_permission(tmp_path: Path, fault_stage: str, retained: bool) -> None:
+    path = tmp_path / "workflow.db"
+    ledger = Ledger(path)
+    arguments = _refresh_start_arguments(ledger, tmp_path)
+    ledger.close()
+
+    def fault(stage: str) -> None:
+        if stage == fault_stage:
+            raise RuntimeError("injected intent boundary failure")
+
+    ledger = Ledger(path, fault_injector=fault)
+    with pytest.raises(RuntimeError):
+        ledger.arm_service_refresh_start(**arguments)
+    ledger.close()
+    ledger = Ledger(path)
+    assert (ledger.service_refresh_start(repository_root=tmp_path, state_root=tmp_path) is not None) is retained
+    assert ledger.arm_service_refresh_start(**arguments)["start_permitted"] is (not retained)
+    ledger.close()
+
+
+def test_refresh_start_resolution_cas_preserves_predecessor_and_rejects_stale_authority(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    arguments = _refresh_start_arguments(ledger, tmp_path)
+    pending = ledger.arm_service_refresh_start(**arguments)
+    pending.pop("start_permitted")
+    replacement = ledger.acquire_harness(
+        repository_root=tmp_path,
+        state_root=tmp_path,
+        pid=501,
+        process_birth_identity="replacement-birth",
+        executable_digest="e" * 64,
+        version="0.2.0",
+        owner_nonce_sha256="f" * 64,
+    )
+    with pytest.raises(ledger_module.StaleWriter):
+        ledger.resolve_service_refresh_start(
+            expected_start=pending,
+            replacement_authority={**replacement, "owner_nonce_sha256": "a" * 64},
+            state="healthy",
+        )
+    with pytest.raises(ledger_module.StaleWriter):
+        ledger.resolve_service_refresh_start(
+            expected_start={**pending, "unit_sha256": "a" * 64}, replacement_authority=replacement, state="healthy"
+        )
+    resolved = ledger.resolve_service_refresh_start(
+        expected_start=pending, replacement_authority=replacement, state="healthy"
+    )
+    assert (
+        ledger.resolve_service_refresh_start(expected_start=pending, replacement_authority=replacement, state="healthy")
+        == resolved
+    )
+    assert resolved["predecessor_epoch"] == 1 and resolved["predecessor_pid"] == 500
+    assert json.loads(resolved["replacement_authority_json"]) == replacement
+    ledger.close()
+    reopened = Ledger(tmp_path / "workflow.db")
+    assert reopened.service_refresh_start(repository_root=tmp_path, state_root=tmp_path) == resolved
+    reopened.close()
+
+
+@pytest.mark.parametrize("version", [18, 19, 20, 21])
+def test_refresh_start_migration_preserves_authority_and_history_without_backfill(tmp_path: Path, version: int) -> None:
+    path = tmp_path / "workflow.db"
+    _prepare_supported_legacy_ledger(path, SchemaVersion(version))
+    predecessor = Ledger(path, allow_legacy=True)
+    authority = predecessor.arm_predecessor_refresh_fence()
+    snapshot = {
+        str(table[0]): predecessor._db().execute(f'SELECT * FROM "{table[0]}"').fetchall()
+        for table in predecessor._db().execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+        if table[0] != "schema_meta"
+    }
+    snapshot = {table: [tuple(row) for row in rows] for table, rows in snapshot.items()}
+    predecessor.close()
+    migrated = Ledger(path, migrate=True, expected_refresh_authority=authority)
+    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
+    assert migrated.service_refresh_start(repository_root=tmp_path, state_root=tmp_path) is None
+    for table, rows in snapshot.items():
+        current_table = "harness_authority" if table == "supervisor_authority" else table
+        assert [tuple(row) for row in migrated._db().execute(f'SELECT * FROM "{current_table}"')] == rows
+    migrated.close()
+
+
+@pytest.mark.parametrize("fault_stage", ["after_migration", "before_commit"])
+def test_refresh_start_schema_migration_failure_preserves_exact_v21(tmp_path: Path, fault_stage: str) -> None:
+    path = tmp_path / "workflow.db"
+    _prepare_supported_legacy_ledger(path, SchemaVersion(21))
+    ledger = Ledger(path, allow_legacy=True)
+    predecessor = ledger.arm_predecessor_refresh_fence()
+    ledger.close()
+    before = _noninternal_inventory(path)
+
+    def fault(stage: str) -> None:
+        if stage == fault_stage:
+            raise RuntimeError("injected migration failure")
+
+    with pytest.raises(RuntimeError):
+        Ledger(path, migrate=True, expected_refresh_authority=predecessor, fault_injector=fault)
+    assert _noninternal_inventory(path) == before
+    ledger = Ledger(path, allow_legacy=True)
+    assert ledger.schema_version == SchemaVersion(21)
+    assert ledger.harness_authority() == predecessor
+    ledger.close()
+
+
+@pytest.mark.parametrize("mutation", ["digest", "timestamp", "shape"])
+def test_retained_refresh_start_reopen_rejects_corrupt_identity(tmp_path: Path, mutation: str) -> None:
+    path = tmp_path / "workflow.db"
+    ledger = Ledger(path)
+    ledger.arm_service_refresh_start(**_refresh_start_arguments(ledger, tmp_path))
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        if mutation == "digest":
+            connection.execute("UPDATE service_refresh_starts SET launcher_sha256 = ?", ("z" * 64,))
+        elif mutation == "timestamp":
+            connection.execute("UPDATE service_refresh_starts SET created_at = '2026-09-07T12:00:00'")
+        else:
+            connection.execute("ALTER TABLE service_refresh_starts ADD COLUMN replay_permission INTEGER")
+    with pytest.raises(CorruptSchemaError):
+        Ledger(path)
+
+
+def test_refresh_start_resolved_health_replay_accepts_lease_renewal_without_rewriting_history(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    pending = ledger.arm_service_refresh_start(**_refresh_start_arguments(ledger, tmp_path))
+    pending.pop("start_permitted")
+    replacement = ledger.acquire_harness(
+        repository_root=tmp_path,
+        state_root=tmp_path,
+        pid=501,
+        process_birth_identity="replacement-birth",
+        executable_digest="e" * 64,
+        version="0.2.0",
+        owner_nonce_sha256="f" * 64,
+    )
+    resolved = ledger.resolve_service_refresh_start(
+        expected_start=pending, replacement_authority=replacement, state="healthy"
+    )
+    renewed = ledger.renew_harness(epoch=2, owner_nonce_sha256="f" * 64)
+    assert renewed != replacement
+    assert (
+        ledger.resolve_service_refresh_start(expected_start=resolved, replacement_authority=renewed, state="healthy")
+        == resolved
+    )
+    ledger.close()
+
+
+@pytest.mark.parametrize("current_owner", ["predecessor", "replacement", "absent"])
+def test_default_refresh_fence_never_mutates_pending_start_authority(tmp_path: Path, current_owner: str) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    pending = ledger.arm_service_refresh_start(**_refresh_start_arguments(ledger, tmp_path))
+    pending.pop("start_permitted")
+    if current_owner == "replacement":
+        ledger.acquire_harness(
+            repository_root=tmp_path,
+            state_root=tmp_path,
+            pid=501,
+            process_birth_identity="replacement-birth",
+            executable_digest="e" * 64,
+            version="0.2.0",
+            owner_nonce_sha256="f" * 64,
+        )
+    elif current_owner == "absent":
+        ledger._db().execute("DELETE FROM harness_authority")
+    before = ledger.harness_authority()
+    with pytest.raises(ledger_module.HarnessRefreshBlocked, match="unresolved prior refresh start"):
+        ledger.arm_harness_refresh_fence()
+    assert ledger.harness_authority() == before
+    assert ledger.service_refresh_start(repository_root=tmp_path, state_root=tmp_path) == pending
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "half-start",
+        "half-authority",
+        "stale-authority",
+        "conflicting-start",
+        "resolved",
+        "predecessor",
+        "interpreter",
+        "roots",
+        "children",
+        "ambiguous",
+    ],
+)
+def test_pending_replacement_fence_requires_exact_pair_and_never_resolves_start(
+    tmp_path: Path, mutation: str | None
+) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    pending = ledger.arm_service_refresh_start(**_refresh_start_arguments(ledger, tmp_path))
+    pending.pop("start_permitted")
+    if mutation == "predecessor":
+        replacement = ledger.harness_authority()
+    else:
+        replacement = ledger.acquire_harness(
+            repository_root=tmp_path,
+            state_root=tmp_path,
+            pid=501,
+            process_birth_identity="replacement-birth",
+            executable_digest="e" * 64 if mutation != "interpreter" else "a" * 64,
+            version="0.2.0",
+            owner_nonce_sha256="f" * 64,
+        )
+    if mutation == "roots":
+        ledger._db().execute("UPDATE harness_authority SET state_root = ?", (os.fspath(tmp_path / "other"),))
+        replacement = ledger.harness_authority()
+    if mutation == "children":
+        ledger.create_run("run")
+        ledger.create_milestone("run", "work")
+        dispatch = ledger.claim_dispatch("run", "work", "executor", 1).dispatch_id
+        ledger.enqueue_dispatch(
+            dispatch,
+            backend="sdk_headless",
+            capsule_json='{"model":"test","prompt":"bounded"}',
+            route_json="{}",
+            workspace_path=tmp_path,
+            result_contract_sha256="c" * 64,
+        )
+        ledger._db().execute("UPDATE dispatch_queue SET state = 'running'")
+    if mutation == "ambiguous":
+        other = {**pending, "predecessor_epoch": 2}
+        ledger._db().execute(
+            f"INSERT INTO service_refresh_starts ({', '.join(other)}) VALUES ({', '.join('?' for _ in other)})",
+            tuple(other.values()),
+        )
+    if mutation == "resolved":
+        ledger.resolve_service_refresh_start(expected_start=pending, replacement_authority=replacement, state="healthy")
+    if mutation == "ambiguous":
+        with pytest.raises(CorruptSchemaError, match="multiple pending refresh starts"):
+            ledger.service_refresh_start(repository_root=tmp_path, state_root=tmp_path)
+    before = ledger.harness_authority()
+    expected = dict(replacement)
+    if mutation == "stale-authority":
+        expected["owner_nonce_sha256"] = "d" * 64
+    if mutation == "conflicting-start":
+        pending["unit_sha256"] = "a" * 64
+    arguments = {
+        "expected_start": None if mutation == "half-authority" else pending,
+        "expected_authority": None if mutation == "half-start" else expected,
+    }
+    if mutation is not None:
+        with pytest.raises((ValueError, ledger_module.LedgerError)):
+            ledger.arm_harness_refresh_fence(**arguments)
+        assert ledger.harness_authority() == before
+    else:
+        fenced = ledger.arm_harness_refresh_fence(**arguments)
+        assert fenced == {**replacement, "requested_shutdown": 1}
+        changes = ledger._db().total_changes
+        assert ledger.arm_harness_refresh_fence(expected_start=pending, expected_authority=fenced) == fenced
+        assert ledger._db().total_changes == changes
+        assert ledger.service_refresh_start(repository_root=tmp_path, state_root=tmp_path) == pending
+    ledger.close()

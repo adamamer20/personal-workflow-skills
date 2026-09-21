@@ -507,6 +507,25 @@ def test_bootstrap_service_entrypoint_gates_plugin_cache_after_refresh(
         assert bootstrap.completed == ["preflight", "harness-refresh-fenced", "controller-installed"]
         assert installer_events == ["fence", "tool-install", "refresh"]
         assert not any("marketplace" in call or "plugin" in call for call in runner.calls)
+        if failure_stage == "start":
+            assert service_events.count("start") == 1
+            check = Ledger(ledger_path)
+            retained = check.service_refresh_start(repository_root=service_root, state_root=service_root)
+            check.close()
+            assert retained is not None and retained["state"] == "pending"
+            repeated = installer.Bootstrap(root, runner=runner)
+
+            def repeated_fence() -> None:
+                repeated.completed.append("harness-refresh-fenced")
+
+            monkeypatch.setattr(repeated, "fence_existing_harness", repeated_fence)
+            with pytest.raises(installer.BootstrapError, match="unresolved prior refresh start"):
+                repeated.execute()
+            assert service_events.count("start") == 1
+            assert not any("marketplace" in call or "plugin" in call for call in runner.calls)
+            check = Ledger(ledger_path)
+            assert check.service_refresh_start(repository_root=service_root, state_root=service_root) == retained
+            check.close()
 
 
 def test_bootstrap_rejects_unsafe_harness_unit_before_shared_tool_install(
@@ -597,3 +616,77 @@ def test_bootstrap_execute_refreshes_one_exact_fenced_v19_harness_without_instal
         hashlib.sha256((root / "scripts" / "install_personal_workflow_skills.py").read_bytes()).digest()
         == before_script
     )
+
+
+@pytest.mark.parametrize("replacement_acquired", [False, True])
+def test_public_installer_fence_preserves_pending_refresh_before_tool_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement_acquired: bool
+) -> None:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(config_home))
+    executable = tmp_path / "codex-flow"
+    executable.write_text(f"#!{Path(sys.executable).resolve()}\n", encoding="utf-8")
+    executable.chmod(0o755)
+    unit = generate_unit(root, executable=executable, provider_env_key="OPENAI_API_KEY")
+    installed = install_unit(unit, config_home=config_home)
+    state_dir = root / ".codex-flow"
+    state_dir.mkdir()
+    path = state_dir / "workflow.db"
+    ledger = Ledger(path)
+    ledger.acquire_harness(
+        repository_root=root,
+        state_root=root,
+        pid=500,
+        process_birth_identity="old-birth",
+        executable_digest="a" * 64,
+        version=unit.version,
+        owner_nonce_sha256="b" * 64,
+    )
+    ledger.close()
+    starts: list[str] = []
+
+    def manager(argv: tuple[str, ...], **_: object):
+        from types import SimpleNamespace
+
+        operation = argv[2]
+        if operation == "start":
+            starts.append(operation)
+        return SimpleNamespace(
+            returncode=1 if operation == "start" else 3 if operation == "is-active" else 0,
+            stdout="ActiveState=inactive\nMainPID=0\n" if operation == "show" else "",
+        )
+
+    with pytest.raises(ServiceError):
+        refresh_with_credential(
+            unit,
+            config_home=config_home,
+            environment={"OPENAI_API_KEY": "secret"},
+            runner=manager,
+            process_is_live=lambda _pid, _birth: False,
+        )
+    ledger = Ledger(path)
+    if replacement_acquired:
+        ledger.acquire_harness(
+            repository_root=root,
+            state_root=root,
+            pid=_TEST_REPLACEMENT_PID,
+            process_birth_identity=_TEST_REPLACEMENT_BIRTH,
+            executable_digest=_TEST_INTERPRETER_DIGEST,
+            version=unit.version,
+            owner_nonce_sha256="d" * 64,
+        )
+    authority = ledger.harness_authority()
+    pending = ledger.service_refresh_start(repository_root=root, state_root=root)
+    ledger.close()
+    runner = FakeRunner(root)
+    bootstrap = installer.Bootstrap(root, runner=runner)
+    assert bootstrap._matching_harness_unit() == installed
+    with pytest.raises(installer.BootstrapError, match="unresolved prior refresh start"):
+        bootstrap.fence_existing_harness()
+    assert runner.calls == [] and starts == ["start"]
+    ledger = Ledger(path)
+    assert ledger.harness_authority() == authority
+    assert ledger.service_refresh_start(repository_root=root, state_root=root) == pending
+    ledger.close()

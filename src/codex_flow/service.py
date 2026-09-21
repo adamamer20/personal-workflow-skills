@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
+from .domain import JsonObject, strict_json_loads
 from .ipc import IpcError, send_request
 from .ledger import CURRENT_SCHEMA_VERSION, HarnessRefreshBlocked, Ledger, LedgerError, ledger_schema_compatibility
 
@@ -830,8 +831,8 @@ def refresh_with_credential(
                 raise ServiceRefreshFailed("harness ledger schema identity is unavailable")
             predecessor_schema_version = raw_schema_version
             migration_required = bool(compatibility.get("migration_required"))
-            if migration_required and predecessor_schema_version not in {18, 19, 20}:
-                raise ServiceRefreshFailed("service refresh only supports schema-v18/v19/v20 predecessor handoff")
+            if migration_required and predecessor_schema_version not in {18, 19, 20, 21}:
+                raise ServiceRefreshFailed("service refresh only supports schema-v18/v19/v20/v21 predecessor handoff")
             legacy_topology_migration = predecessor_schema_version == 18
             if migration_required:
                 # Keep the predecessor schema intact while the old service is
@@ -846,8 +847,8 @@ def refresh_with_credential(
         try:
             predecessor_schema_version = int(ledger.schema_version)
             migration_required = predecessor_schema_version < int(CURRENT_SCHEMA_VERSION)
-            if migration_required and predecessor_schema_version not in {18, 19, 20}:
-                raise ServiceRefreshFailed("service refresh only supports schema-v18/v19/v20 predecessor handoff")
+            if migration_required and predecessor_schema_version not in {18, 19, 20, 21}:
+                raise ServiceRefreshFailed("service refresh only supports schema-v18/v19/v20/v21 predecessor handoff")
             legacy_topology_migration = predecessor_schema_version == 18
             ledger_path = ledger.path
         except LedgerError as exc:
@@ -1012,6 +1013,7 @@ def refresh_with_credential(
 
     replacement_authority_seen = False
     replacement_identity: tuple[int, str, int] | None = None
+    start_intent: JsonObject | None = None
 
     def rollback_failed_replacement(
         replacement: Mapping[str, object],
@@ -1048,18 +1050,34 @@ def refresh_with_credential(
             credential_value=value,
         )
 
-        # A replacement which already carries the durable shutdown fence is
-        # already isolated.  Refencing it would be a second lifecycle
-        # mutation (and can race its own shutdown), so reuse that exact row.
-        if shutdown_bit == 1:
-            fenced: object = replacement
-        else:
-            try:
-                fenced = owned_ledger.arm_harness_refresh_fence()
-            except HarnessRefreshBlocked as exc:
-                raise ServiceRefreshDeferred(str(exc)) from exc
-            except LedgerError as exc:
-                raise ServiceRefreshFailed("replacement harness refresh fence could not be armed") from exc
+        if _installed_command_identity(unit) != installed_launcher_identity:
+            raise ServiceRefreshFailed("replacement launcher changed before recovery fence")
+        if owned_ledger.harness_authority() != dict(replacement):
+            raise ServiceRefreshFailed("replacement authority changed before recovery fence")
+        if (
+            shutdown_bit == 0
+            and _replacement_is_healthy(
+                replacement,
+                unit=unit,
+                old_pid=old_pid,
+                old_birth_identity=old_birth_identity,
+                old_epoch=old_epoch,
+                process_is_live=live_checker,
+                identity_reader=identity_reader,
+                interpreter=installed_launcher_identity[1],
+                interpreter_digest=installed_launcher_identity[2],
+            )
+            and _unit_is_active(unit, runner=runner)
+        ):
+            raise ServiceRefreshFailed("replacement became healthy before recovery fence")
+        if start_intent is None:
+            raise ServiceRefreshFailed("replacement recovery has no retained start intent")
+        try:
+            fenced = owned_ledger.arm_harness_refresh_fence(expected_start=start_intent, expected_authority=replacement)
+        except HarnessRefreshBlocked as exc:
+            raise ServiceRefreshDeferred(str(exc)) from exc
+        except LedgerError as exc:
+            raise ServiceRefreshFailed("replacement harness refresh fence could not be armed") from exc
         if not isinstance(fenced, Mapping):
             raise ServiceRefreshFailed("replacement harness authority is unavailable")
         _authority_matches_unit(fenced, unit)
@@ -1087,19 +1105,25 @@ def refresh_with_credential(
         if _authority_stable_identity(current) != _authority_stable_identity(cast(Mapping[str, object], fenced)):
             raise ServiceRefreshFailed("replacement harness authority row changed after stop")
 
-        if not (legacy_topology_migration or interrupted_recovery):
-            _prove_stopped_current_owner(
-                owned_ledger,
-                unit=unit,
-                config_home=config_home,
-                profile_sha256=profile_sha256,
-                credential_value=value,
-                expected_authority=fenced,
-                expected_launcher_identity=installed_launcher_identity,
-                runner=runner,
-                process_is_live=live_checker,
-                allow_profile_identity_update=False,
+        _prove_stopped_current_owner(
+            owned_ledger,
+            unit=unit,
+            config_home=config_home,
+            profile_sha256=profile_sha256,
+            credential_value=value,
+            expected_authority=fenced,
+            expected_launcher_identity=installed_launcher_identity,
+            runner=runner,
+            process_is_live=live_checker,
+            allow_profile_identity_update=False,
+        )
+        if start_intent is not None:
+            owned_ledger.resolve_service_refresh_start(
+                expected_start=start_intent,
+                replacement_authority=current,
+                state="stopped_replacement",
             )
+        if not (legacy_topology_migration or interrupted_recovery):
             return
 
         _validate_installed_unit(
@@ -1117,205 +1141,227 @@ def refresh_with_credential(
         if restored_raw != legacy_unit_raw or restored_mode != legacy_unit_mode:
             raise ServiceRefreshFailed("legacy service unit rollback was not exact")
 
-    def prove_no_replacement(
-        *, old_pid: int, old_birth_identity: str, old_epoch: int, expected_authority: Mapping[str, object]
-    ) -> bool:
-        """Prove an unchanged fenced predecessor is the only remaining owner.
-
-        This is deliberately positive evidence, not an absence inferred from
-        a timeout: every observation must show the exact fenced predecessor,
-        an inactive unit, a dead birth-bound PID and no runtime socket entry.
-        Three observations are required with real monotonic spacing so a
-        delayed replacement cannot be hidden by immediate legacy restoration.
-        """
-
-        observations: list[float] = []
-        for index in range(3):
-            remaining()
-            observed_at = clock()
-            if observations and observed_at - observations[-1] < 0.05:
-                return False
-            observations.append(observed_at)
+    try:
+        retained = (
+            None
+            if migration_required
+            else owned_ledger.service_refresh_start(repository_root=unit.repository_root, state_root=unit.state_root)
+        )
+        if retained is not None:
             current = owned_ledger.harness_authority()
             if not isinstance(current, Mapping):
-                return False
+                raise ServiceRefreshFailed("unresolved prior refresh start has no exact authority")
+            _authority_matches_unit(current, unit)
+            current_pid, current_birth, current_epoch = _authority_identity(current)
+            _authority_stable_identity(current)
+            if retained["state"] != "pending":
+                recorded = strict_json_loads(str(retained["replacement_authority_json"]))
+                if not isinstance(recorded, dict):
+                    raise ServiceRefreshFailed("resolved refresh replacement identity drifted")
+                recorded_identity = _authority_stable_identity(recorded)
+                current_identity = _authority_stable_identity(current)
+                # An explicit later installer refresh may fence a previously
+                # resolved healthy owner. Its newer epoch becomes predecessor;
+                # unresolved starts never reach that ordinary fence path.
+                if recorded_identity[:-1] != current_identity[:-1] or (
+                    retained["state"] == "stopped_replacement" and current_identity[-1] != 1
+                ):
+                    raise ServiceRefreshFailed("resolved refresh replacement identity drifted")
+            target_identity = {
+                "repository_root": os.fspath(unit.repository_root.resolve()),
+                "state_root": os.fspath(unit.state_root.resolve()),
+                "unit_name": unit.unit_name,
+                "unit_sha256": hashlib.sha256(unit.text.encode()).hexdigest(),
+                "launcher_sha256": installed_launcher_identity[0],
+                "interpreter_sha256": installed_launcher_identity[2],
+                "target_profile_sha256": profile_sha256,
+                "target_compatibility_sha256": native_compatibility_sha256,
+                "intended_schema_version": int(CURRENT_SCHEMA_VERSION),
+            }
+            same_target = all(retained[field] == expected for field, expected in target_identity.items())
+            if retained["state"] == "pending" or (
+                retained["state"] == "healthy" and same_target and _authority_shutdown_bit(current) == 0
+            ):
+                if not same_target or _read_installed_unit(unit_path_value)[0] != unit.text.encode():
+                    raise ServiceRefreshFailed("unresolved prior refresh start target identity drifted")
+                _validate_installed_unit(
+                    unit, config_home=config_home, expected_profile_sha256=profile_sha256, credential_value=value
+                )
+                old_pid = int(retained["predecessor_pid"])
+                old_birth_identity = str(retained["predecessor_birth_identity"])
+                old_epoch = int(retained["predecessor_epoch"])
+                if current_epoch <= old_epoch or (current_pid, current_birth) == (old_pid, old_birth_identity):
+                    raise ServiceRefreshFailed("unresolved prior refresh start; another start is forbidden")
+                start_intent = retained
+                mark_possible_replacement()
+                replacement_identity = (current_pid, current_birth, current_epoch)
+            elif current_epoch <= int(retained["predecessor_epoch"]):
+                raise ServiceRefreshFailed("resolved refresh start cannot reuse its predecessor epoch")
+
+        if start_intent is None:
             try:
-                _authority_matches_unit(current, unit)
-                current_identity = _authority_identity(current)
-                current_shutdown = _authority_shutdown_bit(current)
-            except ServiceRefreshFailed:
-                return False
-            if current_identity != (old_pid, old_birth_identity, old_epoch) or current_shutdown != 1:
-                return False
-            if dict(current) != dict(expected_authority):
-                return False
-            try:
-                _assert_unit_stopped(unit, runner=runner)
-            except ServiceRefreshDeferred:
-                return False
-            if live_checker(old_pid, old_birth_identity):
-                return False
-            runtime = unit.state_root / ".codex-flow" / "runtime"
-            if any(os.path.lexists(runtime / socket_name) for socket_name in ("supervisor.sock", "harness.sock")):
-                return False
-            if index < 2:
+                if interrupted_recovery:
+                    if authority_value is None:
+                        raise ServiceRefreshFailed("harness authority is unavailable")
+                    predecessor_authority = dict(authority_value)
+                else:
+                    fence = (
+                        owned_ledger.arm_predecessor_refresh_fence()
+                        if migration_required
+                        else owned_ledger.arm_harness_refresh_fence()
+                    )
+                    if fence is None:
+                        raise ServiceRefreshFailed("harness authority is unavailable")
+                    predecessor_authority = dict(cast(Mapping[str, object], fence))
+            except HarnessRefreshBlocked as exc:
+                raise ServiceRefreshDeferred(str(exc)) from exc
+            except LedgerError as exc:
+                raise ServiceRefreshFailed("harness refresh fence could not be armed") from exc
+
+            _authority_matches_unit(predecessor_authority, unit)
+            _authority_stable_identity(predecessor_authority)
+            old_pid, old_birth_identity, old_epoch = _authority_identity(predecessor_authority)
+            legacy_topology = legacy_topology_migration or interrupted_recovery
+            predecessor_unit = _legacy_supervisor_unit(unit) if legacy_topology else unit
+            socket_path = (
+                unit.state_root / ".codex-flow" / "runtime" / ("supervisor.sock" if legacy_topology else "harness.sock")
+            )
+            if os.path.lexists(socket_path):
+                try:
+                    socket_metadata = os.lstat(socket_path)
+                except OSError as exc:
+                    raise ServiceRefreshFailed("predecessor harness socket path is unavailable") from exc
+                if stat.S_ISLNK(socket_metadata.st_mode):
+                    raise ServiceRefreshFailed("predecessor harness socket path must not be a symlink")
+            old_process_live = False if interrupted_recovery else live_checker(old_pid, old_birth_identity)
+            if old_process_live:
+                shutdown_sender(socket_path, remaining())
+                # The authenticated shutdown may synchronously close the exact
+                # old owner. Re-read its birth-bound liveness before entering the
+                # wait loop so an already completed handoff does not incur an
+                # artificial sleep or deadline edge.
+                old_process_live = live_checker(old_pid, old_birth_identity)
+            elif not interrupted_recovery and not (
+                owned_ledger.predecessor_refresh_fenced()
+                if migration_required
+                else owned_ledger.harness_refresh_fenced()
+            ):
+                raise ServiceRefreshFailed("harness fence disappeared before shutdown")
+
+            while old_process_live or _unit_is_active(predecessor_unit, runner=runner):
                 remaining()
                 sleeper(min(0.05, remaining()))
+                old_process_live = live_checker(old_pid, old_birth_identity)
 
-        # Re-read the authority immediately after the last observation.  A
-        # replacement that acquired during the final interval is never hidden
-        # behind the captured legacy bytes.
-        remaining()
-        final = owned_ledger.harness_authority()
-        if not isinstance(final, Mapping):
-            return False
-        try:
-            _authority_matches_unit(final, unit)
-            final_identity = _authority_identity(final)
-            final_shutdown = _authority_shutdown_bit(final)
-        except ServiceRefreshFailed:
-            return False
-        if final_identity != (old_pid, old_birth_identity, old_epoch) or final_shutdown != 1:
-            return False
-        if dict(final) != dict(expected_authority):
-            return False
-        try:
-            _assert_unit_stopped(unit, runner=runner)
-        except ServiceRefreshDeferred:
-            return False
-        if live_checker(old_pid, old_birth_identity):
-            return False
-        runtime = unit.state_root / ".codex-flow" / "runtime"
-        return not any(os.path.lexists(runtime / socket_name) for socket_name in ("supervisor.sock", "harness.sock"))
+            predecessor_authority = _prove_stopped_current_owner(
+                owned_ledger,
+                unit=predecessor_unit,
+                config_home=config_home,
+                profile_sha256=profile_sha256,
+                credential_value=value,
+                expected_authority=predecessor_authority,
+                expected_launcher_identity=installed_launcher_identity,
+                runner=runner,
+                process_is_live=live_checker,
+            )
 
-    try:
-        try:
-            if interrupted_recovery:
-                if authority_value is None:
-                    raise ServiceRefreshFailed("harness authority is unavailable")
-                predecessor_authority = dict(authority_value)
-            else:
-                fence = (
-                    owned_ledger.arm_predecessor_refresh_fence()
-                    if migration_required
-                    else owned_ledger.arm_harness_refresh_fence()
-                )
-                if fence is None:
-                    raise ServiceRefreshFailed("harness authority is unavailable")
-                predecessor_authority = dict(cast(Mapping[str, object], fence))
-        except HarnessRefreshBlocked as exc:
-            raise ServiceRefreshDeferred(str(exc)) from exc
-        except LedgerError as exc:
-            raise ServiceRefreshFailed("harness refresh fence could not be armed") from exc
+            assert_predecessor_unit_unchanged()
 
-        _authority_matches_unit(predecessor_authority, unit)
-        _authority_stable_identity(predecessor_authority)
-        old_pid, old_birth_identity, old_epoch = _authority_identity(predecessor_authority)
-        legacy_topology = legacy_topology_migration or interrupted_recovery
-        predecessor_unit = _legacy_supervisor_unit(unit) if legacy_topology else unit
-        socket_path = (
-            unit.state_root / ".codex-flow" / "runtime" / ("supervisor.sock" if legacy_topology else "harness.sock")
-        )
-        if os.path.lexists(socket_path):
-            try:
-                socket_metadata = os.lstat(socket_path)
-            except OSError as exc:
-                raise ServiceRefreshFailed("predecessor harness socket path is unavailable") from exc
-            if stat.S_ISLNK(socket_metadata.st_mode):
-                raise ServiceRefreshFailed("predecessor harness socket path must not be a symlink")
-        old_process_live = False if interrupted_recovery else live_checker(old_pid, old_birth_identity)
-        if old_process_live:
-            shutdown_sender(socket_path, remaining())
-            # The authenticated shutdown may synchronously close the exact
-            # old owner. Re-read its birth-bound liveness before entering the
-            # wait loop so an already completed handoff does not incur an
-            # artificial sleep or deadline edge.
-            old_process_live = live_checker(old_pid, old_birth_identity)
-        elif not interrupted_recovery and not (
-            owned_ledger.predecessor_refresh_fenced() if migration_required else owned_ledger.harness_refresh_fenced()
-        ):
-            raise ServiceRefreshFailed("harness fence disappeared before shutdown")
-
-        while old_process_live or _unit_is_active(predecessor_unit, runner=runner):
-            remaining()
-            sleeper(min(0.05, remaining()))
-            old_process_live = live_checker(old_pid, old_birth_identity)
-
-        predecessor_authority = _prove_stopped_current_owner(
-            owned_ledger,
-            unit=predecessor_unit,
-            config_home=config_home,
-            profile_sha256=profile_sha256,
-            credential_value=value,
-            expected_authority=predecessor_authority,
-            expected_launcher_identity=installed_launcher_identity,
-            runner=runner,
-            process_is_live=live_checker,
-        )
-
-        assert_predecessor_unit_unchanged()
-
-        if migration_required:
-            # The old authority is now fenced and its process/unit are gone.
-            # Only the v18 supervisor topology needs a replacement unit staged
-            # before its schema rename; v19/v20 already use the current unit
-            # and keep those bytes in place while migrating forward.
-            if ledger_path is None:
-                raise ServiceRefreshFailed("legacy ledger path is unavailable")
-            runtime = unit.state_root / ".codex-flow" / "runtime"
-            if legacy_topology_migration:
-                if os.path.lexists(runtime / "supervisor.sock"):
-                    raise ServiceRefreshFailed("legacy supervisor socket remains after predecessor stop")
-                if os.path.lexists(runtime / "harness.sock"):
-                    raise ServiceRefreshFailed("unexpected harness socket remains after predecessor stop")
-                try:
-                    install_unit(unit, config_home=config_home)
+            if migration_required:
+                # The old authority is now fenced and its process/unit are gone.
+                # Only the v18 supervisor topology needs a replacement unit staged
+                # before its schema rename; v19/v20 already use the current unit
+                # and keep those bytes in place while migrating forward.
+                if ledger_path is None:
+                    raise ServiceRefreshFailed("legacy ledger path is unavailable")
+                runtime = unit.state_root / ".codex-flow" / "runtime"
+                if legacy_topology_migration:
+                    if os.path.lexists(runtime / "supervisor.sock"):
+                        raise ServiceRefreshFailed("legacy supervisor socket remains after predecessor stop")
+                    if os.path.lexists(runtime / "harness.sock"):
+                        raise ServiceRefreshFailed("unexpected harness socket remains after predecessor stop")
+                    try:
+                        install_unit(unit, config_home=config_home)
+                        _validate_installed_unit(
+                            unit,
+                            config_home=config_home,
+                            expected_profile_sha256=profile_sha256,
+                            credential_value=value,
+                        )
+                    except BaseException:
+                        restore_legacy_pair()
+                        raise
+                else:
+                    if os.path.lexists(runtime / "harness.sock"):
+                        raise ServiceRefreshFailed("harness socket remains after predecessor stop")
+                    if os.path.lexists(runtime / "supervisor.sock"):
+                        raise ServiceRefreshFailed("unexpected supervisor socket remains after predecessor stop")
                     _validate_installed_unit(
                         unit,
                         config_home=config_home,
                         expected_profile_sha256=profile_sha256,
                         credential_value=value,
+                        allow_profile_identity_update=True,
+                    )
+                    assert_predecessor_unit_unchanged()
+                owned_ledger.close()
+                try:
+                    owned_ledger = Ledger(
+                        ledger_path,
+                        migrate=True,
+                        expected_refresh_authority=predecessor_authority,
                     )
                 except BaseException:
-                    restore_legacy_pair()
+                    # The predecessor fence is committed before migration. If
+                    # opening or migrating fails, v18 restores its exact legacy
+                    # pair; v19/v20 retain their current-schema unit and ledger
+                    # bytes without any topology downgrade.
+                    if legacy_topology_migration:
+                        restore_legacy_pair()
                     raise
-            else:
-                if os.path.lexists(runtime / "harness.sock"):
-                    raise ServiceRefreshFailed("harness socket remains after predecessor stop")
-                if os.path.lexists(runtime / "supervisor.sock"):
-                    raise ServiceRefreshFailed("unexpected supervisor socket remains after predecessor stop")
-                _validate_installed_unit(
-                    unit,
+
+            assert_predecessor_unit_unchanged()
+            if profile_sha256 is not None and native_compatibility_sha256 is not None:
+                owned_ledger.authorize_controller_profile_refresh(
+                    native_profile_sha256=profile_sha256,
+                    native_compatibility_sha256=native_compatibility_sha256,
+                )
+
+            if not (legacy_topology_migration or interrupted_recovery):
+                predecessor_authority = _prove_stopped_current_owner(
+                    owned_ledger,
+                    unit=unit,
                     config_home=config_home,
-                    expected_profile_sha256=profile_sha256,
+                    profile_sha256=profile_sha256,
                     credential_value=value,
-                    allow_profile_identity_update=True,
+                    expected_authority=predecessor_authority,
+                    expected_launcher_identity=installed_launcher_identity,
+                    runner=runner,
+                    process_is_live=live_checker,
                 )
                 assert_predecessor_unit_unchanged()
-            owned_ledger.close()
-            try:
-                owned_ledger = Ledger(
-                    ledger_path,
-                    migrate=True,
-                    expected_refresh_authority=predecessor_authority,
-                )
-            except BaseException:
-                # The predecessor fence is committed before migration. If
-                # opening or migrating fails, v18 restores its exact legacy
-                # pair; v19/v20 retain their current-schema unit and ledger
-                # bytes without any topology downgrade.
-                if legacy_topology_migration:
-                    restore_legacy_pair()
-                raise
 
-        assert_predecessor_unit_unchanged()
-        if profile_sha256 is not None and native_compatibility_sha256 is not None:
-            owned_ledger.authorize_controller_profile_refresh(
-                native_profile_sha256=profile_sha256,
-                native_compatibility_sha256=native_compatibility_sha256,
+            if not legacy_topology_migration:
+                interrupted_unit_staged = interrupted_recovery
+                install_unit(unit, config_home=config_home)
+            if unit.runtime != "harness":
+                raise ServiceRefreshFailed("replacement service unit runtime is not harness")
+            _validate_installed_unit(
+                unit,
+                config_home=config_home,
+                expected_profile_sha256=profile_sha256,
+                credential_value=value,
             )
-
-        if not (legacy_topology_migration or interrupted_recovery):
+            target_unit_snapshot = _read_installed_unit(unit_path_value)
+            if target_unit_snapshot[0] != unit.text.encode("utf-8"):
+                raise ServiceRefreshFailed("installed target unit changed during capture")
+            if _installed_command_identity(unit) != installed_launcher_identity:
+                raise ServiceRefreshFailed("installed service launcher changed before replacement start")
+            if _run_manager(("daemon-reload",), runner=runner) != 0:
+                raise ServiceRefreshFailed("user-manager daemon reload failed")
+            if _run_manager(("import-environment", key), runner=runner) != 0:
+                raise ServiceRefreshFailed("user-manager credential import failed")
+            imported = True
             predecessor_authority = _prove_stopped_current_owner(
                 owned_ledger,
                 unit=unit,
@@ -1326,68 +1372,28 @@ def refresh_with_credential(
                 expected_launcher_identity=installed_launcher_identity,
                 runner=runner,
                 process_is_live=live_checker,
+                allow_profile_identity_update=False,
             )
-            assert_predecessor_unit_unchanged()
-
-        if not legacy_topology_migration:
-            interrupted_unit_staged = interrupted_recovery
-            install_unit(unit, config_home=config_home)
-        if unit.runtime != "harness":
-            raise ServiceRefreshFailed("replacement service unit runtime is not harness")
-        _validate_installed_unit(
-            unit,
-            config_home=config_home,
-            expected_profile_sha256=profile_sha256,
-            credential_value=value,
-        )
-        target_unit_snapshot = _read_installed_unit(unit_path_value)
-        if target_unit_snapshot[0] != unit.text.encode("utf-8"):
-            raise ServiceRefreshFailed("installed target unit changed during capture")
-        if _installed_command_identity(unit) != installed_launcher_identity:
-            raise ServiceRefreshFailed("installed service launcher changed before replacement start")
-        if _run_manager(("daemon-reload",), runner=runner) != 0:
-            raise ServiceRefreshFailed("user-manager daemon reload failed")
-        if _run_manager(("import-environment", key), runner=runner) != 0:
-            raise ServiceRefreshFailed("user-manager credential import failed")
-        imported = True
-        predecessor_authority = _prove_stopped_current_owner(
-            owned_ledger,
-            unit=unit,
-            config_home=config_home,
-            profile_sha256=profile_sha256,
-            credential_value=value,
-            expected_authority=predecessor_authority,
-            expected_launcher_identity=installed_launcher_identity,
-            runner=runner,
-            process_is_live=live_checker,
-            allow_profile_identity_update=False,
-        )
-        if _read_installed_unit(unit_path_value) != target_unit_snapshot:
-            raise ServiceRefreshFailed("installed target unit changed before replacement start")
-        # Mark before invoking systemctl start.  A failed/timeout start is
-        # still an uncertain replacement unless the bounded positive absence
-        # proof below establishes that no replacement could have run.
-        mark_possible_replacement()
-        try:
+            if _read_installed_unit(unit_path_value) != target_unit_snapshot:
+                raise ServiceRefreshFailed("installed target unit changed before replacement start")
+            mark_possible_replacement()
+            armed = owned_ledger.arm_service_refresh_start(
+                expected_authority=predecessor_authority,
+                unit_name=unit.unit_name,
+                unit_sha256=hashlib.sha256(target_unit_snapshot[0]).hexdigest(),
+                launcher_sha256=installed_launcher_identity[0],
+                interpreter_sha256=installed_launcher_identity[2],
+                target_profile_sha256=profile_sha256,
+                target_compatibility_sha256=native_compatibility_sha256,
+            )
+            permitted = armed.pop("start_permitted")
+            start_intent = armed
+            mark_possible_replacement()
+            if permitted is not True:
+                raise ServiceRefreshFailed("unresolved prior refresh start; another start is forbidden")
             start_status = _run_manager(("start", unit.unit_name), runner=runner)
-        except Exception:
-            if interrupted_recovery and prove_no_replacement(
-                old_pid=old_pid,
-                old_birth_identity=old_birth_identity,
-                old_epoch=old_epoch,
-                expected_authority=predecessor_authority,
-            ):
-                restore_legacy_unit(replacement_death_proven=True)
-            raise
-        if start_status != 0:
-            if interrupted_recovery and prove_no_replacement(
-                old_pid=old_pid,
-                old_birth_identity=old_birth_identity,
-                old_epoch=old_epoch,
-                expected_authority=predecessor_authority,
-            ):
-                restore_legacy_unit(replacement_death_proven=True)
-            raise ServiceRefreshFailed("user service replacement start failed")
+            if start_status != 0:
+                raise ServiceRefreshFailed("user service replacement start failed")
 
         while True:
             remaining()
@@ -1413,9 +1419,8 @@ def refresh_with_credential(
             identity = (replacement_pid, replacement_birth, replacement_epoch)
             # The shutdown fence is untrusted input.  Keep the guard set
             # before parsing it so malformed values cannot re-enable legacy
-            # restore.  The exact unchanged fenced predecessor is handled by
-            # a bounded positive absence proof; every other greater epoch is a
-            # replacement, including one that arrived already fenced.
+            # restore. An unchanged fenced predecessor remains uncertain;
+            # a greater epoch is a replacement, including one already fenced.
             shutdown_bit = _authority_shutdown_bit(replacement)
             if (
                 replacement_epoch == old_epoch
@@ -1423,18 +1428,7 @@ def refresh_with_credential(
                 and replacement_birth == old_birth_identity
                 and shutdown_bit == 1
             ):
-                if interrupted_recovery and prove_no_replacement(
-                    old_pid=old_pid,
-                    old_birth_identity=old_birth_identity,
-                    old_epoch=old_epoch,
-                    expected_authority=predecessor_authority,
-                ):
-                    restore_legacy_unit(replacement_death_proven=True)
-                    raise ServiceRefreshFailed("replacement harness authority did not acquire a newer epoch")
-                # The predecessor is still the sole row, but complete
-                # absence proof was not established.  Keep the current
-                # bytes in place and continue only within the existing
-                # deadline so a delayed replacement remains observable.
+                # A committed intent is never made absent by observations or time.
                 remaining()
                 sleeper(min(0.05, remaining()))
                 continue
@@ -1469,7 +1463,15 @@ def refresh_with_credential(
                 )
             )
             if healthy:
-                assert replacement is not None
+                assert replacement is not None and start_intent is not None
+                _validate_installed_unit(
+                    unit, config_home=config_home, expected_profile_sha256=profile_sha256, credential_value=value
+                )
+                if _read_installed_unit(unit_path_value)[0] != unit.text.encode():
+                    raise ServiceRefreshFailed("replacement target unit changed during health proof")
+                owned_ledger.resolve_service_refresh_start(
+                    expected_start=start_intent, replacement_authority=replacement, state="healthy"
+                )
                 return {
                     "refreshed": True,
                     "unit": unit.unit_name,
