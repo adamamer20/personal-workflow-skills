@@ -13,14 +13,14 @@ working on that milestone; do not reload all history into every task.
 
 | Work | Current state / dependency | Next gate |
 | --- | --- | --- |
-| Implementation economy and late architecture review | Candidate `dc26bae` received two blocking review findings; successor repair now requires explicit `accepted=True` before architecture/promotion and emits durable architecture-blocked repair attention. Four skill validators, 481 affected tests and full `make check` with 1268 tests are green | Successor commit, focused Sol Medium causal re-review of both findings, then matching local plugin/tool installation and parity proof |
+| Implementation economy and late architecture review | Closed at `dc26bae` + repair `7011820`: explicit green-state gating and architecture-blocked repair routing accepted by focused Sol Medium re-review with P0=0/P1=0; four skill validators, 481 affected tests and full `make check` with 1268 tests are green | Installed locally; plugin/tool version and source parity verified; see history closure record |
 | Task-bound worktree rollover | Instruction repair delivered: Codex-managed task workspace, saved-project address, and integration checkout are distinct; single-owner same-directory rollover is explicit; 63 focused tests and the full `make check` gate (1266 tests) are green | Independent Sol Medium contract review before installation |
 | Sol-first routing | Source/config/tests delivered in local candidate; 62 focused tests and validators green; full gate reached 1263/1265 before the retained-capsule repair, with only the native-profile environment probe still unresolved | Independent Sol Medium policy review and a clean-environment full gate before installation; preserve unrelated dirty recovery/TUI surfaces |
 | refresh-start-intent | Existing uncommitted recovery candidate, single original owner; acceptance unverified here | Required checks, successor commit, one focused Sol Medium review of ROTATION-START-REENTRY-DOUBLE-START |
 | evidence-led-delivery-instructions | Accepted and committed as aad46cd | Closed; see history installation record |
 | Current plan/history separation | Accepted; snapshot and active capsule identity preserved | Closed |
-| Instruction plugin installation | 0.1.12+codex.20260907000000 installed/enabled; global instructions synchronized | Closed; 42-file byte parity verified |
-| Controller runtime installation | Depends on accepted refresh-start-intent; canonical installer packages all checkout bytes | Original controller retains cutover authority |
+| Instruction plugin installation | 0.1.15+codex.20260921000000 installed/enabled from the exact local plugin source | Closed; installer verification and source identity passed |
+| Controller runtime installation | codex-flow 0.2.0 reinstalled from accepted tip `7011820`; all 34 source modules match installed bytes | Closed for this selected update; unrelated refresh-start-intent milestone remains separately owned |
 | Other prior program successors | Deferred, not selected by historical headings | Reassess prerequisites after the above close |
 
 Installed preflight: codex-flow 0.2.0; installed candidate schema 21, live ledger

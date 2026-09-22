@@ -13746,3 +13746,30 @@ match the reviewed candidate, SHA-256
 051cbcd891ca0a889ae2bc7bb01957f6dfb92d904479c27c35ecd4344e00dfb4.
 Runtime service/ledger recovery was not installed or changed by this update;
 its original owner and acceptance/cutover requirements remain in force.
+
+## Implementation economy and late architecture review — installed
+
+2026-09-22: user requested the supplied workflow-skills refinements and local
+reinstallation. Candidate `dc26bae` added the first-sufficient minimum semantic
+delta ladder and changed controller review scheduling so objective/visual
+authorities converge before architecture reviews the exact green candidate.
+
+The first focused Sol Medium correctness/integration review found two blocking
+P1 defects: `accepted=False` without findings could still promote, and a
+blocking architecture result had no durable repair-attention transition.
+Successor `7011820` closed both causes. Explicit green state now requires
+`accepted=True` with no promotion blocker in both rounds; architecture blockers
+emit exact-subject `architecture-blocked` attention and the existing bounded
+`REQUEST_REPAIR` path consumes the recorded review/finding identities. A
+successor candidate must regain non-architecture acceptance before architecture
+re-review. Focused causal re-review accepted the successor with P0=0/P1=0.
+
+Evidence: four changed skills passed their validators; 481 affected tests passed;
+the full gate passed 1,268 tests plus Ruff, validator (16 skills and 7 schemas),
+compilation and every pre-commit hook. `make install-personal-workflow-skills`
+returned ready with plugin `0.1.15+codex.20260921000000` enabled from the exact
+local plugin root and `codex-flow 0.2.0` installed. All 34 source Python modules
+matched the installed tool byte-for-byte, and both CLI and TUI help entrypoints
+loaded successfully. The unrelated untracked `docs/reviews/conversational-tui/`
+tree remained untouched. No push, merge, rebase, stash, discard or remote
+mutation occurred.
