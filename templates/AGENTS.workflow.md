@@ -34,7 +34,9 @@
   architecture/acceptance or ownership is independently executable. Replace
   stale current status; history records only durable semantic transitions under
   date-first ISO headings, not calls or transcripts. Date-prefixed filenames
-  are immutable evidence/snapshots. Historical capsules never authorize work.
+  are immutable evidence/snapshots. Keep retained active contracts explicitly
+  selected, linked and reachable; preserve exact capsule identities and
+  references. Historical capsules never authorize work.
 
 - Start from the outcome and material unknowns. Resolve them with existing
   evidence or the smallest bounded experiment before speculative design. Make

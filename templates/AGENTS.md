@@ -17,7 +17,8 @@
   Current persists across PRs; a PR is a delivery event, not a new program.
   History records only durable semantic events under date-first ISO headings,
   never model-call transcripts. Date-prefixed filenames are for immutable
-  evidence/snapshots, not current state.
+  evidence/snapshots, not current state. Keep retained active designs linked and
+  reachable; preserve exact capsule identities and references.
 - Plan the next executable milestone in detail. Record later milestones and
   dependencies at the detail needed now; defer live cutover and deployment
   prerequisites until the milestone that actually needs them.

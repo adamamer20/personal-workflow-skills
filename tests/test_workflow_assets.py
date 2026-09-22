@@ -349,6 +349,8 @@ def test_template_and_config_assets_resolve() -> None:
     assert "non-normative append-only `history.md`" in normalized_template
     assert "a PR is a delivery event" in normalized_template
     assert "Date-prefixed filenames" in normalized_template
+    assert "retained active contracts explicitly selected, linked and reachable" in normalized_template
+    assert "preserve exact capsule identities and references" in normalized_template
     config = tomllib.loads((ROOT / "config" / "workflow.toml.example").read_text(encoding="utf-8"))
     assert config["roles"]["execute_substantial"]["model"] == "gpt-5.6-luna"
     assert config["roles"]["execute_bounded"]["thinking"] == "xhigh"
@@ -376,6 +378,12 @@ def test_plan_work_keeps_machine_ledger_current_history_and_evidence_distinct() 
     assert "a PR is a delivery event" in normalized_plan
     assert "date-first ISO headings" in normalized_plan
     assert "dated filenames are immutable evidence/snapshots" in normalized_plan
+
+
+def test_global_template_preserves_retained_design_identity_and_reachability() -> None:
+    template = " ".join((ROOT / "templates" / "AGENTS.md").read_text(encoding="utf-8").split())
+    assert "retained active designs linked and reachable" in template
+    assert "preserve exact capsule identities and references" in template
 
 
 def test_task_bound_worktree_rollover_keeps_launch_addressing_separate_from_ownership() -> None:
