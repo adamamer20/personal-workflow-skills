@@ -13773,3 +13773,21 @@ matched the installed tool byte-for-byte, and both CLI and TUI help entrypoints
 loaded successfully. The unrelated untracked `docs/reviews/conversational-tui/`
 tree remained untouched. No push, merge, rebase, stash, discard or remote
 mutation occurred.
+
+## Current/history program documentation convention — accepted and installed
+
+2026-09-22: candidate `3a4125a` generalized long-lived program documentation
+to stable `current.md`, append-only non-normative `history.md`, and optional
+`evidence/`, while keeping the controller ledger as the sole structured
+lifecycle authority. The first focused Sol Medium outcome/spec review found
+P1 `DOC-POLICY-001`: both reusable AGENTS templates had lost explicit
+retained-contract reachability and exact capsule-reference preservation.
+
+Successor `ea5eaa7` restored both guarantees in both templates and added
+regression assertions. Focused causal re-review of
+`3a4125a9d7e6e98727f7fd92d3687877e8f91183..ea5eaa760580337f8f9f4eede05fee481f8892f5`
+accepted with P0=0/P1=0 and no deferred finding. Three causal tests, validator
+and full `make check` passed with 1,270 tests. Plugin
+`0.1.16+codex.20260922000000` and `codex-flow 0.2.0` were installed from the
+exact local source with byte parity. The unrelated untracked
+`docs/reviews/conversational-tui/` tree remained untouched.
