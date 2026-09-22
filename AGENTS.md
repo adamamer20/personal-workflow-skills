@@ -96,6 +96,20 @@ Preserve exact capsule identities and references, and explicitly link any
 retained design that still governs selected work. Replace stale current status
 rather than accumulating chronological overlays.
 
+The controller/SQLite ledger is the machine-readable authority for finding,
+review, evidence and lifecycle identities. Human documentation is not a second
+ledger. New long-lived programs default to one stable
+`docs/reviews/<program-slug>/` directory containing normative `current.md`,
+non-normative append-only `history.md`, and `evidence/` only when durable
+artifacts justify it. Existing canonical paths remain valid; adopt this layout
+when a program is created or materially touched, and migrate old paths only
+with reference-preserving links. The current document persists across PRs; a
+PR is a delivery event, not a new program. Create a new program only when the
+goal, architecture/acceptance contract, or ownership becomes independently
+executable. History records only durable semantic transitions under date-first
+ISO headings, not model calls or transcripts. Date-prefixed filenames are for
+immutable evidence/snapshots, never current authority.
+
 The planning task owns architecture, scope changes, milestone ordering,
 the plan, and this instruction file. Each execution task owns exactly one
 decision-ready milestone and may not expand into a later milestone.

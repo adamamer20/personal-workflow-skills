@@ -141,10 +141,27 @@ retained dirty state even when that path is not a saved project. Fresh
 `create_thread` addressability, current-task workspace ownership, and the later
 integration checkout are separate facts.
 
-Keep a lightweight current plan and a separate history document. The current
-plan selects outcome, risks, readiness, ownership and next gate. History retains
-closed decisions and evidence; it never authorizes dispatch. Link any retained
-design that still governs current work, preserving capsule identities.
+Keep the controller ledger, current documentation, and history distinct. The
+ledger is structured machine authority for findings, reviews, evidence and
+lifecycle. Human docs do not mirror it in a `ledger.md`. The normative current
+plan selects outcome, risks, readiness, ownership and next gate; non-normative
+history retains only durable semantic transitions and never authorizes dispatch.
+
+For a new long-lived program, default to:
+
+```text
+docs/reviews/<program-slug>/
+├── current.md
+├── history.md
+└── evidence/     # only when durable artifacts exist
+```
+
+Keep the program path stable across PRs. Treat each PR as a delivery event in
+that program; create a new program only when goal, architecture/acceptance, or
+ownership is independently executable. Use date-first ISO headings in history
+and date-prefixed filenames only for immutable evidence/snapshots. Existing
+canonical files stay valid and move only through reference-preserving migration.
+Link any retained active design and preserve capsule identities.
 
 Project-specific composition remains in each project's `AGENTS.md`. Repository
 instructions name the canonical plan path, gates, protected surfaces, and any

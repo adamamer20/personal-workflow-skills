@@ -6,31 +6,34 @@ description: Turn substantial or architecturally uncertain work into one decisio
 # Plan Work
 
 Inspect instructions, plan, evidence and dirty state. Planner owns intent;
-executor owns one capsule. Ask only about material uncertainty or authority.
+executor owns one capsule. Ask only about material uncertainty.
 
 ## Plan the learning before the system
 
-Name one outcome, non-goals and material assumptions. Reuse evidence or select
-the smallest run-discovery-spike with a falsifying observation and stopping
-condition. Small known repairs stay direct; try the real path before a framework.
+Name outcome, non-goals and material assumptions. Reuse evidence or the smallest
+falsifiable run-discovery-spike. Small known repairs stay direct.
 
-The first feasible milestone is a complete observable production vertical.
-A prerequisite foundation names its obstruction and smallest removal. Check
-that the oracle accepts valid alternatives and rejects wrong results where
-its assumptions matter. Provider-free success is not live proof; missing access
-blocks that proof, not unrelated work. Preserve permissions and safety gates.
+Start with a complete observable production vertical. A prerequisite foundation
+names its obstruction and smallest removal. Test material oracle assumptions.
+Provider-free success is not live proof; preserve permissions and safety gates.
 
 Freeze one deliverable. Successors own new ambition; outcome-breaking defects
-stay. Close independent cohorts when contracts permit. Before an expensive
-guarantee, name outcome, threat, boundary, proof, cost and simpler alternative;
-resolve inferred guarantees and preserve explicit ones.
+stay. Before an expensive guarantee, name outcome, threat, boundary, proof,
+cost and simpler alternative; preserve explicit guarantees.
 
 ## Keep exactly one active plan
 
-Keep outcome, risks, readiness, ownership, next milestone/gate at the repository
-plan path. Replace stale status; put closed/superseded decisions and evidence in
-separate history. History is not an execution queue. Preserve identities and
-explicitly link any retained active design. Read only needed history.
+In planning, do not duplicate the controller ledger in documentation; it remains the
+machine-readable lifecycle authority. Keep outcome, risks, readiness, ownership and next gate in one
+stable normative current plan. New long-lived programs default to
+`docs/reviews/<program-slug>/current.md`, non-normative append-only `history.md`,
+and optional `evidence/` only when artifacts exist. Existing canonical paths
+remain until a reference-preserving migration is useful. Current persists across
+PRs; a PR is a delivery event. Start another program only when goal,
+architecture/acceptance or ownership is independently executable. Replace stale
+status. History uses date-first ISO headings for durable semantic transitions,
+not calls/transcripts; dated filenames are immutable evidence/snapshots. Preserve
+identities, link retained active designs, and read only needed history.
 
 State independently closable milestones, owner, protected surfaces, acceptance
 modes (`objective`, `visual`, `architecture`), mandatory gates, hard-cap conflict
@@ -39,11 +42,9 @@ nodes keep outcome, prerequisites, owner and readiness.
 
 ## Freeze the implementation architecture map
 
-After discovery, map ready-milestone paths as create/modify/preserve/remove:
-one responsibility, owner, dependency direction, public/persisted types, entrypoints,
-state/error/serialization boundaries and new-artifact budget. Prefer existing modules.
-Private helpers stay owned; new modules, public classes, registries, runners,
-schemas, entrypoints, dependency edges or artifacts need a bounded plan update.
+Map ready-milestone paths as create/modify/preserve/remove with one responsibility,
+owner, dependency direction, public/persisted types, entrypoints, boundaries and
+new-artifact budget. New structural vocabulary needs a bounded plan update.
 
 ## Budget semantic vocabulary
 
@@ -67,14 +68,12 @@ parallelize only ready milestones with disjoint work. Read-only scouts and
 independent acceptance evidence may overlap under the single controller.
 
 The controller owns the sole local integration trunk. Before fan-out record `fan_out_base`
-and separate unrelated dirty baseline bytes. Distinguish integration and mutable
-checkouts; a saved Codex project is only a fresh native START address. Each lane is a
-physical sibling worktree; `$CODEX_HOME/worktrees/` may be selected as
-`existing_worktree`. Retain Git identity, branch/base, owner, target and review
-commit/range. Mutable work needs an owned commit and `git diff --cached --check`;
-repairs add successor commits. Integration needs P0/P1=0,
-ancestry/extraneous-commit verification, a merge commit or reason and a new integrated tip. No push,
-rebase, history rewrite, discard, remote mutation or cleanup.
+and separate unrelated dirty baseline bytes. A saved Codex project is only a fresh native START address;
+each lane is a physical sibling worktree; `$CODEX_HOME/worktrees/` may be selected as
+`existing_worktree`. Retain Git identity, ownership and review commit/range. Mutable
+work needs an owned commit and `git diff --cached --check`; repairs add successor commits. Integration needs
+P0/P1=0, ancestry/extraneous-commit verification, a merge commit or reason and a new integrated tip.
+No push, rebase, history rewrite, discard, remote mutation or cleanup.
 
 ## Acceptance, evidence and non-convergence
 

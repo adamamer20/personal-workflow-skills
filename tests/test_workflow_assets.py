@@ -343,7 +343,12 @@ def test_skill_inventory_metadata_and_nonownership() -> None:
 
 def test_template_and_config_assets_resolve() -> None:
     template = (ROOT / "templates" / "AGENTS.workflow.md").read_text(encoding="utf-8")
+    normalized_template = " ".join(template.split())
     assert "Controller and skill ownership" in template
+    assert "`docs/reviews/<program-slug>/current.md`" in normalized_template
+    assert "non-normative append-only `history.md`" in normalized_template
+    assert "a PR is a delivery event" in normalized_template
+    assert "Date-prefixed filenames" in normalized_template
     config = tomllib.loads((ROOT / "config" / "workflow.toml.example").read_text(encoding="utf-8"))
     assert config["roles"]["execute_substantial"]["model"] == "gpt-5.6-luna"
     assert config["roles"]["execute_bounded"]["thinking"] == "xhigh"
@@ -358,6 +363,19 @@ def test_template_and_config_assets_resolve() -> None:
             assert "speed" not in route
     partitions = tomllib.loads((ROOT / "config" / "test-partitions.toml").read_text(encoding="utf-8"))
     assert set(partitions["partitions"]) == set(PARTITION_NAMES)
+
+
+def test_plan_work_keeps_machine_ledger_current_history_and_evidence_distinct() -> None:
+    plan = (SKILLS_ROOT / "plan-work" / "SKILL.md").read_text(encoding="utf-8")
+    normalized_plan = " ".join(plan.split())
+    assert "machine-readable lifecycle authority" in normalized_plan
+    assert "do not duplicate the controller ledger in documentation" in normalized_plan
+    assert "`docs/reviews/<program-slug>/current.md`" in normalized_plan
+    assert "non-normative append-only `history.md`" in normalized_plan
+    assert "optional `evidence/`" in normalized_plan
+    assert "a PR is a delivery event" in normalized_plan
+    assert "date-first ISO headings" in normalized_plan
+    assert "dated filenames are immutable evidence/snapshots" in normalized_plan
 
 
 def test_task_bound_worktree_rollover_keeps_launch_addressing_separate_from_ownership() -> None:

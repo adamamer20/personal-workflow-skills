@@ -22,11 +22,19 @@
 
 ### Planning and guarantees
 
-- Keep one lightweight current plan and a separate history document. The plan
-  owns current outcome, risks, readiness, ownership and next gate; history
-  retains closed/superseded decisions and linked evidence. Replace stale status
-  instead of appending chronological overlays. Keep active contracts explicitly
-  selected and reachable; historical capsules never authorize new work.
+- The controller ledger is the machine-readable authority for finding, review,
+  evidence and lifecycle identity; documentation never duplicates it as a
+  `ledger.md`. Keep one stable program identity and one lightweight normative
+  current plan owning outcome, risks, readiness, ownership and next gate. New
+  long-lived programs default to `docs/reviews/<program-slug>/current.md`,
+  non-normative append-only `history.md`, and optional `evidence/` only when
+  durable artifacts exist. Existing canonical paths remain valid until a
+  reference-preserving migration is useful. Current persists across PRs; a PR
+  is a delivery event, not a new program. Create a new program only when goal,
+  architecture/acceptance or ownership is independently executable. Replace
+  stale current status; history records only durable semantic transitions under
+  date-first ISO headings, not calls or transcripts. Date-prefixed filenames
+  are immutable evidence/snapshots. Historical capsules never authorize work.
 
 - Start from the outcome and material unknowns. Resolve them with existing
   evidence or the smallest bounded experiment before speculative design. Make

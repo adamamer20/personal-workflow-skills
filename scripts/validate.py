@@ -527,6 +527,13 @@ def validate_plan_work_contract() -> None:
         "fake boundaries",
         "single-owner",
         "nested swarm",
+        "machine-readable lifecycle authority",
+        "`docs/reviews/<program-slug>/current.md`",
+        "non-normative append-only `history.md`",
+        "optional `evidence/`",
+        "a PR is a delivery event",
+        "date-first ISO headings",
+        "immutable evidence/snapshots",
     )
     require_contract(plan_path, required_text)
 
@@ -1353,6 +1360,10 @@ def validate_global_agents_template() -> None:
         "Before substantial execution",
         "open P0/P1 findings are zero",
         "Repository `AGENTS.md` files own project-specific plan paths",
+        "`docs/reviews/<program-slug>/current.md`",
+        "non-normative append-only `history.md`",
+        "a PR is a delivery event",
+        "Date-prefixed filenames are for immutable evidence/snapshots",
     )
     for token in required_text:
         if token not in normalized_text:

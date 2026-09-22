@@ -8,9 +8,16 @@
   from context and continue useful work before asking about a material decision.
   If a skill causes a pause, cite its exact instruction and explain the missing
   authority; do not treat a procedural preference as a new approval gate.
-- Keep the canonical plan lightweight and current; keep closed/superseded
-  decisions and evidence in a separate history document. Link retained designs
-  explicitly, preserve identities, and never treat history as an execution queue.
+- Keep one stable program identity and one lightweight normative current plan.
+  The controller ledger remains the structured lifecycle authority; do not
+  create a parallel documentation ledger. For new long-lived programs use
+  `docs/reviews/<program-slug>/current.md`, non-normative append-only
+  `history.md`, and optional `evidence/` only when artifacts exist. Preserve
+  existing canonical paths until safely migrated with updated references.
+  Current persists across PRs; a PR is a delivery event, not a new program.
+  History records only durable semantic events under date-first ISO headings,
+  never model-call transcripts. Date-prefixed filenames are for immutable
+  evidence/snapshots, not current state.
 - Plan the next executable milestone in detail. Record later milestones and
   dependencies at the detail needed now; defer live cutover and deployment
   prerequisites until the milestone that actually needs them.
