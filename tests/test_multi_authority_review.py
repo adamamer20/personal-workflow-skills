@@ -154,6 +154,57 @@ def test_route_alias_fails_closed_before_claim(tmp_path: Path) -> None:
         raise AssertionError("aliased role must fail closed")
 
 
+def test_rejected_authority_without_findings_never_dispatches_architecture_or_promotes(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    ledger = Ledger(root / ".codex-flow" / "workflow.db")
+    ledger.create_run("rejected")
+    ledger.create_milestone("rejected", "m")
+    calls: list[str] = []
+
+    def rejected_objective(token: str, fresh: bool) -> ReviewResult:
+        calls.append("objective")
+        return ReviewResult(
+            "objective-rejected",
+            RoleId("code-reviewer"),
+            False,
+            (),
+            token,
+            acceptance_mode=AcceptanceMode.OBJECTIVE,
+        )
+
+    def architecture(token: str, fresh: bool) -> ReviewResult:
+        calls.append("architecture")
+        return ReviewResult(
+            "architecture-accepted",
+            RoleId("architecture-reviewer"),
+            True,
+            (),
+            token,
+            acceptance_mode=AcceptanceMode.ARCHITECTURE,
+        )
+
+    result = ReviewWorkflow(
+        ledger, root, load_workflow_config(Path(__file__).parents[1] / "workflow.toml")
+    ).run_multi_authority(
+        "rejected",
+        "m",
+        objective=lambda: {"ok": True},
+        repair=lambda item: (_ for _ in ()).throw(AssertionError("repair must not run")),
+        current_revision=lambda: "revision",
+        acceptance_modes=(AcceptanceMode.OBJECTIVE, AcceptanceMode.ARCHITECTURE),
+        objective_reviewer=rejected_objective,
+        architecture_reviewer=architecture,
+        architecture_replan=lambda finding: ReplanProposal("unused"),
+        budget=Budget(max_turns=1, max_repairs=1, max_reviews=2),
+    )
+
+    assert result.accepted is False
+    assert result.status.value == "failed"
+    assert calls == ["objective"]
+    assert ledger.current_state("rejected", "m").value == "FAILED"
+
+
 def test_notification_failure_is_non_authoritative_and_planner_decision_is_durable(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     root.mkdir()

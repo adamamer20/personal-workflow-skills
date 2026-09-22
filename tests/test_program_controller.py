@@ -35,6 +35,7 @@ from codex_flow.domain import (
     ControllerGenerationState,
     ControllerGenerationStatus,
     ExecutionCapsule,
+    FindingCausalClass,
     Generation,
     MilestoneId,
     NativePermissionMode,
@@ -51,9 +52,11 @@ from codex_flow.domain import (
     ProgramState,
     ProgramStatus,
     ReasoningEffort,
+    ReviewFinding,
     ReviewResult,
     RoleId,
     RunId,
+    Severity,
     ThreadIdentity,
     TurnObservation,
     TypedBlocker,
@@ -467,6 +470,125 @@ def test_program_lifecycle_advances_only_after_exact_review_and_integration(tmp_
         )
         assert integrated.nodes[0].integrated is True
         assert integrated.ready_milestones == (MilestoneId("second"),)
+    finally:
+        ledger.close()
+
+
+def test_architecture_blocker_emits_repair_attention_for_exact_candidate(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "workflow.db")
+    try:
+        ledger.register_program(_graph(tmp_path))
+        start = ledger.start_program("program")
+        _claim_and_apply(
+            ledger,
+            start,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_READY_MILESTONES,
+                milestone_ids=("first",),
+            ),
+        )
+        ledger.claim_dispatch("program", "first", "executor", 1)
+        ledger.record_program_executor_result(
+            "program",
+            "first",
+            candidate_sha=CANDIDATE_SHA,
+            terminal_status="completed",
+            dispatch_id="program/first/executor/1",
+        )
+        implementation = next(
+            item
+            for item in ledger.program_controller_decisions()
+            if item.event_kind is ProgramEventKind.IMPLEMENTATION_COMPLETED
+        )
+        _claim_and_apply(
+            ledger,
+            implementation,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_REVIEWS,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                review_roles=("code-reviewer",),
+            ),
+        )
+        ledger.record_program_review(
+            "program",
+            "first",
+            ReviewResult(
+                "code-accepted",
+                RoleId("code-reviewer"),
+                True,
+                (),
+                CANDIDATE_SHA,
+                acceptance_mode=AcceptanceMode.OBJECTIVE,
+            ),
+        )
+        architecture_ready = next(
+            item
+            for item in reversed(ledger.program_controller_decisions())
+            if item.event_key.endswith("/architecture-ready")
+        )
+        _claim_and_apply(
+            ledger,
+            architecture_ready,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.START_REVIEWS,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                review_roles=("architecture-reviewer",),
+            ),
+        )
+        finding = ReviewFinding(
+            "ARCH-P1",
+            FindingCausalClass.CONTRACT,
+            Severity.P1,
+            True,
+            "architecture violates the accepted boundary",
+            {"candidate_sha": CANDIDATE_SHA},
+            "the candidate preserves the accepted boundary",
+        )
+        ledger.record_program_review(
+            "program",
+            "first",
+            ReviewResult(
+                "architecture-rejected",
+                RoleId("architecture-reviewer"),
+                False,
+                (finding,),
+                CANDIDATE_SHA,
+                acceptance_mode=AcceptanceMode.ARCHITECTURE,
+            ),
+        )
+
+        blocked = next(
+            item
+            for item in reversed(ledger.program_controller_decisions())
+            if item.event_key.endswith("/architecture-blocked")
+        )
+        assert blocked.event_kind is ProgramEventKind.CONTROLLER_ATTENTION
+        assert blocked.payload["payload"] == {
+            "milestone_id": "first",
+            "promotion_blocking": True,
+            "review_ids": ["architecture-rejected"],
+            "finding_ids": ["ARCH-P1"],
+            "candidate_sha": CANDIDATE_SHA,
+        }
+        assert ledger.current_state("program", "first") is WorkflowState.REVIEWING
+        _claim_and_apply(
+            ledger,
+            blocked,
+            ModelFacingProgramControllerAction(
+                ProgramControllerActionKind.REQUEST_REPAIR,
+                milestone_id="first",
+                candidate_sha=CANDIDATE_SHA,
+                finding_ids=("ARCH-P1",),
+            ),
+        )
+        assert ledger.current_state("program", "first") is WorkflowState.REPAIR_REQUIRED
+        repair_fact = next(
+            item for item in reversed(ledger.review_lifecycle("program", "first")) if item.kind == "repair_requested"
+        )
+        assert repair_fact.data["candidate_sha"] == CANDIDATE_SHA
+        assert repair_fact.data["finding_ids"] == ["ARCH-P1"]
     finally:
         ledger.close()
 

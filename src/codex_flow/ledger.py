@@ -13747,6 +13747,12 @@ class Ledger:
                 if item.kind == "review_completed" and item.data.get("reviewer_role") in initial_roles
             ]
             initial_blocking = any(item.data.get("promotion_blocking") is True for item in initial_reviews)
+            architecture_reviews = [
+                item
+                for item in matching
+                if item.kind == "review_completed" and item.data.get("reviewer_role") == "architecture-reviewer"
+            ]
+            architecture_blocking = any(item.data.get("promotion_blocking") is True for item in architecture_reviews)
             if initial_roles.issubset(completed) and initial_blocking:
                 payload: JsonObject = {
                     "milestone_id": str(milestone),
@@ -13779,6 +13785,27 @@ class Ledger:
                     program,
                     event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
                     event_key=f"milestone/{milestone}/reviews/{subject.wire_value}/architecture-ready",
+                    payload=payload,
+                )
+            elif initial_roles.issubset(completed) and architecture_blocking:
+                payload = {
+                    "milestone_id": str(milestone),
+                    "promotion_blocking": True,
+                    "review_ids": sorted(str(item.data["review_id"]) for item in architecture_reviews),
+                    "finding_ids": sorted(
+                        finding_id
+                        for item in architecture_reviews
+                        for finding_id in item.data.get("finding_ids", [])
+                        if isinstance(finding_id, str)
+                    ),
+                }
+                payload[
+                    "evidence_sha256" if subject.kind is ProgramOutcomeKind.RUNTIME_EVIDENCE else "candidate_sha"
+                ] = subject.digest
+                self._ensure_program_decision_in_transaction(
+                    program,
+                    event_kind=ProgramEventKind.CONTROLLER_ATTENTION,
+                    event_key=f"milestone/{milestone}/reviews/{subject.wire_value}/architecture-blocked",
                     payload=payload,
                 )
             elif expected_roles == completed and all(

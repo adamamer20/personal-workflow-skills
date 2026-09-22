@@ -3110,6 +3110,10 @@ class ReviewWorkflow:
         non_architecture_modes = tuple(mode for mode in modes if mode is not AcceptanceMode.ARCHITECTURE)
         initial_review_modes = non_architecture_modes or modes
         architecture_is_late = AcceptanceMode.ARCHITECTURE in modes and bool(non_architecture_modes)
+
+        def reviews_green(results: Sequence[ReviewResult]) -> bool:
+            return all(result.accepted and not result.promotion_blockers for result in results)
+
         config = self.config or load_workflow_config(self.repository_root / "workflow.toml")
         plan = config.derive_authorities(modes, available_models=available_models)
         callback_map: dict[AcceptanceMode, Callable[..., ReviewResult]] = {}
@@ -3355,7 +3359,7 @@ class ReviewWorkflow:
 
         try:
             first_reviews = [invoke(mode, revision, True, round_number=1) for mode in initial_review_modes]
-            if architecture_is_late and not any(review.promotion_blockers for review in first_reviews):
+            if architecture_is_late and reviews_green(first_reviews):
                 first_reviews.append(invoke(AcceptanceMode.ARCHITECTURE, revision, True, round_number=1))
         except AuthorityUnavailable as exc:
             self.ledger.record_review_transition(
@@ -3424,7 +3428,32 @@ class ReviewWorkflow:
             )
         reviews.extend(first_reviews)
         blockers = [finding for review in first_reviews for finding in review.promotion_blockers]
-        if not blockers:
+        rejected_without_blockers = [
+            review for review in first_reviews if not review.accepted and not review.promotion_blockers
+        ]
+        if rejected_without_blockers:
+            self.ledger.record_review_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="authority_rejected_without_finding",
+                data={"review_ids": [review.review_id for review in rejected_without_blockers]},
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.FAILED.value,
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=(),
+                recovery=self.classify_recovery(checkpoint="review_rejected_without_finding"),
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
+        if reviews_green(first_reviews):
             self.ledger.record_review_transition(
                 run_id,
                 milestone_id,
@@ -3648,7 +3677,7 @@ class ReviewWorkflow:
         second_reviews: list[ReviewResult] = []
         try:
             second_reviews = [invoke(mode, fresh_revision, True, round_number=2) for mode in initial_review_modes]
-            if architecture_is_late and not any(review.promotion_blockers for review in second_reviews):
+            if architecture_is_late and reviews_green(second_reviews):
                 second_reviews.append(invoke(AcceptanceMode.ARCHITECTURE, fresh_revision, True, round_number=2))
         except AuthorityUnavailable as exc:
             self.ledger.record_review_transition(
@@ -3716,6 +3745,32 @@ class ReviewWorkflow:
                 rendered_evidence=tuple(evidence),
             )
         reviews.extend(second_reviews)
+        rejected_without_blockers = [
+            review for review in second_reviews if not review.accepted and not review.promotion_blockers
+        ]
+        if rejected_without_blockers:
+            recovery = self.classify_recovery(proven_infeasible=True, checkpoint="re_review_rejected_without_finding")
+            self.ledger.record_review_transition(
+                run_id,
+                milestone_id,
+                WorkflowState.FAILED,
+                expected_state=WorkflowState.REVIEWING,
+                phase=LifecyclePhase.RECOVERY,
+                kind="re_review_rejected_without_finding",
+                data={"review_ids": [review.review_id for review in rejected_without_blockers]},
+                reason=ReasonCode.REVIEW_REJECTED,
+            )
+            return self._project_result(
+                run_id,
+                milestone_id,
+                status=LifecycleStatus.REJECTED_AFTER_REPAIR.value,
+                accepted=False,
+                reviews=tuple(reviews),
+                repairs=tuple(repairs),
+                recovery=recovery,
+                authority_plan=plan,
+                rendered_evidence=tuple(evidence),
+            )
         remaining = [finding for review in second_reviews for finding in review.promotion_blockers]
         if remaining:
             recovery = self.classify_recovery(proven_infeasible=True, checkpoint="re_review_rejected")
